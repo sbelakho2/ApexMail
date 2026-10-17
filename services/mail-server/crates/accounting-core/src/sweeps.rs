@@ -36,41 +36,45 @@
 //! tick of [`sweep_all_unposted`] (the combined entry point, the host the
 //! compliance cron already uses for the payroll/expense/bank sweeps).
 //!
-//! # Claim protocol — same `SKIP LOCKED` discipline as the projectors, in its
-//! strongest form
+//! # Claim protocol — one bounded SKIP LOCKED batch per tick
 //!
-//! The sales projectors (`sales-autopilot::outcome_projector`) claim with
-//! `FOR UPDATE SKIP LOCKED` and then carry a durable lease, because the work
-//! between claim and apply (other transactions / external side effects)
-//! outlives one transaction. A posting sweep does not have that property: the
-//! claim, the journal write and the commit are ONE transaction:
+//! A sweep tick claims up to [`SweepConfig::batch_size`] unposted rows with
+//! ONE `FOR UPDATE ... SKIP LOCKED ... LIMIT $1` statement and posts them
+//! inside the SAME transaction. Each row is wrapped in a savepoint: a row
+//! whose posting fails rolls back only that row's work, and the remaining
+//! rows still commit. That is the same failure isolation the previous
+//! one-row-per-transaction loop provided, but the claim and the commit are
+//! paid once per tick instead of once per row.
 //!
 //! ```text
 //! BEGIN;
 //!   SELECT ... FROM <source>
-//!    WHERE <not yet posted> AND id <> ALL(<already attempted this tick>)
+//!    WHERE <not yet posted>
 //!    ORDER BY <stable business order>
 //!    FOR UPDATE OF <source> SKIP LOCKED
-//!    LIMIT 1;
-//!   -- only when a row was returned:
+//!    LIMIT <batch_size>;
+//!   -- per row:
+//!   SAVEPOINT sweep_row;
 //!   <adapter>::post_*_in(conn, ...);        -- unique source doc + idempotency key
+//!   RELEASE SAVEPOINT sweep_row;            -- or ROLLBACK TO on failure
 //! COMMIT;
 //! ```
 //!
-//! Two sweepers can never process the same row: the second's `SELECT` skips
-//! the locked row. A crash rolls the claim back with the posting, so there is
-//! no stranded claim and no lease-expiry recovery sweep is needed — strictly
-//! stronger than a lease, not weaker. No lease columns are added to the
-//! source tables (they belong to other domains, and `operating_costs` may not
-//! even exist in a deployment).
+//! Two sweepers can never process the same row: the second's claim skips the
+//! rows the first locked. A crash rolls the whole batch back with no
+//! stranded claim; every posting is idempotent (unique source document +
+//! idempotency key), so the next tick re-posts the batch exactly once. No
+//! lease columns are added to the source tables (they belong to other
+//! domains, and `operating_costs` may not even exist in a deployment).
 //!
 //! # Idempotency
 //!
 //! Each adapter derives its posting from `(source_type, source_table,
 //! source_id)` (`accounting_source_documents` UNIQUE) and a stable
-//! idempotency key, so replaying a sweep posts nothing new. The sweep also
-//! skips a row it already attempted in the same tick, so one poison row cannot
-//! consume the whole batch.
+//! idempotency key, so replaying a sweep posts nothing new. A batch claims
+//! every row at most once (`FOR UPDATE ... LIMIT`), so a poison row cannot
+//! be re-claimed inside the same tick and cannot consume the whole batch —
+//! its savepoint is rolled back and the next row proceeds.
 //!
 //! # What "unpostable" means
 //!
@@ -224,7 +228,7 @@ where
 // Payroll
 // ---------------------------------------------------------------------------
 
-/// Claim one unposted payroll record, oldest payment period first.
+/// Claim up to `$1` unposted payroll records, oldest payment period first.
 ///
 /// "Unposted" is `accounting_source_documents` absence for
 /// `('payroll','payroll_records',id)`: the adapter registers that document in
@@ -240,21 +244,37 @@ const CLAIM_PAYROLL_SQL: &str = r#"
               AND d.source_table = 'payroll_records'
               AND d.source_id = pr.id::text
           )
-      AND NOT (pr.id = ANY($1::uuid[]))
     ORDER BY pr.pay_period ASC, pr.id ASC
     FOR UPDATE OF pr SKIP LOCKED
-    LIMIT 1
+    LIMIT $1
 "#;
 
-async fn claim_payroll(
-    conn: &mut PgConnection,
-    attempted: &[Uuid],
-) -> Result<Option<PayrollRecordFacts>> {
-    let row: Option<PayrollRecordFacts> = sqlx::query_as(CLAIM_PAYROLL_SQL)
-        .bind(attempted)
-        .fetch_optional(conn)
+// ---------------------------------------------------------------------------
+// Savepoint plumbing — one failed row must not take the batch down with it.
+// ---------------------------------------------------------------------------
+
+/// Savepoint name wrapping one claimed row inside the batch transaction.
+async fn savepoint_row(conn: &mut PgConnection) -> Result<()> {
+    sqlx::query("SAVEPOINT sweep_row")
+        .execute(&mut *conn)
         .await?;
-    Ok(row)
+    Ok(())
+}
+
+/// Keep the row's posting in the batch transaction.
+async fn release_row(conn: &mut PgConnection) -> Result<()> {
+    sqlx::query("RELEASE SAVEPOINT sweep_row")
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}
+
+/// Discard only the failed row's posting, leaving earlier rows intact.
+async fn rollback_row(conn: &mut PgConnection) -> Result<()> {
+    sqlx::query("ROLLBACK TO SAVEPOINT sweep_row")
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
 }
 
 /// Post every unposted `payroll_records` row (up to `batch_size` per tick).
@@ -268,27 +288,26 @@ pub async fn sweep_unposted_payroll(
     policy: &dyn PayrollAmountsPolicy,
 ) -> Result<SweepReport> {
     let mut report = SweepReport::default();
-    // Rows attempted (and failed/incomplete) in this tick are excluded from
-    // later claims so one bad row cannot spin the batch.
-    let mut attempted: Vec<Uuid> = Vec::new();
 
-    for _ in 0..config.batch_size.max(1) {
-        let mut tx = pool.begin().await?;
-        let Some(facts) = claim_payroll(&mut tx, &attempted).await? else {
-            tx.commit().await?;
-            break;
-        };
-        attempted.push(facts.id);
+    let mut tx = pool.begin().await?;
+    let records: Vec<PayrollRecordFacts> = sqlx::query_as(CLAIM_PAYROLL_SQL)
+        .bind(config.batch_size.max(1))
+        .fetch_all(&mut *tx)
+        .await?;
+
+    for facts in &records {
         report.claimed += 1;
 
         if facts.gross_salary_cents <= 0 {
             // No balanced journal exists for an all-zero payroll; a human must
             // fix the record (or it is a genuine zero-pay month that needs an
-            // explicit decision). Reported, never deleted.
+            // explicit decision). Reported, never deleted. Nothing was
+            // written for this row, so no savepoint is needed.
             report.unpostable += 1;
-            tx.rollback().await?;
             continue;
         }
+
+        savepoint_row(&mut tx).await?;
 
         let legal_entity_id = match crate::provisioning::ensure_default_entity_in(&mut tx).await {
             Ok(id) => id,
@@ -299,12 +318,12 @@ pub async fn sweep_unposted_payroll(
                     error = %error,
                     "payroll sweep could not resolve the default legal entity; row left unposted"
                 );
-                tx.rollback().await?;
+                rollback_row(&mut tx).await?;
                 continue;
             }
         };
 
-        let amounts = match policy.amounts_for(&facts) {
+        let amounts = match policy.amounts_for(facts) {
             Ok(Some(amounts)) => amounts,
             Ok(None) => {
                 report.skipped_incomplete += 1;
@@ -312,7 +331,7 @@ pub async fn sweep_unposted_payroll(
                     payroll_record_id = %facts.id,
                     "payroll sweep left an incomplete payroll record unposted; it will post once completed"
                 );
-                tx.rollback().await?;
+                rollback_row(&mut tx).await?;
                 continue;
             }
             Err(error) => {
@@ -322,7 +341,7 @@ pub async fn sweep_unposted_payroll(
                     error = %error,
                     "payroll sweep policy failed; row left unposted"
                 );
-                tx.rollback().await?;
+                rollback_row(&mut tx).await?;
                 continue;
             }
         };
@@ -330,20 +349,21 @@ pub async fn sweep_unposted_payroll(
         match adapters::post_payroll_record_in(&mut tx, legal_entity_id, facts.id, amounts).await {
             Ok(outcome) => {
                 report.record(outcome.status);
-                tx.commit().await?;
+                release_row(&mut tx).await?;
             }
             Err(error) => {
                 report.failed += 1;
                 tracing::warn!(
                     payroll_record_id = %facts.id,
                     error = %error,
-                    "payroll sweep posting failed; claim rolled back for the next tick"
+                    "payroll sweep posting failed; the row stays unposted for the next tick"
                 );
-                tx.rollback().await?;
+                rollback_row(&mut tx).await?;
             }
         }
     }
 
+    tx.commit().await?;
     Ok(report)
 }
 
@@ -351,7 +371,7 @@ pub async fn sweep_unposted_payroll(
 // Expenses
 // ---------------------------------------------------------------------------
 
-/// Claim one unposted `operating_costs` row, oldest incurred first.
+/// Claim up to `$1` unposted `operating_costs` rows, oldest incurred first.
 const CLAIM_EXPENSE_SQL: &str = r#"
     SELECT oc.id
     FROM operating_costs oc
@@ -362,10 +382,9 @@ const CLAIM_EXPENSE_SQL: &str = r#"
               AND d.source_table = 'operating_costs'
               AND d.source_id = oc.id::text
           )
-      AND NOT (oc.id = ANY($1::uuid[]))
     ORDER BY oc.incurred_at ASC, oc.id ASC
     FOR UPDATE OF oc SKIP LOCKED
-    LIMIT 1
+    LIMIT $1
 "#;
 
 /// Post every unposted positive `operating_costs` row (up to `batch_size`).
@@ -401,18 +420,14 @@ pub async fn sweep_unposted_expenses(pool: &PgPool, config: &SweepConfig) -> Res
     .fetch_one(pool)
     .await? as u64;
 
-    let mut attempted: Vec<Uuid> = Vec::new();
-    for _ in 0..config.batch_size.max(1) {
-        let mut tx = pool.begin().await?;
-        let id: Option<Uuid> = sqlx::query_scalar(CLAIM_EXPENSE_SQL)
-            .bind(&attempted)
-            .fetch_optional(&mut *tx)
-            .await?;
-        let Some(id) = id else {
-            tx.commit().await?;
-            break;
-        };
-        attempted.push(id);
+    let mut tx = pool.begin().await?;
+    let ids: Vec<Uuid> = sqlx::query_scalar(CLAIM_EXPENSE_SQL)
+        .bind(config.batch_size.max(1))
+        .fetch_all(&mut *tx)
+        .await?;
+
+    for id in ids {
+        savepoint_row(&mut tx).await?;
         report.claimed += 1;
 
         let legal_entity_id = match crate::provisioning::ensure_default_entity_in(&mut tx).await {
@@ -424,7 +439,7 @@ pub async fn sweep_unposted_expenses(pool: &PgPool, config: &SweepConfig) -> Res
                     error = %error,
                     "expense sweep could not resolve the default legal entity; row left unposted"
                 );
-                tx.rollback().await?;
+                rollback_row(&mut tx).await?;
                 continue;
             }
         };
@@ -432,20 +447,21 @@ pub async fn sweep_unposted_expenses(pool: &PgPool, config: &SweepConfig) -> Res
         match adapters::post_operating_cost_in(&mut tx, legal_entity_id, id).await {
             Ok(outcome) => {
                 report.record(outcome.status);
-                tx.commit().await?;
+                release_row(&mut tx).await?;
             }
             Err(error) => {
                 report.failed += 1;
                 tracing::warn!(
                     operating_cost_id = %id,
                     error = %error,
-                    "expense sweep posting failed; claim rolled back for the next tick"
+                    "expense sweep posting failed; the row stays unposted for the next tick"
                 );
-                tx.rollback().await?;
+                rollback_row(&mut tx).await?;
             }
         }
     }
 
+    tx.commit().await?;
     Ok(report)
 }
 
@@ -453,7 +469,7 @@ pub async fn sweep_unposted_expenses(pool: &PgPool, config: &SweepConfig) -> Res
 // Bank statement lines
 // ---------------------------------------------------------------------------
 
-/// Claim one unposted non-zero bank statement line, oldest first.
+/// Claim up to `$1` unposted non-zero bank statement lines, oldest first.
 ///
 /// The line's own `journal_entry_id` (migration 220) is the posting marker;
 /// non-zero is required because no balanced journal exists for a zero line.
@@ -462,10 +478,9 @@ const CLAIM_BANK_SQL: &str = r#"
     FROM bank_statement_lines l
     WHERE l.journal_entry_id IS NULL
       AND l.amount_cents <> 0
-      AND NOT (l.id = ANY($1::uuid[]))
     ORDER BY l.statement_date ASC, l.id ASC
     FOR UPDATE OF l SKIP LOCKED
-    LIMIT 1
+    LIMIT $1
 "#;
 
 /// Post every unreconciled, non-zero `bank_statement_lines` row (up to
@@ -494,37 +509,34 @@ pub async fn sweep_unposted_bank_statement_lines(
         ..SweepReport::default()
     };
 
-    let mut attempted: Vec<Uuid> = Vec::new();
-    for _ in 0..config.batch_size.max(1) {
-        let mut tx = pool.begin().await?;
-        let id: Option<Uuid> = sqlx::query_scalar(CLAIM_BANK_SQL)
-            .bind(&attempted)
-            .fetch_optional(&mut *tx)
-            .await?;
-        let Some(id) = id else {
-            tx.commit().await?;
-            break;
-        };
-        attempted.push(id);
+    let mut tx = pool.begin().await?;
+    let ids: Vec<Uuid> = sqlx::query_scalar(CLAIM_BANK_SQL)
+        .bind(config.batch_size.max(1))
+        .fetch_all(&mut *tx)
+        .await?;
+
+    for id in ids {
+        savepoint_row(&mut tx).await?;
         report.claimed += 1;
 
         match adapters::post_bank_statement_line_in(&mut tx, id).await {
             Ok(outcome) => {
                 report.record(outcome.status);
-                tx.commit().await?;
+                release_row(&mut tx).await?;
             }
             Err(error) => {
                 report.failed += 1;
                 tracing::warn!(
                     bank_statement_line_id = %id,
                     error = %error,
-                    "bank sweep posting failed; claim rolled back for the next tick"
+                    "bank sweep posting failed; the row stays unposted for the next tick"
                 );
-                tx.rollback().await?;
+                rollback_row(&mut tx).await?;
             }
         }
     }
 
+    tx.commit().await?;
     Ok(report)
 }
 
@@ -532,7 +544,7 @@ pub async fn sweep_unposted_bank_statement_lines(
 // Invoices (audit SM7 F1 — billing-source replay)
 // ---------------------------------------------------------------------------
 
-/// Claim one unposted finalized invoice, oldest issued first.
+/// Claim up to `$1` unposted finalized invoices, oldest issued first.
 ///
 /// "Unposted" is `accounting_source_documents` absence for
 /// `('invoice', 'invoices', id)` — the adapter registers that document in the
@@ -550,10 +562,9 @@ const CLAIM_INVOICE_SQL: &str = r#"
               AND d.source_table = 'invoices'
               AND d.source_id = i.id::text
           )
-      AND NOT (i.id = ANY($1::uuid[]))
     ORDER BY i.issued_at ASC, i.id ASC
     FOR UPDATE OF i SKIP LOCKED
-    LIMIT 1
+    LIMIT $1
 "#;
 
 /// Replay every finalized, unposted invoice (up to `batch_size` per tick).
@@ -563,38 +574,35 @@ const CLAIM_INVOICE_SQL: &str = r#"
 /// configured" policy into an actual replay (audit SM7 F1).
 pub async fn sweep_unposted_invoices(pool: &PgPool, config: &SweepConfig) -> Result<SweepReport> {
     let mut report = SweepReport::default();
-    let mut attempted: Vec<Uuid> = Vec::new();
 
-    for _ in 0..config.batch_size.max(1) {
-        let mut tx = pool.begin().await?;
-        let id: Option<Uuid> = sqlx::query_scalar(CLAIM_INVOICE_SQL)
-            .bind(&attempted)
-            .fetch_optional(&mut *tx)
-            .await?;
-        let Some(id) = id else {
-            tx.commit().await?;
-            break;
-        };
-        attempted.push(id);
+    let mut tx = pool.begin().await?;
+    let ids: Vec<Uuid> = sqlx::query_scalar(CLAIM_INVOICE_SQL)
+        .bind(config.batch_size.max(1))
+        .fetch_all(&mut *tx)
+        .await?;
+
+    for id in ids {
+        savepoint_row(&mut tx).await?;
         report.claimed += 1;
 
         match adapters::post_invoice_issued_in(&mut tx, id).await {
             Ok(outcome) => {
                 report.record(outcome.status);
-                tx.commit().await?;
+                release_row(&mut tx).await?;
             }
             Err(error) => {
                 report.failed += 1;
                 tracing::warn!(
                     invoice_id = %id,
                     error = %error,
-                    "invoice sweep posting failed; claim rolled back for the next tick"
+                    "invoice sweep posting failed; the row stays unposted for the next tick"
                 );
-                tx.rollback().await?;
+                rollback_row(&mut tx).await?;
             }
         }
     }
 
+    tx.commit().await?;
     Ok(report)
 }
 
@@ -602,7 +610,7 @@ pub async fn sweep_unposted_invoices(pool: &PgPool, config: &SweepConfig) -> Res
 // Payment allocations (audit SM7 F1 — billing-source replay)
 // ---------------------------------------------------------------------------
 
-/// Claim one unposted settlement allocation, oldest first. Credit-note
+/// Claim up to `$1` unposted settlement allocations, oldest first. Credit-note
 /// allocations are posted by the credit-note adapter (with the invoice's VAT
 /// split) and zero amounts have no balanced journal — both excluded.
 const CLAIM_PAYMENT_ALLOCATION_SQL: &str = r#"
@@ -616,10 +624,9 @@ const CLAIM_PAYMENT_ALLOCATION_SQL: &str = r#"
               AND d.source_table = 'invoice_payment_allocations'
               AND d.source_id = a.operation_id
           )
-      AND NOT (a.id = ANY($1::uuid[]))
     ORDER BY a.created_at ASC, a.id ASC
     FOR UPDATE OF a SKIP LOCKED
-    LIMIT 1
+    LIMIT $1
 "#;
 
 /// Replay every unposted settlement allocation (up to `batch_size` per tick).
@@ -628,38 +635,36 @@ pub async fn sweep_unposted_payment_allocations(
     config: &SweepConfig,
 ) -> Result<SweepReport> {
     let mut report = SweepReport::default();
-    let mut attempted: Vec<Uuid> = Vec::new();
 
-    for _ in 0..config.batch_size.max(1) {
-        let mut tx = pool.begin().await?;
-        let row: Option<(Uuid, String)> = sqlx::query_as(CLAIM_PAYMENT_ALLOCATION_SQL)
-            .bind(&attempted)
-            .fetch_optional(&mut *tx)
-            .await?;
-        let Some((id, operation_id)) = row else {
-            tx.commit().await?;
-            break;
-        };
-        attempted.push(id);
+    let mut tx = pool.begin().await?;
+    let rows: Vec<(Uuid, String)> = sqlx::query_as(CLAIM_PAYMENT_ALLOCATION_SQL)
+        .bind(config.batch_size.max(1))
+        .fetch_all(&mut *tx)
+        .await?;
+
+    for (id, operation_id) in rows {
+        savepoint_row(&mut tx).await?;
         report.claimed += 1;
 
         match adapters::post_payment_allocation_in(&mut tx, &operation_id).await {
             Ok(outcome) => {
                 report.record(outcome.status);
-                tx.commit().await?;
+                release_row(&mut tx).await?;
             }
             Err(error) => {
                 report.failed += 1;
                 tracing::warn!(
+                    allocation_id = %id,
                     operation_id = %operation_id,
                     error = %error,
-                    "payment-allocation sweep posting failed; claim rolled back for the next tick"
+                    "payment-allocation sweep posting failed; the row stays unposted for the next tick"
                 );
-                tx.rollback().await?;
+                rollback_row(&mut tx).await?;
             }
         }
     }
 
+    tx.commit().await?;
     Ok(report)
 }
 
@@ -667,7 +672,7 @@ pub async fn sweep_unposted_payment_allocations(
 // Credit notes (audit SM7 F1 — billing-source replay)
 // ---------------------------------------------------------------------------
 
-/// Claim one credit note with an unresolved part, oldest first.
+/// Claim up to `$1` credit notes with an unresolved part, oldest first.
 ///
 /// A credit note posts up to TWO entries (debt reduction + refund), each with
 /// its own source document. "Fully posted" means every non-zero part carries
@@ -696,10 +701,9 @@ const CLAIM_CREDIT_NOTE_SQL: &str = r#"
                 )
             )
           )
-      AND NOT (c.id = ANY($1::uuid[]))
     ORDER BY c.created_at ASC, c.id ASC
     FOR UPDATE OF c SKIP LOCKED
-    LIMIT 1
+    LIMIT $1
 "#;
 
 /// Replay every credit note with an unposted part (up to `batch_size` per
@@ -709,19 +713,15 @@ pub async fn sweep_unposted_credit_notes(
     config: &SweepConfig,
 ) -> Result<SweepReport> {
     let mut report = SweepReport::default();
-    let mut attempted: Vec<Uuid> = Vec::new();
 
-    for _ in 0..config.batch_size.max(1) {
-        let mut tx = pool.begin().await?;
-        let id: Option<Uuid> = sqlx::query_scalar(CLAIM_CREDIT_NOTE_SQL)
-            .bind(&attempted)
-            .fetch_optional(&mut *tx)
-            .await?;
-        let Some(id) = id else {
-            tx.commit().await?;
-            break;
-        };
-        attempted.push(id);
+    let mut tx = pool.begin().await?;
+    let ids: Vec<Uuid> = sqlx::query_scalar(CLAIM_CREDIT_NOTE_SQL)
+        .bind(config.batch_size.max(1))
+        .fetch_all(&mut *tx)
+        .await?;
+
+    for id in ids {
+        savepoint_row(&mut tx).await?;
         report.claimed += 1;
 
         match adapters::post_credit_note_in(&mut tx, id).await {
@@ -729,20 +729,21 @@ pub async fn sweep_unposted_credit_notes(
                 for outcome in outcomes {
                     report.record(outcome.status);
                 }
-                tx.commit().await?;
+                release_row(&mut tx).await?;
             }
             Err(error) => {
                 report.failed += 1;
                 tracing::warn!(
                     credit_note_id = %id,
                     error = %error,
-                    "credit-note sweep posting failed; claim rolled back for the next tick"
+                    "credit-note sweep posting failed; the row stays unposted for the next tick"
                 );
-                tx.rollback().await?;
+                rollback_row(&mut tx).await?;
             }
         }
     }
 
+    tx.commit().await?;
     Ok(report)
 }
 
@@ -775,12 +776,14 @@ pub async fn sweep_all_unposted(
 mod tests {
     use super::*;
 
-    /// The claim statements must lock the claimed row and let a concurrent
-    /// sweeper skip it — the SKIP LOCKED discipline is the concurrency
+    /// The claim statements must lock the claimed rows and let a concurrent
+    /// sweeper skip them — the SKIP LOCKED discipline is the concurrency
     /// contract, so it is asserted as text (the DB-backed tests exercise the
-    /// behaviour).
+    /// behaviour). Each claim is ONE bounded batch: `LIMIT $1` (the tick's
+    /// batch size) replaces the previous per-row `LIMIT 1` loop, and a
+    /// stable `ORDER BY` keeps the batch deterministic across ticks.
     #[test]
-    fn claim_statements_use_skip_locked_and_a_row_lock() {
+    fn claim_statements_use_skip_locked_and_a_bounded_batch() {
         for (name, sql) in [
             ("payroll", CLAIM_PAYROLL_SQL),
             ("expenses", CLAIM_EXPENSE_SQL),
@@ -794,12 +797,12 @@ mod tests {
                 "{name} claim must take a row lock with SKIP LOCKED"
             );
             assert!(
-                sql.contains("NOT (") && sql.contains("ANY($1::uuid[])"),
-                "{name} claim must exclude rows already attempted this tick"
+                sql.contains("LIMIT $1"),
+                "{name} claim must be ONE bounded batch (LIMIT $1), not a per-row LIMIT 1 loop"
             );
             assert!(
-                sql.contains("LIMIT 1"),
-                "{name} claim processes one row per transaction so the claim and the post commit together"
+                sql.contains("ORDER BY"),
+                "{name} claim must order by its stable business key"
             );
         }
     }
@@ -906,5 +909,224 @@ mod tests {
         assert!(policy.amounts_for(&facts).expect("policy").is_none());
         facts.pension_exemption = true;
         assert!(policy.amounts_for(&facts).expect("policy").is_some());
+    }
+}
+
+#[cfg(test)]
+mod batch_db_tests {
+    //! DB-backed proof of the batched claim protocol:
+    //!
+    //! * a successful tick posts every claimed row in ONE transaction (the
+    //!   pre-fix loop committed one row per transaction — the statement-level
+    //!   probe below records one `txid_current()` per row there, one for the
+    //!   whole batch here);
+    //! * a poison row still rolls back alone (savepoint isolation) and the
+    //!   rest of the batch commits;
+    //! * a tick claims at most `batch_size` rows and the next tick continues
+    //!   where it stopped.
+    //!
+    //! Gated on `TEST_DATABASE_URL` (workspace convention); a configured
+    //! provisioning failure panics.
+
+    use super::*;
+    use chrono::{DateTime, Utc};
+    use sqlx::PgPool;
+
+    async fn provision(name: &str) -> Option<PgPool> {
+        match migrator::test_support::fresh_canonical_pool(name, &format!("acct_sweeps_{name}"))
+            .await
+        {
+            Ok(pool) => pool,
+            Err(error) => panic!("{}", error.panic_message()),
+        }
+    }
+
+    fn pay_period() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-06-30T12:00:00Z")
+            .expect("timestamp")
+            .with_timezone(&Utc)
+    }
+
+    async fn insert_payroll(pool: &PgPool, name: &str, code: &str, gross: i64) -> Uuid {
+        sqlx::query_scalar(
+            "INSERT INTO payroll_records (employee_name, personal_code, gross_salary_cents, \
+                funded_pension_rate, pay_period) \
+             VALUES ($1, $2, $3, 0.02, $4) RETURNING id",
+        )
+        .bind(name)
+        .bind(code)
+        .bind(gross)
+        .bind(pay_period())
+        .fetch_one(pool)
+        .await
+        .expect("payroll record")
+    }
+
+    /// Exactly-balanced amounts for a gross salary (the adapter validates the
+    /// identity, so the policy is deterministic).
+    fn valid_amounts(gross: i64) -> PayrollAmounts {
+        let income_tax_cents = gross / 10;
+        let unemployment_employee_cents = gross / 100;
+        let pension_cents = gross / 50;
+        let net_cents = gross - income_tax_cents - unemployment_employee_cents - pension_cents;
+        PayrollAmounts {
+            income_tax_cents,
+            social_tax_cents: gross / 3,
+            unemployment_employee_cents,
+            unemployment_employer_cents: gross / 125,
+            pension_cents,
+            net_cents,
+        }
+    }
+
+    async fn install_tx_probe(pool: &PgPool) {
+        sqlx::raw_sql(
+            r#"
+            CREATE TABLE sweep_tx_probe (
+                entry_id UUID NOT NULL,
+                tx       BIGINT NOT NULL
+            );
+            CREATE OR REPLACE FUNCTION sweep_tx_probe_fn() RETURNS trigger
+            LANGUAGE plpgsql AS $$
+            BEGIN
+                INSERT INTO sweep_tx_probe (entry_id, tx) VALUES (NEW.id, txid_current());
+                RETURN NEW;
+            END
+            $$;
+            CREATE TRIGGER sweep_tx_probe_after_insert
+                AFTER INSERT ON journal_entries
+                FOR EACH ROW EXECUTE FUNCTION sweep_tx_probe_fn();
+            "#,
+        )
+        .execute(pool)
+        .await
+        .expect("tx probe trigger");
+    }
+
+    /// One tick == one transaction for every successfully posted row.
+    #[tokio::test]
+    async fn payroll_sweep_posts_the_claimed_batch_in_one_transaction() {
+        let Some(pool) = provision("batch_tx").await else {
+            return;
+        };
+        install_tx_probe(&pool).await;
+        for index in 0..3 {
+            insert_payroll(
+                &pool,
+                &format!("Batch Employee {index}"),
+                &format!("BATCH-{index}"),
+                100_000 + index * 10_000,
+            )
+            .await;
+        }
+
+        let config = SweepConfig { batch_size: 10 };
+        let report = sweep_unposted_payroll(&pool, &config, &|facts: &PayrollRecordFacts| {
+            Ok(Some(valid_amounts(facts.gross_salary_cents)))
+        })
+        .await
+        .expect("payroll sweep");
+
+        assert_eq!(report.claimed, 3, "{report:?}");
+        assert_eq!(report.posted, 3, "{report:?}");
+        assert_eq!(report.failed, 0, "{report:?}");
+
+        let distinct_transactions: i64 =
+            sqlx::query_scalar("SELECT COUNT(DISTINCT tx)::bigint FROM sweep_tx_probe")
+                .fetch_one(&pool)
+                .await
+                .expect("probe tx count");
+        assert_eq!(
+            distinct_transactions, 1,
+            "all three postings must commit in the SAME transaction \
+             (the pre-fix implementation committed one row per transaction)"
+        );
+        let entries: i64 = sqlx::query_scalar("SELECT COUNT(*)::bigint FROM sweep_tx_probe")
+            .fetch_one(&pool)
+            .await
+            .expect("probe entry count");
+        assert_eq!(entries, 3);
+
+        pool.close().await;
+    }
+
+    /// A poison row rolls back alone; the rest of its batch still commits.
+    #[tokio::test]
+    async fn one_failing_row_does_not_roll_back_the_batch() {
+        let Some(pool) = provision("batch_poison").await else {
+            return;
+        };
+        insert_payroll(&pool, "Poison A", "POISON-A", 100_000).await;
+        insert_payroll(&pool, "Poison B", "POISON-B", 100_000).await;
+        insert_payroll(&pool, "Poison C", "POISON-C", 100_000).await;
+
+        let config = SweepConfig { batch_size: 10 };
+        let report = sweep_unposted_payroll(&pool, &config, &|facts: &PayrollRecordFacts| {
+            if facts.employee_name.as_deref() == Some("Poison B") {
+                Err(crate::error::AccountingError::Invalid(
+                    "policy exploded".to_string(),
+                ))
+            } else {
+                Ok(Some(valid_amounts(facts.gross_salary_cents)))
+            }
+        })
+        .await
+        .expect("payroll sweep");
+
+        assert_eq!(report.claimed, 3, "{report:?}");
+        assert_eq!(report.posted, 2, "{report:?}");
+        assert_eq!(report.failed, 1, "{report:?}");
+
+        let entries: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM journal_entries WHERE idempotency_key LIKE 'payroll:%'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("posted entries");
+        assert_eq!(entries, 2, "the two healthy rows committed");
+
+        // The poison row is still unposted and is retried next tick.
+        let retried =
+            sweep_unposted_payroll(&pool, &config, &|_facts: &PayrollRecordFacts| Ok(None))
+                .await
+                .expect("retry sweep");
+        assert_eq!(retried.claimed, 1, "{retried:?}");
+        assert_eq!(retried.skipped_incomplete, 1, "{retried:?}");
+
+        pool.close().await;
+    }
+
+    /// A tick is bounded by `batch_size`; the next tick continues with the
+    /// next-oldest rows.
+    #[tokio::test]
+    async fn a_tick_claims_at_most_batch_size_rows() {
+        let Some(pool) = provision("batch_bound").await else {
+            return;
+        };
+        for index in 0..5 {
+            insert_payroll(
+                &pool,
+                &format!("Bounded {index}"),
+                &format!("BOUNDED-{index}"),
+                100_000,
+            )
+            .await;
+        }
+
+        let mut total = 0u64;
+        let config = SweepConfig { batch_size: 2 };
+        for expected_claimed in [2, 2, 1] {
+            let report = sweep_unposted_payroll(&pool, &config, &|facts: &PayrollRecordFacts| {
+                Ok(Some(valid_amounts(facts.gross_salary_cents)))
+            })
+            .await
+            .expect("payroll sweep");
+            assert_eq!(report.claimed, expected_claimed, "{report:?}");
+            assert_eq!(report.posted, expected_claimed, "{report:?}");
+            total += report.posted;
+        }
+        assert_eq!(total, 5, "every row posts exactly once across the ticks");
+
+        pool.close().await;
     }
 }

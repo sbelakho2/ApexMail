@@ -680,6 +680,7 @@ mod tests {
             csrf_secret: "test-csrf-secret-1234567890abcd".into(),
             control_plane_api_key: None,
             sales_autopilot_base_url: "http://localhost:3010".into(),
+            sales_discovery_run_budget_secs: 120,
             internal_service_token: None,
             pdf_renderer_auth_token: None,
             template_renderer_auth_token: None,

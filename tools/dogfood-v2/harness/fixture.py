@@ -125,7 +125,44 @@ def _segments_match(pattern_path: str, request_path: str) -> bool:
     return True
 
 
-def _bucket_has(entries, method: str, path: str) -> bool:
+def _path_segments(path: str) -> tuple[str, ...]:
+    return tuple(path.strip("/").split("/"))
+
+
+class _RouteTable:
+    """Compiled (method, pattern) lookup built once per bucket.
+
+    Static patterns live in a hash map keyed by the request's segment tuple;
+    parameterized patterns are bucketed by segment count. A request therefore
+    costs one split plus (usually) one hash lookup instead of re-splitting and
+    rescanning every route on every call (the old _bucket_has loop)."""
+
+    def __init__(self, entries):
+        self._exact: set[tuple[str, tuple[str, ...]]] = set()
+        self._params: dict[int, list[tuple[str, tuple[str, ...]]]] = {}
+        for method, pattern in entries:
+            segments = _path_segments(pattern)
+            if any(segment.startswith(":") for segment in segments):
+                self._params.setdefault(len(segments), []).append((method, segments))
+            else:
+                self._exact.add((method, segments))
+
+    def has(self, method: str, segments: tuple[str, ...]) -> bool:
+        if (method, segments) in self._exact:
+            return True
+        for pattern_method, pattern in self._params.get(len(segments), ()):
+            if pattern_method != method:
+                continue
+            if all(expected.startswith(":") or expected == actual
+                   for expected, actual in zip(pattern, segments)):
+                return True
+        return False
+
+
+def _bucket_has(entries, method: str, path: str, segments: tuple[str, ...] | None = None) -> bool:
+    if isinstance(entries, _RouteTable):
+        return entries.has(method, segments if segments is not None else _path_segments(path))
+    # Plain-iterable fallback (kept for callers/tests holding raw entries).
     for entry_method, pattern in entries:
         if entry_method == method and _segments_match(pattern, path):
             return True
@@ -327,13 +364,15 @@ class FixtureHandler(BaseHTTPRequestHandler):
             if path.startswith(("/assets/", "/css/", "/fonts/", "/images/", "/js/", "/specs/")):
                 return self._html(200, "/* fixture asset */", ctype="application/octet-stream")
             index = self._surface_index()
+            segments = _path_segments(path)
             # A /web/* path that is also a registered API route (the zero-JS
             # form routes merged into the authenticated/admin chains) must
             # answer its API contract, not the SSR page catch-all: /web/admin/*
             # and /web/contacts/export.csv are auth-gated routes, and the
             # anonymous/foreign-session probes assert the refusal.
-            if _bucket_has(index["admin"], method, path) or _bucket_has(index["authenticated"], method, path):
-                return self._fallback(method, path)
+            if (_bucket_has(index["admin"], method, path, segments)
+                    or _bucket_has(index["authenticated"], method, path, segments)):
+                return self._fallback(method, path, segments)
             if method == "GET" and (path in index["ssr_paths"] or path == "/"
                                     or path.startswith(("/web/", "/assets", "/dashboard", "/campaigns",
                                                         "/contacts", "/lists", "/templates", "/reports",
@@ -342,7 +381,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
                                                         "/login", "/signup", "/forgot-password",
                                                         "/reset-password"))):
                 return self._ssr(method, path, control_plane=False)
-            return self._fallback(method, path)
+            return self._fallback(method, path, segments)
         except BrokenPipeError:
             pass
         except Exception as error:  # noqa: BLE001
@@ -350,29 +389,35 @@ class FixtureHandler(BaseHTTPRequestHandler):
 
     def _surface_index(self):
         if FixtureHandler._index is None:
-            index = {"public": set(), "authenticated": set(), "admin": set(),
-                     "ssr": {}, "ssr_paths": set()}
+            entries = {"public": [], "authenticated": [], "admin": []}
+            index = {"ssr": {}, "ssr_paths": set()}
             for surface in self.ledger.by_kind("api"):
                 normalized = re.sub(r":[A-Za-z_][A-Za-z0-9_]*", ":param", surface.path)
-                bucket = index.get(surface.mount_class or "public")
-                if isinstance(bucket, set):
-                    bucket.add((surface.method, normalized))
+                bucket = entries.get(surface.mount_class or "public")
+                if bucket is not None:
+                    bucket.append((surface.method, normalized))
             for surface in self.ledger.by_kind("ssr"):
                 host_kind = surface.meta.get("surface", "web")
                 key = "cp" if host_kind == "control-plane" else "web"
                 index["ssr"][(key, surface.path)] = surface
                 index["ssr_paths"].add(surface.path)
+            # Compile each bucket once: request routing then does a hash
+            # lookup instead of rescanning every route per call.
+            for name, bucket in entries.items():
+                index[name] = _RouteTable(bucket)
             FixtureHandler._index = index
         return FixtureHandler._index
 
-    def _fallback(self, method, path):
+    def _fallback(self, method, path, segments: tuple[str, ...] | None = None):
         index = self._surface_index()
-        if _bucket_has(index["admin"], method, path):
+        if segments is None:
+            segments = _path_segments(path)
+        if _bucket_has(index["admin"], method, path, segments):
             auth = self._auth_ok()
             if not auth:
                 return self._err(401, "UNAUTHORIZED", "authentication required")
             return self._err(403, "FORBIDDEN", "control-plane access requires system tenant")
-        if _bucket_has(index["authenticated"], method, path):
+        if _bucket_has(index["authenticated"], method, path, segments):
             if not self._auth_ok():
                 return self._err(401, "UNAUTHORIZED", "authentication required")
             body = None
@@ -381,7 +426,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 if body is None:
                     return self._err(400, "VALIDATION_ERROR", "invalid JSON body")
             return self._err(404, "NOT_FOUND", "resource not found")
-        if _bucket_has(index["public"], method, path):
+        if _bucket_has(index["public"], method, path, segments):
             return self._err(400, "VALIDATION_ERROR", "invalid request for this endpoint")
         return self._err(404, "NOT_FOUND", "route not found")
 

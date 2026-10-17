@@ -632,11 +632,20 @@ async fn authenticate_api_key(
 /// queueing requests behind.
 static API_KEY_ARGON2_FALLBACK_SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
 const API_KEY_ARGON2_FALLBACK_MAX_CONCURRENT: usize = 2;
-/// Upper bound on rows examined per fallback run. The scan is a best-effort
-/// bridge for legacy Argon2id keys; on tenants with more keys than this the
-/// newest entries simply fall back to the normal "invalid API key" failure
-/// until the owner re-issues the key (ordered by creation for determinism).
-const API_KEY_ARGON2_FALLBACK_SCAN_LIMIT: i32 = 500;
+/// Upper bound on Argon2id rows examined per fallback run.
+///
+/// Each candidate costs a memory-hard Argon2id verification (~50 ms), so an
+/// unbounded scan lets ONE unauthenticated request pin a core for seconds (two
+/// with both semaphore permits) — a cheap CPU-exhaustion lever.
+///
+/// The scan is restricted to `$argon2id$` rows (`key_hash LIKE
+/// '$argon2id$%'`): only those can consume the budget, so newer HMAC/SHA-256
+/// keys — the overwhelming majority — never push a legacy key out of reach.
+/// A legacy key older than the newest [`API_KEY_ARGON2_FALLBACK_SCAN_LIMIT`]
+/// Argon2 rows is refused consistently (deterministic `created_at DESC`
+/// order); the remedy is re-issuing that key, which is the same remedy the
+/// former 500-row global bound implied, with a far smaller blast radius.
+const API_KEY_ARGON2_FALLBACK_SCAN_LIMIT: i32 = 50;
 
 async fn authenticate_api_key_argon2_fallback(
     key: &str,
@@ -658,14 +667,17 @@ async fn authenticate_api_key_argon2_fallback(
         }
     };
 
-    // Scan active keys (limited scope — only runs when HMAC lookup fails,
-    // capped at SCAN_LIMIT rows so a large api_keys table cannot turn each
-    // unauthenticated request into a full-table Argon2id grind).
+    // Scan active Argon2id keys only (a prefix LIKE on the indexed key_hash
+    // column): HMAC/SHA-256 rows cannot match this fallback anyway and must
+    // not consume its budget. Capped at SCAN_LIMIT rows so a large legacy set
+    // cannot turn each unauthenticated request into a full-table Argon2id
+    // grind.
     let rows = sqlx::query_as::<_, ApiKeyRow>(
         "SELECT id::text AS id, tenant_id, key_hash, scopes, expires_at
          FROM api_keys
-         WHERE expires_at IS NULL OR expires_at > NOW()
-         ORDER BY created_at DESC NULLS LAST
+         WHERE (expires_at IS NULL OR expires_at > NOW())
+           AND key_hash LIKE '$argon2id$%'
+         ORDER BY created_at DESC NULLS LAST, id DESC
          LIMIT $1",
     )
     .bind(API_KEY_ARGON2_FALLBACK_SCAN_LIMIT)
@@ -4003,6 +4015,153 @@ mod adversarial_tests {
             let env = crate::app::test_support::adv::AdvEnv::over(pool, expired_raw).await;
             let (status, _) = env.get("/v1/account/profile").await;
             assert_eq!(status, axum::http::StatusCode::UNAUTHORIZED);
+        }
+
+        /// A valid `$argon2id$` hash with minimal cost — format detection and
+        /// verification behave exactly as for a production hash, but seeding
+        /// dozens of them does not turn the test into a CPU benchmark.
+        fn cheap_argon2id_hash(raw: &str) -> String {
+            use argon2::password_hash::rand_core::OsRng;
+            use argon2::password_hash::{PasswordHasher, SaltString};
+            let salt = SaltString::generate(&mut OsRng);
+            let params = argon2::Params::new(8 * 1024, 1, 1, None).expect("cheap params");
+            argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params)
+                .hash_password(raw.as_bytes(), &salt)
+                .expect("cheap argon hash")
+                .to_string()
+        }
+
+        /// The Argon2id fallback scan is capped at
+        /// `API_KEY_ARGON2_FALLBACK_SCAN_LIMIT` Argon2id ROWS, deterministically
+        /// ordered newest-first. Two properties are pinned:
+        ///   * only `$argon2id$` rows consume the budget — a flood of newer
+        ///     HMAC/SHA-256 keys cannot push a legacy key out of reach;
+        ///   * a legacy Argon2 key older than the cap is refused on EVERY
+        ///     attempt (no nondeterministic acceptance, no partial write).
+        #[tokio::test]
+        async fn argon2_fallback_scan_cap_accepts_within_the_window_and_refuses_beyond_it_consistently(
+        ) {
+            let Some(pool) = crate::test_db::canonical_pool("waved_mw_argon2_cap").await else {
+                eprintln!(
+                    "skipping argon2_fallback_scan_cap_accepts_within_the_window_and_refuses_beyond_it_consistently: no TEST_DATABASE_URL"
+                );
+                return;
+            };
+            let cap = API_KEY_ARGON2_FALLBACK_SCAN_LIMIT as i64;
+            assert!(cap <= 50, "the documented cap must stay at or below 50");
+
+            // Each seeded decoy is a REAL Argon2id hash (an HMAC/SHA-256
+            // decoy would be skipped by the scan and would not exercise the
+            // cap). `newer_decoys` strictly precede the target in the scan
+            // order.
+            let seed_target = |pool: sqlx::PgPool, raw: String, newer_decoys: i64| async move {
+                let tenant = apexmail_lib::id::generate_id("wvcap", 20);
+                sqlx::query(
+                    "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at)
+                     VALUES ($1, 'Argon Cap Co', $2, 'free', 'active', NOW(), NOW())",
+                )
+                .bind(&tenant)
+                .bind(format!("slug-{tenant}"))
+                .execute(&pool)
+                .await
+                .expect("seed tenant");
+                for i in 0..newer_decoys {
+                    let decoy = format!("am_live_decoy{}{}", i, uuid::Uuid::new_v4().simple());
+                    // A REAL `$argon2id$` hash, but with cheap parameters: the
+                    // scan's cost is what is under test, not Argon2's cost.
+                    let hash = cheap_argon2id_hash(&decoy);
+                    sqlx::query(
+                        "INSERT INTO api_keys (id, tenant_id, name, key_prefix, key_hash, scopes, created_at, updated_at)
+                         VALUES ($1, $2, 'decoy', 'am_test_', $3, '[\"*\"]'::jsonb, NOW() - make_interval(secs => $4), NOW())",
+                    )
+                    .bind(uuid::Uuid::new_v4())
+                    .bind(&tenant)
+                    .bind(&hash)
+                    .bind(i as f64 + 1.0)
+                    .execute(&pool)
+                    .await
+                    .expect("seed decoy key");
+                }
+                let target_hash = apexmail_lib::hash_api_key_argon2(&raw).expect("target hash");
+                sqlx::query(
+                    "INSERT INTO api_keys (id, tenant_id, name, key_prefix, key_hash, scopes, created_at, updated_at)
+                     VALUES ($1, $2, 'legacy target', 'am_test_', $3, '[\"*\"]'::jsonb, NOW() - INTERVAL '1 hour', NOW())",
+                )
+                .bind(uuid::Uuid::new_v4())
+                .bind(&tenant)
+                .bind(&target_hash)
+                .execute(&pool)
+                .await
+                .expect("seed target key");
+                tenant
+            };
+
+            // ── Within the window: target is exactly the cap-th newest row ──
+            let within_raw = format!("am_live_{}", uuid::Uuid::new_v4().simple());
+            let within_tenant = seed_target(pool.clone(), within_raw.clone(), cap - 1).await;
+            // A flood of NEWER non-Argon2 keys must not consume the Argon2
+            // scan budget. Under the pre-fix global LIMIT these would push the
+            // legacy target out of the window and the request would be 401.
+            for i in 0..cap + 10 {
+                sqlx::query(
+                    "INSERT INTO api_keys (id, tenant_id, name, key_prefix, key_hash, scopes, created_at, updated_at)
+                     VALUES ($1, $2, 'hmac decoy', 'am_test_', $3, '[\"*\"]'::jsonb, NOW(), NOW())",
+                )
+                .bind(uuid::Uuid::new_v4())
+                .bind(&within_tenant)
+                .bind(format!("sha256:{i}-{}", uuid::Uuid::new_v4().simple()))
+                .execute(&pool)
+                .await
+                .expect("seed hmac decoy");
+            }
+            let env =
+                crate::app::test_support::adv::AdvEnv::over(pool.clone(), within_raw.clone()).await;
+            let (status, body) = env.get("/v1/account/profile").await;
+            assert_eq!(
+                status,
+                axum::http::StatusCode::NOT_FOUND,
+                "a legacy key inside the scan window must authenticate: {body}"
+            );
+            // ... and the upgrade path re-hashed it to HMAC.
+            let upgraded: String = sqlx::query_scalar(
+                "SELECT key_hash FROM api_keys WHERE tenant_id = $1 AND name = 'legacy target'",
+            )
+            .bind(&within_tenant)
+            .fetch_one(&pool)
+            .await
+            .expect("target row");
+            assert_eq!(
+                apexmail_lib::detect_api_key_hash_version(&upgraded),
+                apexmail_lib::ApiKeyHashVersion::HmacSha256,
+                "the accepted legacy key must be upgraded to the fast hash"
+            );
+
+            // ── Beyond the window: the target is one row older than the cap ──
+            let beyond_raw = format!("am_live_{}", uuid::Uuid::new_v4().simple());
+            let beyond_tenant = seed_target(pool.clone(), beyond_raw.clone(), cap + 1).await;
+            let env =
+                crate::app::test_support::adv::AdvEnv::over(pool.clone(), beyond_raw.clone()).await;
+            for attempt in 0..2 {
+                let (status, body) = env.get("/v1/account/profile").await;
+                assert_eq!(
+                    status,
+                    axum::http::StatusCode::UNAUTHORIZED,
+                    "attempt {attempt}: a legacy key beyond the scan cap is refused consistently: {body}"
+                );
+            }
+            // The refused key was NOT silently upgraded.
+            let still_argon: String = sqlx::query_scalar(
+                "SELECT key_hash FROM api_keys WHERE tenant_id = $1 AND name = 'legacy target'",
+            )
+            .bind(&beyond_tenant)
+            .fetch_one(&pool)
+            .await
+            .expect("target row");
+            assert!(
+                apexmail_lib::detect_api_key_hash_version(&still_argon)
+                    == apexmail_lib::ApiKeyHashVersion::Argon2id,
+                "a key the scan never reached stays Argon2id (no partial write)"
+            );
         }
 
         async fn seed_raw_key(pool: &sqlx::PgPool, tenant_prefix: &str, hash: &str) -> String {

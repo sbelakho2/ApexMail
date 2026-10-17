@@ -302,6 +302,59 @@ pub async fn load_consent_state(
     Ok(current_consent_state(&rows, contact_id, Utc::now()))
 }
 
+/// Load the consent state for MANY contacts in one round trip.
+///
+/// Semantics are identical to calling [`load_consent_state`] for each pair:
+/// evidence is scoped to the tenant and contact, and a contact's point-scoped
+/// view accepts person-level rows (`contact_point_id IS NULL`) plus rows for
+/// that exact point. Batching changes only the number of statements, never
+/// which rows are eligible.
+pub async fn load_consent_states(
+    db: &PgPool,
+    tenant_id: &str,
+    contacts: &[(Uuid, Option<Uuid>)],
+) -> Result<std::collections::HashMap<Uuid, ConsentState>, SalesError> {
+    let mut states = std::collections::HashMap::with_capacity(contacts.len());
+    if contacts.is_empty() {
+        return Ok(states);
+    }
+    let contact_ids: Vec<Uuid> = contacts.iter().map(|(id, _)| *id).collect();
+    let rows: Vec<ConsentEvidenceRow> = sqlx::query_as(
+        "SELECT id, contact_id, contact_point_id, consent_text, consent_version, \
+                source::text AS source, collected_at, withdrawn_at \
+         FROM sales_consent_evidence \
+         WHERE tenant_id = $1 AND contact_id = ANY($2) \
+         ORDER BY collected_at DESC",
+    )
+    .bind(tenant_id)
+    .bind(&contact_ids)
+    .fetch_all(db)
+    .await
+    .map_err(|e| SalesError::Database(e.to_string()))?;
+
+    let now = Utc::now();
+    let mut by_contact: std::collections::HashMap<Uuid, Vec<ConsentEvidenceRow>> =
+        std::collections::HashMap::new();
+    for row in rows {
+        if let Some(contact_id) = row.contact_id {
+            by_contact.entry(contact_id).or_default().push(row);
+        }
+    }
+    for (contact_id, point_id) in contacts {
+        let eligible: Vec<ConsentEvidenceRow> = by_contact
+            .remove(contact_id)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|row| row.contact_point_id.is_none() || row.contact_point_id == *point_id)
+            .collect();
+        states.insert(
+            *contact_id,
+            current_consent_state(&eligible, *contact_id, now),
+        );
+    }
+    Ok(states)
+}
+
 /// Resolve the policy key for a recipient country.
 ///
 /// * `None`, an empty/non ISO-3166-1 alpha-2 value, or a confidence below
@@ -809,6 +862,162 @@ pub async fn evaluate(
         channel_configured,
         input,
     ))
+}
+
+/// Evaluate the policy for MANY contacts with a bounded number of queries.
+///
+/// This is the batch form of [`evaluate`]: results are returned in input
+/// order and are identical to calling `evaluate` once per input. The lookup
+/// is performed per distinct `(jurisdiction, channel, contact_type)` triple
+/// with two statements (highest-version rows, then the channel-configured
+/// fallback), never per contact. It reads only the CURRENT canonical policy
+/// store — never a historical decision row.
+///
+/// Fail-closed semantics are preserved exactly: the highest-version row for a
+/// triple is considered even when unapproved/expired (so it cannot silently
+/// delegate to an older permissive row), and only an authoritative row may
+/// drive a non-default verdict.
+pub async fn evaluate_batch(
+    db: &PgPool,
+    inputs: &[ContactPolicyInput<'_>],
+) -> Result<Vec<ContactPolicyVerdict>, SalesError> {
+    if inputs.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Resolve the lookup triple for each input, in input order.
+    let keys: Vec<(String, &'static str, &'static str)> = inputs
+        .iter()
+        .map(|input| {
+            (
+                resolve_jurisdiction(input.recipient_country.as_deref(), input.country_confidence),
+                normalize_channel(input.channel),
+                normalize_contact_type(input.contact_type),
+            )
+        })
+        .collect();
+
+    let mut jurisdictions: Vec<String> = Vec::new();
+    let mut channels: Vec<String> = Vec::new();
+    let mut contact_types: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<(&str, &str, &str)> = std::collections::HashSet::new();
+    for (jurisdiction, channel, contact_type) in &keys {
+        if seen.insert((jurisdiction.as_str(), channel, contact_type)) {
+            jurisdictions.push(jurisdiction.clone());
+            channels.push((*channel).to_string());
+            contact_types.push((*contact_type).to_string());
+        }
+    }
+
+    // One statement: highest version per exact triple, regardless of
+    // approval/validity (mirrors the per-contact query).
+    let rows: Vec<PolicyRow> = sqlx::query_as(
+        "SELECT DISTINCT ON (jurisdiction, channel, contact_type) \
+                id, jurisdiction, channel, contact_type, decision, basis, \
+                required_disclosure, version, approved_by, approved_at, \
+                valid_from, valid_until \
+         FROM sales_jurisdiction_policies \
+         WHERE (jurisdiction, channel, contact_type) IN ( \
+             SELECT * FROM unnest($1::text[], $2::text[], $3::text[]) \
+         ) \
+         ORDER BY jurisdiction, channel, contact_type, version DESC",
+    )
+    .bind(&jurisdictions)
+    .bind(&channels)
+    .bind(&contact_types)
+    .fetch_all(db)
+    .await
+    .map_err(|e| SalesError::Database(e.to_string()))?;
+
+    let now = Utc::now();
+    let mut policies: std::collections::HashMap<
+        (String, String, String),
+        Option<JurisdictionPolicy>,
+    > = std::collections::HashMap::new();
+    for row in rows {
+        let authoritative = policy_is_authoritative(
+            row.approved_by.as_deref(),
+            row.approved_at,
+            row.valid_from,
+            row.valid_until,
+            now,
+        );
+        let key = (
+            row.jurisdiction.clone(),
+            row.channel.clone(),
+            row.contact_type.clone(),
+        );
+        policies.insert(key, authoritative.then(|| row.into_policy()));
+    }
+
+    // Fallback statement for triples with no policy at all: which
+    // (jurisdiction, contact_type) pairs have an approved valid row for ANY
+    // channel (the operator-facing "channel not configured" distinction).
+    // Only needed when at least one resolved policy is absent, exactly like
+    // the per-contact path.
+    let needs_channel_probe = keys.iter().any(|(jurisdiction, channel, contact_type)| {
+        !policies
+            .get(&(
+                jurisdiction.clone(),
+                (*channel).to_string(),
+                (*contact_type).to_string(),
+            ))
+            .is_some_and(Option::is_some)
+    });
+    let mut configured: std::collections::HashSet<(String, String)> =
+        std::collections::HashSet::new();
+    if needs_channel_probe {
+        let mut probe_jurisdictions: Vec<String> = Vec::new();
+        let mut probe_contact_types: Vec<String> = Vec::new();
+        let mut seen_pairs: std::collections::HashSet<(&str, &str)> =
+            std::collections::HashSet::new();
+        for (jurisdiction, channel, contact_type) in &keys {
+            let has_policy = policies
+                .get(&(
+                    jurisdiction.clone(),
+                    (*channel).to_string(),
+                    (*contact_type).to_string(),
+                ))
+                .is_some_and(Option::is_some);
+            if !has_policy && seen_pairs.insert((jurisdiction.as_str(), contact_type)) {
+                probe_jurisdictions.push(jurisdiction.clone());
+                probe_contact_types.push((*contact_type).to_string());
+            }
+        }
+        if !probe_jurisdictions.is_empty() {
+            let rows: Vec<(String, String)> = sqlx::query_as(
+                "SELECT DISTINCT jurisdiction, contact_type \
+                 FROM sales_jurisdiction_policies \
+                 WHERE (jurisdiction, contact_type) IN ( \
+                     SELECT * FROM unnest($1::text[], $2::text[]) \
+                 ) \
+                   AND approved_by IS NOT NULL AND approved_at IS NOT NULL \
+                   AND valid_from <= NOW() \
+                   AND (valid_until IS NULL OR valid_until > NOW())",
+            )
+            .bind(&probe_jurisdictions)
+            .bind(&probe_contact_types)
+            .fetch_all(db)
+            .await
+            .map_err(|e| SalesError::Database(e.to_string()))?;
+            configured.extend(rows);
+        }
+    }
+
+    Ok(inputs
+        .iter()
+        .zip(keys.iter())
+        .map(|(input, (jurisdiction, channel, contact_type))| {
+            let policy = policies.get(&(
+                jurisdiction.clone(),
+                (*channel).to_string(),
+                (*contact_type).to_string(),
+            ));
+            let channel_configured = policy.is_some_and(Option::is_some)
+                || configured.contains(&(jurisdiction.clone(), (*contact_type).to_string()));
+            decide_with_state(policy.and_then(Option::as_ref), channel_configured, input)
+        })
+        .collect())
 }
 
 /// Persist a legal verdict into `sales_contact_policy_decisions` (audit trail).
@@ -1709,6 +1918,111 @@ mod tests {
             source: Some("form:newsletter".into()),
             collected_at,
             withdrawn_at,
+        }
+    }
+
+    /// The batched evaluator returns exactly the same verdicts (in input
+    /// order) as calling `evaluate` once per contact, across mixed
+    /// jurisdictions — including the no-policy fail-closed case and a
+    /// duplicated jurisdiction.
+    #[tokio::test]
+    async fn evaluate_batch_matches_per_contact_evaluation() {
+        let Some(db) =
+            crate::test_db::canonical_test_pool("legal_policy::tests::evaluate_batch_equivalence")
+                .await
+        else {
+            return;
+        };
+        let (allowed_code, allowed_id) =
+            crate::test_db::insert_unique_jurisdiction_policy_returning_id(
+                &db,
+                "allowed",
+                "legitimate_interest",
+            )
+            .await;
+        let (prohibited_code, prohibited_id) =
+            crate::test_db::insert_unique_jurisdiction_policy_returning_id(
+                &db,
+                "prohibited",
+                "not_permitted",
+            )
+            .await;
+        let no_policy_code = crate::test_db::ensure_no_policy_jurisdiction(&db).await;
+        let tenant = crate::test_db::unique_test_tenant("policy-eq");
+
+        let countries = [
+            allowed_code.as_str(),
+            prohibited_code.as_str(),
+            no_policy_code.as_str(),
+            allowed_code.as_str(),
+        ];
+        let inputs: Vec<crate::decision_engine::ContactPolicyInputOwned> = countries
+            .iter()
+            .map(|country| crate::decision_engine::ContactPolicyInputOwned {
+                account_id: None,
+                contact_id: None,
+                contact_point_id: None,
+                recipient_country: Some((*country).to_string()),
+                country_confidence: 1.0,
+                contact_type: "b2b_professional".to_string(),
+                channel: "email".to_string(),
+                source: Some("sequence".to_string()),
+                purpose: Some("outbound_sales".to_string()),
+                has_existing_relationship: false,
+                consent_status: None,
+                soft_opt_in: false,
+                legitimate_interest_assessed: true,
+                subscriber_type: SubscriberType::LegalPerson,
+                consent_evidence_id: None,
+                existing_customer: false,
+                similar_product_basis: false,
+                collection_opt_out_offered_at: None,
+            })
+            .collect();
+        let borrowed: Vec<ContactPolicyInput<'_>> = inputs
+            .iter()
+            .map(|input| input.as_borrowed(&tenant))
+            .collect();
+
+        let batched = evaluate_batch(&db, &borrowed).await.unwrap();
+        assert_eq!(batched.len(), countries.len());
+        for (index, input) in borrowed.iter().enumerate() {
+            let single = evaluate(&db, input).await.unwrap();
+            assert_eq!(
+                batched[index].decision, single.decision,
+                "decision differs for input {index} ({})",
+                countries[index]
+            );
+            assert_eq!(batched[index].basis, single.basis);
+            assert_eq!(batched[index].policy_id, single.policy_id);
+            assert_eq!(batched[index].policy_version, single.policy_version);
+            assert_eq!(
+                batched[index].required_disclosure,
+                single.required_disclosure
+            );
+        }
+        assert_eq!(
+            batched[0].policy_id,
+            Some(allowed_id),
+            "the allowed jurisdiction resolves its own policy"
+        );
+        assert_eq!(
+            batched[1].decision,
+            ContactDecision::Prohibited,
+            "the prohibited jurisdiction is prohibited"
+        );
+        assert!(
+            batched[2].policy_id.is_none(),
+            "the no-policy jurisdiction fails closed without a policy"
+        );
+        assert_eq!(batched[3].policy_id, batched[0].policy_id);
+
+        for policy_id in [allowed_id, prohibited_id] {
+            sqlx::query("DELETE FROM sales_jurisdiction_policies WHERE id = $1")
+                .bind(policy_id)
+                .execute(&db)
+                .await
+                .unwrap();
         }
     }
 }

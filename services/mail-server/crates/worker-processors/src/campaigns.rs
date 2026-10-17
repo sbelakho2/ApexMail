@@ -1536,6 +1536,13 @@ impl CampaignExecutor {
     /// A `sending`/`resending` campaign with recipient rows but nothing left
     /// in flight converges: `sent` when every recipient was enqueued, `partial`
     /// otherwise; `sent_count` becomes the real per-recipient count.
+    ///
+    /// P1: the whole discovered batch is finalized with a bounded number of
+    /// statements — ONE `GROUP BY campaign_id` count over `= ANY($1)`, ONE
+    /// `UPDATE ... FROM (VALUES ...)` whose `RETURNING` also replaces the old
+    /// per-campaign tenant/A-B read, and ONE multi-row `webhook_queue` insert
+    /// for every `campaign.completed` event — instead of 3+ statements (and
+    /// one insert per subscribed webhook) per campaign.
     async fn finalize_finished_campaigns(&self) -> Result<TickReport, CampaignError> {
         let finished: Vec<Uuid> = sqlx::query_scalar(
             "SELECT c.id FROM campaigns c \
@@ -1551,60 +1558,91 @@ impl CampaignExecutor {
         .bind(self.batch_size)
         .fetch_all(&self.db)
         .await?;
+        if finished.is_empty() {
+            return Ok(TickReport::default());
+        }
+
+        // ONE count pass over the whole batch. A campaign with no counted
+        // recipient row (deleted between discovery and the count) keeps the
+        // historical (0, 0) default.
+        let counts: Vec<(Uuid, i64, i64)> = sqlx::query_as(
+            "SELECT cr.campaign_id, \
+                    COUNT(*) FILTER (WHERE cr.status = 'sent'), \
+                    COUNT(*) FILTER (WHERE cr.status IN ('failed', 'suppressed')) \
+             FROM campaign_recipients cr \
+             WHERE cr.campaign_id = ANY($1) \
+             GROUP BY cr.campaign_id",
+        )
+        .bind(&finished)
+        .fetch_all(&self.db)
+        .await?;
+        let counts: HashMap<Uuid, (i64, i64)> = counts
+            .into_iter()
+            .map(|(campaign_id, sent, failed)| (campaign_id, (sent, failed)))
+            .collect();
+
+        // ONE UPDATE for the whole batch, gated on the same
+        // `status IN ('sending', 'resending')` condition per row. RETURNING
+        // yields exactly the campaigns this worker actually transitioned (the
+        // old `rows_affected > 0` gate, per row) plus the data the completed
+        // event needs — tenant and A/B winner — without a second read.
+        let mut update_sql = String::from(
+            "UPDATE campaigns c \
+             SET status = v.status, sent_count = v.sent_count, updated_at = NOW() \
+             FROM (VALUES ",
+        );
+        for index in 0..finished.len() {
+            if index > 0 {
+                update_sql.push(',');
+            }
+            let base = index * 3;
+            update_sql.push_str(&format!(
+                "(${}::uuid, ${}::text, ${}::int)",
+                base + 1,
+                base + 2,
+                base + 3
+            ));
+        }
+        update_sql.push_str(
+            ") AS v(id, status, sent_count) \
+             WHERE c.id = v.id AND c.status IN ('sending', 'resending') \
+             RETURNING c.id, c.tenant_id, c.ab_config->'winnerArm', v.status",
+        );
+        let mut update =
+            sqlx::query_as::<_, (Uuid, String, Option<serde_json::Value>, String)>(&update_sql);
+        for campaign_id in &finished {
+            let (sent, failed) = counts.get(campaign_id).copied().unwrap_or((0, 0));
+            let new_status = if failed > 0 { "partial" } else { "sent" };
+            update = update
+                .bind(campaign_id)
+                .bind(new_status)
+                .bind(i32::try_from(sent).unwrap_or(i32::MAX));
+        }
 
         let mut report = TickReport::default();
-        for campaign_id in finished {
-            let (sent, failed): (i64, i64) = sqlx::query_as(
-                "SELECT \
-                    COUNT(*) FILTER (WHERE status = 'sent'), \
-                    COUNT(*) FILTER (WHERE status IN ('failed', 'suppressed')) \
-                 FROM campaign_recipients WHERE campaign_id = $1",
-            )
-            .bind(campaign_id)
-            .fetch_one(&self.db)
-            .await?;
-
-            let new_status = if failed > 0 { "partial" } else { "sent" };
-            let updated = sqlx::query(
-                "UPDATE campaigns \
-                 SET status = $2, sent_count = $3, updated_at = NOW() \
-                 WHERE id = $1 AND status IN ('sending', 'resending')",
-            )
-            .bind(campaign_id)
-            .bind(new_status)
-            .bind(i32::try_from(sent).unwrap_or(i32::MAX))
-            .execute(&self.db)
-            .await?
-            .rows_affected();
-            if updated > 0 {
-                let (tenant_id, ab_winner): (String, Option<serde_json::Value>) = sqlx::query_as(
-                    "SELECT tenant_id, ab_config->'winnerArm' FROM campaigns WHERE id = $1",
-                )
-                .bind(campaign_id)
-                .fetch_one(&self.db)
-                .await?;
-                enqueue_campaign_event_webhooks(
-                    &self.db,
-                    &tenant_id,
-                    "campaign.completed",
-                    serde_json::json!({
-                        "id": format!("evt_{}", Uuid::new_v4().simple()),
-                        "type": "campaign.completed",
-                        "tenantId": tenant_id,
-                        "timestamp": Utc::now().to_rfc3339(),
-                        "data": {
-                            "campaign_id": campaign_id.to_string(),
-                            "status": new_status,
-                            "sent": sent,
-                            "failed": failed,
-                            "ab_winner_arm": ab_winner,
-                        },
-                    }),
-                )
-                .await;
-                report.campaigns_completed += 1;
-            }
+        let mut events: Vec<CampaignWebhookEvent> = Vec::new();
+        for (campaign_id, tenant_id, ab_winner, new_status) in update.fetch_all(&self.db).await? {
+            let (sent, failed) = counts.get(&campaign_id).copied().unwrap_or((0, 0));
+            events.push(CampaignWebhookEvent {
+                tenant_id: tenant_id.clone(),
+                event_type: "campaign.completed".to_string(),
+                payload: serde_json::json!({
+                    "id": format!("evt_{}", Uuid::new_v4().simple()),
+                    "type": "campaign.completed",
+                    "tenantId": tenant_id,
+                    "timestamp": Utc::now().to_rfc3339(),
+                    "data": {
+                        "campaign_id": campaign_id.to_string(),
+                        "status": new_status,
+                        "sent": sent,
+                        "failed": failed,
+                        "ab_winner_arm": ab_winner,
+                    },
+                }),
+            });
+            report.campaigns_completed += 1;
         }
+        enqueue_campaign_event_webhooks_batch(&self.db, &events).await;
         Ok(report)
     }
 }
@@ -1669,6 +1707,163 @@ async fn enqueue_campaign_event_webhooks(
         .await
         {
             tracing::warn!(error = %error, event_type, webhook_id, "campaign webhook enqueue failed");
+        }
+    }
+}
+
+/// One lifecycle event ready for webhook fan-out.
+struct CampaignWebhookEvent {
+    tenant_id: String,
+    event_type: String,
+    payload: serde_json::Value,
+}
+
+/// P1: enqueue a whole batch of lifecycle events with ONE subscription
+/// lookup (per (tenant, event_type) pair) and ONE multi-row `webhook_queue`
+/// insert (chunked to keep the statement bounded) — instead of one lookup +
+/// one insert per webhook per event.
+///
+/// Failures keep the historical posture: a failed lookup or insert is logged
+/// and the remaining rows still go out; the queue is best-effort, the durable
+/// delivery guarantees live in the webhook processor. A failed CHUNK is
+/// retried row by row so one bad row costs only that row (the pre-batch code
+/// lost exactly one webhook insert per failure, never its chunk-mates).
+async fn enqueue_campaign_event_webhooks_batch(
+    pool: &sqlx::PgPool,
+    events: &[CampaignWebhookEvent],
+) {
+    if events.is_empty() {
+        return;
+    }
+
+    // One lookup for the entire batch: each DISTINCT (tenant, event_type)
+    // pair is joined against the tenant's enabled webhooks that subscribe to
+    // the event (or to `*`). The dedup matters: the payload fan-out below
+    // would otherwise multiply a pair's webhooks by the number of batch
+    // events sharing it. O(n) via the seen set (the old `Vec::contains` was
+    // O(n²) in distinct pairs).
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    let mut seen_pairs: std::collections::HashSet<(String, String)> =
+        std::collections::HashSet::new();
+    for event in events {
+        let pair = (event.tenant_id.clone(), event.event_type.clone());
+        if seen_pairs.insert(pair.clone()) {
+            pairs.push(pair);
+        }
+    }
+    let (tenant_ids, event_types): (Vec<String>, Vec<String>) = pairs.into_iter().unzip();
+    let subscriptions: Vec<(String, String, String)> = match sqlx::query_as(
+        "SELECT w.id, e.tenant_id, e.event_type \
+         FROM UNNEST($1::text[], $2::text[]) AS e(tenant_id, event_type) \
+         JOIN webhooks w \
+           ON w.tenant_id = e.tenant_id AND w.enabled = true \
+          AND (w.events ? e.event_type OR w.events ? '*')",
+    )
+    .bind(&tenant_ids)
+    .bind(&event_types)
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!(error = %error, "campaign webhook subscription lookup failed");
+            return;
+        }
+    };
+    if subscriptions.is_empty() {
+        return;
+    }
+
+    // Payloads keyed by the pair the lookup matched.
+    let mut payloads_by_pair: HashMap<(String, String), Vec<&serde_json::Value>> = HashMap::new();
+    for event in events {
+        payloads_by_pair
+            .entry((event.tenant_id.clone(), event.event_type.clone()))
+            .or_default()
+            .push(&event.payload);
+    }
+
+    let mut queue_rows: Vec<(String, String, String, String, &serde_json::Value)> = Vec::new();
+    for (webhook_id, tenant_id, event_type) in subscriptions {
+        let Some(payloads) = payloads_by_pair.get(&(tenant_id.clone(), event_type.clone())) else {
+            continue;
+        };
+        for payload in payloads {
+            queue_rows.push((
+                format!("whj_{}", Uuid::new_v4().simple()),
+                webhook_id.clone(),
+                tenant_id.clone(),
+                event_type.clone(),
+                payload,
+            ));
+        }
+    }
+    if queue_rows.is_empty() {
+        return;
+    }
+
+    // Chunked multi-row insert; only the placeholder count is dynamic, every
+    // value is bound.
+    const CHUNK: usize = 200;
+    for chunk in queue_rows.chunks(CHUNK) {
+        let mut insert_sql = String::from(
+            "INSERT INTO webhook_queue \
+                 (id, webhook_id, tenant_id, event_type, payload, status, attempt, created_at) \
+             VALUES ",
+        );
+        for index in 0..chunk.len() {
+            if index > 0 {
+                insert_sql.push(',');
+            }
+            let base = index * 5;
+            insert_sql.push_str(&format!(
+                "(${}, ${}, ${}, ${}, ${}, 'pending', 1, NOW())",
+                base + 1,
+                base + 2,
+                base + 3,
+                base + 4,
+                base + 5
+            ));
+        }
+        let mut insert = sqlx::query(&insert_sql);
+        for (queue_id, webhook_id, tenant_id, event_type, payload) in chunk {
+            insert = insert
+                .bind(queue_id)
+                .bind(webhook_id)
+                .bind(tenant_id)
+                .bind(event_type)
+                .bind(*payload);
+        }
+        if let Err(error) = insert.execute(pool).await {
+            // Chunk-level failure: retry the rows one at a time so a single
+            // bad row does not discard its chunk-mates (the per-webhook
+            // insert this batch replaced lost exactly one row per failure).
+            tracing::warn!(
+                error = %error,
+                rows = chunk.len(),
+                "campaign webhook chunk insert failed; retrying row by row"
+            );
+            for (queue_id, webhook_id, tenant_id, event_type, payload) in chunk {
+                if let Err(row_error) = sqlx::query(
+                    "INSERT INTO webhook_queue \
+                         (id, webhook_id, tenant_id, event_type, payload, status, attempt, created_at) \
+                     VALUES ($1, $2, $3, $4, $5, 'pending', 1, NOW())",
+                )
+                .bind(queue_id)
+                .bind(webhook_id)
+                .bind(tenant_id)
+                .bind(event_type)
+                .bind(*payload)
+                .execute(pool)
+                .await
+                {
+                    tracing::warn!(
+                        error = %row_error,
+                        webhook_id = %webhook_id,
+                        "campaign webhook enqueue failed"
+                    );
+                }
+            }
         }
     }
 }
@@ -1945,6 +2140,80 @@ mod tests {
         let suffix = uuid::Uuid::new_v4().simple().to_string();
         let prefix: String = label.chars().take(13).collect();
         format!("{prefix}-{}", &suffix[..12])
+    }
+
+    /// Perf P1 regression guard: a failed CHUNK insert is retried row by row,
+    /// so one poisoned queue row costs only that row. The pre-fallback code
+    /// lost the whole chunk on any error (a 200-row loss where the
+    /// pre-batching code lost exactly one webhook insert).
+    #[tokio::test]
+    async fn campaign_webhook_batch_isolates_one_poisoned_row() {
+        let Some(pool) = fresh_pool("camp_webhook_poison", "batch").await else {
+            return;
+        };
+        let tenant = fresh_tenant("camp-poison");
+        // webhooks.id is VARCHAR(26), not UUID — a UUID's 36-char text form
+        // would overflow it.
+        let webhook_id = format!("wh{}", &Uuid::new_v4().simple().to_string()[..20]);
+        sqlx::query(
+            "INSERT INTO webhooks (id, tenant_id, name, url, secret, events, enabled, created_at) \
+             VALUES ($1, $2, 'poison-test', 'https://hooks.example.test/x', 's', \
+                     '[\"campaign.completed\"]'::jsonb, true, NOW())",
+        )
+        .bind(&webhook_id)
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("seed webhook");
+
+        // Poison exactly one payload; a BEFORE INSERT trigger aborts any
+        // statement containing it (the whole batch, then just that row).
+        sqlx::query(
+            "CREATE FUNCTION test_poison_webhook() RETURNS trigger AS $$ \
+             BEGIN \
+                 IF COALESCE(NEW.payload->>'poison', 'false') = 'true' THEN \
+                     RAISE EXCEPTION 'poisoned webhook payload'; \
+                 END IF; \
+                 RETURN NEW; \
+             END $$ LANGUAGE plpgsql",
+        )
+        .execute(&pool)
+        .await
+        .expect("trigger function");
+        sqlx::query(
+            "CREATE TRIGGER test_poison_webhook BEFORE INSERT ON webhook_queue \
+             FOR EACH ROW EXECUTE FUNCTION test_poison_webhook()",
+        )
+        .execute(&pool)
+        .await
+        .expect("trigger");
+
+        let events: Vec<CampaignWebhookEvent> = (0..3)
+            .map(|i| CampaignWebhookEvent {
+                tenant_id: tenant.clone(),
+                event_type: "campaign.completed".to_string(),
+                payload: serde_json::json!({
+                    "id": format!("evt_{i}"),
+                    "poison": i == 1,
+                }),
+            })
+            .collect();
+        enqueue_campaign_event_webhooks_batch(&pool, &events).await;
+
+        let queued: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM webhook_queue WHERE tenant_id = $1 AND webhook_id = $2",
+        )
+        .bind(&tenant)
+        .bind(&webhook_id)
+        .fetch_one(&pool)
+        .await
+        .expect("queue count");
+        assert_eq!(
+            queued, 2,
+            "the two healthy events survive the poisoned chunk-mate"
+        );
+
+        pool.close().await;
     }
 
     /// In-memory admission backend: quota limit, suppression set, duplicate

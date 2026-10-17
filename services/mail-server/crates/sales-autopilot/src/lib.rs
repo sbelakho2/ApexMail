@@ -62,4 +62,6 @@ pub mod signals;
 pub mod simulation;
 #[cfg(test)]
 mod test_db;
+#[cfg(test)]
+mod test_probe;
 pub mod types;

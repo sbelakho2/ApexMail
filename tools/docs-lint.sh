@@ -240,7 +240,8 @@ function emit_sentences(  t, k, ns, s, n) {
     gsub(/  +/, " ", n)
     if (n == "") continue
     if (n ~ /^[0-9]+$/) continue
-    print n
+    if (dupfile != "") print n "\t" file >> dupfile
+    else print n
   }
 }
 function check_para(  t, s, k, ns, wc, n, i, tok, core, after, lw, m) {
@@ -347,7 +348,10 @@ function check_para(  t, s, k, ns, wc, n, i, tok, core, after, lw, m) {
 }
 function flush() {
   if (pbuf == "") { pline = 0; pbold = 0; return }
-  if (mode == "dup") emit_sentences()
+  if (mode == "both") {
+    check_para()
+    if (emitdup) emit_sentences()
+  } else if (mode == "dup") emit_sentences()
   else check_para()
   pbuf = ""; pline = 0; pbold = 0
 }
@@ -532,13 +536,21 @@ dupsum_tmp="$tmpd/dupsum"
 out_tmp="$tmpd/out"
 agg_tmp="$tmpd/agg"
 
+# One pass per markdown file: mode=both runs the paragraph checks and writes
+# the duplicate-sentence stream to dupfile, so the corpus is not preprocessed
+# and re-scanned a second time (the former separate mode=dup pass).
+: > "$dup_tmp"
 {
   for f in $md_files; do
+    case "$f" in
+      *Resources/ACCESSIBILITY.md) emitdup=0 ;; # byte-parity mirror: dup content is canonical elsewhere
+      *) emitdup=1 ;;
+    esac
     "$AWK_BIN" -f "$tmpd/mdprose.awk" "$f" |
-      "$AWK_BIN" -f "$tmpd/checks.awk" -v mode=check -v file="$f" \
+      "$AWK_BIN" -f "$tmpd/checks.awk" -v mode=both -v file="$f" \
           -v max_em="$MAX_EM" -v max_words="$MAX_WORDS" \
           -v max_contrast="$MAX_CONTRAST" -v max_bold="$MAX_BOLD" \
-          -v allowlist="$ALLOWLIST"
+          -v allowlist="$ALLOWLIST" -v dupfile="$dup_tmp" -v emitdup="$emitdup"
   done
   if [ "$WITH_SOURCE" = 1 ]; then
     for f in $src_files; do
@@ -558,17 +570,6 @@ agg_tmp="$tmpd/agg"
 } > "$out_tmp"
 grep '^SUMMARY' "$out_tmp" > "$summary_tmp"
 grep -v '^SUMMARY' "$out_tmp"
-
-for f in $md_files; do
-  "$AWK_BIN" -f "$tmpd/mdprose.awk" "$f" |
-    case "$f" in
-    *Resources/ACCESSIBILITY.md) ;; # byte-parity mirror: dup content is canonical elsewhere
-    *)
-      "$AWK_BIN" -f "$tmpd/checks.awk" -v mode=dup |
-        "$AWK_BIN" -v f="$f" '{ printf "%s\t%s\n", $0, f }'
-      ;;
-  esac
-done > "$dup_tmp"
 
 echo ""
 echo "== duplicate sentences (markdown, normalized) =="

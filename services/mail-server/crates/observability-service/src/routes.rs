@@ -443,6 +443,10 @@ fn system_alerts_severity(labels: &HashMap<String, String>) -> &'static str {
 /// fingerprint). Firing alerts are inserted idempotently (unique on
 /// (source, fingerprint)); resolved alerts acknowledge their row so they
 /// stop counting toward unacknowledged risk in the CP dashboard.
+///
+/// One UPDATE for every resolved alert and one UNNEST INSERT for every
+/// firing alert — the payload of a webhook is processed in two round trips
+/// instead of one statement per alert.
 async fn persist_alerts_to_system_alerts(
     pool: &Option<sqlx::PgPool>,
     alerts: &[AlertmanagerAlert],
@@ -453,6 +457,16 @@ async fn persist_alerts_to_system_alerts(
         tracing::debug!("no database pool attached — skipping system_alerts persistence");
         return;
     };
+    if alerts.is_empty() {
+        return;
+    }
+
+    let mut resolved_fingerprints: Vec<String> = Vec::new();
+    let mut firing_rule_names: Vec<String> = Vec::new();
+    let mut firing_messages: Vec<String> = Vec::new();
+    let mut firing_severities: Vec<String> = Vec::new();
+    let mut firing_components: Vec<Option<String>> = Vec::new();
+    let mut firing_fingerprints: Vec<String> = Vec::new();
 
     for alert in alerts {
         let rule_name = alert
@@ -480,36 +494,61 @@ async fn persist_alerts_to_system_alerts(
             .clone()
             .unwrap_or_else(|| format!("{rule_name}:{}", component.clone().unwrap_or_default()));
 
-        let result = if alert.status == "resolved" {
-            sqlx::query(
-                "UPDATE system_alerts
-                 SET acknowledged = true, acknowledged_at = NOW()
-                 WHERE source = 'alertmanager' AND fingerprint = $1 AND acknowledged = false",
-            )
-            .bind(&fingerprint)
-            .execute(db)
-            .await
+        if alert.status == "resolved" {
+            resolved_fingerprints.push(fingerprint);
         } else {
-            sqlx::query(
-                "INSERT INTO system_alerts
-                    (alert_type, message, severity, component, source, fingerprint)
-                 VALUES ($1, $2, $3, $4, 'alertmanager', $5)
-                 ON CONFLICT DO NOTHING",
-            )
-            .bind(&rule_name)
-            .bind(&message)
-            .bind(severity)
-            .bind(&component)
-            .bind(&fingerprint)
-            .execute(db)
-            .await
-        };
+            firing_rule_names.push(rule_name);
+            firing_messages.push(message);
+            firing_severities.push(severity.to_string());
+            firing_components.push(component);
+            firing_fingerprints.push(fingerprint);
+        }
+    }
 
+    // Resolve first, then insert: a resolved alert acknowledges the row a
+    // previous delivery created, exactly as the per-alert sequence did.
+    if !resolved_fingerprints.is_empty() {
+        let result = sqlx::query(
+            "UPDATE system_alerts
+             SET acknowledged = true, acknowledged_at = NOW()
+             WHERE source = 'alertmanager' AND fingerprint = ANY($1) AND acknowledged = false",
+        )
+        .bind(&resolved_fingerprints)
+        .execute(db)
+        .await;
         if let Err(error) = result {
             tracing::warn!(
                 error = %error,
-                alert = %rule_name,
-                "failed to persist alert into system_alerts"
+                alerts = resolved_fingerprints.len(),
+                "failed to acknowledge resolved alerts in system_alerts"
+            );
+        }
+    }
+
+    if !firing_rule_names.is_empty() {
+        // `ON CONFLICT DO NOTHING` keeps webhook redelivery idempotent. The
+        // per-alert values travel as parallel arrays, one INSERT statement
+        // for the whole batch.
+        let result = sqlx::query(
+            "INSERT INTO system_alerts
+                (alert_type, message, severity, component, source, fingerprint)
+             SELECT rule_name, message, severity, component, 'alertmanager', fingerprint
+             FROM UNNEST($1::text[], $2::text[], $3::text[], $4::text[], $5::text[])
+                  AS batch(rule_name, message, severity, component, fingerprint)
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(&firing_rule_names)
+        .bind(&firing_messages)
+        .bind(&firing_severities)
+        .bind(&firing_components)
+        .bind(&firing_fingerprints)
+        .execute(db)
+        .await;
+        if let Err(error) = result {
+            tracing::warn!(
+                error = %error,
+                alerts = firing_rule_names.len(),
+                "failed to persist firing alerts into system_alerts"
             );
         }
     }
@@ -681,7 +720,9 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use serde_json::json;
+    use sqlx::ConnectOptions;
     use tower::ServiceExt; // for `oneshot`
+    use tracing_subscriber::layer::SubscriberExt;
 
     fn test_state() -> AppState {
         AppState::new(
@@ -1541,5 +1582,260 @@ mod tests {
             .unwrap();
         let text = String::from_utf8(body.to_vec()).unwrap();
         assert!(text.contains("outage_probe"), "{text}");
+    }
+    // ── system_alerts persistence: one statement per phase ──────────────────
+
+    /// Isolated database for the persistence test (same convention as the
+    /// analytics DB tests): drop + recreate `<base>_obs_alerts`, apply the
+    /// migration-108 slice of `system_alerts`, and enable statement logging
+    /// so round trips are observable.
+    async fn isolated_alerts_pool() -> Option<sqlx::PgPool> {
+        use std::str::FromStr;
+        let url = std::env::var("TEST_DATABASE_URL").ok()?;
+        if url.trim().is_empty() {
+            return None;
+        }
+        let (server_part, db_part) = url.rsplit_once('/')?;
+        let db_only = db_part.split('?').next().unwrap_or(db_part);
+        let isolated = format!("{db_only}_obs_alerts");
+        let admin = sqlx::PgPool::connect(&format!("{server_part}/postgres"))
+            .await
+            .unwrap_or_else(|error| {
+                panic!("TEST_DATABASE_URL is configured but the admin connection failed: {error}")
+            });
+        let _ = sqlx::query(&format!(
+            r#"DROP DATABASE IF EXISTS "{isolated}" WITH (FORCE)"#
+        ))
+        .execute(&admin)
+        .await;
+        sqlx::query(&format!(r#"CREATE DATABASE "{isolated}""#))
+            .execute(&admin)
+            .await
+            .unwrap_or_else(|error| {
+                panic!("TEST_DATABASE_URL is configured but creating {isolated} failed: {error}")
+            });
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(4)
+            .test_before_acquire(false)
+            .connect_with(
+                sqlx::postgres::PgConnectOptions::from_str(&format!("{server_part}/{isolated}"))
+                    .expect("isolated database URL must parse")
+                    .log_statements(tracing::log::LevelFilter::Debug),
+            )
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "TEST_DATABASE_URL is configured but connecting to {isolated} failed: {error}"
+                )
+            });
+        sqlx::raw_sql(
+            r#"
+CREATE TABLE system_alerts (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    alert_type      TEXT NOT NULL,
+    message         TEXT NOT NULL,
+    severity        TEXT NOT NULL DEFAULT 'info'
+        CHECK (severity IN ('info', 'warning', 'critical')),
+    acknowledged    BOOLEAN NOT NULL DEFAULT false,
+    acknowledged_at TIMESTAMPTZ,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    component       TEXT,
+    source          VARCHAR(64) NOT NULL DEFAULT 'system',
+    fingerprint     VARCHAR(128)
+);
+CREATE UNIQUE INDEX idx_system_alerts_source_fingerprint
+    ON system_alerts (source, fingerprint)
+    WHERE source <> 'system' AND fingerprint IS NOT NULL;
+"#,
+        )
+        .execute(&pool)
+        .await
+        .expect("system_alerts fixture schema");
+        Some(pool)
+    }
+
+    #[derive(Clone, Default)]
+    struct QueryLog(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+    impl<S> tracing_subscriber::Layer<S> for QueryLog
+    where
+        S: tracing::Subscriber,
+    {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _context: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if event.metadata().target() == "sqlx::query" {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+    }
+
+    fn alert(
+        status: &str,
+        fingerprint: Option<&str>,
+        labels: &[(&str, &str)],
+        annotations: &[(&str, &str)],
+    ) -> AlertmanagerAlert {
+        AlertmanagerAlert {
+            status: status.to_string(),
+            labels: labels
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            annotations: annotations
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            starts_at: None,
+            ends_at: None,
+            fingerprint: fingerprint.map(str::to_string),
+            generator_url: None,
+            value_string: None,
+        }
+    }
+
+    /// A webhook with one resolved and three firing alerts is persisted in
+    /// TWO statements (one UPDATE, one UNNEST INSERT) — the pre-fix path
+    /// issued one statement per alert — while every row/fallback/severity
+    /// rule the per-alert path applied is preserved.
+    #[tokio::test]
+    async fn alertmanager_persistence_batches_statements_and_preserves_rows() {
+        let Some(pool) = isolated_alerts_pool().await else {
+            return;
+        };
+
+        // A previously-stored firing row that this payload resolves.
+        sqlx::query(
+            "INSERT INTO system_alerts \
+                 (alert_type, message, severity, component, source, fingerprint, acknowledged) \
+             VALUES ('ResolveMe', 'old', 'critical', 'api', 'alertmanager', 'resolve-me', false)",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed resolved row");
+
+        let alerts = vec![
+            alert(
+                "resolved",
+                Some("resolve-me"),
+                &[("alertname", "ResolveMe"), ("severity", "critical")],
+                &[("summary", "recovered")],
+            ),
+            alert(
+                "firing",
+                Some("fire-1"),
+                &[
+                    ("alertname", "FireOne"),
+                    ("severity", "critical"),
+                    ("component", "api"),
+                ],
+                &[("summary", "the API is down")],
+            ),
+            alert(
+                "firing",
+                Some("fire-2"),
+                &[
+                    ("alertname", "FireTwo"),
+                    ("severity", "page"),
+                    ("job", "worker"),
+                ],
+                &[],
+            ),
+            // No fingerprint: the stable fallback is "<rule>:<component>".
+            alert(
+                "firing",
+                None,
+                &[("alertname", "FireThree"), ("severity", "unknown")],
+                &[],
+            ),
+        ];
+
+        let counter = QueryLog::default();
+        let subscriber = tracing_subscriber::registry().with(counter.clone());
+        let _guard = tracing::subscriber::set_default(subscriber);
+        // The sqlx callsite may have cached `Interest::never` before this
+        // thread-local subscriber existed; rebuild so DEBUG events reach us.
+        tracing::callsite::rebuild_interest_cache();
+
+        let before = counter.0.load(std::sync::atomic::Ordering::SeqCst);
+        persist_alerts_to_system_alerts(&Some(pool.clone()), &alerts).await;
+        let statements = counter.0.load(std::sync::atomic::Ordering::SeqCst) - before;
+        assert_eq!(
+            statements, 2,
+            "one UPDATE + one UNNEST INSERT; the pre-fix path issued a statement per alert"
+        );
+
+        // The resolved row is acknowledged.
+        let (acknowledged, acknowledged_at): (bool, Option<chrono::DateTime<Utc>>) =
+            sqlx::query_as(
+                "SELECT acknowledged, acknowledged_at FROM system_alerts \
+                 WHERE source = 'alertmanager' AND fingerprint = 'resolve-me'",
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("resolved row");
+        assert!(acknowledged);
+        assert!(acknowledged_at.is_some());
+
+        // Every firing alert landed with the same derived values as before.
+        let rows: Vec<(String, String, String, Option<String>, String)> = sqlx::query_as(
+            "SELECT alert_type, message, severity, component, fingerprint \
+             FROM system_alerts WHERE source = 'alertmanager' AND fingerprint <> 'resolve-me' \
+             ORDER BY fingerprint",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("firing rows");
+        assert_eq!(rows.len(), 3);
+        assert_eq!(
+            rows[0],
+            (
+                "FireThree".to_string(),
+                "FireThree".to_string(),
+                "info".to_string(),
+                None,
+                "FireThree:".to_string()
+            ),
+            "missing summary falls back to the rule name; unknown severity degrades to info; \
+             missing fingerprint falls back to <rule>:<component>"
+        );
+        assert_eq!(
+            rows[1],
+            (
+                "FireOne".to_string(),
+                "the API is down".to_string(),
+                "critical".to_string(),
+                Some("api".to_string()),
+                "fire-1".to_string()
+            )
+        );
+        assert_eq!(
+            rows[2],
+            (
+                "FireTwo".to_string(),
+                "FireTwo".to_string(),
+                "warning".to_string(),
+                Some("worker".to_string()),
+                "fire-2".to_string()
+            ),
+            "severity 'page' maps to warning; message falls back to the rule name"
+        );
+
+        // Redelivery stays idempotent: no duplicates, and still two statements.
+        let before = counter.0.load(std::sync::atomic::Ordering::SeqCst);
+        persist_alerts_to_system_alerts(&Some(pool.clone()), &alerts).await;
+        let statements = counter.0.load(std::sync::atomic::Ordering::SeqCst) - before;
+        assert_eq!(statements, 2);
+        let total: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM system_alerts WHERE source = 'alertmanager'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("total rows");
+        assert_eq!(total, 4, "1 resolved seed + 3 firing rows, no duplicates");
+
+        pool.close().await;
     }
 }

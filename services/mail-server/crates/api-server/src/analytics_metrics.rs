@@ -30,6 +30,8 @@
 //! `services/mail-server/migrations/` (see the doc comments on each query
 //! builder below).
 
+use std::sync::OnceLock;
+
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::ser::SerializeMap;
 use serde::{Serialize, Serializer};
@@ -138,11 +140,117 @@ pub fn select_event_columns(type_col: Option<&str>, time_col: Option<&str>) -> E
     }
 }
 
+/// Process-wide cache of column-detection results.
+///
+/// `detect_event_columns` sits on the analytics request path and has 8 call
+/// sites; before this cache each request ran up to 2 sequential
+/// `information_schema.columns` probes (14 catalog scans per analytics page
+/// render). The physical schema is fixed for the process lifetime (migrations
+/// run before the server accepts traffic), so a per-`(table, candidates)`
+/// memo is safe and removes the catalog round trips entirely.
+///
+/// Only POSITIVE results are memoised. A `None` (no candidate column found)
+/// is deliberately re-probed: a miss can mean "the schema is not provisioned
+/// yet" (a dedicated-tenant provisioning test, a fresh runtime database), and
+/// caching it forever would freeze analytics into the broken state instead of
+/// letting a later migration self-heal the process.
+static DETECTED_COLUMNS: OnceLock<
+    parking_lot::RwLock<std::collections::HashMap<String, Option<String>>>,
+> = OnceLock::new();
+
+/// Per-`(table, candidates)` count of `information_schema` probes issued by
+/// [`detect_column`] since the last [`reset_column_detection_cache_for_tests`].
+/// Test-only instrumentation that lets a test assert the cache actually
+/// removed the catalog round trips. Keyed by the same cache key so a test can
+/// count its OWN probes even while other tests probe other columns in
+/// parallel.
+#[cfg(test)]
+static CATALOG_PROBE_COUNT: OnceLock<parking_lot::Mutex<std::collections::HashMap<String, usize>>> =
+    OnceLock::new();
+
+#[cfg(test)]
+fn catalog_probe_count(cache_key: &str) -> usize {
+    CATALOG_PROBE_COUNT
+        .get_or_init(|| parking_lot::Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .get(cache_key)
+        .copied()
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+fn record_catalog_probe(cache_key: &str) {
+    *CATALOG_PROBE_COUNT
+        .get_or_init(|| parking_lot::Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .entry(cache_key.to_string())
+        .or_insert(0) += 1;
+}
+
+fn detected_columns(
+) -> &'static parking_lot::RwLock<std::collections::HashMap<String, Option<String>>> {
+    DETECTED_COLUMNS.get_or_init(|| parking_lot::RwLock::new(std::collections::HashMap::new()))
+}
+
+/// Cache key for one `(database, table, ordered candidates)` probe.
+/// `\u{1f}` (unit separator) cannot appear in a SQL identifier and `\u{1e}`
+/// cannot appear in a database name, so distinct inputs cannot collide on one
+/// key.
+///
+/// The database segment matters: a schema is fixed per DATABASE, and the
+/// process may hold pools to more than one database (production control-plane
+/// pools, and the per-test throwaway databases schema-surgery tests use in
+/// the same test process). Scoping by database keeps a column dropped in one
+/// database from poisoning detection for another.
+fn detection_cache_key(scope: &str, table: &str, candidates: &[&str]) -> String {
+    let mut key = String::with_capacity(scope.len() + table.len() + candidates.len() * 16 + 2);
+    key.push_str(scope);
+    key.push('\u{1e}');
+    key.push_str(table);
+    for candidate in candidates {
+        key.push('\u{1f}');
+        key.push_str(candidate);
+    }
+    key
+}
+
+/// The cache scope a pool belongs to: the database name it connects to.
+fn pool_cache_scope(db: &PgPool) -> String {
+    db.connect_options()
+        .get_database()
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// Drop every memoised detection (and the probe counters). Test-only:
+/// schema-provisioning tests create/rename columns at runtime and must prove
+/// detection against the schema they just made, not against the schema the
+/// process saw first. Compiled out of production binaries — no test hook in
+/// the hot path.
+#[cfg(test)]
+pub(crate) fn reset_column_detection_cache_for_tests() {
+    detected_columns().write().clear();
+    CATALOG_PROBE_COUNT
+        .get_or_init(|| parking_lot::Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .clear();
+}
+
 /// Detect which of the candidate columns exists on `table` (canonical
 /// production schemas have `event_type`/`timestamp`; runtime-provisioned
 /// legacy schemas may have `type`/`created_at`).
+///
+/// Positive results are memoised process-wide — see [`DETECTED_COLUMNS`].
 pub async fn detect_column(db: &PgPool, table: &str, candidates: &[&str]) -> Option<String> {
+    let key = detection_cache_key(&pool_cache_scope(db), table, candidates);
+    if let Some(cached) = detected_columns().read().get(&key) {
+        return cached.clone();
+    }
+
+    let mut found = None;
     for col in candidates {
+        #[cfg(test)]
+        record_catalog_probe(&key);
         let exists: Option<(bool,)> = sqlx::query_as(
             "SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name = $1 AND column_name = $2)",
         )
@@ -153,9 +261,18 @@ pub async fn detect_column(db: &PgPool, table: &str, candidates: &[&str]) -> Opt
         .ok()
         .flatten();
         if exists.map(|r| r.0).unwrap_or(false) {
-            return Some((*col).to_string());
+            found = Some((*col).to_string());
+            break;
         }
     }
+
+    if let Some(found_column) = found {
+        // First writer wins; a concurrent probe of the same (table,
+        // candidates) computed the same schema, so either value is correct.
+        let mut guard = detected_columns().write();
+        return guard.entry(key).or_insert(Some(found_column)).clone();
+    }
+
     None
 }
 
@@ -755,6 +872,98 @@ mod tests {
         let columns = EventColumns::default();
         assert_eq!(columns.type_col.as_sql(), "event_type");
         assert_eq!(columns.time_col.as_sql(), "timestamp");
+    }
+
+    // ── Column-detection cache (analytics request path) ──────────
+    //
+    // Method of proof (both assertions together):
+    //  1. a per-key PROBE COUNTER (`catalog_probe_count`) shows the second
+    //     call issues zero `information_schema` probes;
+    //  2. the memo is served even after the probed column is DROPPED —
+    //     something only a cache (not a catalog read) can do — and a cache
+    //     reset makes the same call see the dropped schema again, proving
+    //     BOTH the cache hit and that the reset hook works.
+    #[tokio::test]
+    async fn column_detection_is_probed_once_and_served_from_cache_after_a_schema_change() {
+        let Some(pool) = crate::test_db::optional_pg_pool("analytics_column_cache").await else {
+            return;
+        };
+        // A UNIQUE table name: the cache key is (table, candidates), so this
+        // test's probes can never be satisfied or polluted by another test's
+        // detection of `events`.
+        let table = format!(
+            "_column_detection_cache_probe_{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..16]
+        );
+        sqlx::query(&format!(
+            "CREATE TABLE {table} (event_type TEXT, timestamp TIMESTAMPTZ)"
+        ))
+        .execute(&pool)
+        .await
+        .expect("create probe table");
+
+        reset_column_detection_cache_for_tests();
+        let candidates = ["event_type", "type"];
+        let key = detection_cache_key(&pool_cache_scope(&pool), &table, &candidates);
+
+        let first = detect_column(&pool, &table, &candidates).await;
+        assert_eq!(first.as_deref(), Some("event_type"));
+        let probes_after_first = catalog_probe_count(&key);
+
+        let second = detect_column(&pool, &table, &candidates).await;
+        assert_eq!(second.as_deref(), Some("event_type"));
+        assert_eq!(
+            catalog_probe_count(&key),
+            probes_after_first,
+            "second detection must be memoised, not re-probed"
+        );
+
+        // The schema changes under the process (the provisioning/rename
+        // case): a cache read still answers with the schema it saw first.
+        sqlx::query(&format!("ALTER TABLE {table} DROP COLUMN event_type"))
+            .execute(&pool)
+            .await
+            .expect("drop probed column");
+        let cached = detect_column(&pool, &table, &candidates).await;
+        assert_eq!(
+            cached.as_deref(),
+            Some("event_type"),
+            "a memoised detection must not consult the catalog again"
+        );
+        assert_eq!(catalog_probe_count(&key), probes_after_first);
+
+        // The reset hook drops the memo, so a fresh probe honestly reports
+        // the changed schema (and the negative is NOT cached forever).
+        reset_column_detection_cache_for_tests();
+        assert_eq!(detect_column(&pool, &table, &candidates).await, None);
+        let re_probed = catalog_probe_count(&key);
+        assert_eq!(re_probed, 2, "both candidates re-probed after the reset");
+        // Misses stay uncached: the next call probes again instead of
+        // freezing the process into a schema that no longer exists.
+        assert_eq!(detect_column(&pool, &table, &candidates).await, None);
+        assert_eq!(catalog_probe_count(&key), re_probed + 2);
+
+        sqlx::query(&format!("DROP TABLE {table}"))
+            .execute(&pool)
+            .await
+            .expect("drop probe table");
+        reset_column_detection_cache_for_tests();
+    }
+
+    #[test]
+    fn detection_cache_keys_cannot_collide_across_databases_tables_or_candidate_lists() {
+        let a = detection_cache_key("db1", "events", &["event_type", "type"]);
+        let b = detection_cache_key("db1", "events", &["type", "event_type"]);
+        let c = detection_cache_key("db1", "eventsx", &["event_type", "type"]);
+        let d = detection_cache_key("db2", "events", &["event_type", "type"]);
+        assert_ne!(a, b);
+        assert_ne!(a, c);
+        assert_ne!(a, d);
+        // Same inputs always produce the same key.
+        assert_eq!(
+            a,
+            detection_cache_key("db1", "events", &["event_type", "type"])
+        );
     }
 
     #[test]

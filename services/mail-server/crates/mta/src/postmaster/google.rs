@@ -248,10 +248,46 @@ impl GoogleClient {
     }
 }
 
+/// Rows per multi-row upsert statement.
+const UPSERT_BATCH_ROWS: usize = 500;
+
 /// Persist a batch of reputation rows; ON CONFLICT updates the existing day.
+///
+/// One `INSERT ... SELECT FROM jsonb_to_recordset(...)` per 500 rows instead
+/// of one INSERT per row. The ON CONFLICT target and update list are
+/// unchanged, so the idempotency contract per (domain, observed_at) is
+/// preserved exactly.
 pub async fn upsert_reputation(db: &PgPool, rows: &[GoogleReputation]) -> Result<usize, String> {
-    let mut inserted = 0;
-    for r in rows {
+    if rows.is_empty() {
+        return Ok(0);
+    }
+
+    // A single ON CONFLICT DO UPDATE statement cannot touch the same key
+    // twice, so duplicate (domain, observed_at) pairs within the slice are
+    // collapsed first. The LAST occurrence wins — the same result the old
+    // sequential loop produced.
+    let mut deduped: Vec<&GoogleReputation> = Vec::with_capacity(rows.len());
+    let mut positions: std::collections::HashMap<(String, NaiveDate), usize> =
+        std::collections::HashMap::new();
+    for row in rows {
+        let key = (row.domain.clone(), row.observed_at);
+        if let Some(&index) = positions.get(&key) {
+            deduped[index] = row;
+        } else {
+            positions.insert(key, deduped.len());
+            deduped.push(row);
+        }
+    }
+
+    let mut inserted = 0usize;
+    for chunk in deduped.chunks(UPSERT_BATCH_ROWS) {
+        let payload = serde_json::Value::Array(
+            chunk
+                .iter()
+                .map(serde_json::to_value)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| format!("serialize reputation row: {e}"))?,
+        );
         sqlx::query(
             "INSERT INTO postmaster_google_reputation
                (domain, observed_at, domain_reputation, ip_reputation,
@@ -259,7 +295,26 @@ pub async fn upsert_reputation(db: &PgPool, rows: &[GoogleReputation]) -> Result
                 spf_success_ratio, dkim_success_ratio, dmarc_success_ratio,
                 inbound_encryption_ratio, outbound_encryption_ratio,
                 delivery_errors, raw, fetched_at)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, NOW())
+             SELECT domain, observed_at, domain_reputation, ip_reputation,
+                    user_reported_spam_ratio, spammy_feedback_loops,
+                    spf_success_ratio, dkim_success_ratio, dmarc_success_ratio,
+                    inbound_encryption_ratio, outbound_encryption_ratio,
+                    delivery_errors, raw, NOW()
+               FROM jsonb_to_recordset($1::jsonb) AS r(
+                    domain text,
+                    observed_at date,
+                    domain_reputation text,
+                    ip_reputation jsonb,
+                    user_reported_spam_ratio double precision,
+                    spammy_feedback_loops jsonb,
+                    spf_success_ratio double precision,
+                    dkim_success_ratio double precision,
+                    dmarc_success_ratio double precision,
+                    inbound_encryption_ratio double precision,
+                    outbound_encryption_ratio double precision,
+                    delivery_errors jsonb,
+                    raw jsonb
+               )
              ON CONFLICT (domain, observed_at) DO UPDATE SET
                domain_reputation = EXCLUDED.domain_reputation,
                ip_reputation = EXCLUDED.ip_reputation,
@@ -274,23 +329,11 @@ pub async fn upsert_reputation(db: &PgPool, rows: &[GoogleReputation]) -> Result
                raw = EXCLUDED.raw,
                fetched_at = NOW()",
         )
-        .bind(&r.domain)
-        .bind(r.observed_at)
-        .bind(&r.domain_reputation)
-        .bind(&r.ip_reputation)
-        .bind(r.user_reported_spam_ratio)
-        .bind(&r.spammy_feedback_loops)
-        .bind(r.spf_success_ratio)
-        .bind(r.dkim_success_ratio)
-        .bind(r.dmarc_success_ratio)
-        .bind(r.inbound_encryption_ratio)
-        .bind(r.outbound_encryption_ratio)
-        .bind(&r.delivery_errors)
-        .bind(&r.raw)
+        .bind(payload)
         .execute(db)
         .await
         .map_err(|e| format!("DB error: {e}"))?;
-        inserted += 1;
+        inserted += chunk.len();
     }
     debug!(rows = inserted, "Google reputation upserted");
     Ok(inserted)
@@ -706,6 +749,99 @@ mod mock_server_tests {
                 .await
                 .unwrap();
         assert_eq!(rep, "LOW", "the conflict update wins");
+        pool.close().await;
+    }
+
+    /// The upsert must be O(1) in STATEMENTS, not O(N) in rows.
+    ///
+    /// The old `upsert_reputation` issued one INSERT per row; this test
+    /// installs a `FOR EACH STATEMENT` trigger, so it fails on that code
+    /// (25 statements) and passes only when the whole batch is one
+    /// multi-row `jsonb_to_recordset` INSERT. Duplicate keys in one call are
+    /// collapsed (last wins), because one ON CONFLICT statement cannot touch
+    /// the same row twice.
+    #[tokio::test]
+    async fn upsert_reputation_batches_many_rows_into_one_statement() {
+        let Some(pool) =
+            migrator::test_support::fresh_canonical_pool("google_postmaster_batch", "upsert_batch")
+                .await
+                .expect("configured TEST_DATABASE_URL must provision")
+        else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed google tests");
+            return;
+        };
+
+        let observed = NaiveDate::from_ymd_opt(2026, 3, 1).unwrap();
+        let row = |domain: &str, band: &str| GoogleReputation {
+            domain: domain.to_string(),
+            observed_at: observed,
+            domain_reputation: Some(band.into()),
+            ip_reputation: serde_json::json!([]),
+            user_reported_spam_ratio: Some(0.01),
+            spammy_feedback_loops: None,
+            spf_success_ratio: Some(0.9),
+            dkim_success_ratio: Some(0.9),
+            dmarc_success_ratio: Some(0.9),
+            inbound_encryption_ratio: Some(1.0),
+            outbound_encryption_ratio: Some(1.0),
+            delivery_errors: serde_json::json!([]),
+            raw: serde_json::json!({"fixture": true}),
+        };
+        let rows: Vec<GoogleReputation> = (0..25)
+            .map(|index| row(&format!("batch-{index}.example"), "HIGH"))
+            .collect();
+
+        crate::postmaster::test_support::install_statement_counters(
+            &pool,
+            &["postmaster_google_reputation"],
+        )
+        .await;
+        crate::postmaster::test_support::reset_statement_counts(&pool).await;
+
+        assert_eq!(upsert_reputation(&pool, &rows).await.unwrap(), 25);
+        let inserts = crate::postmaster::test_support::statement_count(
+            &pool,
+            "postmaster_google_reputation",
+            "INSERT",
+        )
+        .await;
+        assert_eq!(
+            inserts, 1,
+            "25 rows must be written by ONE INSERT statement, got {inserts}"
+        );
+
+        let stored: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM postmaster_google_reputation WHERE observed_at = $1",
+        )
+        .bind(observed)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(stored, 25, "every row in the batch is persisted");
+
+        // Within-batch duplicate: last occurrence wins and still one statement.
+        crate::postmaster::test_support::reset_statement_counts(&pool).await;
+        let duplicate_batch = vec![row("dupe.example", "HIGH"), row("dupe.example", "LOW")];
+        assert_eq!(
+            upsert_reputation(&pool, &duplicate_batch).await.unwrap(),
+            1,
+            "duplicate keys collapse to one row"
+        );
+        let band: String = sqlx::query_scalar(
+            "SELECT domain_reputation FROM postmaster_google_reputation WHERE domain = 'dupe.example'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(band, "LOW", "last occurrence wins");
+        let inserts = crate::postmaster::test_support::statement_count(
+            &pool,
+            "postmaster_google_reputation",
+            "INSERT",
+        )
+        .await;
+        assert_eq!(inserts, 1);
+
         pool.close().await;
     }
 

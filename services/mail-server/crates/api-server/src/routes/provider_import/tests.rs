@@ -1278,18 +1278,20 @@ async fn template_import_on_the_free_plan_is_refused_by_the_entitlement() {
 
 // ─── Domains: read-only report per provider ────────────────────
 
-async fn seed_domain(pool: &PgPool, tenant: &str, name: &str) {
+async fn seed_domain(pool: &PgPool, tenant: &str, name: &str) -> String {
+    let id = uuid::Uuid::new_v4().to_string();
     sqlx::query(
         "INSERT INTO domains (id, tenant_id, name, status, verified, dkim_enabled, ses_verified,
              dkim_selector, dkim_public_key, dkim_private_key)
          VALUES ($1::uuid, $2, $3, 'verified', true, true, true, 'am-testselector', 'test-public-key', 'dkim:v1:test')",
     )
-    .bind(uuid::Uuid::new_v4().to_string())
+    .bind(&id)
     .bind(tenant)
     .bind(name)
     .execute(pool)
     .await
     .expect("seed domain");
+    id
 }
 
 #[tokio::test]
@@ -1298,7 +1300,7 @@ async fn domains_report_is_generated_per_provider_and_read_only() {
         return;
     };
     let (env, tenant) = fixture(&pool, "free", &["domains:read"]).await;
-    seed_domain(&pool, &tenant, "switch.example.com").await;
+    let domain_id = seed_domain(&pool, &tenant, "switch.example.com").await;
 
     for provider in ["sendgrid", "mailgun", "postmark", "resend"] {
         let (status, body) = post_file(
@@ -1382,6 +1384,49 @@ async fn domains_report_is_generated_per_provider_and_read_only() {
         );
         assert_eq!(body["counts"]["imported"], 0);
     }
+
+    // The query accepts an id OR a name, and the id arm now binds the
+    // domains.id UUID natively (`id = $3::uuid`, primary key) instead of
+    // casting the column with `id::text = $2`: resolving by id must behave
+    // exactly like resolving by name, and an unknown id that parses as a UUID
+    // (or a name that is neither) is still the same 404.
+    let (status, by_id) = post_file(
+        &env,
+        &format!("/v1/import/sendgrid/domains?domain={domain_id}"),
+        "application/json",
+        b"",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "resolution by id: {by_id}");
+    assert_eq!(by_id["domain"]["from_provider"], "sendgrid");
+    assert!(by_id["domain"]["keep"]
+        .as_array()
+        .expect("keep")
+        .iter()
+        .any(|row| row["hostname"] == "am-testselector._domainkey.switch.example.com"));
+    let (status, body) = post_file(
+        &env,
+        &format!(
+            "/v1/import/sendgrid/domains?domain={}",
+            uuid::Uuid::new_v4()
+        ),
+        "application/json",
+        b"",
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "unknown uuid id: {body}");
+    let (status, body) = post_file(
+        &env,
+        "/v1/import/sendgrid/domains?domain=not-a-uuid-and-not-a-domain",
+        "application/json",
+        b"",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a non-UUID query that names no domain is the same 404: {body}"
+    );
 
     // Ambiguity is impossible: a domain outside the tenant is a 404, and a
     // missing ?domain= is a named 400.

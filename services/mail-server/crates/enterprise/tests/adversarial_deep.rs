@@ -81,6 +81,73 @@ async fn seed_agent(pool: &PgPool, name: &str, email: &str, specialties: &[&str]
     id
 }
 
+/// `FOR EACH STATEMENT` DML counters: one bump per SQL statement, not per
+/// row — the only observable that distinguishes a batched sweep from the old
+/// per-ticket UPDATE loop.
+async fn install_statement_counters(pool: &PgPool, tables: &[&str]) {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS _apexmail_test_stmt_counts (
+             probed_table TEXT NOT NULL,
+             op TEXT NOT NULL,
+             statements BIGINT NOT NULL DEFAULT 0,
+             PRIMARY KEY (probed_table, op)
+         )",
+    )
+    .execute(pool)
+    .await
+    .expect("create statement-count table");
+    sqlx::query(
+        "CREATE OR REPLACE FUNCTION _apexmail_test_count_stmt() RETURNS trigger \
+         LANGUAGE plpgsql AS $$ \
+         BEGIN \
+           INSERT INTO _apexmail_test_stmt_counts (probed_table, op, statements) \
+           VALUES (TG_TABLE_NAME, TG_OP, 1) \
+           ON CONFLICT (probed_table, op) \
+           DO UPDATE SET statements = _apexmail_test_stmt_counts.statements + 1; \
+           RETURN NULL; \
+         END $$",
+    )
+    .execute(pool)
+    .await
+    .expect("create statement-count function");
+    for table in tables {
+        assert!(
+            table
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_'),
+            "statement counter table name must be identifier-shaped: {table}"
+        );
+        sqlx::query(&format!(
+            "CREATE OR REPLACE TRIGGER _apexmail_test_count_stmt \
+             AFTER INSERT OR UPDATE OR DELETE ON {table} \
+             FOR EACH STATEMENT EXECUTE FUNCTION _apexmail_test_count_stmt()"
+        ))
+        .execute(pool)
+        .await
+        .expect("install statement-count trigger");
+    }
+}
+
+async fn reset_statement_counts(pool: &PgPool) {
+    sqlx::query("UPDATE _apexmail_test_stmt_counts SET statements = 0")
+        .execute(pool)
+        .await
+        .expect("reset statement counts");
+}
+
+async fn statement_count(pool: &PgPool, table: &str, op: &str) -> i64 {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT statements FROM _apexmail_test_stmt_counts \
+         WHERE probed_table = $1 AND op = $2",
+    )
+    .bind(table)
+    .bind(op)
+    .fetch_optional(pool)
+    .await
+    .expect("read statement count")
+    .unwrap_or(0)
+}
+
 fn ok<T: serde::Serialize + std::fmt::Debug>(
     result: Result<enterprise::types::ApiResult<T>, String>,
 ) -> T {
@@ -1004,6 +1071,85 @@ db_test!(support_sla_breach_job_marks_once_and_notifies, pool, {
     assert_eq!(mailed, expected);
     assert!(expected >= 1, "overdue ticket had an assignee");
 });
+
+// The breach sweep must mark the whole due set with ONE UPDATE statement.
+// The old code SELECTed the set and then issued one UPDATE per ticket, so
+// this test fails on that code (15 UPDATE statements) and passes with the
+// set-based `UPDATE ... RETURNING *`.
+db_test!(
+    support_sla_breach_sweep_marks_the_batch_in_one_statement,
+    pool,
+    {
+        let svc = SupportService::new(pool.clone());
+        let tenant = t26();
+        seed_tenant(&pool, &tenant).await;
+        seed_agent(&pool, "Ag", "ag-batch@apexmail.ee", &["billing"]).await;
+
+        let mut overdue_ids = Vec::new();
+        for index in 0..15 {
+            let ticket = ok(svc
+                .create_ticket(
+                    &tenant,
+                    &format!("overdue-{index}"),
+                    "d",
+                    "high",
+                    "billing",
+                    None,
+                )
+                .await);
+            sqlx::query(
+                "UPDATE ent_support_tickets SET sla_first_response_due = NOW() - interval '1 hour', \
+                 sla_resolution_due = NOW() + interval '5 hours' WHERE id=$1",
+            )
+            .bind(ticket.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+            overdue_ids.push(ticket.id);
+        }
+
+        install_statement_counters(&pool, &["ent_support_tickets"]).await;
+        reset_statement_counts(&pool).await;
+
+        let breached = svc.check_sla_breaches().await.unwrap();
+        assert_eq!(breached.len(), 15, "every overdue ticket is returned");
+
+        let updates = statement_count(&pool, "ent_support_tickets", "UPDATE").await;
+        assert_eq!(
+            updates, 1,
+            "15 breaches must be marked by ONE UPDATE statement, got {updates}"
+        );
+
+        // Equivalence: all rows are flagged, and a second sweep is a no-op
+        // (a statement affecting zero rows fires no statement trigger).
+        let flagged: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM ent_support_tickets WHERE sla_breached = true",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(flagged, 15);
+        for id in &overdue_ids {
+            let breached_flag: bool =
+                sqlx::query_scalar("SELECT sla_breached FROM ent_support_tickets WHERE id = $1")
+                    .bind(id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert!(breached_flag);
+        }
+
+        reset_statement_counts(&pool).await;
+        assert!(svc.check_sla_breaches().await.unwrap().is_empty());
+        // A statement-level trigger fires even for a zero-row UPDATE, so the
+        // idempotent sweep is still exactly ONE (no-op) statement.
+        assert_eq!(
+            statement_count(&pool, "ent_support_tickets", "UPDATE").await,
+            1,
+            "the idempotent second sweep is a single no-op statement"
+        );
+    }
+);
 
 db_test!(
     support_auto_escalation_promotes_open_tickets_exactly_once,

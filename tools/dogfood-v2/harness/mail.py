@@ -13,6 +13,30 @@ import urllib.request
 
 
 class MailSource:
+    # True when list entries already carry the full body (the fixture does);
+    # links() then avoids one detail fetch per matched message (N+1).
+    summary_has_body = False
+
+    def __init__(self):
+        self._detail_cache: dict[str, dict] = {}
+
+    def _cached(self, mid: str) -> dict | None:
+        cache = getattr(self, "_detail_cache", None)
+        if cache is None:
+            cache = self._detail_cache = {}
+        return cache.get(mid)
+
+    def _remember(self, mid: str, detail: dict) -> dict:
+        if detail:
+            cache = getattr(self, "_detail_cache", None)
+            if cache is None:
+                cache = self._detail_cache = {}
+            cache[mid] = detail
+        return detail
+
+    def _forget_details(self) -> None:
+        getattr(self, "_detail_cache", {}).clear()
+
     def messages(self, limit: int = 100) -> list[dict]:
         raise NotImplementedError
 
@@ -34,11 +58,19 @@ class MailSource:
             out.append(message)
         return out
 
+    def _body_text(self, message: dict, summary_has_body: bool | None = None) -> str:
+        use_summary = self.summary_has_body if summary_has_body is None else summary_has_body
+        if use_summary:
+            text = message.get("Text") or message.get("HTML") or ""
+            if text:
+                return text
+        body = self.message(message["ID"])
+        return body.get("Text") or body.get("HTML") or ""
+
     def links(self, recipient: str, subject_contains: str = "") -> list[str]:
         links: list[str] = []
         for message in self.for_recipient(recipient, subject_contains):
-            body = self.message(message["ID"])
-            text = body.get("Text") or body.get("HTML") or ""
+            text = self._body_text(message)
             links.extend(re.findall(r"https?://[^\s\"'<>]+", text))
         return links
 
@@ -58,6 +90,7 @@ class MailSource:
 
 class MailpitSource(MailSource):
     def __init__(self, url: str = "http://127.0.0.1:8025"):
+        super().__init__()
         self.url = url
 
     def _get(self, path: str) -> dict:
@@ -71,12 +104,17 @@ class MailpitSource(MailSource):
             return []
 
     def message(self, mid: str) -> dict:
+        cached = self._cached(mid)
+        if cached is not None:
+            return cached
         try:
-            return self._get(f"/api/v1/message/{mid}")
+            detail = self._get(f"/api/v1/message/{mid}")
         except Exception:  # noqa: BLE001
             return {}
+        return self._remember(mid, detail)
 
     def delete_all(self) -> None:
+        self._forget_details()
         request = urllib.request.Request(f"{self.url}/api/v1/messages", method="DELETE")
         try:
             urllib.request.urlopen(request, timeout=10) # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected — internal tooling hitting a configured/constant endpoint, not a user-supplied URL
@@ -94,23 +132,39 @@ class MailpitSource(MailSource):
 class FixtureMailSource(MailSource):
     """Reads the self-test fixture server's mailbox API."""
 
+    # /__fixture/mailbox returns the stored message objects with HTML/Text/Raw.
+    summary_has_body = True
+
     def __init__(self, base: str):
+        super().__init__()
         self.base = base
+        self._by_id: dict[str, dict] = {}
 
     def _get(self, path: str) -> dict:
         with urllib.request.urlopen(f"{self.base}{path}", timeout=10) as response: # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected — internal tooling hitting a configured/constant endpoint, not a user-supplied URL
             return json.loads(response.read().decode())
 
     def messages(self, limit: int = 100) -> list[dict]:
-        return self._get("/__fixture/mailbox").get("messages", [])[-limit:]
+        messages = self._get("/__fixture/mailbox").get("messages", [])[-limit:]
+        # One pass per fetch: message() lookups become O(1) instead of
+        # re-fetching and rescanning the mailbox per id (N+1).
+        self._by_id = {message["ID"]: message for message in messages if "ID" in message}
+        return messages
 
     def message(self, mid: str) -> dict:
-        for message in self.messages():
-            if message["ID"] == mid:
-                return message
-        return {}
+        cached = self._cached(mid)
+        if cached is not None:
+            return cached
+        if mid not in self._by_id:
+            self.messages()
+        found = self._by_id.get(mid)
+        if found is None:
+            return {}
+        return self._remember(mid, found)
 
     def delete_all(self) -> None:
+        self._forget_details()
+        self._by_id = {}
         request = urllib.request.Request(f"{self.base}/__fixture/mailbox", method="DELETE")
         try:
             urllib.request.urlopen(request, timeout=5) # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected — internal tooling hitting a configured/constant endpoint, not a user-supplied URL

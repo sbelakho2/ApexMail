@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -12,7 +12,7 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use sqlx::{Connection, FromRow, Postgres, QueryBuilder};
+use sqlx::{Connection, FromRow, PgPool, Postgres, QueryBuilder};
 use tokio::time::{interval_at, Instant, MissedTickBehavior};
 use tracing::{error, info, warn};
 use uuid::Uuid;
@@ -796,37 +796,78 @@ async fn archive_paid_invoices(state: &AppState) -> Result<i64, String> {
 
     let batch_id = uuid::Uuid::new_v4();
 
-    for (invoice_id, tenant_id, invoice_number, pdf_url) in &candidates {
-        if let Err(e) = sqlx::query(
-            r#"
-            INSERT INTO invoice_archives (invoice_id, tenant_id, invoice_number, pdf_url, batch_id, archived_at)
-            VALUES ($1, $2, $3, $4, $5, NOW())
-            ON CONFLICT (invoice_id) DO NOTHING
-            "#,
-        )
-        .bind(invoice_id)
-        .bind(tenant_id)
-        .bind(invoice_number)
-        .bind(pdf_url)
-        .bind(batch_id)
-        .execute(&state.db)
-        .await
-        {
+    // P3 item 7 — archive the whole batch with ONE multi-row INSERT. The
+    // pre-fix loop issued one INSERT per candidate (up to 500 round trips a
+    // day) and only logged individual failures; `ON CONFLICT DO NOTHING`
+    // keeps the replay idempotence, and the returned duplicate count is the
+    // number of rows this run actually archived.
+    #[cfg(test)]
+    crate::test_support::query_count::bump("archive.db.insert");
+    let mut builder = QueryBuilder::<Postgres>::new(
+        "INSERT INTO invoice_archives (
+            invoice_id, tenant_id, invoice_number, pdf_url, batch_id, archived_at
+         ) ",
+    );
+    builder.push_values(
+        &candidates,
+        |mut values, (invoice_id, tenant_id, invoice_number, pdf_url)| {
+            values
+                .push_bind(*invoice_id)
+                .push_bind(tenant_id.clone())
+                .push_bind(invoice_number.clone())
+                .push_bind(pdf_url.clone())
+                .push_bind(batch_id)
+                .push("NOW()");
+        },
+    );
+    builder.push(" ON CONFLICT (invoice_id) DO NOTHING");
+    // Error isolation matches the pre-batch loop: a failing row must not
+    // discard its batch-mates. On a batch failure retry each candidate once;
+    // a permanently failing row is logged (as before) and the rest archive.
+    let archived = match builder.build().execute(&state.db).await {
+        Ok(result) => result.rows_affected(),
+        Err(error) => {
             warn!(
-                invoice_id = %invoice_id,
-                error = %e,
-                "Failed to archive invoice"
+                error = %error,
+                candidates = count,
+                "Invoice archive batch failed; retrying rows individually"
             );
+            let mut archived = 0u64;
+            for (invoice_id, tenant_id, invoice_number, pdf_url) in &candidates {
+                match sqlx::query(
+                    "INSERT INTO invoice_archives (
+                        invoice_id, tenant_id, invoice_number, pdf_url, batch_id, archived_at
+                     ) VALUES ($1, $2, $3, $4, $5, NOW())
+                     ON CONFLICT (invoice_id) DO NOTHING",
+                )
+                .bind(invoice_id)
+                .bind(tenant_id)
+                .bind(invoice_number)
+                .bind(pdf_url)
+                .bind(batch_id)
+                .execute(&state.db)
+                .await
+                {
+                    Ok(result) => archived += result.rows_affected(),
+                    Err(row_error) => error!(
+                        error = %row_error,
+                        invoice_id = %invoice_id,
+                        "Failed to archive invoice"
+                    ),
+                }
+            }
+            archived
         }
-    }
+    };
 
     info!(
         batch_id = %batch_id,
-        count = count,
+        candidates = count,
+        archived,
         "Invoice archival batch completed"
     );
 
-    Ok(count)
+    Ok(i64::try_from(archived).unwrap_or(i64::MAX))
 }
 
 /// Perform month-end closing for the previous month.
@@ -1845,6 +1886,39 @@ async fn clear_dunning_retry(state: &AppState, tenant_id: &str) -> Result<(), St
     .map_err(|error| format!("Failed to clear next_retry_at for {tenant_id}: {error}"))
 }
 
+/// The earliest PENDING invoice per tenant, for a whole retry batch in ONE
+/// query (`DISTINCT ON`, deterministic on `created_at, id`). This replaces
+/// the per-dunning-row invoice SELECT (P3 fix 5). Tenant ids without an open
+/// invoice have no map entry — exactly the old `fetch_optional` → `None`.
+async fn load_open_invoices_for_tenants(
+    db: &PgPool,
+    tenant_ids: &[String],
+) -> Result<HashMap<String, (Uuid, String)>, String> {
+    let mut invoices = HashMap::new();
+    if tenant_ids.is_empty() {
+        return Ok(invoices);
+    }
+    #[cfg(test)]
+    crate::test_support::query_count::bump("dunning.invoice_lookup");
+    let rows: Vec<(String, Uuid, String)> = sqlx::query_as(
+        r#"
+        SELECT DISTINCT ON (tenant_id) tenant_id, id, currency
+        FROM invoices
+        WHERE tenant_id = ANY($1)
+          AND status = 'pending'
+        ORDER BY tenant_id, created_at ASC, id ASC
+        "#,
+    )
+    .bind(tenant_ids)
+    .fetch_all(db)
+    .await
+    .map_err(|error| format!("Failed to load the tenants' open invoices: {error}"))?;
+    for (tenant_id, invoice_id, currency) in rows {
+        invoices.insert(tenant_id, (invoice_id, currency));
+    }
+    Ok(invoices)
+}
+
 async fn process_scheduled_retries(
     state: &AppState,
     client: &Client,
@@ -1883,6 +1957,14 @@ async fn process_scheduled_retries(
     let mut attempted = 0_i64;
     let mut succeeded = 0_i64;
 
+    // P3 fix 5 — resolve every candidate's open local invoice in ONE query
+    // (earliest pending invoice per tenant). The old loop issued one invoice
+    // SELECT per due dunning row, so a 50-row batch cost 50 round trips
+    // before any provider work. The amount is still DERIVED per invoice
+    // below (integer cents via `invoice_outstanding_cents`).
+    let candidate_tenants: Vec<String> = rows.iter().map(|row| row.tenant_id.clone()).collect();
+    let open_invoices = load_open_invoices_for_tenants(&state.db, &candidate_tenants).await?;
+
     for row in rows {
         attempted += 1;
 
@@ -1890,19 +1972,7 @@ async fn process_scheduled_retries(
             // Adyen has no provider-side invoice objects: the retry charges
             // the tenant's OWN open (pending) local invoice against the
             // stored recurring token. No open invoice → nothing to retry.
-            let invoice: Option<(Uuid, String)> = sqlx::query_as(
-                r#"
-                SELECT id, currency
-                FROM invoices
-                WHERE tenant_id = $1 AND status = 'pending'
-                ORDER BY created_at ASC
-                LIMIT 1
-                "#,
-            )
-            .bind(&row.tenant_id)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(|error| format!("Failed to load the tenant's open invoice: {error}"))?;
+            let invoice = open_invoices.get(&row.tenant_id).cloned();
 
             let Some((invoice_id, currency)) = invoice else {
                 clear_dunning_retry(state, &row.tenant_id).await?;
@@ -2386,12 +2456,32 @@ fn next_day_start(now: DateTime<Utc>) -> DateTime<Utc> {
     day_start(now) + chrono::Days::new(1)
 }
 
+/// Rows per multi-row INSERT of SLA credits.
+///
+/// PostgreSQL rejects statements with more than 65,535 bound parameters; the
+/// SLA credit insert binds 9 columns per row, so 5,000 rows <= 45,000 binds.
+/// A breach month can exceed that row count, so the insert must be chunked.
+const SLA_CREDIT_INSERT_CHUNK_ROWS: usize = 5_000;
+
 async fn process_monthly_sla_credits(state: &AppState) -> Result<SlaCreditSweepResult, String> {
+    process_monthly_sla_credits_chunked(state, SLA_CREDIT_INSERT_CHUNK_ROWS).await
+}
+
+/// [`process_monthly_sla_credits`] with an explicit insert chunk size (tests
+/// shrink it to cross the chunk boundary; production uses
+/// [`SLA_CREDIT_INSERT_CHUNK_ROWS`]).
+async fn process_monthly_sla_credits_chunked(
+    state: &AppState,
+    insert_chunk_rows: usize,
+) -> Result<SlaCreditSweepResult, String> {
+    let insert_chunk_rows = insert_chunk_rows.max(1);
     let current_month_start = month_start(Utc::now());
     let period_start = month_start(current_month_start - chrono::Days::new(1));
     let period_month = period_start.date_naive();
     let period_end = current_month_start;
 
+    #[cfg(test)]
+    crate::test_support::query_count::bump("sla.db.candidates");
     let candidates = sqlx::query_as::<_, SlaMetricCandidateRow>(
         r#"
         SELECT sm.tenant_id,
@@ -2419,7 +2509,84 @@ async fn process_monthly_sla_credits(state: &AppState) -> Result<SlaCreditSweepR
     .await
     .map_err(|error| format!("Failed to load SLA metric candidates: {error}"))?;
 
-    let mut credits_created = 0_i64;
+    // P3: the invoice inputs for EVERY candidate are loaded in ONE grouped
+    // query. Before this, each breaching candidate issued its own currency
+    // lookup (latest paid invoice) and amount SUM — two round trips per row.
+    // Only candidates that can actually reach the credit insert need them.
+    let invoice_tenants: Vec<String> = candidates
+        .iter()
+        .filter(|candidate| {
+            feature_flag_enabled(&candidate.features, &["slaGuarantee", "sla_guarantee"])
+                && candidate.uptime_percent < SLA_AVAILABILITY_TARGET
+                && sla_credit_percentage_for_breach(
+                    SLA_AVAILABILITY_TARGET - candidate.uptime_percent,
+                ) > 0
+        })
+        .map(|candidate| candidate.tenant_id.clone())
+        .collect();
+
+    let mut invoice_stats: HashMap<String, (String, i64)> = HashMap::new();
+    if !invoice_tenants.is_empty() {
+        #[cfg(test)]
+        crate::test_support::query_count::bump("sla.db.invoice_aggregate");
+        // Currency = the LATEST paid invoice's currency (the per-row
+        // `ORDER BY created_at DESC LIMIT 1`); amount = the sum of that
+        // currency's paid invoices in the period. `COALESCE(total, amount)` is
+        // the same fallback the per-row SUM used; every value stays BIGINT
+        // cents (integer-cent semantics, no f64).
+        let rows: Vec<(String, String, i64)> = sqlx::query_as(
+            r#"
+            WITH eligible AS (
+                SELECT tenant_id,
+                       UPPER(currency) AS currency,
+                       COALESCE(total, amount)::bigint AS amount_cents,
+                       created_at
+                FROM invoices
+                WHERE status = 'paid'
+                  AND period_start >= $2
+                  AND period_end <= $3
+                  AND tenant_id = ANY($1)
+            ),
+            picked AS (
+                SELECT DISTINCT ON (tenant_id) tenant_id, currency
+                FROM eligible
+                ORDER BY tenant_id, created_at DESC
+            ),
+            totals AS (
+                SELECT tenant_id, currency, SUM(amount_cents)::bigint AS amount_cents
+                FROM eligible
+                GROUP BY tenant_id, currency
+            )
+            SELECT p.tenant_id, p.currency, COALESCE(t.amount_cents, 0)::bigint
+            FROM picked p
+            LEFT JOIN totals t
+              ON t.tenant_id = p.tenant_id
+             AND t.currency = p.currency
+            "#,
+        )
+        .bind(&invoice_tenants)
+        .bind(period_start)
+        .bind(period_end)
+        .fetch_all(&state.db)
+        .await
+        .map_err(|error| format!("Failed to load SLA invoice aggregates: {error}"))?;
+        invoice_stats.extend(
+            rows.into_iter()
+                .map(|(tenant_id, currency, amount_cents)| (tenant_id, (currency, amount_cents))),
+        );
+    }
+
+    // Compute every credit in memory (integer cents only), then persist the
+    // whole pass in ONE transaction.
+    struct PendingSlaCredit {
+        tenant_id: String,
+        breach_percent: f64,
+        credit_percent: i32,
+        credit_amount: i64,
+        currency: String,
+    }
+    let mut pending: Vec<PendingSlaCredit> = Vec::new();
+
     for candidate in &candidates {
         if !feature_flag_enabled(&candidate.features, &["slaGuarantee", "sla_guarantee"]) {
             continue;
@@ -2438,55 +2605,11 @@ async fn process_monthly_sla_credits(state: &AppState) -> Result<SlaCreditSweepR
         // Fix I6 — SLA credits are cash-equivalent: base them only on
         // invoices that were actually paid, and credit in the invoice's own
         // currency (mixed-currency totals must never be summed together).
-        let invoice_currency: String = sqlx::query_scalar(
-            r#"
-            SELECT UPPER(currency)
-            FROM invoices
-            WHERE tenant_id = $1
-              AND status = 'paid'
-              AND period_start >= $2
-              AND period_end <= $3
-            ORDER BY created_at DESC
-            LIMIT 1
-            "#,
-        )
-        .bind(&candidate.tenant_id)
-        .bind(period_start)
-        .bind(period_end)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(|error| {
-            format!(
-                "Failed to load invoice currency for SLA credits {}: {error}",
-                candidate.tenant_id
-            )
-        })?
-        .flatten()
-        .unwrap_or_else(|| "EUR".into());
-
-        let invoice_amount_cents: i64 = sqlx::query_scalar(
-            r#"
-            SELECT COALESCE(SUM(COALESCE(total, amount)), 0)::bigint
-            FROM invoices
-            WHERE tenant_id = $1
-              AND status = 'paid'
-              AND period_start >= $2
-              AND period_end <= $3
-              AND UPPER(currency) = $4
-            "#,
-        )
-        .bind(&candidate.tenant_id)
-        .bind(period_start)
-        .bind(period_end)
-        .bind(&invoice_currency)
-        .fetch_one(&state.db)
-        .await
-        .map_err(|error| {
-            format!(
-                "Failed to load invoice total for SLA credits {}: {error}",
-                candidate.tenant_id
-            )
-        })?;
+        // Defaults: no paid invoice → EUR, zero cents → no credit.
+        let (invoice_currency, invoice_amount_cents) = invoice_stats
+            .get(&candidate.tenant_id)
+            .cloned()
+            .unwrap_or_else(|| ("EUR".into(), 0));
 
         // Money invariant: integer cents, half-up rounding — no f64 in the
         // computation path (the previous `(cents as f64) * pct/100` drifted
@@ -2518,99 +2641,111 @@ async fn process_monthly_sla_credits(state: &AppState) -> Result<SlaCreditSweepR
         } else {
             credit_amount
         };
-
-        // Fix F5 — the previous NOT-EXISTS check-then-insert could
-        // double-run across replicas/restarts: two sweeps both saw no
-        // credit and both inserted (sla_credits has no unique constraint on
-        // (tenant_id, period_month)). Serialize with a pg advisory
-        // TRANSACTION lock keyed on (tenant, period) and re-check existence
-        // INSIDE the lock — no schema change needed.
-        let mut tx = state.db.begin().await.map_err(|error| {
-            format!(
-                "Failed to begin SLA credit transaction for {}: {error}",
-                candidate.tenant_id
-            )
-        })?;
-
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-            .bind(format!(
-                "sla_credit:{}:{}-{:02}",
-                candidate.tenant_id,
-                period_month.year(),
-                period_month.month()
-            ))
-            .execute(&mut *tx)
-            .await
-            .map_err(|error| {
-                format!(
-                    "Failed to acquire SLA credit lock for {}: {error}",
-                    candidate.tenant_id
-                )
-            })?;
-
-        // `SELECT 1` is INT4 and cannot decode into Option<i64>: the
-        // idempotency re-check failed on every SECOND sweep, aborting the
-        // whole SLA pass. Project an explicit bigint.
-        let already_credited: Option<i64> = sqlx::query_scalar(
-            "SELECT 1::bigint FROM sla_credits WHERE tenant_id = $1 AND period_month = $2 LIMIT 1",
-        )
-        .bind(&candidate.tenant_id)
-        .bind(period_month)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|error| {
-            format!(
-                "Failed to re-check existing SLA credit for {}: {error}",
-                candidate.tenant_id
-            )
-        })?;
-
-        let created = if already_credited.is_some() {
-            false
-        } else {
-            sqlx::query(
-                r#"
-                INSERT INTO sla_credits (
-                    id,
-                    tenant_id,
-                    period_month,
-                    breach_percent,
-                    credit_percent,
-                    credit_amount,
-                    currency,
-                    status,
-                    created_at
-                )
-                VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, 'pending', NOW())
-                "#,
-            )
-            .bind(&candidate.tenant_id)
-            .bind(period_month)
-            .bind(breach_percent)
-            .bind(credit_percent)
-            .bind(credit_amount)
-            .bind(&invoice_currency)
-            .execute(&mut *tx)
-            .await
-            .map_err(|error| {
-                format!(
-                    "Failed to insert SLA credit for {}: {error}",
-                    candidate.tenant_id
-                )
-            })?;
-            true
-        };
-
-        tx.commit().await.map_err(|error| {
-            format!(
-                "Failed to commit SLA credit transaction for {}: {error}",
-                candidate.tenant_id
-            )
-        })?;
-
-        if created {
-            credits_created += 1;
+        if credit_amount <= 0 {
+            continue;
         }
+
+        pending.push(PendingSlaCredit {
+            tenant_id: candidate.tenant_id.clone(),
+            breach_percent,
+            credit_percent,
+            credit_amount,
+            currency: invoice_currency,
+        });
+    }
+
+    let mut credits_created = 0_i64;
+    if !pending.is_empty() {
+        // Fix F5 — the old NOT-EXISTS check-then-insert could double-run
+        // across replicas/restarts (sla_credits has no unique constraint on
+        // (tenant_id, period_month)). The batch takes the SAME per-(tenant,
+        // period) advisory locks, in ONE statement and sorted order (no
+        // deadlock between two sweeping replicas), then checks existence and
+        // inserts under those locks in ONE transaction.
+        let mut tx = state
+            .db
+            .begin()
+            .await
+            .map_err(|error| format!("Failed to begin SLA credit batch: {error}"))?;
+
+        let mut lock_keys: Vec<String> = pending
+            .iter()
+            .map(|credit| {
+                format!(
+                    "sla_credit:{}:{}-{:02}",
+                    credit.tenant_id,
+                    period_month.year(),
+                    period_month.month()
+                )
+            })
+            .collect();
+        lock_keys.sort();
+        lock_keys.dedup();
+        #[cfg(test)]
+        crate::test_support::query_count::bump("sla.db.lock_batch");
+        sqlx::query(
+            "SELECT pg_advisory_xact_lock(hashtextextended(lock_key, 0))
+               FROM (SELECT unnest($1::text[]) AS lock_key ORDER BY 1) AS locks",
+        )
+        .bind(&lock_keys)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("Failed to acquire SLA credit locks: {error}"))?;
+
+        let tenant_ids: Vec<String> = pending
+            .iter()
+            .map(|credit| credit.tenant_id.clone())
+            .collect();
+        #[cfg(test)]
+        crate::test_support::query_count::bump("sla.db.existing_batch");
+        let already: Vec<String> = sqlx::query_scalar(
+            "SELECT tenant_id FROM sla_credits WHERE period_month = $1 AND tenant_id = ANY($2)",
+        )
+        .bind(period_month)
+        .bind(&tenant_ids)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|error| format!("Failed to re-check existing SLA credits: {error}"))?;
+        let already: HashSet<String> = already.into_iter().collect();
+
+        let to_insert: Vec<&PendingSlaCredit> = pending
+            .iter()
+            .filter(|credit| !already.contains(&credit.tenant_id))
+            .collect();
+
+        if !to_insert.is_empty() {
+            for chunk in to_insert.chunks(insert_chunk_rows) {
+                #[cfg(test)]
+                crate::test_support::query_count::bump("sla.db.insert_batch");
+                let mut builder = QueryBuilder::<Postgres>::new(
+                    "INSERT INTO sla_credits (
+                        id, tenant_id, period_month, breach_percent, credit_percent,
+                        credit_amount, currency, status, created_at
+                     ) ",
+                );
+                builder.push_values(chunk, |mut row, credit| {
+                    row.push_bind(Uuid::new_v4())
+                        .push_bind(credit.tenant_id.clone())
+                        .push_bind(period_month)
+                        .push_bind(credit.breach_percent)
+                        .push_bind(credit.credit_percent)
+                        .push_bind(credit.credit_amount)
+                        .push_bind(credit.currency.clone())
+                        .push_bind("pending")
+                        .push("NOW()");
+                });
+                let inserted = builder
+                    .build()
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|error| format!("Failed to insert SLA credits: {error}"))?;
+                credits_created += i64::try_from(inserted.rows_affected()).unwrap_or(i64::MAX);
+            }
+        }
+
+        tx.commit()
+            .await
+            .map_err(|error| format!("Failed to commit SLA credit batch: {error}"))?;
     }
 
     Ok(SlaCreditSweepResult {
@@ -4857,6 +4992,105 @@ mod coverage_adversarial {
         );
     });
 
+    // P3 item 7 — invoice archival was one INSERT per candidate (up to 500 a
+    // day). The whole batch is now ONE multi-row INSERT; the counter proves
+    // three invoices cost one statement, not three.
+    env_test!(archive_paid_invoices_is_one_statement_per_batch, |env| {
+        use crate::test_support::query_count;
+
+        let tenant = "mtcov_archive_batch";
+        seed_tenant(env, tenant, "free", "active").await;
+        let old = Utc::now() - chrono::Duration::days(120);
+        for _ in 0..3 {
+            seed_invoice_row(
+                env,
+                Uuid::new_v4(),
+                tenant,
+                "paid",
+                old,
+                Some(old),
+                Some("https://pdf/batch"),
+            )
+            .await;
+        }
+
+        query_count::reset();
+        let archived = archive_paid_invoices(&env.state).await.expect("archive");
+        assert_eq!(archived, 3);
+        assert_eq!(
+            query_count::count("archive.db.insert"),
+            1,
+            "one multi-row INSERT for the whole batch"
+        );
+
+        query_count::reset();
+        assert_eq!(
+            archive_paid_invoices(&env.state)
+                .await
+                .expect("archive replay"),
+            0
+        );
+        assert_eq!(
+            query_count::count("archive.db.insert"),
+            0,
+            "nothing left to archive issues no INSERT"
+        );
+    });
+
+    // Regression guard for the batch-error path: one poisoned archive row
+    // must not discard its batch-mates. The batch INSERT aborts on the
+    // trigger, the per-row fallback archives the two healthy invoices and
+    // logs the failing one — the pre-fallback code returned Err and archived
+    // ZERO.
+    env_test!(archive_paid_invoices_isolates_a_poisoned_row, |env| {
+        let tenant = "mtcov_archive_poison";
+        seed_tenant(env, tenant, "free", "active").await;
+        let old = Utc::now() - chrono::Duration::days(120);
+        let ids: Vec<Uuid> = (0..3).map(|_| Uuid::new_v4()).collect();
+        for id in &ids {
+            seed_invoice_row(
+                env,
+                *id,
+                tenant,
+                "paid",
+                old,
+                Some(old),
+                Some("https://pdf/poison"),
+            )
+            .await;
+        }
+        // The seeded invoice_number is `MTCOV-<uuid simple>` (identifier-safe:
+        // ASCII hex + dash only, so embedding it in DDL cannot inject).
+        let poison_number = format!("MTCOV-{}", ids[1].simple());
+        sqlx::query(&format!(
+            "CREATE FUNCTION test_poison_invoice_archive() RETURNS trigger AS $$ \
+             BEGIN \
+                 IF NEW.invoice_number = '{poison_number}' THEN \
+                     RAISE EXCEPTION 'poisoned invoice archive row'; \
+                 END IF; \
+                 RETURN NEW; \
+             END $$ LANGUAGE plpgsql"
+        ))
+        .execute(&env.pool)
+        .await
+        .expect("trigger function");
+        sqlx::query(
+            "CREATE TRIGGER test_poison_invoice_archive BEFORE INSERT ON invoice_archives \
+             FOR EACH ROW EXECUTE FUNCTION test_poison_invoice_archive()",
+        )
+        .execute(&env.pool)
+        .await
+        .expect("trigger");
+
+        let archived = archive_paid_invoices(&env.state).await.expect("archive");
+        assert_eq!(archived, 2, "the two healthy invoices are archived");
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM invoice_archives")
+            .fetch_one(&env.pool)
+            .await
+            .expect("archive count");
+        assert_eq!(rows, 2);
+    });
+
     // ---------------- month-end closing ----------------
 
     env_test!(
@@ -5350,6 +5584,247 @@ mod coverage_adversarial {
             assert_eq!(credit_percent, 50.0);
             assert_eq!(currency, "EUR");
             assert_eq!(status, "pending");
+        }
+    );
+
+    // P3 fix 1 — the SLA sweep must not scale its DB round trips with the
+    // number of breaching candidates. Before the fix each candidate cost two
+    // invoice reads plus its own advisory lock + existence check + insert
+    // (≈5 statements/row). The batched pass loads every candidate's invoice
+    // aggregate in ONE query and persists all credits in ONE locked
+    // transaction. The test compares the statement counters of a 1-candidate
+    // pass with a 3-candidate pass: they must be identical, and the insert
+    // must be one statement. (Thread-local counters: isolated from the other
+    // tests running in this binary.)
+    env_test!(
+        sla_sweep_statement_count_is_constant_in_candidate_count,
+        |env| {
+            use crate::test_support::query_count;
+
+            let now = Utc::now();
+            let this_month = now
+                .date_naive()
+                .with_day(1)
+                .expect("first")
+                .and_hms_opt(0, 0, 0)
+                .expect("midnight")
+                .and_utc();
+            let last_month = this_month - chrono::Months::new(1);
+            let period_date = last_month.date_naive();
+            seed_plan(
+                env,
+                "slabatch",
+                100_000,
+                json!({"slaGuarantee": true, "slaCreditPercentage": 100}),
+            )
+            .await;
+
+            async fn seed_candidate(
+                env: &Env,
+                tenant: &str,
+                total_cents: i64,
+                last_month: DateTime<Utc>,
+                period_date: chrono::NaiveDate,
+            ) {
+                seed_tenant(env, tenant, "slabatch", "active").await;
+                sqlx::query(
+                    "INSERT INTO sla_metrics (tenant_id, period_month, uptime_percent)
+                 VALUES ($1, $2, 98.5000)",
+                )
+                .bind(tenant)
+                .bind(period_date)
+                .execute(&env.pool)
+                .await
+                .expect("sla metric");
+                let invoice = Uuid::new_v4();
+                seed_invoice_row(
+                    env,
+                    invoice,
+                    tenant,
+                    "paid",
+                    last_month + chrono::Duration::days(5),
+                    Some(last_month + chrono::Duration::days(6)),
+                    None,
+                )
+                .await;
+                sqlx::query(
+                    "UPDATE invoices SET total = $2, subtotal = $2, amount = $2 WHERE id = $1",
+                )
+                .bind(invoice)
+                .bind(total_cents)
+                .execute(&env.pool)
+                .await
+                .expect("invoice total");
+            }
+
+            seed_candidate(env, "mtcov_slabatch_a", 10_000, last_month, period_date).await;
+            query_count::reset();
+            let one = process_monthly_sla_credits(&env.state)
+                .await
+                .expect("one-candidate sweep");
+            assert_eq!(one.credits_created, 1, "{one:?}");
+            let one_counts = (
+                query_count::count("sla.db.candidates"),
+                query_count::count("sla.db.invoice_aggregate"),
+                query_count::count("sla.db.lock_batch"),
+                query_count::count("sla.db.existing_batch"),
+                query_count::count("sla.db.insert_batch"),
+            );
+            assert_eq!(one_counts, (1, 1, 1, 1, 1), "one row = five statements");
+
+            // Two more candidates: the SAME five statements, not fifteen.
+            seed_candidate(env, "mtcov_slabatch_b", 20_000, last_month, period_date).await;
+            seed_candidate(env, "mtcov_slabatch_c", 30_000, last_month, period_date).await;
+            query_count::reset();
+            let three = process_monthly_sla_credits(&env.state)
+                .await
+                .expect("three-candidate sweep");
+            assert_eq!(
+                three.credits_created, 2,
+                "the first row is already credited"
+            );
+            let three_counts = (
+                query_count::count("sla.db.candidates"),
+                query_count::count("sla.db.invoice_aggregate"),
+                query_count::count("sla.db.lock_batch"),
+                query_count::count("sla.db.existing_batch"),
+                query_count::count("sla.db.insert_batch"),
+            );
+            assert_eq!(
+                three_counts, one_counts,
+                "statement count must be constant in the candidate count"
+            );
+
+            // Integer cents and per-invoice currency survive the batching:
+            // 1.5% breach → 50% credit, no cap.
+            let rows: Vec<(String, i32, String)> = sqlx::query_as(
+                "SELECT tenant_id, credit_amount, currency FROM sla_credits
+              WHERE tenant_id LIKE 'mtcov_slabatch_%' ORDER BY tenant_id",
+            )
+            .fetch_all(&env.pool)
+            .await
+            .expect("sla credits");
+            assert_eq!(
+                rows,
+                vec![
+                    ("mtcov_slabatch_a".to_string(), 5_000, "EUR".to_string()),
+                    ("mtcov_slabatch_b".to_string(), 10_000, "EUR".to_string()),
+                    ("mtcov_slabatch_c".to_string(), 15_000, "EUR".to_string()),
+                ],
+                "half-up integer cents: 50% of the paid invoice total"
+            );
+
+            // Replay: nothing new, same read/lock/check shape.
+            query_count::reset();
+            let replay = process_monthly_sla_credits(&env.state)
+                .await
+                .expect("replay");
+            assert_eq!(replay.credits_created, 0);
+            assert_eq!(query_count::count("sla.db.candidates"), 1);
+            assert_eq!(query_count::count("sla.db.invoice_aggregate"), 1);
+            assert_eq!(query_count::count("sla.db.lock_batch"), 1);
+            assert_eq!(query_count::count("sla.db.existing_batch"), 1);
+            assert_eq!(
+                query_count::count("sla.db.insert_batch"),
+                0,
+                "an idempotent replay issues no insert"
+            );
+        }
+    );
+
+    // F-audit P2 (PostgreSQL 65,535-parameter ceiling): the SLA credit INSERT
+    // must chunk an oversized candidate set. The chunk size is shrunk here
+    // (production uses the pinned 5,000-row constant) so a 5-candidate sweep
+    // crosses the boundary: 5 rows / 2 per statement = 3 INSERTs, with every
+    // credit persisted and the replay still idempotent.
+    //
+    // Fail-before: the unbounded single `push_values` issues exactly ONE
+    // insert statement for all 5 candidates.
+    env_test!(
+        sla_credit_insert_chunks_above_the_parameter_boundary,
+        |env| {
+            use crate::test_support::query_count;
+
+            let now = Utc::now();
+            let this_month = now
+                .date_naive()
+                .with_day(1)
+                .expect("first")
+                .and_hms_opt(0, 0, 0)
+                .expect("midnight")
+                .and_utc();
+            let last_month = this_month - chrono::Months::new(1);
+            let period_date = last_month.date_naive();
+            seed_plan(
+                env,
+                "slachunk",
+                100_000,
+                json!({"slaGuarantee": true, "slaCreditPercentage": 100}),
+            )
+            .await;
+
+            for index in 0..5 {
+                let tenant = format!("mtcov_slachunk_{index}");
+                seed_tenant(env, &tenant, "slachunk", "active").await;
+                sqlx::query(
+                    "INSERT INTO sla_metrics (tenant_id, period_month, uptime_percent)
+                     VALUES ($1, $2, 98.5000)",
+                )
+                .bind(&tenant)
+                .bind(period_date)
+                .execute(&env.pool)
+                .await
+                .expect("sla metric");
+                let invoice = Uuid::new_v4();
+                seed_invoice_row(
+                    env,
+                    invoice,
+                    &tenant,
+                    "paid",
+                    last_month + chrono::Duration::days(5),
+                    Some(last_month + chrono::Duration::days(6)),
+                    None,
+                )
+                .await;
+                sqlx::query(
+                    "UPDATE invoices SET total = 10000, subtotal = 10000, amount = 10000 WHERE id = $1",
+                )
+                .bind(invoice)
+                .execute(&env.pool)
+                .await
+                .expect("invoice total");
+            }
+
+            query_count::reset();
+            let sweep = process_monthly_sla_credits_chunked(&env.state, 2)
+                .await
+                .expect("chunked sla sweep");
+            assert_eq!(sweep.credits_created, 5, "all five credits created");
+            assert_eq!(
+                query_count::count("sla.db.insert_batch"),
+                3,
+                "5 rows at 2 per chunk = 3 SLA credit INSERTs"
+            );
+
+            let persisted: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM sla_credits WHERE tenant_id LIKE 'mtcov_slachunk_%'",
+            )
+            .fetch_one(&env.pool)
+            .await
+            .expect("sla credit count");
+            assert_eq!(persisted, 5, "every credit persists across chunks");
+
+            // The chunked replay still creates nothing new.
+            let replay = process_monthly_sla_credits_chunked(&env.state, 2)
+                .await
+                .expect("chunked replay");
+            assert_eq!(replay.credits_created, 0);
+
+            // The production chunk size stays inside the bind ceiling (9
+            // binds per SLA credit row).
+            const {
+                assert!(SLA_CREDIT_INSERT_CHUNK_ROWS * 9 <= 65_535);
+            }
         }
     );
 
@@ -6693,8 +7168,62 @@ mod coverage_adversarial {
         }
     );
 
-    // ---------------- dedicated IP edge paths ----------------
+    // P3 fix 5 — one batched open-invoice lookup for the whole dunning
+    // batch, not one SELECT per due dunning row. Three candidates with no
+    // open invoice must cost exactly ONE lookup query (the pre-fix loop
+    // issued three) and must still clear every retry.
+    env_test!(
+        scheduled_retries_lookup_open_invoices_once_per_batch,
+        |env| {
+            use crate::test_support::query_count;
 
+            let guard = ENV_LOCK.lock().await;
+            let previous = std::env::var("AUTO_PAY_OPEN_INVOICES").ok();
+            std::env::set_var("AUTO_PAY_OPEN_INVOICES", "1");
+
+            let tenants = [
+                "mtcov_retry_batch_a",
+                "mtcov_retry_batch_b",
+                "mtcov_retry_batch_c",
+            ];
+            for tenant in tenants {
+                seed_retry_candidate(env, tenant, "warning", "past_due").await;
+            }
+
+            query_count::reset();
+            let result = process_scheduled_retries(&env.state, &Client::new())
+                .await
+                .expect("retry batch");
+            assert_eq!(result.attempted, 3);
+            assert_eq!(result.succeeded, 3);
+            assert_eq!(
+                query_count::count("dunning.invoice_lookup"),
+                1,
+                "one DISTINCT ON lookup must serve every due dunning row"
+            );
+
+            let still_due: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM dunning_records
+              WHERE tenant_id = ANY($1) AND next_retry_at IS NOT NULL",
+            )
+            .bind(&tenants[..])
+            .fetch_one(&env.pool)
+            .await
+            .expect("dunning state");
+            assert_eq!(
+                still_due, 0,
+                "no open invoice: every candidate's retry is cleared"
+            );
+
+            match previous {
+                Some(auto) => std::env::set_var("AUTO_PAY_OPEN_INVOICES", auto),
+                None => std::env::remove_var("AUTO_PAY_OPEN_INVOICES"),
+            }
+            drop(guard);
+        }
+    );
+
+    // ---------------- dedicated IP edge paths ----------------
     async fn seed_dedicated_ip(
         env: &Env,
         ip_id: &str,

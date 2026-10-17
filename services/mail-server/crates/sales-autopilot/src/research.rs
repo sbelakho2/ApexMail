@@ -331,26 +331,42 @@ pub async fn research_account_with_report(
         .begin()
         .await
         .map_err(|error| SalesError::Database(error.to_string()))?;
-    let mut evidence_ids = Vec::with_capacity(pending.len());
-    for claim in &pending {
-        let id: Uuid = sqlx::query_scalar(
-            "INSERT INTO sales_evidence \
-                 (id, tenant_id, account_id, contact_id, proposition, confidence, source_kind, \
-                  source_ref, source_hash, observed_at, expires_at, created_at) \
-             VALUES (gen_random_uuid(), $1, $2, NULL, $3, $4, $5, $6, NULL, NOW(), NULL, NOW()) \
-             RETURNING id",
-        )
-        .bind(tenant_id)
-        .bind(account_id)
-        .bind(&claim.proposition)
-        .bind(claim.confidence)
-        .bind(claim.source_kind.as_str())
-        .bind(claim.source_ref.as_deref())
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(|error| SalesError::Database(error.to_string()))?;
-        evidence_ids.push(id);
-    }
+    // ONE row-producing statement for every accepted finding. Ids are
+    // generated client-side so the returned order is exactly the input order
+    // (a multi-row RETURNING has no guaranteed order).
+    let evidence_ids: Vec<Uuid> = pending.iter().map(|_| Uuid::new_v4()).collect();
+    let propositions: Vec<&str> = pending
+        .iter()
+        .map(|claim| claim.proposition.as_str())
+        .collect();
+    let confidences: Vec<f64> = pending.iter().map(|claim| claim.confidence).collect();
+    let source_kinds: Vec<&str> = pending
+        .iter()
+        .map(|claim| claim.source_kind.as_str())
+        .collect();
+    let source_refs: Vec<Option<&str>> = pending
+        .iter()
+        .map(|claim| claim.source_ref.as_deref())
+        .collect();
+    sqlx::query(
+        "INSERT INTO sales_evidence \
+             (id, tenant_id, account_id, contact_id, proposition, confidence, source_kind, \
+              source_ref, source_hash, observed_at, expires_at) \
+         SELECT id, $2, $3, NULL, proposition, confidence, source_kind, source_ref, NULL, \
+                NOW(), NULL \
+         FROM unnest($1::uuid[], $4::text[], $5::float8[], $6::text[], $7::text[]) \
+              AS batch(id, proposition, confidence, source_kind, source_ref)",
+    )
+    .bind(&evidence_ids)
+    .bind(tenant_id)
+    .bind(account_id)
+    .bind(&propositions)
+    .bind(&confidences)
+    .bind(&source_kinds)
+    .bind(&source_refs)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| SalesError::Database(error.to_string()))?;
     tx.commit()
         .await
         .map_err(|error| SalesError::Database(error.to_string()))?;
@@ -457,5 +473,133 @@ mod tests {
         let validation = crate::intelligence::validate_claims(&findings.claims, &[]);
         assert!(validation.accepted.is_empty());
         assert!(findings.fallback.is_some());
+    }
+
+    /// A scripted provider returning `claims` hypothesis findings.
+    #[derive(Debug)]
+    struct HypothesisIntelligence {
+        claims: usize,
+    }
+
+    #[async_trait::async_trait]
+    impl SalesIntelligence for HypothesisIntelligence {
+        async fn research_account(
+            &self,
+            _req: &ResearchRequest<'_>,
+        ) -> Result<ResearchFindings, IntelligenceError> {
+            Ok(ResearchFindings {
+                claims: (0..self.claims)
+                    .map(|index| crate::intelligence::ResearchClaim {
+                        proposition: format!("hypothesis {index}: the account is hiring"),
+                        confidence: 0.6,
+                        source_kind: Some("provider_api".into()),
+                        source_ref: Some("batch-test".into()),
+                        evidence_id: None,
+                        is_hypothesis: true,
+                    })
+                    .collect(),
+                model_version: Some("scripted".into()),
+                fallback: None,
+            })
+        }
+
+        async fn select_angle(
+            &self,
+            _req: &crate::intelligence::AngleRequest<'_>,
+        ) -> Result<crate::intelligence::AngleSelection, IntelligenceError> {
+            Err(IntelligenceError::Unavailable("not used".into()))
+        }
+
+        async fn draft_message(
+            &self,
+            _req: &crate::intelligence::DraftRequest<'_>,
+        ) -> Result<crate::intelligence::DraftedMessage, IntelligenceError> {
+            Err(IntelligenceError::Unavailable("not used".into()))
+        }
+
+        async fn classify_reply(
+            &self,
+            _req: &crate::intelligence::ReplyRequest<'_>,
+        ) -> Result<crate::intelligence::ReplyClassification, IntelligenceError> {
+            Err(IntelligenceError::Unavailable("not used".into()))
+        }
+
+        async fn determine_next_action(
+            &self,
+            _req: &crate::intelligence::NextActionRequest<'_>,
+        ) -> Result<crate::types::DecisionAction, IntelligenceError> {
+            Err(IntelligenceError::Unavailable("not used".into()))
+        }
+    }
+
+    /// Accepted findings are written by ONE INSERT (pre-fix: one per claim),
+    /// and the returned ids still match the claims in order.
+    #[tokio::test]
+    async fn accepted_findings_are_persisted_in_one_statement() {
+        let Some(pool) =
+            crate::test_db::canonical_test_pool("research::tests::evidence_batch").await
+        else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("research-batch");
+        let account_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO sales_accounts (id, tenant_id, company, domain, lifecycle, created_at, updated_at) \
+             VALUES ($1, $2, 'Research Fixture', $3, 'discovered', NOW(), NOW())",
+        )
+        .bind(account_id)
+        .bind(&tenant)
+        .bind(format!("{account_id}.example"))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        crate::test_probe::install_insert_probe(&pool, "sales_evidence", "tenant_id").await;
+        crate::test_probe::reset_probe(&pool, "sales_evidence", &tenant).await;
+
+        let intelligence = HypothesisIntelligence { claims: 8 };
+        let run = research_account_with_report(&pool, &tenant, account_id, &intelligence)
+            .await
+            .unwrap();
+        assert_eq!(run.accepted, 8);
+        assert_eq!(run.evidence_ids.len(), 8);
+        assert_eq!(
+            crate::test_probe::probe_count(&pool, "sales_evidence", &tenant).await,
+            1,
+            "all accepted findings must be ONE INSERT (pre-fix: one per claim)"
+        );
+
+        let rows: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sales_evidence WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(rows, 8);
+
+        // The ids are exactly the persisted rows (order is input order).
+        let persisted: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM sales_evidence WHERE tenant_id = $1 ORDER BY proposition",
+        )
+        .bind(&tenant)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let mut persisted = persisted;
+        persisted.sort();
+        let mut expected = run.evidence_ids.clone();
+        expected.sort();
+        assert_eq!(persisted, expected);
+
+        sqlx::query("DELETE FROM sales_evidence WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM sales_accounts WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 }

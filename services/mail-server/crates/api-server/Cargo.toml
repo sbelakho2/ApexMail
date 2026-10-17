@@ -107,6 +107,11 @@ live-db = []
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
+# The Argon2 fallback cap test seeds 40 decoy `$argon2id$` hashes; generating
+# them at the library's production cost would make the test itself a CPU
+# benchmark (~40 s). Cheap-but-valid Argon2id params keep the format/version
+# detection and the verification loop real.
+argon2 = { workspace = true }
 # DB-backed tests bootstrap through the REAL production migrator (audit F01):
 # the same embedded canonical migration set the deploy gate applies.
 migrator = { path = "../migrator" }

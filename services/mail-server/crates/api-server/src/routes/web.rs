@@ -10481,7 +10481,9 @@ async fn form_admin_tenant_plan(
         .execute(&mut *tx)
         .await?;
 
-        sqlx::query("UPDATE tenants SET plan = $1, updated_at = NOW() WHERE id::text = $2")
+        // tenants.id is VARCHAR(26): bind natively so the primary key index is
+        // usable (the `id::text = $2` cast forced a scan on every plan change).
+        sqlx::query("UPDATE tenants SET plan = $1, updated_at = NOW() WHERE id = $2")
             .bind(&plan_id)
             .bind(&id)
             .execute(&mut *tx)
@@ -10684,6 +10686,58 @@ fn sales_engine_base_url_for(config: &Config) -> Option<String> {
     (!base.is_empty()).then(|| base.trim_end_matches('/').to_string())
 }
 
+/// Per-source timeout for one console discovery run.
+///
+/// The handler used to POST every comma-separated entry SEQUENTIALLY with a
+/// 30 s per-request timeout, so a pasted list of N sources could hold the
+/// request for 30 s × N (a one-request denial of service against the console
+/// worker). There is NO source-count cap: the fan-out below runs
+/// [`SALES_DISCOVERY_CONCURRENCY`] calls at a time and every call is bounded
+/// by this per-source timeout AND by the run's wall-clock budget
+/// (`SALES_DISCOVERY_RUN_BUDGET_SECS`, default 120 s). Sources that cannot
+/// start or finish inside the budget are reported as failed, so a large list
+/// degrades gracefully instead of being rejected.
+const SALES_DISCOVERY_PER_SOURCE_TIMEOUT_SECS: u64 = 30;
+
+/// Sources enriched concurrently. Bounded so one console request cannot open
+/// dozens of sockets to the sales engine.
+const SALES_DISCOVERY_CONCURRENCY: usize = 4;
+
+/// Enrich ONE source through the sales engine; `Err` carries the per-source
+/// failure detail the console flashes.
+async fn enrich_sales_source(
+    client: &reqwest::Client,
+    base: &str,
+    token: Option<&str>,
+    source: &str,
+) -> Result<(), String> {
+    let payload = serde_json::json!({ "domain": source, "tenant_id": "system" });
+    let request = client
+        .post(format!("{base}/enrich"))
+        .header("x-tenant-id", "system")
+        .json(&payload)
+        .timeout(std::time::Duration::from_secs(30));
+    let request = if let Some(token) = token {
+        request.header("x-api-key", token)
+    } else {
+        request
+    };
+    match request.send().await {
+        Ok(response) if response.status().is_success() => Ok(()),
+        Ok(response) => {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            let detail = body.trim().trim_matches('"');
+            Err(if detail.is_empty() {
+                format!("{source}: engine returned {status}")
+            } else {
+                format!("{source}: {detail}")
+            })
+        }
+        Err(error) => Err(format!("{source}: {error}")),
+    }
+}
+
 /// POST /web/admin/sales/discovery/run — triggers the sales engine's
 /// enrich path (POST {base}/enrich) for each selected source domain,
 /// surfacing the engine's errors verbatim in an error flash.
@@ -10717,34 +10771,61 @@ async fn form_sales_discovery_run(
         );
     };
     let _ = user;
+
+    // Bounded-concurrency fan-out with a WALL-CLOCK BUDGET: at most
+    // SALES_DISCOVERY_CONCURRENCY calls in flight, each bounded by the
+    // per-source timeout and by the run's remaining budget
+    // (`SALES_DISCOVERY_RUN_BUDGET_SECS`, default 120 s). A source that cannot
+    // start or finish inside the budget is reported as failed. There is no
+    // source-count cap — a large pasted list degrades to "some failed"
+    // instead of a rejection, and one request can never hold a worker for
+    // 30 s × N. `buffered` yields results in SOURCE ORDER, keeping the
+    // per-source failure report stable.
+    use futures::StreamExt;
+    let client = state.http_client.clone();
+    let token = state.config.internal_service_token.clone();
+    let budget =
+        std::time::Duration::from_secs(state.config.sales_discovery_run_budget_secs.max(1));
+    let deadline = tokio::time::Instant::now() + budget;
+    let results: Vec<Result<(), String>> =
+        futures::stream::iter(sources.iter().cloned().map(|source| {
+            let client = client.clone();
+            let base = base.clone();
+            let token = token.clone();
+            async move {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    return Err(format!(
+                        "{source}: discovery run budget exhausted before this source started"
+                    ));
+                }
+                let per_source = remaining.min(std::time::Duration::from_secs(
+                    SALES_DISCOVERY_PER_SOURCE_TIMEOUT_SECS,
+                ));
+                match tokio::time::timeout(
+                    per_source,
+                    enrich_sales_source(&client, &base, token.as_deref(), &source),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => Err(format!(
+                        "{source}: timed out after {}s",
+                        per_source.as_secs()
+                    )),
+                }
+            }
+        }))
+        .buffered(SALES_DISCOVERY_CONCURRENCY)
+        .collect()
+        .await;
+
     let mut enriched = 0usize;
     let mut failed: Vec<String> = Vec::new();
-    for source in &sources {
-        let payload = serde_json::json!({ "domain": source, "tenant_id": "system" });
-        let request = state
-            .http_client
-            .post(format!("{base}/enrich"))
-            .header("x-tenant-id", "system")
-            .json(&payload)
-            .timeout(std::time::Duration::from_secs(30));
-        let request = if let Some(token) = state.config.internal_service_token.as_deref() {
-            request.header("x-api-key", token)
-        } else {
-            request
-        };
-        match request.send().await {
-            Ok(response) if response.status().is_success() => enriched += 1,
-            Ok(response) => {
-                let status = response.status();
-                let body = response.text().await.unwrap_or_default();
-                let detail = body.trim().trim_matches('"');
-                failed.push(if detail.is_empty() {
-                    format!("{source}: engine returned {status}")
-                } else {
-                    format!("{source}: {detail}")
-                });
-            }
-            Err(error) => failed.push(format!("{source}: {error}")),
+    for outcome in results {
+        match outcome {
+            Ok(()) => enriched += 1,
+            Err(detail) => failed.push(detail),
         }
     }
     if enriched == 0 {
@@ -21223,6 +21304,28 @@ mod coverage_auth_admin_tests {
             "the tenant's current plan must be preselected"
         );
 
+        // 1b. The loader binds the tenant id NATIVELY (`t.id = $1`, the
+        //     VARCHAR(26) primary key): an id that exists in no row — here a
+        //     non-UUID-shaped string — reads as an honest "missing" page,
+        //     never `unavailable` and never a cast error.
+        let absent = crate::routes::web::data::load_page_data(
+            &app,
+            "control-plane",
+            "/cp/tenants/no-such-tenant",
+            None,
+            Some(&operator),
+        )
+        .await;
+        let absent_detail = absent
+            .tenant_detail
+            .as_ref()
+            .expect("the loader binds the detail shell for any id path");
+        assert!(
+            absent_detail.missing,
+            "an unknown tenant id must read as missing (the loader flags both \
+             unavailable and missing so the page says 'no such workspace'): {absent_detail:?}"
+        );
+
         // 2. A hand-crafted unknown plan is refused by NAME and nothing
         //    changes (the handler validates against the same catalog).
         let (headers, form) = signed_form(&app.config, &[("plan", "not-a-plan")]);
@@ -26467,8 +26570,14 @@ mod residual_zero_tests {
     // ── Sales engine live paths over a loopback mock ────────────────
 
     struct MockEngine {
-        /// Popped per /enrich request: (status, body).
+        /// Popped per /enrich request: (status, body) — used when the request's
+        /// domain has no entry in `by_domain`. The handler now fans out with
+        /// bounded concurrency, so ORDER-dependent scripting is only valid for
+        /// responses that do not differ per source.
         enrich: std::sync::Mutex<std::collections::VecDeque<(u16, String)>>,
+        /// Per-domain response: deterministic regardless of request arrival
+        /// order (concurrent fall-out).
+        by_domain: std::sync::Mutex<std::collections::HashMap<String, (u16, String)>>,
         enroll: std::sync::Mutex<(u16, String)>,
         /// (path, x-api-key header, body) per request.
         seen: std::sync::Mutex<Vec<(String, Option<String>, String)>>,
@@ -26493,16 +26602,28 @@ mod residual_zero_tests {
                 .seen
                 .lock()
                 .unwrap()
-                .push((path.clone(), api_key, body));
+                .push((path.clone(), api_key, body.clone()));
             // axum's Path extractor strips the leading slash: a request to
             // /enrich arrives here as "enrich".
             let (status, text) = if path.trim_start_matches('/') == "enrich" {
-                engine
-                    .enrich
-                    .lock()
-                    .unwrap()
-                    .pop_front()
-                    .unwrap_or((500, "no scripted enrich response".into()))
+                let domain = serde_json::from_str::<serde_json::Value>(&body)
+                    .ok()
+                    .and_then(|value| {
+                        value
+                            .get("domain")
+                            .and_then(|domain| domain.as_str())
+                            .map(str::to_string)
+                    });
+                let scripted = domain
+                    .and_then(|domain| engine.by_domain.lock().unwrap().get(&domain).cloned());
+                scripted.unwrap_or_else(|| {
+                    engine
+                        .enrich
+                        .lock()
+                        .unwrap()
+                        .pop_front()
+                        .unwrap_or((500, "no scripted enrich response".into()))
+                })
             } else {
                 engine.enroll.lock().unwrap().clone()
             };
@@ -26546,6 +26667,7 @@ mod residual_zero_tests {
                 .into_iter()
                 .collect(),
             ),
+            by_domain: std::sync::Mutex::new(std::collections::HashMap::new()),
             enroll: std::sync::Mutex::new((200, "{}".into())),
             seen: std::sync::Mutex::new(Vec::new()),
         });
@@ -26583,18 +26705,21 @@ mod residual_zero_tests {
             }
         }
 
-        // Mixed: first source enriches, second fails with a detail body.
+        // Mixed: one source enriches, the other fails with a detail body.
+        // Scripted PER DOMAIN: the bounded fan-out means request order is no
+        // longer the source order, and the per-source report must stay
+        // attached to each source regardless of arrival order.
         engine.seen.lock().unwrap().clear();
         engine
-            .enrich
+            .by_domain
             .lock()
             .unwrap()
-            .push_back((200, "{\"ok\":true}".into()));
+            .insert("alpha.test".into(), (200, "{\"ok\":true}".into()));
         engine
-            .enrich
+            .by_domain
             .lock()
             .unwrap()
-            .push_back((422, "domain unreachable".into()));
+            .insert("beta.test".into(), (422, "domain unreachable".into()));
         let (headers, form) = signed_form(&config, &[("sources", "alpha.test, beta.test")]);
         let response = form_sales_discovery_run(
             State(engine_state.clone()),
@@ -26613,15 +26738,15 @@ mod residual_zero_tests {
         // Empty failure body: the status code is reported instead.
         engine.seen.lock().unwrap().clear();
         engine
-            .enrich
+            .by_domain
             .lock()
             .unwrap()
-            .push_back((200, "{\"ok\":true}".into()));
+            .insert("alpha.test".into(), (200, "{\"ok\":true}".into()));
         engine
-            .enrich
+            .by_domain
             .lock()
             .unwrap()
-            .push_back((500, String::new()));
+            .insert("beta.test".into(), (500, String::new()));
         let (headers, form) = signed_form(&config, &[("sources", "alpha.test, beta.test")]);
         let response = form_sales_discovery_run(
             State(engine_state.clone()),
@@ -26637,6 +26762,175 @@ mod residual_zero_tests {
         );
     }
 
+    /// A mock engine whose `/enrich` answers after a fixed delay, so the test
+    /// can prove the console fan-out is bounded instead of 30 s per source.
+    async fn spawn_slow_engine(delay: std::time::Duration) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback slow engine");
+        let addr = listener.local_addr().unwrap();
+        let app = axum::Router::new().route(
+            "/enrich",
+            axum::routing::post(move || async move {
+                tokio::time::sleep(delay).await;
+                (StatusCode::OK, "{\"ok\":true}")
+            }),
+        );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
+    }
+
+    /// There is NO source-count cap: a list above the old limit of 10 is
+    /// accepted and every source is dialled. (The run is bounded by the
+    /// wall-clock budget instead — see the budget test below.)
+    #[tokio::test]
+    async fn sales_discovery_run_accepts_more_sources_than_the_old_cap() {
+        let Some(pool) = crate::test_db::canonical_pool("web_res_sales_many").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let system = system_tenant_id(&state.db).await;
+        let (operator, _email) = seed_caller(&state.db, &system, "owner").await;
+
+        let engine = std::sync::Arc::new(MockEngine {
+            enrich: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            by_domain: std::sync::Mutex::new(std::collections::HashMap::new()),
+            enroll: std::sync::Mutex::new((200, "{}".into())),
+            seen: std::sync::Mutex::new(Vec::new()),
+        });
+        let base = spawn_mock_engine(engine.clone()).await;
+        let mut config = state.config.clone();
+        config.sales_autopilot_base_url = base;
+        config.sales_discovery_run_budget_secs = 120;
+        let engine_state =
+            crate::app::test_support::test_state_over_with_config(pool.clone(), config.clone())
+                .await;
+
+        const SOURCES: usize = 12;
+        let over_old_cap: String = (0..SOURCES)
+            .map(|i| format!("src{i}.example"))
+            .collect::<Vec<_>>()
+            .join(",");
+        engine
+            .enrich
+            .lock()
+            .unwrap()
+            .extend((0..SOURCES).map(|_| (200u16, "{\"ok\":true}".to_string())));
+        let (headers, form) = signed_form(&config, &[("sources", &over_old_cap)]);
+        let response = form_sales_discovery_run(
+            State(engine_state),
+            axum::Extension(operator),
+            headers,
+            Form(form),
+        )
+        .await;
+        let flash = flash_text(&response, &config);
+        assert!(
+            flash.contains(&format!(
+                "Discovery run finished: {SOURCES} source(s) enriched, 0 failed."
+            )),
+            "got {flash}"
+        );
+        assert_eq!(
+            engine.seen.lock().unwrap().len(),
+            SOURCES,
+            "every source above the old cap must be dialled"
+        );
+    }
+
+    /// The wall-clock budget replaces the old count cap: with a 1 s budget
+    /// and a 300 ms engine delay, the run stops starting sources when the
+    /// budget is gone, reports them as failed, and still finishes promptly
+    /// (rather than 30 s × N).
+    #[tokio::test]
+    async fn sales_discovery_run_stops_at_the_wall_clock_budget() {
+        let Some(pool) = crate::test_db::canonical_pool("web_res_sales_budget").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let system = system_tenant_id(&state.db).await;
+        let (operator, _email) = seed_caller(&state.db, &system, "owner").await;
+        let base = spawn_slow_engine(std::time::Duration::from_millis(300)).await;
+        let mut config = state.config.clone();
+        config.sales_autopilot_base_url = base;
+        config.sales_discovery_run_budget_secs = 1;
+        let engine_state =
+            crate::app::test_support::test_state_over_with_config(pool.clone(), config.clone())
+                .await;
+
+        let sources: String = (0..20)
+            .map(|i| format!("slow{i}.example"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let started = std::time::Instant::now();
+        let (headers, form) = signed_form(&config, &[("sources", &sources)]);
+        let response = form_sales_discovery_run(
+            State(engine_state),
+            axum::Extension(operator),
+            headers,
+            Form(form),
+        )
+        .await;
+        let elapsed = started.elapsed();
+        let flash = flash_text(&response, &config);
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "the run must stop at the budget, took {elapsed:?}: {flash}"
+        );
+        assert!(
+            flash.contains("failed") && !flash.contains("20 source(s) enriched, 0 failed"),
+            "sources beyond the budget must be reported failed: {flash}"
+        );
+    }
+
+    /// Bounded concurrency: N sources against a slow engine finish in about
+    /// ceil(N/concurrency) × delay, not N × delay. With 10 sources and a
+    /// 300 ms fixture the old sequential loop needs ≥3 s; the bounded fan-out
+    /// (4 in flight) needs ~0.9 s. The assertion is a generous 2 s so it
+    /// stays robust on a loaded CI box while still failing the 30 s-per-source
+    /// shape.
+    #[tokio::test]
+    async fn sales_discovery_run_fans_out_with_bounded_concurrency() {
+        let Some(pool) = crate::test_db::canonical_pool("web_res_sales_concurrency").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let system = system_tenant_id(&state.db).await;
+        let (operator, _email) = seed_caller(&state.db, &system, "owner").await;
+        let base = spawn_slow_engine(std::time::Duration::from_millis(300)).await;
+        let mut config = state.config.clone();
+        config.sales_autopilot_base_url = base;
+        let engine_state =
+            crate::app::test_support::test_state_over_with_config(pool.clone(), config.clone())
+                .await;
+
+        let sources: String = (0..10)
+            .map(|i| format!("slow{i}.example"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let (headers, form) = signed_form(&config, &[("sources", &sources)]);
+        let started = std::time::Instant::now();
+        let response = form_sales_discovery_run(
+            State(engine_state),
+            axum::Extension(operator),
+            headers,
+            Form(form),
+        )
+        .await;
+        let elapsed = started.elapsed();
+        let flash = flash_text(&response, &config);
+        assert!(
+            flash.contains("10 source(s) enriched, 0 failed"),
+            "got {flash}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "bounded fan-out must not serialize 10 × 300 ms (took {elapsed:?})"
+        );
+    }
+
     #[tokio::test]
     async fn sales_outreach_launch_reports_the_engine_verdict() {
         let Some(pool) = crate::test_db::canonical_pool("web_res_outreach_live").await else {
@@ -26646,6 +26940,7 @@ mod residual_zero_tests {
         let (operator, _email) = seed_caller(&pool, &system, "owner").await;
         let engine = std::sync::Arc::new(MockEngine {
             enrich: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            by_domain: std::sync::Mutex::new(std::collections::HashMap::new()),
             enroll: std::sync::Mutex::new((200, "{\"accepted\":2,\"rejected\":1}".into())),
             seen: std::sync::Mutex::new(Vec::new()),
         });

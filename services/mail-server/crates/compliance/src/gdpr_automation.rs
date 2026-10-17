@@ -1307,9 +1307,16 @@ impl GdprAutomation {
                 // skipped, never a SQL JSON-cast abort), and only snapshots
                 // actually addressed to the subject are rewritten. The
                 // financial record itself is RETAINED (statutory).
+                //
+                // P3 (perf): the id is selected as a UUID — no `::text` cast —
+                // and the rewrites go out as ONE set-based
+                // `UPDATE … FROM unnest($1::uuid[], $2::text[])` per chunk
+                // instead of one `UPDATE … WHERE id::text = $1` round trip per
+                // invoice (the cast also made every rewrite a sequential scan
+                // instead of a primary-key lookup).
                 let email_lower = email.to_lowercase();
-                let rows: Vec<(String, Option<String>, DateTime<Utc>)> = match sqlx::query_as(
-                    "SELECT id::text, billing_address, COALESCE(issued_at, created_at) \
+                let rows: Vec<(Uuid, Option<String>, DateTime<Utc>)> = match sqlx::query_as(
+                    "SELECT id, billing_address, COALESCE(issued_at, created_at) \
                      FROM invoices WHERE tenant_id = $1",
                 )
                 .bind(tid)
@@ -1358,6 +1365,10 @@ impl GdprAutomation {
                 let subject_hash = legal_archive::subject_email_hash(email);
                 let mut updated: u64 = 0;
                 let mut failure: Option<sqlx::Error> = None;
+
+                // Pass 1: parse + redact in Rust, collect the rewrites.
+                let mut rewrites: Vec<(Uuid, String, DateTime<Utc>)> =
+                    Vec::with_capacity(rows.len());
                 for (invoice_id, snapshot_raw, issued_at) in rows {
                     let Some(raw) = snapshot_raw.as_deref() else {
                         continue;
@@ -1375,26 +1386,64 @@ impl GdprAutomation {
                     if let Some(obj) = snapshot.as_object_mut() {
                         obj.insert("email".into(), serde_json::Value::String(marker.clone()));
                     }
+                    rewrites.push((invoice_id, snapshot.to_string(), issued_at));
+                }
+
+                // Pass 2: ONE set-based rewrite per chunk. The primary key is
+                // compared as UUID; a well-formed id that matches no row is a
+                // 0-row no-op (the same outcome the old text comparison had
+                // for an absent id).
+                //
+                // `committed` is the prefix of `rewrites` whose UPDATE chunk
+                // has committed. Pass 3 archives exactly that prefix even when
+                // a LATER chunk fails: a chunked rewrite is atomic per chunk,
+                // so earlier chunks are already redacted and must keep their
+                // legal-retention archive rows. (Before this, any failure
+                // skipped the whole archive pass, leaving redacted invoices
+                // with no legal trail — the opposite of the required order.)
+                const SNAPSHOT_REWRITE_CHUNK: usize = 1_000;
+                let mut committed: usize = 0;
+                for chunk in rewrites.chunks(SNAPSHOT_REWRITE_CHUNK) {
+                    let ids: Vec<Uuid> = chunk.iter().map(|(id, _, _)| *id).collect();
+                    let snapshots: Vec<String> = chunk
+                        .iter()
+                        .map(|(_, snapshot, _)| snapshot.clone())
+                        .collect();
                     match sqlx::query(
-                        "UPDATE invoices SET billing_address = $2, updated_at = NOW() \
-                         WHERE id::text = $1",
+                        "UPDATE invoices i \
+                            SET billing_address = u.snapshot, updated_at = NOW() \
+                           FROM unnest($1::uuid[], $2::text[]) AS u(id, snapshot) \
+                          WHERE i.id = u.id",
                     )
-                    .bind(&invoice_id)
-                    .bind(snapshot.to_string())
+                    .bind(&ids)
+                    .bind(&snapshots)
                     .execute(&self.db)
                     .await
                     {
-                        Ok(r) => updated += r.rows_affected(),
+                        Ok(r) => {
+                            updated += r.rows_affected();
+                            committed += chunk.len();
+                        }
                         Err(e) => {
                             failure = Some(e);
                             break;
                         }
                     }
+                }
 
-                    // product-active → legally-restricted archive: the record
-                    // survives, its subject data is redacted, and the archive
-                    // row records why and until when.
-                    let expiry = class.expiry_for(issued_at);
+                // Pass 3: archive the COMMITTED prefix (the legal trail).
+                //
+                // This runs even when a later rewrite chunk failed: those
+                // invoices are already redacted, so they must get their
+                // archive rows. If the archive itself fails, stop at the first
+                // failure (the rewrite failure, when present, takes priority
+                // in the reported error).
+                for (invoice_id, _snapshot, issued_at) in rewrites.iter().take(committed) {
+                    let invoice_id = invoice_id.to_string();
+                    // product-active → legally-restricted archive: the
+                    // record survives, its subject data is redacted, and
+                    // the archive row records why and until when.
+                    let expiry = class.expiry_for(*issued_at);
                     let disclosure = serde_json::json!({
                         "source_table": "invoices",
                         "record_id": invoice_id,
@@ -1418,7 +1467,9 @@ impl GdprAutomation {
                         disclosure,
                     };
                     if let Err(e) = legal_archive::archive_record(&self.db, &input).await {
-                        failure = Some(sqlx::Error::Protocol(e));
+                        if failure.is_none() {
+                            failure = Some(sqlx::Error::Protocol(e));
+                        }
                         break;
                     }
                 }
@@ -5352,6 +5403,128 @@ mod hostile_db_tests {
             count, 5,
             "a tenant user's invoices are all disclosed (anonymized)"
         );
+    }
+
+    /// PERF P3 regression guard: the chunked invoice rewrite archives the
+    /// COMMITTED prefix even when a later chunk's UPDATE fails. Before this,
+    /// pass 3 was gated on `failure.is_none()`, so a failure in chunk 2 left
+    /// the 1,000 already-redacted invoices from chunk 1 with NO
+    /// legal-retention archive row — a redaction without its legal trail.
+    ///
+    /// A sequence-driven BEFORE UPDATE trigger lets exactly the first 1,000
+    /// rows through and aborts the second chunk, independent of chunk order.
+    #[tokio::test]
+    async fn invoice_redaction_archives_committed_chunks_when_a_later_chunk_fails() {
+        let Some(pool) = hostile_db("invoice_chunk_archive").await else {
+            return;
+        };
+        let gdpr = automation_with(pool.clone(), config());
+        let tenant = test_support::unique_tenant();
+        let email = format!("chunk-{}@example.test", Uuid::new_v4().simple());
+
+        seed_tenant(&pool, &tenant).await;
+        sqlx::query("INSERT INTO users (tenant_id, email, password_hash) VALUES ($1, $2, 'x')")
+            .bind(&tenant)
+            .bind(&email)
+            .execute(&pool)
+            .await
+            .expect("user");
+
+        // 1,001 invoices: chunk 1 = 1,000 rows, chunk 2 = 1 row.
+        sqlx::query(
+            "INSERT INTO invoices (id, tenant_id, amount, currency, status, billing_address, issued_at) \
+             SELECT gen_random_uuid(), $1, 100, 'EUR', 'paid', \
+                    json_build_object('email', $2)::text, NOW() - INTERVAL '10 days' \
+             FROM generate_series(1, 1001)",
+        )
+        .bind(&tenant)
+        .bind(&email)
+        .execute(&pool)
+        .await
+        .expect("seed invoices");
+
+        // Abort the 1,001st row update; the first 1,000 commit.
+        sqlx::query("CREATE SEQUENCE test_invoice_chunk_seq")
+            .execute(&pool)
+            .await
+            .expect("sequence");
+        sqlx::query(
+            "CREATE FUNCTION test_invoice_chunk_fail() RETURNS trigger AS $$ \
+             BEGIN \
+                 IF nextval('test_invoice_chunk_seq') > 1000 THEN \
+                     RAISE EXCEPTION 'forced second-chunk failure'; \
+                 END IF; \
+                 RETURN NEW; \
+             END $$ LANGUAGE plpgsql",
+        )
+        .execute(&pool)
+        .await
+        .expect("trigger function");
+        sqlx::query(
+            "CREATE TRIGGER test_invoice_chunk_fail BEFORE UPDATE ON invoices \
+             FOR EACH ROW EXECUTE FUNCTION test_invoice_chunk_fail()",
+        )
+        .execute(&pool)
+        .await
+        .expect("trigger");
+
+        let request = DataSubjectRequest {
+            id: "REQ-chunk".into(),
+            tenant_id: tenant.clone(),
+            request_type: DataSubjectRequestType::Erasure,
+            email: email.clone(),
+            verification_token_hash: String::new(),
+            verified: true,
+            verified_at: None,
+            status: RequestStatus::Verified,
+            requested_at: Utc::now(),
+            processed_at: None,
+            completed_at: None,
+            expires_at: Utc::now(),
+            result: None,
+            received_at: Some(Utc::now()),
+            identity_verified_at: None,
+            statutory_due_at: None,
+            extension_due_at: None,
+            extension_reason: None,
+            extension_notified_at: None,
+        };
+        let outcome = gdpr
+            .erase_store(
+                &request,
+                ErasureStore::AnonymizeInvoiceSnapshot { name: "invoices" },
+            )
+            .await;
+        assert!(
+            matches!(outcome.status, StoreErasureStatus::Failed),
+            "the second chunk aborts the store operation: {outcome:?}"
+        );
+
+        let marker = redact_marker(&email);
+        let redacted: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM invoices WHERE tenant_id = $1 AND billing_address LIKE $2",
+        )
+        .bind(&tenant)
+        .bind(format!("%{marker}%"))
+        .fetch_one(&pool)
+        .await
+        .expect("redacted count");
+        assert_eq!(redacted, 1000, "chunk 1 committed its redactions");
+
+        let archived: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM legal_retention_archive \
+             WHERE source_table = 'invoices' AND tenant_id = $1",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("archive count");
+        assert_eq!(
+            archived, 1000,
+            "every committed redaction must keep its legal-retention archive row"
+        );
+
+        pool.close().await;
     }
 
     #[tokio::test]

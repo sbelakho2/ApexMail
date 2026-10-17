@@ -484,6 +484,10 @@ fn routes_gate_on_api_key_and_report_malformed_ids_as_4xx() {
 
 // ── Backup / restore ────────────────────────────────────────────────────
 
+/// Serializes tests that own the contents of `suppression_list` and the
+/// statement-count trigger on it within this process.
+static BACKUP_TABLE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 async fn seed_suppression_row(db: &PgPool, id: &str, email: &str) {
     sqlx::query("INSERT INTO suppression_list (id, tenant_id, email, reason) VALUES ($1, NULL, $2, 'bounce')")
         .bind(id)
@@ -493,10 +497,81 @@ async fn seed_suppression_row(db: &PgPool, id: &str, email: &str) {
         .expect("seed suppression row");
 }
 
+/// Per-STATEMENT DML counters (a `FOR EACH STATEMENT` trigger bumps once per
+/// INSERT/UPDATE/DELETE statement, not once per row). This is what proves a
+/// batched write is O(1) in statements where the old per-row path was O(N):
+/// row counts alone cannot tell the two apart.
+async fn install_statement_counters(pool: &PgPool, tables: &[&str]) {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS _apexmail_test_stmt_counts (
+             probed_table TEXT NOT NULL,
+             op TEXT NOT NULL,
+             statements BIGINT NOT NULL DEFAULT 0,
+             PRIMARY KEY (probed_table, op)
+         )",
+    )
+    .execute(pool)
+    .await
+    .expect("create statement-count table");
+
+    sqlx::query(
+        "CREATE OR REPLACE FUNCTION _apexmail_test_count_stmt() RETURNS trigger \
+         LANGUAGE plpgsql AS $$ \
+         BEGIN \
+           INSERT INTO _apexmail_test_stmt_counts (probed_table, op, statements) \
+           VALUES (TG_TABLE_NAME, TG_OP, 1) \
+           ON CONFLICT (probed_table, op) \
+           DO UPDATE SET statements = _apexmail_test_stmt_counts.statements + 1; \
+           RETURN NULL; \
+         END $$",
+    )
+    .execute(pool)
+    .await
+    .expect("create statement-count function");
+
+    for table in tables {
+        assert!(
+            table
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_'),
+            "statement counter table name must be identifier-shaped: {table}"
+        );
+        sqlx::query(&format!(
+            "CREATE OR REPLACE TRIGGER _apexmail_test_count_stmt \
+             AFTER INSERT OR UPDATE OR DELETE ON {table} \
+             FOR EACH STATEMENT EXECUTE FUNCTION _apexmail_test_count_stmt()"
+        ))
+        .execute(pool)
+        .await
+        .expect("install statement-count trigger");
+    }
+}
+
+async fn reset_statement_counts(pool: &PgPool) {
+    sqlx::query("UPDATE _apexmail_test_stmt_counts SET statements = 0")
+        .execute(pool)
+        .await
+        .expect("reset statement counts");
+}
+
+async fn statement_count(pool: &PgPool, table: &str, op: &str) -> i64 {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT statements FROM _apexmail_test_stmt_counts \
+         WHERE probed_table = $1 AND op = $2",
+    )
+    .bind(table)
+    .bind(op)
+    .fetch_optional(pool)
+    .await
+    .expect("read statement count")
+    .unwrap_or(0)
+}
+
 #[test]
 fn backup_restore_round_trip_and_corrupted_payloads_are_refused() {
     run(async {
         let Some(h) = harness().await else { return };
+        let _table_guard = BACKUP_TABLE_LOCK.lock().await;
         // The round-trip table is isolated from other tests' rows by using a
         // dedicated service instance over the shared canonical database.
         let backup = BackupService::new(h.db.clone(), h.config.clone()).expect("backup service");
@@ -670,6 +745,76 @@ fn local_staging_path(location: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(format!("/tmp/apexmail-backups/{}", key.replace('/', "_")))
 }
 
+/// Restore must insert a table's rows in BATCHES, not one INSERT per row.
+///
+/// The old `restore_table` issued N INSERT statements for N rows. A
+/// `FOR EACH STATEMENT` trigger counts statements (not rows), so this test
+/// fails on that code (count == row count) and passes when the rows go in
+/// through one set-based `jsonb_populate_recordset` INSERT.
+#[test]
+fn restore_uses_one_batched_insert_per_table_not_one_per_row() {
+    run(async {
+        let Some(h) = harness().await else { return };
+        let _table_guard = BACKUP_TABLE_LOCK.lock().await;
+        let backup = BackupService::new(h.db.clone(), h.config.clone()).expect("backup service");
+        let table = "suppression_list".to_string();
+
+        // 40 rows is well below RESTORE_BATCH_ROWS (500), so a correct
+        // restore is exactly ONE INSERT statement.
+        let mut ids = Vec::new();
+        for index in 0..40 {
+            let id = unique(&format!("batch{index}"));
+            let email = format!("{id}@example.com");
+            seed_suppression_row(&h.db, &id, &email).await;
+            ids.push((id, email));
+        }
+
+        let created = backup
+            .create_backup(BackupType::Full, Some(vec![table.clone()]))
+            .await
+            .expect("create backup");
+
+        // Wipe the table so every restored row must be re-inserted.
+        sqlx::query("DELETE FROM suppression_list")
+            .execute(&h.db)
+            .await
+            .expect("clear table");
+
+        install_statement_counters(&h.db, &["suppression_list"]).await;
+        reset_statement_counts(&h.db).await;
+
+        let restored = backup
+            .restore(RestoreOptions {
+                backup_id: created.id,
+                target_time: None,
+                validate_only: false,
+                parallel_jobs: 1,
+            })
+            .await
+            .expect("restore");
+        assert!(restored.success, "{:?}", restored.message);
+
+        let inserts = statement_count(&h.db, "suppression_list", "INSERT").await;
+        assert_eq!(
+            inserts, 1,
+            "40 rows must be restored with ONE multi-row INSERT statement, got {inserts}"
+        );
+
+        // Equivalence: every seeded row came back intact.
+        for (id, email) in &ids {
+            let stored: String =
+                sqlx::query_scalar("SELECT email FROM suppression_list WHERE id=$1")
+                    .bind(id)
+                    .fetch_one(&h.db)
+                    .await
+                    .expect("restored row");
+            assert_eq!(&stored, email);
+        }
+
+        let _ = backup.delete_backup(created.id).await;
+    });
+}
+
 /// `sequence_valid` must count only the ORPHANED sequences of the RESTORED
 /// tables. The previous query counted every ownerless sequence in the whole
 /// database, so an unrelated `CREATE SEQUENCE` made a correct single-table
@@ -678,6 +823,7 @@ fn local_staging_path(location: &str) -> std::path::PathBuf {
 fn restore_sequence_validity_is_scoped_to_the_restored_tables() {
     run(async {
         let Some(h) = harness().await else { return };
+        let _table_guard = BACKUP_TABLE_LOCK.lock().await;
         let backup = BackupService::new(h.db.clone(), h.config.clone()).expect("backup service");
 
         // The restored table gets a real serial column: adding one creates a

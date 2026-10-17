@@ -234,29 +234,104 @@ pub struct ArchiveSweepOutcome {
     pub stuck_unpurgeable: u64,
 }
 
+/// Rows advanced/purged per sweep window (unchanged bound).
+const ARCHIVE_SWEEP_LIMIT: i64 = 5_000;
+
+/// Move a set of `statutory_expired` archive rows to `deleted` in ONE
+/// statement, returning how many rows actually moved. The DB trigger still
+/// enforces the one-step state machine for every row of the statement.
+async fn transition_archive_rows(
+    db: &PgPool,
+    ids: &[String],
+    now: DateTime<Utc>,
+) -> Result<u64, String> {
+    let moved: Vec<String> = sqlx::query_scalar(
+        "UPDATE legal_retention_archive
+            SET state = 'deleted',
+                deleted_at = COALESCE(deleted_at, $2),
+                updated_at = $2
+          WHERE id = ANY($1::text[]) AND state = 'statutory_expired'
+          RETURNING id",
+    )
+    .bind(ids)
+    .bind(now)
+    .fetch_all(db)
+    .await
+    .map_err(|e| format!("DB error advancing archive rows: {e}"))?;
+    Ok(moved.len() as u64)
+}
+
 /// Advance every due archive row one step, deleting source records only after
 /// statutory expiry and only for [`PURGEABLE_SOURCE_TABLES`].
+///
+/// P3 (perf, audit): the pre-fix sweep was per-row in every phase — each
+/// `legally_restricted → statutory_expired` move ran get + UPDATE + get, each
+/// source purge ran `DELETE … WHERE id::text = $1` (a `::text` cast on the
+/// source primary key ⇒ sequential scan) followed by another three-statement
+/// state advance. Now each phase is set-based per source table: one
+/// `UPDATE … WHERE id = ANY(...)` for the expiry window, one
+/// `DELETE FROM <table> WHERE id = ANY($1::uuid[]) RETURNING id` per source
+/// table and one `UPDATE … WHERE id = ANY($1::text[])` archive transition —
+/// O(1) statements per table instead of ~6 per row.
+///
+/// The legal accounting is unchanged: a row counts as `deleted` only when its
+/// archive transition succeeded, `source_records_deleted` counts rows the
+/// DELETE actually removed (a source record already gone still completes the
+/// transition, exactly as before), and a row whose source record cannot be
+/// purged stays in `statutory_expired` and is accounted per row instead of
+/// failing the whole sweep — the archive is the legal audit trail, so a failed
+/// delete must leave the state machine exactly where it was.
 pub async fn advance_due_archives(
     db: &PgPool,
     now: DateTime<Utc>,
 ) -> Result<ArchiveSweepOutcome, String> {
     let mut outcome = ArchiveSweepOutcome::default();
 
-    let due: Vec<String> = sqlx::query_scalar(
-        "SELECT id FROM legal_retention_archive
-          WHERE state = 'legally_restricted' AND statutory_expiry_at <= $1
-          ORDER BY statutory_expiry_at
-          LIMIT 5000",
+    // ── Step 1: legally_restricted → statutory_expired, set-based ────────
+    let due: Result<Vec<String>, sqlx::Error> = sqlx::query_scalar(
+        "UPDATE legal_retention_archive a
+            SET state = 'statutory_expired',
+                statutory_expired_at = COALESCE(a.statutory_expired_at, $1),
+                updated_at = $1
+           FROM (
+               SELECT id FROM legal_retention_archive
+                WHERE state = 'legally_restricted' AND statutory_expiry_at <= $1
+                ORDER BY statutory_expiry_at
+                LIMIT $2
+           ) AS due
+          WHERE a.id = due.id AND a.state = 'legally_restricted'
+        RETURNING a.id",
     )
     .bind(now)
+    .bind(ARCHIVE_SWEEP_LIMIT)
     .fetch_all(db)
-    .await
-    .map_err(|e| format!("DB error listing due archive rows: {e}"))?;
-
-    for id in &due {
-        match advance_state(db, id, STATE_STATUTORY_EXPIRED).await {
-            Ok(_) => outcome.expired += 1,
-            Err(e) => warn!(archive_id = %id, error = %e, "archive expiry transition failed"),
+    .await;
+    match due {
+        Ok(ids) => outcome.expired = ids.len() as u64,
+        Err(e) => {
+            // Per-row fallback: one poison row must not cost the whole
+            // window, and every row is accounted individually (the pre-fix
+            // shape).
+            warn!(error = %e, "archive expiry: set-based transition failed — falling back to per-row");
+            let ids: Vec<String> = sqlx::query_scalar(
+                "SELECT id FROM legal_retention_archive
+                  WHERE state = 'legally_restricted' AND statutory_expiry_at <= $1
+                  ORDER BY statutory_expiry_at
+                  LIMIT $2",
+            )
+            .bind(now)
+            .bind(ARCHIVE_SWEEP_LIMIT)
+            .fetch_all(db)
+            .await
+            .map_err(|e| format!("DB error listing due archive rows: {e}"))?;
+            for id in &ids {
+                match advance_state(db, id, STATE_STATUTORY_EXPIRED).await {
+                    Ok(_) => outcome.expired += 1,
+                    Err(e) => {
+                        warn!(archive_id = %id, error = %e, "archive expiry transition failed")
+                    }
+                }
+            }
         }
     }
 
@@ -265,31 +340,115 @@ pub async fn advance_due_archives(
            FROM legal_retention_archive
           WHERE state = 'statutory_expired'
           ORDER BY statutory_expiry_at
-          LIMIT 5000",
+          LIMIT $1",
     )
+    .bind(ARCHIVE_SWEEP_LIMIT)
     .fetch_all(db)
     .await
     .map_err(|e| format!("DB error listing expired archive rows: {e}"))?;
 
+    // Group the purgeable rows by source table: one DELETE + one transition
+    // per table. Rows whose source table is not owned by the platform stay in
+    // `statutory_expired` and are reported.
+    let mut by_table: std::collections::BTreeMap<&str, Vec<(String, String)>> =
+        std::collections::BTreeMap::new();
     for (id, source_table, source_record_id) in &expired {
         if !PURGEABLE_SOURCE_TABLES.contains(&source_table.as_str()) {
             outcome.stuck_unpurgeable += 1;
             continue;
         }
-        // Remove the source record first; only then certify deletion.
-        let table = source_table.as_str();
-        let deleted = sqlx::query(&format!("DELETE FROM {table} WHERE id::text = $1"))
-            .bind(source_record_id)
-            .execute(db)
-            .await
-            .map_err(|e| format!("DB error purging {table}/{source_record_id}: {e}"))?
-            .rows_affected();
-        match advance_state(db, id, STATE_DELETED).await {
-            Ok(_) => {
-                outcome.deleted += 1;
-                outcome.source_records_deleted += deleted;
+        by_table
+            .entry(source_table.as_str())
+            .or_default()
+            .push((id.clone(), source_record_id.clone()));
+    }
+
+    for (table, pairs) in by_table {
+        // Source keys are typed: a `::text` comparison (the pre-fix shape)
+        // both defeats the primary-key index and silently rewrites the
+        // comparison. Ids that cannot be a UUID primary key can therefore
+        // never match a source row — they are accounted per row here rather
+        // than aborting the whole batch with a cast error.
+        let mut parsed: Vec<(Uuid, String)> = Vec::with_capacity(pairs.len());
+        for (archive_id, source_record_id) in &pairs {
+            match Uuid::parse_str(source_record_id) {
+                Ok(uuid) => parsed.push((uuid, archive_id.clone())),
+                Err(e) => warn!(
+                    archive_id = %archive_id,
+                    source_table = table,
+                    source_record_id = %source_record_id,
+                    error = %e,
+                    "archive purge: source record id is not a UUID — row stays in statutory_expired"
+                ),
             }
-            Err(e) => warn!(archive_id = %id, error = %e, "archive deletion transition failed"),
+        }
+        if parsed.is_empty() {
+            continue;
+        }
+        let source_ids: Vec<Uuid> = parsed.iter().map(|(uuid, _)| *uuid).collect();
+        let archive_ids: Vec<String> = parsed.iter().map(|(_, id)| id.clone()).collect();
+
+        match sqlx::query_scalar::<_, String>(&format!(
+            "DELETE FROM {table} WHERE id = ANY($1::uuid[]) RETURNING id::text"
+        ))
+        .bind(&source_ids)
+        .fetch_all(db)
+        .await
+        {
+            Ok(deleted) => {
+                outcome.source_records_deleted += deleted.len() as u64;
+                match transition_archive_rows(db, &archive_ids, now).await {
+                    Ok(moved) => outcome.deleted += moved,
+                    Err(e) => {
+                        warn!(error = %e, source_table = table, "archive deletion transition failed");
+                        for id in &archive_ids {
+                            match advance_state(db, id, STATE_DELETED).await {
+                                Ok(_) => outcome.deleted += 1,
+                                Err(e) => {
+                                    warn!(archive_id = %id, error = %e, "archive deletion transition failed")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                // Per-row fallback: a failing row is accounted and keeps the
+                // archive row in `statutory_expired` (never certified as
+                // deleted when the source record was not purged).
+                warn!(
+                    error = %e,
+                    source_table = table,
+                    "archive purge: set-based source delete failed — falling back to per-row"
+                );
+                for (uuid, archive_id) in &parsed {
+                    let deleted = match sqlx::query(&format!("DELETE FROM {table} WHERE id = $1"))
+                        .bind(uuid)
+                        .execute(db)
+                        .await
+                    {
+                        Ok(result) => result.rows_affected(),
+                        Err(e) => {
+                            warn!(
+                                archive_id = %archive_id,
+                                source_table = table,
+                                error = %e,
+                                "archive purge: source delete failed — row stays in statutory_expired"
+                            );
+                            continue;
+                        }
+                    };
+                    match advance_state(db, archive_id, STATE_DELETED).await {
+                        Ok(_) => {
+                            outcome.deleted += 1;
+                            outcome.source_records_deleted += deleted;
+                        }
+                        Err(e) => {
+                            warn!(archive_id = %archive_id, error = %e, "archive deletion transition failed")
+                        }
+                    }
+                }
+            }
         }
     }
 

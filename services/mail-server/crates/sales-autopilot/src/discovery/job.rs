@@ -774,28 +774,25 @@ impl DiscoveryJobRunner {
                     let (candidates, dropped_duplicates) = dedupe_candidates(candidates);
                     merged_duplicates += dropped_duplicates as i64;
 
-                    for candidate in &candidates {
-                        match upsert_candidate(
-                            &self.db,
-                            tenant_id,
-                            job_id,
-                            lease_token,
-                            source.id(),
-                            candidate,
-                        )
-                        .await
-                        {
-                            Ok(Some(true)) => new_candidates += 1,
-                            Ok(Some(false)) => {}
-                            // Zero rows means the token no longer owns the
-                            // job: the candidate write was refused, and the
-                            // whole batch must stop without other writes.
-                            Ok(None) => return Err(lease_lost_error(job_id)),
-                            Err(db_error) => {
-                                status = "failed";
-                                error = Some(format!("candidate persistence failed: {db_error}"));
-                                break;
-                            }
+                    match upsert_candidates(
+                        &self.db,
+                        tenant_id,
+                        job_id,
+                        lease_token,
+                        source.id(),
+                        &candidates,
+                    )
+                    .await
+                    {
+                        Ok(Some(inserted)) => new_candidates += inserted as i64,
+                        // Zero rows means the token no longer owns the job:
+                        // the candidate write was refused, and the whole
+                        // batch must stop without other writes.
+                        Ok(None) => return Err(lease_lost_error(job_id)),
+                        Err(db_error) => {
+                            status = "failed";
+                            error = Some(format!("candidate persistence failed: {db_error}"));
+                            break;
                         }
                     }
                     if status != "succeeded" {
@@ -955,43 +952,77 @@ impl DiscoveryJobRunner {
     }
 }
 
-/// Upsert one candidate, fenced by the job's live lease.
+/// Upsert one page of candidates, fenced by the job's live lease.
 ///
-/// Returns `Some(true)` when a fresh row was inserted, `Some(false)` when an
-/// existing `(tenant, source, source_url)` row was refreshed, and `None` when
-/// the lease token no longer owns the job (the write was refused; the caller
-/// must abort without writing anything else). The fence is the same
-/// `EXISTS (... lease_token = $token)` guard as [`DiscoveryJobRunner::insert_source_run`]
-/// because `sales_discovery_candidates` has no token column either.
-async fn upsert_candidate(
+/// Returns `Some(number of fresh rows)` when the lease still owns the job,
+/// and `None` when it no longer does (zero rows were written; the caller must
+/// abort without writing anything else). The fence is the same
+/// `EXISTS (... lease_token = $token)` guard as
+/// [`DiscoveryJobRunner::insert_source_run`] because
+/// `sales_discovery_candidates` has no token column either.
+///
+/// ONE statement per page: a page may carry up to
+/// [`MAX_CANDIDATES_PER_PAGE`] candidates, so the former per-candidate upsert
+/// was an N+1 write path. `dedupe_candidates` runs before this call and keys
+/// on the sanitized source URL, so no two rows in one command share the
+/// `(tenant, source, source_url)` conflict key (which PostgreSQL would reject
+/// for a multi-row `DO UPDATE`).
+async fn upsert_candidates(
     db: &PgPool,
     tenant_id: &str,
     job_id: Uuid,
     lease_token: Uuid,
     source: &str,
-    candidate: &DiscoveredCandidate,
-) -> Result<Option<bool>, SalesError> {
-    let domain = sanitize_domain(candidate.domain.as_deref());
-    let source_url = sanitize_source_url(candidate.source_url.as_deref());
-    let company_name = sanitize_company_name(candidate.company_name.as_deref());
-    let contact_email = candidate.contact_email.as_deref().and_then(normalize_email);
-    let jurisdiction = sanitize_jurisdiction(candidate.jurisdiction.as_deref());
-    let hash = sanitize_snapshot_hash(candidate.raw_snapshot_hash.as_deref());
-    let confidence = clamp_confidence(candidate.confidence);
-    let jurisdiction_confidence = clamp_confidence(candidate.jurisdiction_confidence);
+    candidates: &[DiscoveredCandidate],
+) -> Result<Option<usize>, SalesError> {
+    if candidates.is_empty() {
+        return Ok(Some(0));
+    }
+    let mut ids: Vec<Uuid> = Vec::with_capacity(candidates.len());
+    let mut source_urls: Vec<Option<String>> = Vec::with_capacity(candidates.len());
+    let mut company_names: Vec<Option<String>> = Vec::with_capacity(candidates.len());
+    let mut domains: Vec<Option<String>> = Vec::with_capacity(candidates.len());
+    let mut contact_emails: Vec<Option<String>> = Vec::with_capacity(candidates.len());
+    let mut jurisdictions: Vec<Option<String>> = Vec::with_capacity(candidates.len());
+    let mut jurisdiction_confidences: Vec<f64> = Vec::with_capacity(candidates.len());
+    let mut snapshot_hashes: Vec<Option<String>> = Vec::with_capacity(candidates.len());
+    let mut confidences: Vec<f64> = Vec::with_capacity(candidates.len());
+    let mut fetched_ats: Vec<DateTime<Utc>> = Vec::with_capacity(candidates.len());
+    let mut refresh_expires: Vec<DateTime<Utc>> = Vec::with_capacity(candidates.len());
     let refresh_expires_at = Utc::now() + chrono::Duration::days(REFRESH_TTL_DAYS);
-    // Provenance: the source's own fetch time when it knows one, otherwise
-    // the discovery time — never NULL, so every row states when its evidence
-    // was fetched.
-    let fetched_at = candidate.fetched_at.unwrap_or_else(Utc::now);
+    for candidate in candidates {
+        ids.push(Uuid::new_v4());
+        source_urls.push(sanitize_source_url(candidate.source_url.as_deref()));
+        company_names.push(sanitize_company_name(candidate.company_name.as_deref()));
+        domains.push(sanitize_domain(candidate.domain.as_deref()));
+        contact_emails.push(candidate.contact_email.as_deref().and_then(normalize_email));
+        jurisdictions.push(sanitize_jurisdiction(candidate.jurisdiction.as_deref()));
+        jurisdiction_confidences.push(clamp_confidence(candidate.jurisdiction_confidence));
+        snapshot_hashes.push(sanitize_snapshot_hash(
+            candidate.raw_snapshot_hash.as_deref(),
+        ));
+        confidences.push(clamp_confidence(candidate.confidence));
+        // Provenance: the source's own fetch time when it knows one,
+        // otherwise the discovery time — never NULL.
+        fetched_ats.push(candidate.fetched_at.unwrap_or_else(Utc::now));
+        refresh_expires.push(refresh_expires_at);
+    }
 
-    let inserted: Option<bool> = sqlx::query_scalar(
+    let inserted: Vec<bool> = sqlx::query_scalar(
         "INSERT INTO sales_discovery_candidates (
             id, tenant_id, job_id, source, source_url, company_name, account_domain,
             contact_email, jurisdiction, jurisdiction_confidence, raw_snapshot_hash,
             confidence, fetched_at, refresh_expires_at, discovered_at, created_at
          )
-         SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW(), NOW()
+         SELECT id, $2, $3, $4, source_url, company_name, account_domain, contact_email,
+                jurisdiction, jurisdiction_confidence, raw_snapshot_hash, confidence,
+                fetched_at, refresh_expires_at, NOW(), NOW()
+         FROM unnest($1::uuid[], $5::text[], $6::text[], $7::text[], $8::text[],
+                     $9::text[], $10::float8[], $11::text[], $12::float8[],
+                     $13::timestamptz[], $14::timestamptz[])
+              AS batch(id, source_url, company_name, account_domain, contact_email,
+                       jurisdiction, jurisdiction_confidence, raw_snapshot_hash,
+                       confidence, fetched_at, refresh_expires_at)
          WHERE EXISTS (
              SELECT 1 FROM sales_discovery_jobs
              WHERE id = $3 AND tenant_id = $2 AND lease_token = $15
@@ -1012,26 +1043,31 @@ async fn upsert_candidate(
             refresh_expires_at = EXCLUDED.refresh_expires_at
          RETURNING (xmax = 0) AS inserted",
     )
-    .bind(Uuid::new_v4())
+    .bind(&ids)
     .bind(tenant_id)
     .bind(job_id)
     .bind(source)
-    .bind(&source_url)
-    .bind(&company_name)
-    .bind(&domain)
-    .bind(&contact_email)
-    .bind(&jurisdiction)
-    .bind(jurisdiction_confidence)
-    .bind(&hash)
-    .bind(confidence)
-    .bind(fetched_at)
-    .bind(refresh_expires_at)
+    .bind(&source_urls)
+    .bind(&company_names)
+    .bind(&domains)
+    .bind(&contact_emails)
+    .bind(&jurisdictions)
+    .bind(&jurisdiction_confidences)
+    .bind(&snapshot_hashes)
+    .bind(&confidences)
+    .bind(&fetched_ats)
+    .bind(&refresh_expires)
     .bind(lease_token)
-    .fetch_optional(db)
+    .fetch_all(db)
     .await
     .map_err(|error| SalesError::Database(error.to_string()))?;
 
-    Ok(inserted)
+    if inserted.is_empty() {
+        // The lease guard produced no rows: this runner no longer owns the
+        // job and wrote nothing.
+        return Ok(None);
+    }
+    Ok(Some(inserted.into_iter().filter(|fresh| *fresh).count()))
 }
 
 // ---------------------------------------------------------------------------
@@ -1795,6 +1831,60 @@ mod tests {
                 .await
                 .unwrap();
         }
+    }
+
+    /// One page of candidates is persisted by ONE INSERT (pre-fix: one
+    /// statement per candidate — up to 1,000 credentials per page).
+    #[tokio::test]
+    async fn a_page_of_candidates_is_persisted_by_one_statement() {
+        let Some(pool) = live_pool("candidate_batch").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("cand-batch");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let candidates: Vec<DiscoveredCandidate> = (0..20)
+            .map(|index| {
+                recording_candidate(
+                    &format!("https://batch.example/{index}"),
+                    &format!("batch-{index}.example"),
+                )
+            })
+            .collect();
+        let source: Arc<dyn DiscoverySource> = Arc::new(RecordingSource::with_candidates(
+            "batch_fixture",
+            calls,
+            candidates,
+        ));
+        let runner = DiscoveryJobRunner::new(pool.clone(), vec![source]);
+        let job = runner
+            .create_job(
+                &tenant,
+                &DiscoveryQuery::default(),
+                &["batch_fixture".to_string()],
+            )
+            .await
+            .unwrap();
+
+        crate::test_probe::install_insert_probe(&pool, "sales_discovery_candidates", "tenant_id")
+            .await;
+        crate::test_probe::reset_probe(&pool, "sales_discovery_candidates", &tenant).await;
+
+        runner.run_job(&tenant, job.id, 1).await.unwrap();
+        assert_eq!(
+            crate::test_probe::probe_count(&pool, "sales_discovery_candidates", &tenant).await,
+            1,
+            "one page must be ONE INSERT (pre-fix: one statement per candidate)"
+        );
+        let persisted: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sales_discovery_candidates WHERE tenant_id = $1",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(persisted, 20);
+
+        cleanup_discovery(&pool, &tenant).await;
     }
 
     /// Duplicate candidates on one page are merged before persistence, and

@@ -48,6 +48,31 @@ const MESSAGE_COLUMNS: &str = "id, account_id, mailbox_id, uid, message_id, from
 const MESSAGE_META_COLUMNS: &str = "id, account_id, mailbox_id, uid, message_id, from_address, from_name, to_addresses, cc_addresses, bcc_addresses, subject, date, raw_size, is_read, is_starred, is_deleted, is_spam, labels, dedup_exempt, headers, attachments, created_at, updated_at";
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
+/// Rows a batch has inserted in its transaction but not yet reflected in the
+/// persisted counters (P3: the counters are hoisted to once per mailbox).
+/// The quota checks read through it so `store_messages_batch` enforces the
+/// same byte and message-count limits the pre-fix per-message path did.
+#[derive(Debug, Default)]
+struct PendingBatchUsage {
+    bytes_by_account: HashMap<Uuid, i64>,
+    rows_by_account: HashMap<Uuid, i64>,
+}
+
+impl PendingBatchUsage {
+    fn add(&mut self, account_id: Uuid, raw_size: i64) {
+        *self.bytes_by_account.entry(account_id).or_insert(0) += raw_size.max(0);
+        *self.rows_by_account.entry(account_id).or_insert(0) += 1;
+    }
+
+    fn bytes_for(&self, account_id: &Uuid) -> i64 {
+        self.bytes_by_account.get(account_id).copied().unwrap_or(0)
+    }
+
+    fn rows_for(&self, account_id: &Uuid) -> i64 {
+        self.rows_by_account.get(account_id).copied().unwrap_or(0)
+    }
+}
+
 /// Which optional filters the SQL produced by
 /// [`MessageStorage::message_list_tail`] expects to be bound, in order.
 /// Generated and consumed together so the bind sequence can never drift from
@@ -609,21 +634,67 @@ impl MessageStorage {
     ///         The UNIQUE index idx_mail_messages_dedup provides DB-level enforcement.
     pub async fn store_message(&self, message: &StoredMessage) -> Result<(Uuid, i64)> {
         let mut tx = self.pool.begin().await?;
-        let result = self.store_message_tx(&mut tx, message).await?;
+        let (id, uid, inserted) = self
+            .insert_message_tx(&mut tx, message, &PendingBatchUsage::default())
+            .await?;
+        if inserted {
+            // Counters are maintained per insert on the single-insert path;
+            // the COPY batch hoists them to once per mailbox (L14(e)).
+            self.update_mailbox_counts_tx(&mut tx, &message.mailbox_id)
+                .await?;
+            self.update_account_usage_tx(&mut tx, &message.account_id, message.raw_size)
+                .await?;
+        }
         tx.commit().await?;
-        Ok(result)
+        Ok((id, uid))
     }
 
     /// L10: store several messages in ONE transaction — a failure at message
     /// k rolls back messages 1..k-1 (used by COPY, which must be all-or-nothing).
+    ///
+    /// L14(e): the per-mailbox `total_messages`/`unread_messages` refresh runs
+    /// ONCE PER TOUCHED MAILBOX after the batch (and the account `used_bytes`
+    /// adjustment once per account with the summed byte delta) instead of once
+    /// per message. A 500-message COPY used to issue 500 COUNT(*) refreshes of
+    /// the destination mailbox — the destination's counts are only meaningful
+    /// after the batch anyway, and the same shape is already used by
+    /// [`Self::move_messages_batch`] / [`Self::expunge_deleted_messages`].
+    ///
+    /// The quotas are still enforced INSIDE the batch: the rows this batch has
+    /// already inserted are carried in [`PendingBatchUsage`] and added to the
+    /// persisted counters in the checks, so hoisting the counter writes does
+    /// not weaken the byte or message-count limits (a COPY that would overshoot
+    /// on its second message still fails — see
+    /// `copy_failure_mid_batch_rolls_back_earlier_copies`).
     pub async fn store_messages_batch(
         &self,
         messages: &[StoredMessage],
     ) -> Result<Vec<(Uuid, i64)>> {
         let mut tx = self.pool.begin().await?;
         let mut results = Vec::with_capacity(messages.len());
+        // Mailboxes whose counters must be refreshed, in first-touch order
+        // (dedup collapses write no row and touch no counter).
+        let mut touched_mailboxes: Vec<Uuid> = Vec::new();
+        // Per-account in-batch deltas (not yet written to the counters) —
+        // used both for the quota checks of later inserts and, summed, for the
+        // single usage UPDATE at the end.
+        let mut pending = PendingBatchUsage::default();
         for message in messages {
-            results.push(self.store_message_tx(&mut tx, message).await?);
+            let (id, uid, inserted) = self.insert_message_tx(&mut tx, message, &pending).await?;
+            if inserted {
+                if !touched_mailboxes.contains(&message.mailbox_id) {
+                    touched_mailboxes.push(message.mailbox_id);
+                }
+                pending.add(message.account_id, message.raw_size);
+            }
+            results.push((id, uid));
+        }
+        for mailbox_id in &touched_mailboxes {
+            self.update_mailbox_counts_tx(&mut tx, mailbox_id).await?;
+        }
+        for (account_id, delta) in &pending.bytes_by_account {
+            self.update_account_usage_tx(&mut tx, account_id, *delta)
+                .await?;
         }
         tx.commit().await?;
         Ok(results)
@@ -631,12 +702,20 @@ impl MessageStorage {
 
     /// The transactional core of a message insert (see [`Self::store_message`]).
     /// Callers own the transaction: single inserts commit immediately; the
-    /// COPY batch wraps N calls in one transaction.
-    async fn store_message_tx(
+    /// COPY batch wraps N calls in one transaction. Returns
+    /// `(row id, uid, inserted)` — `inserted == false` means the DI-006
+    /// delivery-dedup lookup collapsed onto an existing row, so no row was
+    /// written and no counter/usage adjustment is owed.
+    ///
+    /// `pending` carries the rows this transaction already inserted (empty for
+    /// a single insert) so the byte and message-count quota checks see them
+    /// even though the persisted counters are refreshed only at commit time.
+    async fn insert_message_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         message: &StoredMessage,
-    ) -> Result<(Uuid, i64)> {
+        pending: &PendingBatchUsage,
+    ) -> Result<(Uuid, i64, bool)> {
         let mailbox_ok: Option<i32> = sqlx::query_scalar(
             r#"
             SELECT 1 FROM mail_mailboxes WHERE id = $1 AND account_id = $2
@@ -667,7 +746,12 @@ impl MessageStorage {
         .await?;
         if let Some((quota_bytes, used_bytes)) = quota {
             let incoming = message.raw_size.max(0);
-            if quota_bytes > 0 && used_bytes.saturating_add(incoming) > quota_bytes {
+            if quota_bytes > 0
+                && used_bytes
+                    .saturating_add(pending.bytes_for(&message.account_id))
+                    .saturating_add(incoming)
+                    > quota_bytes
+            {
                 return Err(QuotaExceeded.into());
             }
         }
@@ -691,7 +775,9 @@ impl MessageStorage {
         .bind(message.account_id)
         .fetch_one(&mut **tx)
         .await?;
-        if used_messages >= MAX_MESSAGES_PER_ACCOUNT {
+        if used_messages.saturating_add(pending.rows_for(&message.account_id))
+            >= MAX_MESSAGES_PER_ACCOUNT
+        {
             return Err(QuotaExceeded.into());
         }
 
@@ -724,7 +810,7 @@ impl MessageStorage {
                     message_id = %message.message_id,
                     "Duplicate message detected, returning existing"
                 );
-                return Ok((existing_id, existing_uid));
+                return Ok((existing_id, existing_uid, false));
             }
         }
 
@@ -791,13 +877,8 @@ impl MessageStorage {
         .fetch_one(&mut **tx)
         .await?;
 
-        self.update_mailbox_counts_tx(tx, &message.mailbox_id)
-            .await?;
-        self.update_account_usage_tx(tx, &message.account_id, message.raw_size)
-            .await?;
-
         debug!(message_id = %id, "Message stored");
-        Ok((id, uid))
+        Ok((id, uid, true))
     }
 
     /// Get a message by ID
@@ -969,7 +1050,17 @@ impl MessageStorage {
             binds.is_deleted = true;
         }
 
-        sql.push_str(" ORDER BY uid DESC NULLS LAST, date DESC");
+        // PERF (audit P3): `uid` is NOT NULL in the canonical schema
+        // (002_mailstore_uid.sql sets it; 056 re-asserts it; the partitioned
+        // rebuild in 050 declares it NOT NULL — verified against a fresh
+        // canonical database), so `NULLS LAST` was dead weight that made the
+        // sort un-indexable: `uid DESC NULLS LAST` cannot use the existing
+        // ascending `idx_mail_messages_mailbox_uid (mailbox_id, uid, …)`,
+        // while a plain `uid DESC` can be served by a backward index scan.
+        // Ordering is unchanged on every row the schema admits (the equivalence
+        // test runs both orderings on a fixture and the constraint is pinned
+        // by `canonical_schema_pins_uid_not_null`).
+        sql.push_str(" ORDER BY uid DESC, date DESC");
         sql.push_str(&format!(" LIMIT ${} OFFSET ${}", param_idx, param_idx + 1));
         (sql, binds)
     }
@@ -1027,6 +1118,57 @@ impl MessageStorage {
         limit: i64,
         offset: i64,
     ) -> Result<(Vec<StoredMessage>, i64)> {
+        self.fulltext_search(
+            account_id,
+            mailbox_id,
+            query,
+            limit,
+            offset,
+            Self::FULLTEXT_EXPR_TEXT,
+        )
+        .await
+    }
+
+    /// `SEARCH BODY` scope: `text_body` ONLY (RFC 3501 §6.4.4 — BODY matches
+    /// the body, not the headers). TEXT and the generic query keep the
+    /// combined subject+body+sender expression; this method is backed by its
+    /// own GIN index (`idx_mail_messages_body_search`) with the identical
+    /// expression.
+    pub async fn search_body_messages(
+        &self,
+        account_id: &Uuid,
+        mailbox_id: &Uuid,
+        query: &str,
+        limit: i64,
+        offset: i64,
+    ) -> Result<(Vec<StoredMessage>, i64)> {
+        self.fulltext_search(
+            account_id,
+            mailbox_id,
+            query,
+            limit,
+            offset,
+            Self::FULLTEXT_EXPR_BODY,
+        )
+        .await
+    }
+
+    /// The `TEXT`/generic full-text expression — MUST match the GIN index
+    /// expression from migration 050 exactly (subject + body + sender).
+    const FULLTEXT_EXPR_TEXT: &'static str = "to_tsvector('english', COALESCE(subject, '') || ' ' || COALESCE(text_body, '') || ' ' || COALESCE(from_address, ''))";
+
+    /// The `BODY` expression — MUST match `idx_mail_messages_body_search`.
+    const FULLTEXT_EXPR_BODY: &'static str = "to_tsvector('english', COALESCE(text_body, ''))";
+
+    async fn fulltext_search(
+        &self,
+        account_id: &Uuid,
+        mailbox_id: &Uuid,
+        query: &str,
+        limit: i64,
+        offset: i64,
+        expression: &'static str,
+    ) -> Result<(Vec<StoredMessage>, i64)> {
         let q = query.trim();
         // O-4.1:Reject empty queries and queries shorter than minimum term length
         if q.len() < Self::MIN_SEARCH_TERM_LENGTH {
@@ -1043,14 +1185,15 @@ impl MessageStorage {
             ));
         }
 
-        let total: i64 = sqlx::query_scalar(
+        // SAFETY: `expression` is one of the two compile-time constants above
+        // (never user input).
+        let total: i64 = sqlx::query_scalar(&format!(
             r#"
             SELECT COUNT(*) FROM mail_messages
             WHERE account_id = $1 AND mailbox_id = $2
-              AND to_tsvector('english', subject || ' ' || COALESCE(text_body, ''))
-                  @@ plainto_tsquery('english', $3)
+              AND {expression} @@ plainto_tsquery('english', $3)
         "#,
-        )
+        ))
         .bind(account_id)
         .bind(mailbox_id)
         .bind(q)
@@ -1065,8 +1208,7 @@ impl MessageStorage {
             r#"
             SELECT {} FROM mail_messages
             WHERE account_id = $1 AND mailbox_id = $2
-              AND to_tsvector('english', subject || ' ' || COALESCE(text_body, ''))
-                  @@ plainto_tsquery('english', $3)
+              AND {expression} @@ plainto_tsquery('english', $3)
             ORDER BY uid DESC NULLS LAST, date DESC
             LIMIT $4 OFFSET $5
         "#,
@@ -1104,7 +1246,34 @@ impl MessageStorage {
     /// search this works on encrypted stores too — headers are never
     /// encrypted — and never matches on subject/body alone, so an IMAP
     /// `SEARCH HEADER` cannot be satisfied by an unrelated subject hit.
+    ///
+    /// PERF (audit P3): page-only — NO COUNT. The old entry point ran the
+    /// same unindexable `EXISTS (SELECT 1 FROM jsonb_each(…))` predicate
+    /// TWICE per search (once for `COUNT(*)`, once for the page), i.e. two
+    /// mailbox scans for one page, and the value was only ever used to fill a
+    /// reply field nobody reads (the RPC's only consumer, imap-server SEARCH,
+    /// intersects the returned `messages` and ignores `total`). Callers that
+    /// actually surface a total opt in explicitly via
+    /// [`Self::search_by_header_with_total`].
     pub async fn search_by_header(
+        &self,
+        account_id: &Uuid,
+        mailbox_id: &Uuid,
+        field: &str,
+        value: &str,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<StoredMessage>> {
+        let pattern = format!("%{}%", Self::escape_like(value));
+        self.header_search_page(account_id, mailbox_id, field, &pattern, limit, offset)
+            .await
+    }
+
+    /// The opt-in counting variant of [`Self::search_by_header`]: identical
+    /// page semantics plus the match count, for callers that surface a total.
+    /// The COUNT is a second execution of the (unindexable) header predicate —
+    /// pay for it only when the total is actually consumed.
+    pub async fn search_by_header_with_total(
         &self,
         account_id: &Uuid,
         mailbox_id: &Uuid,
@@ -1115,19 +1284,16 @@ impl MessageStorage {
     ) -> Result<(Vec<StoredMessage>, i64)> {
         let pattern = format!("%{}%", Self::escape_like(value));
 
-        let predicate = r#"
-            EXISTS (
-                SELECT 1 FROM jsonb_each(COALESCE(headers, '{}'::jsonb)) AS h(k, v)
-                WHERE lower(h.k) = lower($3) AND h.v::text ILIKE $4 ESCAPE '\'
-            )
-        "#;
-
+        // The COUNT runs the SAME predicate the page runs, so the two can
+        // never disagree; the predicate itself is shared verbatim (see
+        // [`Self::HEADER_SEARCH_PREDICATE`]).
         let total: i64 = sqlx::query_scalar(&format!(
             r#"
             SELECT COUNT(*) FROM mail_messages
             WHERE account_id = $1 AND mailbox_id = $2
-              AND {predicate}
-        "#
+              AND {}
+        "#,
+            Self::HEADER_SEARCH_PREDICATE
         ))
         .bind(account_id)
         .bind(mailbox_id)
@@ -1136,35 +1302,64 @@ impl MessageStorage {
         .fetch_one(&self.pool)
         .await?;
 
-        // SAFETY: MESSAGE_META_COLUMNS is a compile-time constant string, not
-        // user input. F1/F2: no `is_deleted = false` predicate (the SEARCH
-        // view includes \Deleted messages) and metadata-only columns (headers
-        // are never encrypted, so the predicate still works on encrypted
-        // stores — and no body is decrypted for the result rows).
+        let messages = self
+            .header_search_page(account_id, mailbox_id, field, &pattern, limit, offset)
+            .await?;
+        Ok((messages, total))
+    }
+
+    /// The `headers` JSONB containment predicate shared by the header-search
+    /// page query and its opt-in COUNT. `$3` is the header field name, `$4`
+    /// the escaped LIKE pattern. Compile-time constant; no user value is ever
+    /// interpolated into it.
+    const HEADER_SEARCH_PREDICATE: &'static str = r#"
+            EXISTS (
+                SELECT 1 FROM jsonb_each(COALESCE(headers, '{}'::jsonb)) AS h(k, v)
+                WHERE lower(h.k) = lower($3) AND h.v::text ILIKE $4 ESCAPE '\'
+            )
+        "#;
+
+    /// Run the header-search page query once. Identical SQL (filter,
+    /// ordering, paging) in both public entry points — the count-free path
+    /// simply never issues the COUNT.
+    async fn header_search_page(
+        &self,
+        account_id: &Uuid,
+        mailbox_id: &Uuid,
+        field: &str,
+        pattern: &str,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<StoredMessage>> {
+        // SAFETY: MESSAGE_META_COLUMNS / HEADER_SEARCH_PREDICATE are
+        // compile-time constant strings, not user input. F1/F2: no
+        // `is_deleted = false` predicate (the SEARCH view includes \Deleted
+        // messages) and metadata-only columns (headers are never encrypted,
+        // so the predicate still works on encrypted stores — and no body is
+        // decrypted for the result rows).
         let rows = sqlx::query(&format!(
             r#"
             SELECT {} FROM mail_messages
             WHERE account_id = $1 AND mailbox_id = $2
-              AND {predicate}
+              AND {}
             ORDER BY uid DESC NULLS LAST, date DESC
             LIMIT $5 OFFSET $6
         "#,
-            MESSAGE_META_COLUMNS
+            MESSAGE_META_COLUMNS,
+            Self::HEADER_SEARCH_PREDICATE
         ))
         .bind(account_id)
         .bind(mailbox_id)
         .bind(field)
-        .bind(&pattern)
+        .bind(pattern)
         .bind(limit)
         .bind(offset)
         .fetch_all(&self.pool)
         .await?;
 
-        let messages = rows
-            .iter()
+        rows.iter()
             .map(Self::row_to_message_meta)
-            .collect::<Result<Vec<_>>>()?;
-        Ok((messages, total))
+            .collect::<Result<Vec<_>>>()
     }
 
     /// Fetch message flags for a set of UIDs.
@@ -1425,6 +1620,18 @@ impl MessageStorage {
     /// per-message loop left a partial move behind). Mailbox counters are
     /// refreshed once at the end instead of once per message. Returns the new
     /// UID for each moved row id, in the same order.
+    ///
+    /// L14(f): set-based — the pre-fix loop did 3 round trips per message
+    /// (SELECT its mailbox, bump the destination `uidnext`, UPDATE the row)
+    /// plus a per-message `FOR UPDATE` lock on the destination mailbox, i.e.
+    /// O(N) statements and O(N) lock acquisitions for an N-message MOVE. Now:
+    /// one `SELECT … WHERE id = ANY($1)`, one `uidnext` bump reserving a
+    /// contiguous block of N UIDs, and one `UPDATE … FROM unnest($ids, $uids)`
+    /// — 3 statements for the whole batch regardless of N (plus the count
+    /// refreshes). The UID each row receives is UNCHANGED: the destination's
+    /// pre-batch `uidnext` + the row's position in `message_ids`, exactly what
+    /// the per-message loop allocated (COPYUID ordering preserved, and the
+    /// single reserved block keeps the UIDs unique).
     pub async fn move_messages_batch(
         &self,
         message_ids: &[Uuid],
@@ -1435,58 +1642,78 @@ impl MessageStorage {
         }
         let mut tx = self.pool.begin().await?;
 
+        // One round trip: the rows' current mailboxes. `id` is the PK, so
+        // this is an index lookup per id (one statement, ordered by nothing —
+        // the caller's order is restored below from `message_ids`).
+        let rows: Vec<(Uuid, Uuid)> = sqlx::query_as(
+            r#"
+            SELECT id, mailbox_id FROM mail_messages WHERE id = ANY($1)
+        "#,
+        )
+        .bind(message_ids)
+        .fetch_all(&mut *tx)
+        .await?;
+        let mut mailbox_by_id: HashMap<Uuid, Uuid> = HashMap::with_capacity(rows.len());
+        for (id, mailbox_id) in rows {
+            mailbox_by_id.insert(id, mailbox_id);
+        }
+
+        // Same failure contract as the per-message loop: a missing id aborts
+        // the whole batch (nothing partial).
         let mut old_mailbox_ids: Vec<Uuid> = Vec::new();
-        let mut new_uids = Vec::with_capacity(message_ids.len());
         for id in message_ids {
-            let message = sqlx::query(
-                r#"
-                SELECT mailbox_id FROM mail_messages WHERE id = $1
-            "#,
-            )
-            .bind(id)
-            .fetch_optional(&mut *tx)
-            .await?;
-            let Some(message) = message else {
+            let Some(old_mailbox_id) = mailbox_by_id.get(id) else {
                 return Err(anyhow!("Message {} not found", id));
             };
-            let old_mailbox_id: Uuid = message.get("mailbox_id");
-            if !old_mailbox_ids.contains(&old_mailbox_id) {
-                old_mailbox_ids.push(old_mailbox_id);
+            if !old_mailbox_ids.contains(old_mailbox_id) {
+                old_mailbox_ids.push(*old_mailbox_id);
             }
-
-            let new_uid: i64 = sqlx::query_scalar(
-                r#"
-                WITH next_uid AS (
-                    SELECT COALESCE(uidnext, 1) AS uid
-                    FROM mail_mailboxes
-                    WHERE id = $1
-                    FOR UPDATE
-                )
-                UPDATE mail_mailboxes
-                SET uidnext = (SELECT uid FROM next_uid) + 1,
-                    updated_at = NOW()
-                WHERE id = $1
-                RETURNING (SELECT uid FROM next_uid) AS uid
-            "#,
-            )
-            .bind(target_mailbox_id)
-            .fetch_one(&mut *tx)
-            .await?;
-
-            sqlx::query(
-                r#"
-                UPDATE mail_messages
-                SET mailbox_id = $2, uid = $3, updated_at = NOW()
-                WHERE id = $1
-            "#,
-            )
-            .bind(id)
-            .bind(target_mailbox_id)
-            .bind(new_uid)
-            .execute(&mut *tx)
-            .await?;
-            new_uids.push(new_uid);
         }
+
+        // One round trip: reserve the destination's next N UIDs under a
+        // single row lock (the per-message loop locked the mailbox N times).
+        let n = message_ids.len() as i64;
+        let first_uid: i64 = sqlx::query_scalar(
+            r#"
+            WITH next_uid AS (
+                SELECT COALESCE(uidnext, 1) AS uid
+                FROM mail_mailboxes
+                WHERE id = $1
+                FOR UPDATE
+            )
+            UPDATE mail_mailboxes
+            SET uidnext = (SELECT uid FROM next_uid) + $2,
+                updated_at = NOW()
+            WHERE id = $1
+            RETURNING (SELECT uid FROM next_uid) AS uid
+        "#,
+        )
+        .bind(target_mailbox_id)
+        .bind(n)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        // The UID the pre-fix loop would have handed to messages[i] is
+        // first_uid + i (allocations happened in `message_ids` order).
+        let new_uids: Vec<i64> = (0..n).map(|i| first_uid + i).collect();
+
+        // One round trip: assign mailbox + UID for every row. The parallel
+        // arrays are built in `message_ids` order and joined on the PK; the
+        // reserved block is disjoint from every UID already in the
+        // destination, so no unique-index conflict can arise mid-statement.
+        sqlx::query(
+            r#"
+            UPDATE mail_messages m
+            SET mailbox_id = $3, uid = u.uid, updated_at = NOW()
+            FROM unnest($1::uuid[], $2::bigint[]) AS u(id, uid)
+            WHERE m.id = u.id
+        "#,
+        )
+        .bind(message_ids)
+        .bind(&new_uids)
+        .bind(target_mailbox_id)
+        .execute(&mut *tx)
+        .await?;
 
         for mailbox_id in old_mailbox_ids {
             self.update_mailbox_counts_tx(&mut tx, &mailbox_id).await?;
@@ -2050,7 +2277,16 @@ mod tests {
         // mailbox_id consumes $2, so LIMIT/OFFSET land on $3/$4 — what
         // matters is that NO is_deleted predicate appears anywhere.
         assert!(sql.contains(" AND mailbox_id = $2"));
-        assert!(sql.contains(" ORDER BY uid DESC NULLS LAST, date DESC"));
+        // PERF (audit P3): the listing orders by `uid DESC` WITHOUT
+        // `NULLS LAST` so the ascending `idx_mail_messages_mailbox_uid` can
+        // serve the sort with a backward scan; `uid` is NOT NULL in the
+        // canonical schema (see `canonical_schema_pins_uid_not_null`), so the
+        // two orderings agree on every row that can exist.
+        assert!(sql.contains(" ORDER BY uid DESC, date DESC"), "got: {sql}");
+        assert!(
+            !sql.contains("NULLS LAST"),
+            "the listing sort must stay index-friendly, got: {sql}"
+        );
         assert!(sql.contains("LIMIT $3 OFFSET $4"));
     }
 
@@ -2293,7 +2529,7 @@ mod tests {
         storage.store_message(&m2).await.unwrap();
 
         let (hits, total) = storage
-            .search_by_header(&account.id, &inbox.id, "Message-ID", "target-mid", 100, 0)
+            .search_by_header_with_total(&account.id, &inbox.id, "Message-ID", "target-mid", 100, 0)
             .await
             .unwrap();
         assert_eq!(total, 1, "only the message with the matching header");
@@ -2302,7 +2538,7 @@ mod tests {
 
         // Subject content must not satisfy a header-field search.
         let (hits, total) = storage
-            .search_by_header(
+            .search_by_header_with_total(
                 &account.id,
                 &inbox.id,
                 "Message-ID",
@@ -2317,14 +2553,14 @@ mod tests {
 
         // Field-name matching is case-insensitive.
         let (_, total) = storage
-            .search_by_header(&account.id, &inbox.id, "message-id", "TARGET-MID", 100, 0)
+            .search_by_header_with_total(&account.id, &inbox.id, "message-id", "TARGET-MID", 100, 0)
             .await
             .unwrap();
         assert_eq!(total, 1, "value match is case-insensitive");
 
         // ILIKE wildcards in the value are literal, not patterns.
         let (_, total) = storage
-            .search_by_header(&account.id, &inbox.id, "Message-ID", "%", 100, 0)
+            .search_by_header_with_total(&account.id, &inbox.id, "Message-ID", "%", 100, 0)
             .await
             .unwrap();
         assert_eq!(total, 0, "'%' in the value must not act as a wildcard");
@@ -3250,22 +3486,129 @@ mod tests {
 
         // Header search honors the field NAME (a subject match is not enough).
         let (hits, total) = storage
-            .search_by_header(&account.id, &inbox.id, "X-Trace", "ABC", 100, 0)
+            .search_by_header_with_total(&account.id, &inbox.id, "X-Trace", "ABC", 100, 0)
             .await
             .unwrap();
         assert_eq!((hits.len(), total), (1, 1));
         let (hits, total) = storage
-            .search_by_header(&account.id, &inbox.id, "Subject", "Quarterly", 100, 0)
+            .search_by_header_with_total(&account.id, &inbox.id, "Subject", "Quarterly", 100, 0)
             .await
             .unwrap();
         assert_eq!(total, 0, "subject is not a stored header field");
         assert!(hits.is_empty());
         // LIKE metacharacters are literal.
         let (_, total) = storage
-            .search_by_header(&account.id, &inbox.id, "X-Trace", "%", 100, 0)
+            .search_by_header_with_total(&account.id, &inbox.id, "X-Trace", "%", 100, 0)
             .await
             .unwrap();
         assert_eq!(total, 0, "'%' must not act as a wildcard");
+
+        pool.close().await;
+    }
+
+    /// PERF P3: the full-text query must use the SAME tsvector expression the
+    /// GIN index is built on (`subject || text_body || from_address`). The
+    /// pre-fix query omitted the sender, so no index could serve it and the
+    /// planner always fell back to a scan. This pins the indexed semantics:
+    /// a token that occurs ONLY in the sender address is searchable.
+    #[tokio::test]
+    async fn fulltext_search_matches_the_sender_address() {
+        let Some((storage, pool)) = adversarial_storage("adv_search_sender").await else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+        let (account, inbox) = account_with_inbox(&storage, "search-sender").await;
+
+        let mut sender_only = sample_message(account.id, inbox.id, "<sender-only@example.com>");
+        sender_only.id = Uuid::new_v4();
+        sender_only.from_address = "xyzzyplugh@example.test".to_string();
+        sender_only.subject = "Lunch plans".to_string();
+        sender_only.text_body = Some("nothing relevant here".to_string());
+        storage.store_message(&sender_only).await.unwrap();
+
+        let mut decoy = sample_message(account.id, inbox.id, "<sender-decoy@example.com>");
+        decoy.id = Uuid::new_v4();
+        decoy.from_address = "someone@example.test".to_string();
+        decoy.subject = "Lunch plans".to_string();
+        decoy.text_body = Some("nothing relevant here".to_string());
+        storage.store_message(&decoy).await.unwrap();
+
+        let (hits, total) = storage
+            .search_messages(&account.id, &inbox.id, "xyzzyplugh@example.test", 100, 0)
+            .await
+            .unwrap();
+        assert_eq!(total, 1, "only the sender-only row matches");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].message_id, "<sender-only@example.com>");
+
+        pool.close().await;
+    }
+
+    /// RFC 3501 §6.4.4: `SEARCH BODY` matches the BODY only, while `TEXT`
+    /// matches header + body. The BODY path has its own GIN index and must
+    /// not see a subject-only or sender-only hit.
+    #[tokio::test]
+    async fn body_scope_searches_text_body_only_while_text_scope_includes_subject_and_sender() {
+        let Some((storage, pool)) = adversarial_storage("adv_search_scope").await else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+        let (account, inbox) = account_with_inbox(&storage, "search-scope").await;
+
+        let mut subject_hit = sample_message(account.id, inbox.id, "<scope-subject@example.com>");
+        subject_hit.id = Uuid::new_v4();
+        subject_hit.subject = "quarterly zzbodytoken report".to_string();
+        subject_hit.text_body = Some("unrelated prose".to_string());
+        storage.store_message(&subject_hit).await.unwrap();
+
+        let mut sender_hit = sample_message(account.id, inbox.id, "<scope-sender@example.com>");
+        sender_hit.id = Uuid::new_v4();
+        sender_hit.from_address = "zzbodytoken@example.test".to_string();
+        sender_hit.subject = "Lunch plans".to_string();
+        sender_hit.text_body = Some("unrelated prose".to_string());
+        storage.store_message(&sender_hit).await.unwrap();
+
+        let mut body_hit = sample_message(account.id, inbox.id, "<scope-body@example.com>");
+        body_hit.id = Uuid::new_v4();
+        body_hit.from_address = "someone@example.test".to_string();
+        body_hit.subject = "Lunch plans".to_string();
+        body_hit.text_body = Some("the zzbodytoken appears here".to_string());
+        storage.store_message(&body_hit).await.unwrap();
+
+        // BODY: only the text_body occurrence.
+        let (body_hits, body_total) = storage
+            .search_body_messages(&account.id, &inbox.id, "zzbodytoken", 100, 0)
+            .await
+            .unwrap();
+        assert_eq!(body_total, 1, "BODY must not match subject/sender");
+        assert_eq!(body_hits.len(), 1);
+        assert_eq!(body_hits[0].message_id, "<scope-body@example.com>");
+
+        // TEXT (combined scope): subject and body occurrences; the sender is
+        // a single email lexeme, so it needs the full address as the query.
+        let (text_hits, text_total) = storage
+            .search_messages(&account.id, &inbox.id, "zzbodytoken", 100, 0)
+            .await
+            .unwrap();
+        assert_eq!(text_total, 2, "TEXT sees subject + body");
+        let ids: std::collections::HashSet<&str> =
+            text_hits.iter().map(|m| m.message_id.as_str()).collect();
+        assert!(ids.contains("<scope-subject@example.com>"));
+        assert!(ids.contains("<scope-body@example.com>"));
+
+        let (sender_body_hits, sender_body_total) = storage
+            .search_body_messages(&account.id, &inbox.id, "zzbodytoken@example.test", 100, 0)
+            .await
+            .unwrap();
+        assert_eq!(sender_body_total, 0, "BODY never sees the sender address");
+        assert!(sender_body_hits.is_empty());
+
+        let (sender_text_hits, sender_text_total) = storage
+            .search_messages(&account.id, &inbox.id, "zzbodytoken@example.test", 100, 0)
+            .await
+            .unwrap();
+        assert_eq!(sender_text_total, 1, "TEXT sees the sender address");
+        assert_eq!(sender_text_hits[0].message_id, "<scope-sender@example.com>");
 
         pool.close().await;
     }
@@ -3695,6 +4038,821 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+
+        pool.close().await;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // P3 perf wave: COPY/MOVE/SEARCH/listing — set-based paths + bound tests
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Statement-level probe on `mail_mailboxes` UPDATEs (P3 item 1/2 bound
+    /// tests). A statement-level trigger fires once per UPDATE statement —
+    /// unlike a row trigger it cannot be swallowed by an UPDATE that rewrites
+    /// the same values, which is exactly what a repeated count refresh does.
+    /// `uidnext` allocations are told apart by a row trigger (the only other
+    /// writer of that table is the UID bump, which changes `uidnext`).
+    async fn install_mailbox_update_probe(pool: &PgPool) {
+        sqlx::query("CREATE TABLE IF NOT EXISTS test_mb_update_probe (kind text NOT NULL)")
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            r#"
+            CREATE OR REPLACE FUNCTION test_mb_update_probe_stmt() RETURNS trigger AS $$
+            BEGIN
+                INSERT INTO test_mb_update_probe (kind) VALUES ('stmt');
+                RETURN NULL;
+            END $$ LANGUAGE plpgsql
+        "#,
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            r#"
+            CREATE OR REPLACE FUNCTION test_mb_update_probe_uid() RETURNS trigger AS $$
+            BEGIN
+                INSERT INTO test_mb_update_probe (kind) VALUES ('uid');
+                RETURN NULL;
+            END $$ LANGUAGE plpgsql
+        "#,
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query("DROP TRIGGER IF EXISTS trg_test_mb_stmt ON mail_mailboxes")
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("DROP TRIGGER IF EXISTS trg_test_mb_uid ON mail_mailboxes")
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TRIGGER trg_test_mb_stmt AFTER UPDATE ON mail_mailboxes \
+             FOR EACH STATEMENT EXECUTE FUNCTION test_mb_update_probe_stmt()",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TRIGGER trg_test_mb_uid AFTER UPDATE ON mail_mailboxes \
+             FOR EACH ROW WHEN (NEW.uidnext IS DISTINCT FROM OLD.uidnext) \
+             EXECUTE FUNCTION test_mb_update_probe_uid()",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// `(mailbox UPDATE statements, uidnext allocations)` since the last
+    /// [`reset_mailbox_update_probe`].
+    async fn mailbox_update_probe(pool: &PgPool) -> (i64, i64) {
+        let stmt: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM test_mb_update_probe WHERE kind = 'stmt'")
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        let uid: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM test_mb_update_probe WHERE kind = 'uid'")
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        (stmt, uid)
+    }
+
+    async fn reset_mailbox_update_probe(pool: &PgPool) {
+        sqlx::query("DELETE FROM test_mb_update_probe")
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    /// Statement-level probe on `mail_messages` UPDATEs (P3 item 2 bound test).
+    async fn install_message_update_probe(pool: &PgPool) {
+        sqlx::query("CREATE TABLE IF NOT EXISTS test_msg_update_probe (n bigint NOT NULL)")
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            r#"
+            CREATE OR REPLACE FUNCTION test_msg_update_probe_stmt() RETURNS trigger AS $$
+            BEGIN
+                INSERT INTO test_msg_update_probe VALUES (1);
+                RETURN NULL;
+            END $$ LANGUAGE plpgsql
+        "#,
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query("DROP TRIGGER IF EXISTS trg_test_msg_stmt ON mail_messages")
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TRIGGER trg_test_msg_stmt AFTER UPDATE ON mail_messages \
+             FOR EACH STATEMENT EXECUTE FUNCTION test_msg_update_probe_stmt()",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn message_update_statements(pool: &PgPool) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM test_msg_update_probe")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    async fn reset_message_update_probe(pool: &PgPool) {
+        sqlx::query("DELETE FROM test_msg_update_probe")
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    /// P3 item 1 — equivalence: a multi-message COPY leaves the destination's
+    /// `total_messages`/`unread_messages` identical to a full recount of the
+    /// copied rows, and the source untouched.
+    #[tokio::test]
+    async fn copy_batch_leaves_counts_equal_to_a_full_recount() {
+        let Some((storage, pool)) = adversarial_storage("p3_copy_counts").await else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+        let (account, inbox) = account_with_inbox(&storage, "copy-counts").await;
+        let archive = storage
+            .get_mailbox_by_type(&account.id, MailboxType::Archive)
+            .await
+            .unwrap()
+            .unwrap();
+
+        // 12 source messages, 5 of them \Seen (unread counts must reflect
+        // the copies' flags, not the source's).
+        let mut clones = Vec::new();
+        let mut source_ids = Vec::new();
+        for i in 0..12 {
+            let mut m = sample_message(
+                account.id,
+                inbox.id,
+                &format!("<copy-counts-{i}-{}@example.com>", Uuid::new_v4()),
+            );
+            m.id = Uuid::new_v4();
+            m.is_read = i % 3 == 0;
+            m.is_starred = i == 4;
+            storage.store_message(&m).await.unwrap();
+            source_ids.push(m.id);
+
+            // COPY semantics (service.rs): new row, dedup-exempt, into the
+            // destination mailbox.
+            m.id = Uuid::new_v4();
+            m.mailbox_id = archive.id;
+            m.uid = 0;
+            m.dedup_exempt = true;
+            clones.push(m);
+        }
+        let before_inbox = storage
+            .get_mailbox_by_name(&account.id, "Inbox")
+            .await
+            .unwrap()
+            .unwrap();
+
+        let stored = storage.store_messages_batch(&clones).await.unwrap();
+        assert_eq!(stored.len(), clones.len());
+
+        // Destination counters equal a full recount of what was copied.
+        let archive_after = storage
+            .get_mailbox_by_name(&account.id, "Archive")
+            .await
+            .unwrap()
+            .unwrap();
+        let (expected_total, expected_unread): (i64, i64) = sqlx::query_as(
+            "SELECT COUNT(*) FILTER (WHERE is_deleted = false)::bigint,
+                    COUNT(*) FILTER (WHERE is_deleted = false AND is_read = false)::bigint
+             FROM mail_messages WHERE mailbox_id = $1 AND account_id = $2",
+        )
+        .bind(archive.id)
+        .bind(account.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(archive_after.total_messages, expected_total);
+        assert_eq!(archive_after.total_messages, 12);
+        assert_eq!(archive_after.unread_messages, expected_unread);
+        assert_eq!(archive_after.unread_messages, 8);
+
+        // The source mailbox is untouched (including its counters).
+        let inbox_after = storage
+            .get_mailbox_by_name(&account.id, "Inbox")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (inbox_after.total_messages, inbox_after.unread_messages),
+            (before_inbox.total_messages, before_inbox.unread_messages)
+        );
+        assert_eq!(
+            storage
+                .get_messages_by_uids(
+                    &account.id,
+                    &inbox.id,
+                    &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+                )
+                .await
+                .unwrap()
+                .len(),
+            12,
+            "COPY must not move the originals"
+        );
+        // Fresh UIDs were allocated in the destination's uid space.
+        let dest_uids: Vec<i64> =
+            sqlx::query_scalar("SELECT uid FROM mail_messages WHERE mailbox_id = $1 ORDER BY uid")
+                .bind(archive.id)
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(dest_uids, (1..=12).collect::<Vec<_>>());
+
+        pool.close().await;
+    }
+
+    /// P3 item 1 — bound: a 500-message COPY refreshes the destination
+    /// mailbox counters ONCE. Method: a statement-level trigger counts every
+    /// UPDATE statement on `mail_mailboxes`; `uidnext` allocations are
+    /// counted by a second (row-level) trigger, so
+    /// `statements - uidnext_allocations` is the number of count refreshes —
+    /// exactly 1 for the batch, and 500 under the pre-fix per-message path.
+    #[tokio::test]
+    async fn copy_batch_refreshes_destination_counts_once_for_500_messages() {
+        let Some((storage, pool)) = adversarial_storage("p3_copy_bound").await else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+        let (account, _inbox) = account_with_inbox(&storage, "copy-bound").await;
+        let archive = storage
+            .get_mailbox_by_type(&account.id, MailboxType::Archive)
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Fixture first (its inserts must not be part of the measurement).
+        let mut clones = Vec::new();
+        for i in 0..500 {
+            let mut m = sample_message(
+                account.id,
+                archive.id,
+                &format!("<copy-bound-{i}-{}@example.com>", Uuid::new_v4()),
+            );
+            m.id = Uuid::new_v4();
+            m.dedup_exempt = true;
+            clones.push(m);
+        }
+
+        install_mailbox_update_probe(&pool).await;
+        reset_mailbox_update_probe(&pool).await;
+
+        let stored = storage.store_messages_batch(&clones).await.unwrap();
+        assert_eq!(stored.len(), 500);
+
+        let (statements, uid_allocations) = mailbox_update_probe(&pool).await;
+        assert_eq!(
+            uid_allocations, 500,
+            "each inserted message takes its own UID (unchanged behaviour)"
+        );
+        assert_eq!(
+            statements - uid_allocations,
+            1,
+            "the COPY batch must issue ONE count refresh for the destination mailbox \
+             (pre-fix path issued one per message: 500); probe = statement-level trigger \
+             on mail_mailboxes minus uidnext allocations"
+        );
+        assert_eq!(
+            storage
+                .get_mailbox_by_name(&account.id, "Archive")
+                .await
+                .unwrap()
+                .unwrap()
+                .total_messages,
+            500
+        );
+
+        pool.close().await;
+    }
+
+    /// P3 item 2 — golden: the batch MOVE hands every row exactly the UID the
+    /// pre-fix per-message loop produced (destination `uidnext` + the row's
+    /// position in `message_ids`), preserves input order, and keeps UIDs
+    /// unique. The pre-fix algorithm is reimplemented here against a second
+    /// mailbox pair so the comparison is against the real old SQL, not a
+    /// restatement of the new formula.
+    #[tokio::test]
+    async fn move_batch_uids_match_the_legacy_per_message_algorithm() {
+        let Some((storage, pool)) = adversarial_storage("p3_move_golden").await else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+
+        // --- Legacy arm: the exact pre-fix statements, one per message.
+        let (legacy_account, legacy_inbox) = account_with_inbox(&storage, "move-legacy").await;
+        let legacy_sent = storage
+            .get_mailbox_by_type(&legacy_account.id, MailboxType::Sent)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut legacy_ids = Vec::new();
+        for i in 0..25 {
+            let mut m = sample_message(
+                legacy_account.id,
+                legacy_inbox.id,
+                &format!("<mv-legacy-{i}-{}@example.com>", Uuid::new_v4()),
+            );
+            m.id = Uuid::new_v4();
+            legacy_ids.push(m.id);
+            storage.store_message(&m).await.unwrap();
+        }
+        let mut legacy_uids = Vec::with_capacity(legacy_ids.len());
+        let mut legacy_tx = pool.begin().await.unwrap();
+        for id in &legacy_ids {
+            let new_uid: i64 = sqlx::query_scalar(
+                r#"
+                WITH next_uid AS (
+                    SELECT COALESCE(uidnext, 1) AS uid
+                    FROM mail_mailboxes
+                    WHERE id = $1
+                    FOR UPDATE
+                )
+                UPDATE mail_mailboxes
+                SET uidnext = (SELECT uid FROM next_uid) + 1,
+                    updated_at = NOW()
+                WHERE id = $1
+                RETURNING (SELECT uid FROM next_uid) AS uid
+            "#,
+            )
+            .bind(legacy_sent.id)
+            .fetch_one(&mut *legacy_tx)
+            .await
+            .unwrap();
+            sqlx::query(
+                "UPDATE mail_messages SET mailbox_id = $2, uid = $3, updated_at = NOW() WHERE id = $1",
+            )
+            .bind(id)
+            .bind(legacy_sent.id)
+            .bind(new_uid)
+            .execute(&mut *legacy_tx)
+            .await
+            .unwrap();
+            legacy_uids.push(new_uid);
+        }
+        legacy_tx.commit().await.unwrap();
+
+        // --- New arm: the same fixture moved through the batch API.
+        let (account, inbox) = account_with_inbox(&storage, "move-batch").await;
+        let sent = storage
+            .get_mailbox_by_type(&account.id, MailboxType::Sent)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut ids = Vec::new();
+        for i in 0..25 {
+            let mut m = sample_message(
+                account.id,
+                inbox.id,
+                &format!("<mv-batch-{i}-{}@example.com>", Uuid::new_v4()),
+            );
+            m.id = Uuid::new_v4();
+            ids.push(m.id);
+            storage.store_message(&m).await.unwrap();
+        }
+        // A pre-existing row in the destination proves allocation continues
+        // from ITS uidnext, not from 1.
+        let mut preexisting = sample_message(
+            account.id,
+            sent.id,
+            &format!("<mv-pre-{}@example.com>", Uuid::new_v4()),
+        );
+        preexisting.id = Uuid::new_v4();
+        storage.store_message(&preexisting).await.unwrap();
+
+        let new_uids = storage.move_messages_batch(&ids, &sent.id).await.unwrap();
+
+        // Same allocation as the legacy loop, shifted by the destination's
+        // pre-batch uidnext (legacy ran against an empty destination = 1).
+        let shifted: Vec<i64> = legacy_uids.iter().map(|u| u + 1).collect();
+        assert_eq!(
+            new_uids, shifted,
+            "the set-based MOVE must hand out the same UID sequence, in the same order"
+        );
+        // Order matches the input order and every UID is unique.
+        let ordered: Vec<i64> = sqlx::query_scalar(
+            "SELECT uid FROM mail_messages WHERE id = ANY($1) ORDER BY array_position($1::uuid[], id)",
+        )
+        .bind(&ids)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(ordered, new_uids, "row order == message_ids order");
+        let unique: i64 = sqlx::query_scalar(
+            "SELECT COUNT(DISTINCT uid) FROM mail_messages WHERE mailbox_id = $1",
+        )
+        .bind(sent.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(unique, 26, "26 distinct UIDs in the destination");
+        // The pre-existing row kept its UID.
+        assert_eq!(
+            storage
+                .get_message(&preexisting.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .uid,
+            1
+        );
+        // Counters follow the batch.
+        assert_eq!(
+            storage
+                .get_mailbox_by_name(&account.id, "Sent")
+                .await
+                .unwrap()
+                .unwrap()
+                .total_messages,
+            26
+        );
+        assert_eq!(
+            storage
+                .get_mailbox_by_name(&account.id, "Inbox")
+                .await
+                .unwrap()
+                .unwrap()
+                .total_messages,
+            0
+        );
+
+        pool.close().await;
+    }
+
+    /// P3 item 2 — bound: a 25-message MOVE issues ONE `mail_messages`
+    /// UPDATE statement and ONE destination `uidnext` allocation regardless
+    /// of N (pre-fix: 25 of each). Method: statement-level triggers.
+    #[tokio::test]
+    async fn move_batch_issues_bounded_statements() {
+        let Some((storage, pool)) = adversarial_storage("p3_move_bound").await else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+        let (account, inbox) = account_with_inbox(&storage, "move-bound").await;
+        let sent = storage
+            .get_mailbox_by_type(&account.id, MailboxType::Sent)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut ids = Vec::new();
+        for i in 0..25 {
+            let mut m = sample_message(
+                account.id,
+                inbox.id,
+                &format!("<mv-bound-{i}-{}@example.com>", Uuid::new_v4()),
+            );
+            m.id = Uuid::new_v4();
+            ids.push(m.id);
+            storage.store_message(&m).await.unwrap();
+        }
+
+        install_mailbox_update_probe(&pool).await;
+        install_message_update_probe(&pool).await;
+        reset_mailbox_update_probe(&pool).await;
+        reset_message_update_probe(&pool).await;
+
+        let new_uids = storage.move_messages_batch(&ids, &sent.id).await.unwrap();
+        assert_eq!(new_uids.len(), 25);
+
+        let (mailbox_statements, uid_allocations) = mailbox_update_probe(&pool).await;
+        assert_eq!(
+            uid_allocations, 1,
+            "the whole batch reserves its UIDs with ONE uidnext bump"
+        );
+        assert_eq!(
+            mailbox_statements, 3,
+            "1 uidnext allocation + 2 count refreshes (source inbox + destination sent)"
+        );
+        assert_eq!(
+            message_update_statements(&pool).await,
+            1,
+            "one set-based UPDATE assigns every row (pre-fix: 25)"
+        );
+
+        pool.close().await;
+    }
+
+    /// Scans of the whole `mail_messages` partition family (seq + index),
+    /// summed from the stats collector. A statement-level trigger cannot
+    /// observe SELECTs, so the SELECT-path bound test reads the server's own
+    /// scan counters. The family is partitioned (050): the parent's own
+    /// counters stay at 0 and EVERY statement scans every leaf partition
+    /// exactly once, so one statement == [`mail_messages_partition_count`]
+    /// scan units.
+    async fn mail_messages_family_scans(pool: &PgPool) -> i64 {
+        sqlx::query_scalar(
+            "SELECT (COALESCE(SUM(seq_scan), 0) + COALESCE(SUM(idx_scan), 0))::bigint
+             FROM pg_stat_all_tables WHERE relname LIKE 'mail_messages%'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn mail_messages_partition_count(pool: &PgPool) -> i64 {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pg_inherits WHERE inhparent = 'mail_messages'::regclass",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    /// Publish every pool connection's pending stats so a later read is not
+    /// polluted by statements issued before it: PG 15+ defers a backend's
+    /// stats flush by up to `PGSTAT_MIN_INTERVAL` (1s), so an idle-then-poked
+    /// connection flushes whatever it accumulated on its next commit. Without
+    /// this, statements from the FIXTURE show up as scans in the middle of the
+    /// measurement window (observed: 75 fixture statements × 24 partitions
+    /// landing after the window opened).
+    async fn drain_pool_stats_pending(pool: &PgPool) {
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        let mut conns = Vec::new();
+        for _ in 0..pool.size().clamp(1, 32) {
+            match pool.acquire().await {
+                Ok(conn) => conns.push(conn),
+                Err(_) => break,
+            }
+        }
+        for conn in &mut conns {
+            let _: i32 = sqlx::query_scalar("SELECT 1")
+                .fetch_one(&mut **conn)
+                .await
+                .unwrap();
+        }
+    }
+
+    /// Base reading for a scan-delta measurement: the pool's pending stats are
+    /// published first, so fixture statements cannot land inside the window.
+    async fn settled_family_scans(pool: &PgPool) -> i64 {
+        drain_pool_stats_pending(pool).await;
+        mail_messages_family_scans(pool).await
+    }
+
+    /// Delta since `base`, with the workload's own pending counters published
+    /// first (see [`drain_pool_stats_pending`]). Without the second drain the
+    /// search's scans can stay pending on their connection and read as zero.
+    async fn published_scan_delta(pool: &PgPool, base: i64) -> i64 {
+        drain_pool_stats_pending(pool).await;
+        mail_messages_family_scans(pool).await - base
+    }
+
+    /// P3 item 3 — the header search path issues exactly ONE statement over
+    /// `mail_messages` (no COUNT). Method: reset the family's scan counters,
+    /// run the search, and read the delta from `pg_stat_all_tables`; the
+    /// opt-in counting variant is the control (delta 2 statements). Fail
+    /// before: the pre-fix `search_by_header` WAS the counting variant, i.e.
+    /// it always paid the second statement.
+    #[tokio::test]
+    async fn header_search_path_does_not_execute_the_count() {
+        let Some((storage, pool)) = adversarial_storage("p3_header_scan").await else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+        let (account, inbox) = account_with_inbox(&storage, "header-scan").await;
+        for i in 0..25 {
+            let mut m = sample_message(
+                account.id,
+                inbox.id,
+                &format!("<hs-{i}-{}@example.com>", Uuid::new_v4()),
+            );
+            m.id = Uuid::new_v4();
+            // Zero-padded so "trace-07" is a unique substring (no
+            // "trace-1" ⊂ "trace-10" surprises in the assertions below).
+            m.headers = serde_json::json!({ "X-Trace": format!("trace-{i:02}") });
+            storage.store_message(&m).await.unwrap();
+        }
+        // One "statement" == one scan of every leaf partition (see the
+        // helper). The measurement window is a couple of statements on a
+        // 25-row table, far below autoanalyze's threshold.
+        let partition_count = mail_messages_partition_count(&pool).await;
+        assert!(partition_count > 0, "the canonical table is partitioned");
+        // Count-free path: ONE statement (pre-fix: COUNT + page = 2).
+        let base = settled_family_scans(&pool).await;
+        let hits = storage
+            .search_by_header(&account.id, &inbox.id, "X-Trace", "trace-07", 100, 0)
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1, "page semantics unchanged");
+        assert_eq!(
+            published_scan_delta(&pool, base).await,
+            partition_count,
+            "the count-free header search must issue exactly ONE statement \
+             ({partition_count} partitions × 1 scan); a COUNT would double it"
+        );
+
+        // Control: the opt-in counting variant really does both statements.
+        let base = settled_family_scans(&pool).await;
+        let (hits, total) = storage
+            .search_by_header_with_total(&account.id, &inbox.id, "X-Trace", "trace-07", 100, 0)
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(total, 1, "the opt-in variant still reports the real total");
+        assert_eq!(
+            published_scan_delta(&pool, base).await,
+            2 * partition_count,
+            "the opt-in variant runs COUNT + page (this is the cost the default path no longer pays)"
+        );
+        // Both entry points return the same page (identical SQL).
+        let paginated = storage
+            .search_by_header(&account.id, &inbox.id, "X-Trace", "trace-", 10, 5)
+            .await
+            .unwrap();
+        let (paginated_counted, total_all) = storage
+            .search_by_header_with_total(&account.id, &inbox.id, "X-Trace", "trace-", 10, 5)
+            .await
+            .unwrap();
+        assert_eq!(
+            paginated.iter().map(|m| m.uid).collect::<Vec<_>>(),
+            paginated_counted.iter().map(|m| m.uid).collect::<Vec<_>>(),
+            "page-only and counting variants must page identically"
+        );
+        assert_eq!(paginated.len(), 10);
+        assert_eq!(total_all, 25);
+
+        pool.close().await;
+    }
+
+    /// P3 item 4 — the precondition the nil-`NULLS LAST` listing sort relies
+    /// on: the canonical schema's `mail_messages.uid` is NOT NULL (002 adds
+    /// it, 056 re-asserts it, 050's partitioned rebuild declares it NOT
+    /// NULL), and the application never writes a NULL uid — the insert path
+    /// always allocates one from `uidnext`.
+    #[tokio::test]
+    async fn canonical_schema_pins_uid_not_null() {
+        let Some((storage, pool)) = adversarial_storage("p3_uid_not_null").await else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+        let nullable: String = sqlx::query_scalar(
+            "SELECT is_nullable FROM information_schema.columns
+             WHERE table_name = 'mail_messages' AND column_name = 'uid'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            nullable, "NO",
+            "the canonical chain must keep uid NOT NULL — that is what makes \
+             `ORDER BY uid DESC` equivalent to `uid DESC NULLS LAST`"
+        );
+
+        // With the constraint dropped (a schema the chain forbids) the app
+        // still writes non-NULL uids: the insert path allocates one for every
+        // row, so no reachable row can sort differently.
+        let (account, inbox) = account_with_inbox(&storage, "uid-not-null").await;
+        sqlx::query("ALTER TABLE mail_messages ALTER COLUMN uid DROP NOT NULL")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut m = sample_message(
+            account.id,
+            inbox.id,
+            &format!("<uid-nn-{}@example.com>", Uuid::new_v4()),
+        );
+        m.id = Uuid::new_v4();
+        storage.store_message(&m).await.unwrap();
+        let null_uids: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM mail_messages WHERE uid IS NULL")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            null_uids, 0,
+            "even without the constraint the application writes an allocated uid"
+        );
+
+        pool.close().await;
+    }
+
+    /// P3 item 4 — ordering equivalence: on a fixture containing an
+    /// (out-of-schema) NULL-uid row, `uid DESC` and `uid DESC NULLS LAST`
+    /// order every reachable row identically; the NULL row is the only
+    /// difference, and it cannot exist in the canonical schema (previous
+    /// test). This pins the exact domain over which the index-friendly sort
+    /// is equivalent, instead of assuming it.
+    #[tokio::test]
+    async fn listing_order_matches_nulls_last_on_every_reachable_row() {
+        let Some((storage, pool)) = adversarial_storage("p3_order_equiv").await else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+        let (account, inbox) = account_with_inbox(&storage, "order-equiv").await;
+        let mut stored_uids = Vec::new();
+        for i in 0..6 {
+            let mut m = sample_message(
+                account.id,
+                inbox.id,
+                &format!("<ord-{i}-{}@example.com>", Uuid::new_v4()),
+            );
+            m.id = Uuid::new_v4();
+            // Same date for all: the uid tiebreak must decide.
+            m.date = chrono::Utc::now();
+            stored_uids.push(storage.store_message(&m).await.unwrap().1);
+        }
+        // A deliberately out-of-order (older) row with a HIGHER uid proves the
+        // uid key leads the sort, as before.
+        let mut older = sample_message(
+            account.id,
+            inbox.id,
+            &format!("<ord-old-{}@example.com>", Uuid::new_v4()),
+        );
+        older.id = Uuid::new_v4();
+        older.date = chrono::Utc::now() - chrono::Duration::days(1);
+        stored_uids.push(storage.store_message(&older).await.unwrap().1);
+
+        // Inject the NULL-uid row — only possible by dropping the canonical
+        // constraint, i.e. it is outside the schema's domain (pinned above).
+        sqlx::query("ALTER TABLE mail_messages ALTER COLUMN uid DROP NOT NULL")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE mail_messages SET uid = NULL WHERE mailbox_id = $1 AND uid = (SELECT MIN(uid) FROM mail_messages WHERE mailbox_id = $1)",
+        )
+        .bind(inbox.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // The two orderings, evaluated by Postgres itself on the same rows.
+        let new_order: Vec<Option<i64>> = sqlx::query_scalar(
+            "SELECT uid FROM mail_messages WHERE account_id = $1 AND mailbox_id = $2
+             ORDER BY uid DESC, date DESC",
+        )
+        .bind(account.id)
+        .bind(inbox.id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let old_order: Vec<Option<i64>> = sqlx::query_scalar(
+            "SELECT uid FROM mail_messages WHERE account_id = $1 AND mailbox_id = $2
+             ORDER BY uid DESC NULLS LAST, date DESC",
+        )
+        .bind(account.id)
+        .bind(inbox.id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+
+        // Every reachable (non-NULL uid) row keeps its position, and the
+        // distinct rows are exactly the same set.
+        let reachable_new: Vec<i64> = new_order.iter().flatten().copied().collect();
+        let reachable_old: Vec<i64> = old_order.iter().flatten().copied().collect();
+        assert_eq!(
+            reachable_new, reachable_old,
+            "ordering of every row the canonical schema admits is unchanged"
+        );
+        assert_eq!(
+            reachable_new.len(),
+            stored_uids.len() - 1,
+            "every row except the injected NULL-uid one is reachable"
+        );
+        assert_eq!(
+            new_order.first(),
+            Some(&None),
+            "with NULLS LAST dropped the (unreachable) NULL row sorts FIRST (the \
+             default for DESC) — the one and only difference"
+        );
+        assert_eq!(old_order.last(), Some(&None));
+
+        // The storage path itself returns the same order as both raw sorts.
+        // (The NULL-uid row must go first: `StoredMessage.uid` is a plain
+        // i64, so a NULL uid is not even decodable — further proof the
+        // canonical schema's NOT NULL is load-bearing.)
+        sqlx::query("DELETE FROM mail_messages WHERE mailbox_id = $1 AND uid IS NULL")
+            .bind(inbox.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let listed = storage
+            .list_messages(&MessageQuery {
+                account_id: account.id,
+                mailbox_id: Some(inbox.id),
+                limit: 100,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let listed_uids: Vec<i64> = listed.iter().map(|m| m.uid).collect();
+        assert_eq!(listed_uids, reachable_old);
 
         pool.close().await;
     }

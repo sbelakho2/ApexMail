@@ -173,13 +173,27 @@ const RESET_CLAIM_SQL: &str = r#"
 /// Live enrollments win over terminal ones so a re-delivered reply resolves
 /// to the same row it locked the first time instead of an older completed
 /// enrollment.
+///
+/// P1: the candidate match is a UNNEST equality join with ORDINALITY —
+/// `normalized_value` is the stored canonical (trimmed + lowercased) form
+/// every in-repo writer stores (`contact.rs`, `campaigns.rs`, `crm_pg.rs`,
+/// `admin/sales.rs`; migration 223 backfilled `lower(btrim(...))`), so the
+/// join is exact and resolves through the
+/// `(tenant_id, channel, normalized_value)` unique index. The old
+/// `lower(cp.normalized_value) = ANY($2)` + `array_position(...)` shape
+/// wrapped the indexed column in a function (defeating the unique index) and
+/// expanded N candidates against M contact points per statement (O(N·M)).
+/// Honest caveat: the database has no CHECK forcing lowercase, so a row
+/// written out-of-band in mixed case would not resolve here (it did with the
+/// old lowered comparison); re-normalizing such a row is the remedy.
 const RESOLVE_ENROLLMENT_SQL: &str = r#"
             WITH canonical_contact AS (
                 SELECT cp.contact_id
                 FROM sales_contact_points cp
+                JOIN UNNEST($2::text[]) WITH ORDINALITY AS t(v, ord)
+                  ON cp.normalized_value = t.v
                 WHERE cp.tenant_id = $1 AND cp.channel = 'email'
-                  AND lower(cp.normalized_value) = ANY($2)
-                ORDER BY array_position($2::text[], lower(cp.normalized_value)) NULLS LAST,
+                ORDER BY t.ord,
                          (cp.suppressed_at IS NULL) DESC,
                          cp.confidence DESC,
                          cp.created_at DESC
@@ -1482,8 +1496,17 @@ mod tests {
     fn resolution_is_canonical_only_and_never_reads_the_lead_bridge() {
         assert!(
             RESOLVE_ENROLLMENT_SQL.contains("sales_contact_points")
-                && RESOLVE_ENROLLMENT_SQL.contains("lower(cp.normalized_value) = ANY($2)"),
-            "the email link must match any candidate address (from_email or DSN recipient)"
+                && RESOLVE_ENROLLMENT_SQL.contains("JOIN UNNEST($2::text[]) WITH ORDINALITY")
+                && RESOLVE_ENROLLMENT_SQL.contains("cp.normalized_value = t.v")
+                && RESOLVE_ENROLLMENT_SQL.contains("ORDER BY t.ord"),
+            "the email link must match any candidate address (from_email or DSN recipient) in \
+             candidate order — via the P1 UNNEST-equality join on the stored canonical \
+             normalized_value, not a lower()-wrapped ANY probe"
+        );
+        assert!(
+            !RESOLVE_ENROLLMENT_SQL.contains("= ANY($")
+                && !RESOLVE_ENROLLMENT_SQL.contains("array_position"),
+            "the resolver must not fan out candidates with lower(...) = ANY / array_position"
         );
         assert!(
             !RESOLVE_ENROLLMENT_SQL.contains("sales_leads"),
@@ -1939,6 +1962,232 @@ mod tests {
         assert_eq!(resolved_after_bogus_lead.contact_id, contact_a);
         assert_eq!(resolved_after_bogus_lead.enrollment_id, enrollment_a);
 
+        pool.close().await;
+    }
+
+    // =======================================================================
+    // P1: the UNNEST-equality resolver's winner selection
+    // =======================================================================
+
+    /// P1: the resolver's winner selection is pinned end to end.
+    ///
+    /// * candidate order first: the `From:` address (candidate 0) wins over a
+    ///   later `X-Failed-Recipients` candidate even though that one's contact
+    ///   point carries 10x the confidence and is older;
+    /// * for the winning contact, a LIVE (`active`) enrollment wins over a
+    ///   TERMINAL (`completed`) one even when the terminal row is much newer;
+    /// * the match is the exact UNNEST-equality join on the stored canonical
+    ///   `normalized_value` (the `(tenant_id, channel, normalized_value)`
+    ///   unique index): a row stored non-canonically is NOT the link — the
+    ///   canonical writers (`lower($4)` / `to_ascii_lowercase()`) are what
+    ///   make `normalized_value` the join key.
+    #[tokio::test]
+    async fn resolution_winner_selection_is_pinned() {
+        let Some(pool) =
+            crate::test_support::canonical_pool("worker_p1_resolve", "reply_resolve_order").await
+        else {
+            return;
+        };
+
+        let suffix = &Uuid::new_v4().simple().to_string()[..12];
+        let tenant = format!("p1resolve{suffix}");
+        let account_id = Uuid::new_v4();
+        let contact_a = Uuid::new_v4();
+        let point_a = Uuid::new_v4();
+        let contact_b = Uuid::new_v4();
+        let point_b = Uuid::new_v4();
+        let email_a = format!("first-{suffix}@example.com");
+        let email_b = format!("second-{suffix}@example.com");
+        let mixed_case_email = format!("MixedCase-{suffix}@Example.COM");
+        let sequence_id = Uuid::new_v4();
+        let version_1 = Uuid::new_v4();
+        let version_2 = Uuid::new_v4();
+        let enrollment_a_live = Uuid::new_v4();
+        let enrollment_a_terminal = Uuid::new_v4();
+        let enrollment_b = Uuid::new_v4();
+
+        sqlx::query(
+            "INSERT INTO sales_accounts (id, tenant_id, company, domain) \
+             VALUES ($1, $2, 'P1 Co', $3)",
+        )
+        .bind(account_id)
+        .bind(&tenant)
+        .bind(format!("p1-{suffix}.example"))
+        .execute(&pool)
+        .await
+        .expect("seed account");
+
+        // Candidate 0 (`From:`) has LOW confidence; candidate 1
+        // (`X-Failed-Recipients`) has HIGH confidence and an older row.
+        for (contact_id, point_id, email, confidence) in [
+            (contact_a, point_a, email_a.as_str(), 0.10_f64),
+            (contact_b, point_b, email_b.as_str(), 0.99_f64),
+        ] {
+            sqlx::query(
+                "INSERT INTO sales_contacts (id, tenant_id, account_id, full_name) \
+                 VALUES ($1, $2, $3, 'P1 Contact')",
+            )
+            .bind(contact_id)
+            .bind(&tenant)
+            .bind(account_id)
+            .execute(&pool)
+            .await
+            .expect("seed contact");
+            sqlx::query(
+                "INSERT INTO sales_contact_points \
+                     (id, tenant_id, contact_id, channel, value, normalized_value, \
+                      verification, confidence, created_at) \
+                 VALUES ($1, $2, $3, 'email', $4, $5, 'valid', $6, NOW())",
+            )
+            .bind(point_id)
+            .bind(&tenant)
+            .bind(contact_id)
+            .bind(email)
+            .bind(email)
+            .bind(confidence)
+            .execute(&pool)
+            .await
+            .expect("seed contact point");
+        }
+        // A NON-canonical row (no writer in the workspace produces this):
+        // the exact join must not match it.
+        sqlx::query(
+            "INSERT INTO sales_contact_points \
+                 (id, tenant_id, contact_id, channel, value, normalized_value, verification) \
+             VALUES ($1, $2, $3, 'email', $4, $4, 'valid')",
+        )
+        .bind(Uuid::new_v4())
+        .bind(&tenant)
+        .bind(contact_b)
+        .bind(&mixed_case_email)
+        .execute(&pool)
+        .await
+        .expect("seed mixed-case point");
+
+        sqlx::query(
+            "INSERT INTO sales_sequences (id, tenant_id, name, status) \
+             VALUES ($1, $2, 'P1 Sequence', 'active')",
+        )
+        .bind(sequence_id)
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("seed sequence");
+        for version in [version_1, version_2] {
+            sqlx::query(
+                "INSERT INTO sales_sequence_versions \
+                     (id, tenant_id, sequence_id, version, status, locale, approved_by, approved_at) \
+                 VALUES ($1, $2, $3, $4, 'active', 'en', 'p1', NOW())",
+            )
+            .bind(version)
+            .bind(&tenant)
+            .bind(sequence_id)
+            .bind(if version == version_1 { 1 } else { 2 })
+            .execute(&pool)
+            .await
+            .expect("seed version");
+        }
+        // Contact A: the LIVE enrollment is OLDER than the terminal one; the
+        // resolver must still prefer the live row (a re-delivered reply lands
+        // on the same enrollment instead of resurfacing a completed one).
+        for (enrollment_id, contact_id, point_id, version, state, hours_ago) in [
+            (
+                enrollment_a_live,
+                contact_a,
+                point_a,
+                version_1,
+                "active",
+                48_i32,
+            ),
+            (
+                enrollment_a_terminal,
+                contact_a,
+                point_a,
+                version_2,
+                "completed",
+                1_i32,
+            ),
+            (enrollment_b, contact_b, point_b, version_1, "active", 1_i32),
+        ] {
+            sqlx::query(
+                "INSERT INTO sales_enrollments \
+                     (id, tenant_id, sequence_version_id, account_id, contact_id, \
+                      contact_point_id, state, current_step_index, updated_at) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, 0, NOW() - make_interval(hours => $8))",
+            )
+            .bind(enrollment_id)
+            .bind(&tenant)
+            .bind(version)
+            .bind(account_id)
+            .bind(contact_id)
+            .bind(point_id)
+            .bind(state)
+            .bind(hours_ago)
+            .execute(&pool)
+            .await
+            .expect("seed enrollment");
+        }
+
+        let handler = ReplyHandler::new(pool.clone(), ReplyHandlerConfig::default());
+
+        // Candidate 0 wins on ORDER alone: the `From:` address is the sender.
+        let mut msg = InboundMessage {
+            id: format!("p1-{}", Uuid::new_v4()),
+            tenant_id: Some(tenant.clone()),
+            lead_id: None,
+            from_email: email_a.to_uppercase(),
+            to_email: "sales@apex.example".to_string(),
+            subject: "Re: item".to_string(),
+            body_text: Some("plain body".to_string()),
+            body_html: None,
+            headers: Some(serde_json::json!({ "x-failed-recipients": email_b })),
+            message_id_header: None,
+            received_at: Utc::now(),
+            processed_at: None,
+            classification: None,
+        };
+        let resolved = handler
+            .resolve_enrollment(&msg)
+            .await
+            .expect("resolve")
+            .expect("the sender's canonical contact point must resolve");
+        assert_eq!(
+            resolved.contact_id, contact_a,
+            "candidate order beats confidence/recency: the From: candidate is the sender"
+        );
+        assert_eq!(resolved.contact_point_id, Some(point_a));
+        assert_eq!(
+            resolved.enrollment_id, enrollment_a_live,
+            "a LIVE enrollment must win over a newer TERMINAL one"
+        );
+        assert_eq!(resolved.state, "active");
+
+        // Drop candidate 0 from the message: the second candidate resolves to
+        // contact B's single enrollment (the join walks the whole candidate
+        // list, not just the first address).
+        msg.from_email = email_b.to_uppercase();
+        msg.headers = None;
+        let resolved = handler
+            .resolve_enrollment(&msg)
+            .await
+            .expect("resolve")
+            .expect("the second candidate's contact point must resolve");
+        assert_eq!(resolved.contact_id, contact_b);
+        assert_eq!(resolved.enrollment_id, enrollment_b);
+
+        // The exact join is canonical-only: a mixed-case stored
+        // `normalized_value` is not the link (and cannot be — the canonical
+        // writers store lowercase).
+        msg.from_email = mixed_case_email.clone();
+        let unresolved = handler.resolve_enrollment(&msg).await.expect("resolve");
+        assert!(
+            unresolved.is_none(),
+            "normalized_value is the stored canonical key; a non-canonical row must not match \
+             (the old lower() probe would have matched it, at the cost of the unique index)"
+        );
+
+        // Every result above came from ONE statement per probe; the resolver
+        // is a single indexed round trip, not a candidate fan-out.
         pool.close().await;
     }
 

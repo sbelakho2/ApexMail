@@ -300,29 +300,48 @@ pub async fn default_legal_entity(conn: &mut PgConnection) -> Result<Uuid> {
 
 /// Seed the standard chart of accounts for an entity (idempotent).
 /// Returns the number of rows actually inserted.
+///
+/// One multi-row INSERT (chunked only for the Postgres parameter ceiling)
+/// instead of one INSERT per account: a fresh deployment provisions the
+/// chart on its first posting, and the per-account round trips made that
+/// first posting needlessly slow.
 pub async fn ensure_standard_chart(conn: &mut PgConnection, legal_entity_id: Uuid) -> Result<u64> {
+    // 7 bind parameters per account; stay far below Postgres' 65,535.
+    const ACCOUNTS_PER_INSERT: usize = 5_000;
     let mut inserted = 0u64;
-    for spec in STANDARD_CHART {
-        let result = sqlx::query(
-            r#"
-            INSERT INTO chart_of_accounts (
-                legal_entity_id, code, name, account_type, normal_balance,
-                account_role, vat_code
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
-            ON CONFLICT DO NOTHING
-            "#,
-        )
-        .bind(legal_entity_id)
-        .bind(spec.code)
-        .bind(spec.name)
-        .bind(spec.account_type)
-        .bind(spec.normal_balance)
-        .bind(spec.role)
-        .bind(spec.vat_code)
-        .execute(&mut *conn)
-        .await?;
-        inserted += result.rows_affected();
+    for chunk in STANDARD_CHART.chunks(ACCOUNTS_PER_INSERT) {
+        let mut sql = String::from(
+            "INSERT INTO chart_of_accounts \
+                (legal_entity_id, code, name, account_type, normal_balance, \
+                 account_role, vat_code) VALUES ",
+        );
+        for offset in 0..chunk.len() {
+            if offset > 0 {
+                sql.push_str(", ");
+            }
+            let base = 2 + offset * 6;
+            sql.push_str(&format!(
+                "($1, ${base}, ${}, ${}, ${}, ${}, ${})",
+                base + 1,
+                base + 2,
+                base + 3,
+                base + 4,
+                base + 5
+            ));
+        }
+        sql.push_str(" ON CONFLICT DO NOTHING");
+
+        let mut query = sqlx::query(&sql).bind(legal_entity_id);
+        for spec in chunk {
+            query = query
+                .bind(spec.code)
+                .bind(spec.name)
+                .bind(spec.account_type)
+                .bind(spec.normal_balance)
+                .bind(spec.role)
+                .bind(spec.vat_code);
+        }
+        inserted += query.execute(&mut *conn).await?.rows_affected();
     }
     Ok(inserted)
 }
@@ -399,5 +418,100 @@ mod tests {
             );
             assert!(["debit", "credit"].contains(&spec.normal_balance));
         }
+    }
+}
+
+#[cfg(test)]
+mod db_tests {
+    //! DB-backed proof that provisioning the standard chart is ONE statement,
+    //! not one per account. The counter is a STATEMENT-level trigger on
+    //! `chart_of_accounts`: the pre-fix loop fired it once per account row.
+
+    use super::*;
+
+    #[tokio::test]
+    async fn standard_chart_is_seeded_by_one_insert_statement() {
+        let Some(pool) =
+            (match migrator::test_support::fresh_canonical_pool("chart_batch", "chart_batch").await
+            {
+                Ok(pool) => pool,
+                Err(error) => panic!("{}", error.panic_message()),
+            })
+        else {
+            return;
+        };
+
+        sqlx::raw_sql(
+            r#"
+            CREATE TABLE chart_insert_statements (n INTEGER NOT NULL);
+            CREATE OR REPLACE FUNCTION chart_insert_count_fn() RETURNS trigger
+            LANGUAGE plpgsql AS $$
+            BEGIN
+                INSERT INTO chart_insert_statements (n) VALUES (1);
+                RETURN NULL;
+            END
+            $$;
+            CREATE TRIGGER chart_insert_count
+                AFTER INSERT ON chart_of_accounts
+                FOR EACH STATEMENT EXECUTE FUNCTION chart_insert_count_fn();
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("statement trigger");
+
+        let mut conn = pool.acquire().await.expect("connection");
+        let entity = create_legal_entity(
+            &mut conn,
+            &LegalEntityInput {
+                legal_name: "Chart Batch OÜ".to_string(),
+                trading_name: None,
+                registry_code: "CHART-BATCH".to_string(),
+                vat_number: None,
+                address_line1: None,
+                city: None,
+                postal_code: None,
+                country_code: "EE".to_string(),
+                default_currency: "EUR".to_string(),
+                fiscal_year_start_month: 1,
+                is_default: false,
+            },
+        )
+        .await
+        .expect("entity");
+
+        let inserted = ensure_standard_chart(&mut conn, entity)
+            .await
+            .expect("seed chart");
+        assert_eq!(
+            inserted,
+            STANDARD_CHART.len() as u64,
+            "every standard account is inserted exactly once"
+        );
+
+        let statements: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::bigint FROM chart_insert_statements")
+                .fetch_one(&mut *conn)
+                .await
+                .expect("statement count");
+        assert_eq!(
+            statements, 1,
+            "the whole chart must be seeded by ONE INSERT statement \
+             (the pre-fix loop issued one per account)"
+        );
+
+        // Idempotent replay inserts nothing.
+        let replay = ensure_standard_chart(&mut conn, entity)
+            .await
+            .expect("replay chart");
+        assert_eq!(replay, 0);
+        let statements: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::bigint FROM chart_insert_statements")
+                .fetch_one(&mut *conn)
+                .await
+                .expect("statement count after replay");
+        assert_eq!(statements, 2, "the replay is still one statement");
+
+        pool.close().await;
     }
 }

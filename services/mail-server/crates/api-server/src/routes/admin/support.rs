@@ -410,7 +410,7 @@ async fn list_tickets(
         sqlx::query_as(
             "SELECT ticket_id::text, id::text, content, author, author_type, \
              COALESCE(attachments, '[]'::jsonb), created_at \
-             FROM support_ticket_messages WHERE ticket_id::text = ANY($1) \
+             FROM support_ticket_messages WHERE ticket_id = ANY($1::text[]) \
              ORDER BY created_at ASC LIMIT 5000",
         )
         .bind(&ticket_ids)
@@ -487,8 +487,10 @@ async fn add_reply(
     // Reject unknown tickets and invalid transitions BEFORE writing: the
     // FK used to swallow the former into a driver error and the latter was
     // silently ignored (status stays stale while the reply suggests action).
+    // support_tickets.id is VARCHAR(26): bind the id natively so the primary
+    // key index is usable (the old `id::text = $1` cast forced a scan).
     let ticket_exists: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM support_tickets WHERE id::text = $1)")
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM support_tickets WHERE id = $1)")
             .bind(&body.ticket_id)
             .fetch_one(&state.db)
             .await
@@ -508,13 +510,11 @@ async fn add_reply(
 
     // Optionally update ticket status (validated above)
     if let Some(ref new_status) = body.new_status {
-        sqlx::query(
-            "UPDATE support_tickets SET status = $1, updated_at = NOW() WHERE id::text = $2",
-        )
-        .bind(new_status)
-        .bind(&body.ticket_id)
-        .execute(&state.db)
-        .await?;
+        sqlx::query("UPDATE support_tickets SET status = $1, updated_at = NOW() WHERE id = $2")
+            .bind(new_status)
+            .bind(&body.ticket_id)
+            .execute(&state.db)
+            .await?;
     }
 
     log_support_audit(
@@ -570,18 +570,17 @@ async fn update_ticket(
     let mut rows_affected: u64 = 0;
 
     if let Some(ref s) = body.status {
-        rows_affected += sqlx::query(
-            "UPDATE support_tickets SET status = $1, updated_at = NOW() WHERE id::text = $2",
-        )
-        .bind(s)
-        .bind(&body.id)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
+        rows_affected +=
+            sqlx::query("UPDATE support_tickets SET status = $1, updated_at = NOW() WHERE id = $2")
+                .bind(s)
+                .bind(&body.id)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
     }
     if let Some(ref p) = body.priority {
         rows_affected += sqlx::query(
-            "UPDATE support_tickets SET priority = $1, updated_at = NOW() WHERE id::text = $2",
+            "UPDATE support_tickets SET priority = $1, updated_at = NOW() WHERE id = $2",
         )
         .bind(p)
         .bind(&body.id)
@@ -591,7 +590,7 @@ async fn update_ticket(
     }
     if let Some(ref a) = body.assignee {
         rows_affected += sqlx::query(
-            "UPDATE support_tickets SET assignee = $1, updated_at = NOW() WHERE id::text = $2",
+            "UPDATE support_tickets SET assignee = $1, updated_at = NOW() WHERE id = $2",
         )
         .bind(a)
         .bind(&body.id)
@@ -1056,6 +1055,120 @@ mod adversarial_tests {
         assert_eq!(updated["status"], "resolved");
         assert_eq!(updated["priority"], "low");
 
+        // Native-typed id binding (P2): the ticket id path is a VARCHAR(26)
+        // column compared directly (`id = $1`), and the batched messages fetch
+        // binds the id ARRAY natively (`ticket_id = ANY($1::text[])`). Both
+        // must still resolve every ticket in one list call, and an id that is
+        // not a ticket id must stay the same opaque 404 the `id::text = $1`
+        // comparison produced.
+        let mut extra_ids = Vec::new();
+        for i in 0..3 {
+            let (_, Json(extra)) = create_ticket(
+                State(state.clone()),
+                admin_auth(),
+                Json(create_body(&format!(
+                    "Batch {} {}",
+                    i,
+                    uuid::Uuid::new_v4().simple()
+                ))),
+            )
+            .await
+            .expect("create extra ticket");
+            let (reply_status, _) = add_reply(
+                State(state.clone()),
+                admin_auth(),
+                Json(AddReplyRequest {
+                    ticket_id: extra.id.clone(),
+                    content: format!("reply {i}"),
+                    author: "ignored".into(),
+                    author_type: "agent".into(),
+                    new_status: None,
+                }),
+            )
+            .await
+            .expect("reply to extra ticket");
+            assert_eq!(reply_status, StatusCode::CREATED);
+            extra_ids.push(extra.id);
+        }
+        let Json(batched) = list_tickets(
+            State(state.clone()),
+            admin_auth(),
+            Query(TicketsQuery {
+                limit: 200,
+                offset: 0,
+                status: None,
+            }),
+        )
+        .await
+        .expect("batched list");
+        for id in &extra_ids {
+            let row = batched
+                .iter()
+                .find(|t| &t.id == id)
+                .expect("extra ticket present");
+            assert_eq!(
+                row.messages.len(),
+                1,
+                "the batched ticket_id = ANY($1::text[]) fetch must cover every ticket"
+            );
+        }
+        // (A NUL byte cannot travel to Postgres as a text parameter at all —
+        // both the old `id::text = $1` form and the native `id = $1` form
+        // reject that bind at the driver, so it is asserted as an error, not
+        // as NotFound.)
+        for garbage in ["not-a-ticket".to_string(), "x".repeat(120), String::new()] {
+            assert!(
+                matches!(
+                    add_reply(
+                        State(state.clone()),
+                        admin_auth(),
+                        Json(AddReplyRequest {
+                            ticket_id: garbage.clone(),
+                            content: "hi".into(),
+                            author: "ignored".into(),
+                            author_type: "agent".into(),
+                            new_status: None,
+                        })
+                    )
+                    .await,
+                    Err(ApiError::NotFound(_))
+                ),
+                "{garbage:?} must be an opaque NotFound"
+            );
+            assert!(
+                matches!(
+                    update_ticket(
+                        State(state.clone()),
+                        admin_auth(),
+                        Json(UpdateTicketRequest {
+                            id: garbage.clone(),
+                            status: Some("closed".into()),
+                            priority: None,
+                            assignee: None,
+                        })
+                    )
+                    .await,
+                    Err(ApiError::NotFound(_))
+                ),
+                "{garbage:?} must be an opaque NotFound"
+            );
+        }
+        assert!(
+            update_ticket(
+                State(state.clone()),
+                admin_auth(),
+                Json(UpdateTicketRequest {
+                    id: "sup_\u{0}injection".into(),
+                    status: Some("closed".into()),
+                    priority: None,
+                    assignee: None,
+                })
+            )
+            .await
+            .is_err(),
+            "a NUL byte in the id is refused at the driver, as it was before"
+        );
+
         // Access gates.
         let mut customer = admin_auth();
         customer.tenant_id = "ten_customer_adv".into();
@@ -1084,7 +1197,9 @@ mod adversarial_tests {
             Err(ApiError::Forbidden(_))
         ));
 
-        cleanup(&pool, &[ticket.id]).await;
+        let mut cleanup_ids = vec![ticket.id.clone()];
+        cleanup_ids.extend(extra_ids);
+        cleanup(&pool, &cleanup_ids).await;
     }
 
     #[test]

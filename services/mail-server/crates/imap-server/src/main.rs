@@ -3750,6 +3750,9 @@ async fn handle_search<W: AsyncWrite + Unpin>(
 
     let mut keep: Vec<&mail_proto::MessageMeta> = all.iter().collect();
     let mut fulltext_terms: Vec<String> = Vec::new();
+    // IMAP BODY scope (RFC 3501 §6.4.4): body-only terms, searched against
+    // text_body alone. TEXT and the free-form query use the combined scope.
+    let mut body_terms: Vec<String> = Vec::new();
     // L8: (field, value) pairs collected from HEADER criteria; each runs as
     // its own headers-JSONB search and ANDs into the result set.
     let mut header_criteria: Vec<(String, String)> = Vec::new();
@@ -3868,7 +3871,13 @@ async fn handle_search<W: AsyncWrite + Unpin>(
                     }
                 }
             }
-            "BODY" | "TEXT" => {
+            "BODY" => {
+                i += 1;
+                if i < tokens.len() {
+                    body_terms.push(tokens[i].clone());
+                }
+            }
+            "TEXT" => {
                 i += 1;
                 if i < tokens.len() {
                     fulltext_terms.push(tokens[i].clone());
@@ -3915,6 +3924,8 @@ async fn handle_search<W: AsyncWrite + Unpin>(
             query: header_search_query(field, value),
             limit: 100_000,
             offset: 0,
+            include_total: false,
+            body_only: false,
         };
         match client.search_messages(req).await {
             Ok(resp) => {
@@ -3929,18 +3940,24 @@ async fn handle_search<W: AsyncWrite + Unpin>(
         }
     }
 
-    if !fulltext_terms.is_empty() {
-        // Deliberate, documented semantics: multiple BODY/TEXT terms are
-        // joined and sent as ONE fulltext query, which the mailstore
-        // evaluates as a stemmed AND (`plainto_tsquery`). This is not a
-        // literal substring match and we do not pretend otherwise.
-        let joined = fulltext_terms.join(" ");
+    // Two fulltext scopes, one RPC each, intersected:
+    //   * TEXT / free-form terms → subject + body + sender
+    //   * BODY terms → text_body ONLY (RFC 3501 §6.4.4)
+    // Multiple terms within one scope are joined and sent as ONE query, which
+    // the mailstore evaluates as a stemmed AND (`plainto_tsquery`). This is
+    // not a literal substring match and we do not pretend otherwise.
+    for (terms, body_only) in [(&fulltext_terms, false), (&body_terms, true)] {
+        if terms.is_empty() {
+            continue;
+        }
         let req = SearchMessagesRequest {
             account_id: session.account_id.clone(),
             mailbox: session.mailbox.clone(),
-            query: joined,
+            query: terms.join(" "),
             limit: 100_000,
             offset: 0,
+            include_total: false,
+            body_only,
         };
         match client.search_messages(req).await {
             Ok(resp) => {

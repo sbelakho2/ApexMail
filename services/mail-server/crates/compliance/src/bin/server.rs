@@ -1,5 +1,5 @@
 //! Compliance server binary — a long-running service: HTTP API on port 3011
-//! (liveness `GET /health`, readiness `GET /health/ready`), 8 background
+//! (liveness `GET /health`, readiness `GET /health/ready`), 10 background
 //! cron jobs and graceful shutdown (SIGTERM/SIGINT → in-flight requests
 //! drain, DB pool closes).
 //!
@@ -44,6 +44,11 @@
 //!    → accounting-core) — every 5min. The bank ingest route
 //!    (`POST /accounting/bank-statements/import`) is the writer the sweep
 //!    posts from, so the statement ledger loop is live end to end.
+//! 9. Statutory obligation sync — daily
+//! 10. Consent expiry (expired `consent_records` revoked + marketing cascade)
+//!     — every `CONSENT_EXPIRY_CHECK_INTERVAL_SECS` (default 3600s). This is
+//!     the job's ONE production driver: before this arm existed the module
+//!     was dead code and expired consents were never revoked.
 
 use clap::Parser;
 use observability_service::otlp_exporter::{
@@ -56,6 +61,7 @@ use tracing::{error, info, warn};
 
 use compliance::bootstrap::build_state;
 use compliance::config::ComplianceConfig;
+use compliance::consent_expiry::{check_interval_secs, ConsentExpiryJob};
 use compliance::dsr_outbox_flush::DsrOutboxFlusher;
 use compliance::routes::create_router;
 use compliance::routes::AppState;
@@ -340,7 +346,7 @@ async fn dsr_expiry_tick(state: &AppState) -> DsrExpiryTick {
     tick
 }
 
-/// 9 background cron jobs:
+/// 10 background cron jobs:
 /// 1. GDPR queue processing — every 30s
 /// 2. Secret auto-rotation — every 60min
 /// 3. GDPR request expiry — every 5min
@@ -352,7 +358,16 @@ async fn dsr_expiry_tick(state: &AppState) -> DsrExpiryTick {
 /// 9. Statutory obligation sync (derive/upsert `statutory_obligations` for every
 ///    legal entity + mark overdue) — daily. Dogfood 2026-10-06 wave B: the
 ///    obligations engine existed only for tests and the table stayed empty.
+/// 10. Consent expiry — every `CONSENT_EXPIRY_CHECK_INTERVAL_SECS` (LIVE
+///     setting, default 3600s). Dead-by-omission fix: `ConsentExpiryJob` was
+///     declared in `lib.rs` but no production code ever constructed it, so
+///     expired consents were never revoked. This arm is its only driver.
 async fn run_cron_jobs(state: Arc<AppState>, outbox_flusher: DsrOutboxFlusher) {
+    let consent_expiry_interval = Duration::from_secs(check_interval_secs());
+    info!(
+        interval_secs = consent_expiry_interval.as_secs(),
+        "Consent expiry cron interval resolved from CONSENT_EXPIRY_CHECK_INTERVAL_SECS"
+    );
     run_cron_jobs_with_intervals(
         state,
         outbox_flusher,
@@ -366,12 +381,13 @@ async fn run_cron_jobs(state: Arc<AppState>, outbox_flusher: DsrOutboxFlusher) {
             outbox_flush: Duration::from_secs(60),
             ledger: Duration::from_secs(300),
             obligations: Duration::from_secs(86400),
+            consent_expiry: consent_expiry_interval,
         },
     )
     .await;
 }
 
-/// Tick periods for the nine cron jobs, in declaration order. Split from
+/// Tick periods for the ten cron jobs, in declaration order. Split from
 /// [`run_cron_jobs`] so tests can drive every job arm in milliseconds.
 #[derive(Clone, Copy)]
 struct CronIntervals {
@@ -384,6 +400,7 @@ struct CronIntervals {
     outbox_flush: Duration,
     ledger: Duration,
     obligations: Duration,
+    consent_expiry: Duration,
 }
 
 async fn run_cron_jobs_with_intervals(
@@ -406,6 +423,11 @@ async fn run_cron_jobs_with_intervals(
     // mark pending-but-past-due rows overdue (dogfood 2026-10-06 wave B — the
     // engine previously had no production caller and the table stayed empty).
     let mut obligations_ticker = interval(intervals.obligations);
+    // 10: consent expiry. ONE job instance for the loop's lifetime; the job
+    // holds no timer (the ticker here is the only driver) and
+    // `check_and_revoke_expired` is its one-shot entry for tests/operators.
+    let consent_expiry_job = ConsentExpiryJob::new(state.db.clone(), state.audit_logger.clone());
+    let mut consent_expiry_ticker = interval(intervals.consent_expiry);
 
     loop {
         tokio::select! {
@@ -555,6 +577,18 @@ async fn run_cron_jobs_with_intervals(
                     Err(e) => error!(error = %e, "Statutory obligation sync failed"),
                 }
             }
+            _ = consent_expiry_ticker.tick() => {
+                // 10: revoke expired consents (bounded batches; marketing
+                // cascades to analytics → profiling) and let the job's own
+                // hash-chained audit entries record every revocation.
+                match consent_expiry_job.check_and_revoke_expired().await {
+                    Ok(revoked) if revoked > 0 => {
+                        info!(revoked, "Consent expiry sweep revoked expired consents");
+                    }
+                    Ok(_) => {}
+                    Err(e) => error!(error = %e, "Consent expiry sweep failed"),
+                }
+            }
         }
     }
 }
@@ -628,7 +662,7 @@ mod tests {
         };
         let outbox_flusher = DsrOutboxFlusher::new(state.db.clone(), config.gdpr.clone());
 
-        // All nine tickers fire their first tick immediately and then every
+        // All ten tickers fire their first tick immediately and then every
         // 5 ms: one loop pass exercises every job arm against real SQL.
         let task = tokio::spawn(run_cron_jobs_with_intervals(
             state.clone(),
@@ -643,10 +677,127 @@ mod tests {
                 outbox_flush: Duration::from_millis(5),
                 ledger: Duration::from_millis(5),
                 obligations: Duration::from_millis(5),
+                consent_expiry: Duration::from_millis(5),
             },
         ));
         tokio::time::sleep(Duration::from_millis(50)).await;
         task.abort();
+        let _ = state.db.close().await;
+    }
+
+    /// Dead-by-omission fix: the consent-expiry job was declared but never
+    /// driven. The cron loop's 10th arm must revoke an EXPIRED consent (and
+    /// leave the non-expired one untouched) when driven with a millisecond
+    /// interval — proving the arm is wired, constructed and effective, not
+    /// just that the job type compiles.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn consent_expiry_cron_arm_revokes_expired_and_keeps_live_consents() {
+        let Some((state, config)) = boot_state("consent_expiry_cron").await else {
+            eprintln!("skipping: set TEST_DATABASE_URL");
+            return;
+        };
+        let outbox_flusher = DsrOutboxFlusher::new(state.db.clone(), config.gdpr.clone());
+        // Unique per run: the per-test clone is reused between runs. The
+        // tenant id column is VARCHAR(26), so keep the suffix short.
+        let tenant = format!("tcret{}", &uuid::Uuid::new_v4().simple().to_string()[..20]);
+        let expired_id = uuid::Uuid::new_v4().to_string();
+        let live_id = uuid::Uuid::new_v4().to_string();
+        for (id, consent_type, expires_at, subscriber, email) in [
+            (
+                &expired_id,
+                "marketing",
+                "NOW() - INTERVAL '1 hour'",
+                "sub-expired",
+                "expired@example.test",
+            ),
+            (
+                &live_id,
+                "newsletter",
+                "NOW() + INTERVAL '48 hours'",
+                "sub-live",
+                "live@example.test",
+            ),
+        ] {
+            sqlx::query(&format!(
+                "INSERT INTO consent_records
+                   (id, tenant_id, subscriber_id, email, consent_type, granted,
+                    granted_at, source, expires_at)
+                 VALUES ($1, $2, $3, $4, $5, true, NOW(), 'api', {expires_at})"
+            ))
+            .bind(id)
+            .bind(&tenant)
+            .bind(subscriber)
+            .bind(email)
+            .bind(consent_type)
+            .execute(&state.db)
+            .await
+            .expect("seed consent");
+        }
+
+        // Only the consent-expiry arm is fast; the other nine still fire
+        // their immediate first tick once, exactly as the job matrix proves.
+        let task = tokio::spawn(run_cron_jobs_with_intervals(
+            state.clone(),
+            outbox_flusher,
+            CronIntervals {
+                gdpr: Duration::from_secs(3600),
+                rotation: Duration::from_secs(3600),
+                expiry: Duration::from_secs(3600),
+                archive: Duration::from_secs(3600),
+                retention: Duration::from_secs(3600),
+                sweep: Duration::from_secs(3600),
+                outbox_flush: Duration::from_secs(3600),
+                ledger: Duration::from_secs(3600),
+                obligations: Duration::from_secs(3600),
+                consent_expiry: Duration::from_millis(5),
+            },
+        ));
+        // The first tick fires immediately. Poll for the effect instead of
+        // sleeping a fixed 60 ms: under parallel test load the cron task may
+        // not get scheduled inside a fixed window, which made this assertion
+        // load-dependent (observed flake in the full battery). The deadline is
+        // generous; a genuine failure still fails below.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let revoked: bool = sqlx::query_scalar(
+                "SELECT revoked_at IS NOT NULL FROM consent_records WHERE id = $1",
+            )
+            .bind(&expired_id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap_or(false);
+            if revoked || tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        task.abort();
+
+        let expired: (bool, bool) = sqlx::query_as(
+            "SELECT granted, revoked_at IS NOT NULL FROM consent_records WHERE id = $1",
+        )
+        .bind(&expired_id)
+        .fetch_one(&state.db)
+        .await
+        .expect("expired consent row");
+        assert_eq!(
+            expired,
+            (false, true),
+            "the cron arm must revoke the expired consent"
+        );
+        let live: (bool, bool) = sqlx::query_as(
+            "SELECT granted, revoked_at IS NOT NULL FROM consent_records WHERE id = $1",
+        )
+        .bind(&live_id)
+        .fetch_one(&state.db)
+        .await
+        .expect("live consent row");
+        assert_eq!(
+            live,
+            (true, false),
+            "a non-expired consent must be untouched by the sweep"
+        );
+
         let _ = state.db.close().await;
     }
 

@@ -244,33 +244,40 @@ async fn run_cron_jobs(state: Arc<AppState>) {
 
     loop {
         tokio::select! {
-                    _ = flush_ticker.tick() => {
-                        if let Err(e) = state.audit.flush().await {
-                            error!(error = %e, "Audit buffer flush failed");
-                        }
-                    }
-                    _ = cleanup_ticker.tick() => {
-                        match state.audit.cleanup().await {
-                            Ok(n) if n > 0 => info!(count = n, "Audit log cleanup completed"),
-                            Err(e) => error!(error = %e, "Audit log cleanup failed"),
-                            _ => {}
-                        }
-                    }
-                    _ = access_cleanup_ticker.tick() => {
-                        // F63: iso_access_attempts is append-only per decision —
-                        // retention keeps it bounded.
-                        match state.isolation.cleanup_access_attempts(365).await {
-                            Ok(n) if n > 0 => info!(count = n, "Access-attempt audit cleanup completed"),
-                            Err(e) => error!(error = %e, "Access-attempt audit cleanup failed"),
-                            _ => {}
-                        }
-                    }
-                    _ = rotation_ticker.tick() => {
-        // Check for keys needing rotation — iterate known orgs
-        // In production, this would query the DB for stale keys
-                        info!("Key rotation check completed");
-                    }
+            _ = flush_ticker.tick() => {
+                if let Err(e) = state.audit.flush().await {
+                    error!(error = %e, "Audit buffer flush failed");
                 }
+            }
+            _ = cleanup_ticker.tick() => {
+                match state.audit.cleanup().await {
+                    Ok(n) if n > 0 => info!(count = n, "Audit log cleanup completed"),
+                    Err(e) => error!(error = %e, "Audit log cleanup failed"),
+                    _ => {}
+                }
+            }
+            _ = access_cleanup_ticker.tick() => {
+                // F63: iso_access_attempts is append-only per decision —
+                // retention keeps it bounded.
+                match state.isolation.cleanup_access_attempts(365).await {
+                    Ok(n) if n > 0 => info!(count = n, "Access-attempt audit cleanup completed"),
+                    Err(e) => error!(error = %e, "Access-attempt audit cleanup failed"),
+                    _ => {}
+                }
+            }
+            _ = rotation_ticker.tick() => {
+                // One set-based scan finds every tenant whose active
+                // key is past its rotation deadline; the old arm
+                // iterated known orgs but never actually rotated.
+                match state.encryption.rotate_expiring_keys().await {
+                    Ok(rotated) if !rotated.is_empty() => {
+                        info!(count = rotated.len(), "Encryption key rotation completed")
+                    }
+                    Ok(_) => info!("Key rotation check completed"),
+                    Err(e) => error!(error = %e, "Key rotation check failed"),
+                }
+            }
+        }
     }
 }
 

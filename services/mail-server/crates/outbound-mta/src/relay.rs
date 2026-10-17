@@ -804,15 +804,12 @@ impl Relay {
             // would duplicate the accepted copies), so they continue on a
             // follow-up unit of their own — never dropped. When the retry
             // budget is already exhausted they are DSN'd (4.4.7) instead.
-            let mut dsn_send_units = Vec::new();
-            for result in &rejected_results {
-                if let Some(unit) = self
-                    .enqueue_rejection_dsn(&row, result, &remote_mx, arrival)
-                    .await
-                {
-                    dsn_send_units.push(unit);
-                }
-            }
+            // One ledger statement for the whole rejected subset.
+            let dsn_submissions: Vec<NewSubmission> = rejected_results
+                .iter()
+                .filter_map(|result| self.build_rejection_dsn(&row, result, &remote_mx, arrival))
+                .collect();
+            let mut dsn_send_units = self.enqueue_dsn_batch(dsn_submissions).await;
             let deferred_retry = if deferred_results.is_empty() {
                 None
             } else {
@@ -832,20 +829,23 @@ impl Relay {
                     None => {
                         // Budget exhausted for the deferred subset: delivery
                         // has expired for them, which is a DSN — not a silent
-                        // drop.
-                        for recipient in &deferred_recipients {
-                            let inputs = DsnInputs::delivery_expired(
-                                recipient.clone(),
-                                arrival,
-                                "smtp; 4.4.7 delivery time expired at the relay (retry \
-                                 ceiling reached for a deferred recipient of a partially \
-                                 accepted send)"
-                                    .to_string(),
-                            );
-                            if let Some(unit) = self.enqueue_dsn(&row, inputs, recipient).await {
-                                dsn_send_units.push(unit);
-                            }
-                        }
+                        // drop. Build the whole subset and enqueue it in one
+                        // ledger statement.
+                        let expired: Vec<NewSubmission> = deferred_recipients
+                            .iter()
+                            .filter_map(|recipient| {
+                                let inputs = DsnInputs::delivery_expired(
+                                    recipient.clone(),
+                                    arrival,
+                                    "smtp; 4.4.7 delivery time expired at the relay (retry \
+                                     ceiling reached for a deferred recipient of a partially \
+                                     accepted send)"
+                                        .to_string(),
+                                );
+                                self.build_dsn(&row, inputs, recipient)
+                            })
+                            .collect();
+                        dsn_send_units.extend(self.enqueue_dsn_batch(expired).await);
                         None
                     }
                 }
@@ -1382,15 +1382,15 @@ impl Relay {
         }
     }
 
-    /// Queue the DSN for one permanently rejected recipient (no-op for a null
-    /// return path).
-    async fn enqueue_rejection_dsn(
+    /// Build the DSN submission for one permanently rejected recipient
+    /// (no-op for a null return path).
+    fn build_rejection_dsn(
         &self,
         row: &QueuedSubmission,
         result: &RecipientResult,
         remote_mx: &Option<String>,
         arrival: DateTime<Utc>,
-    ) -> Option<String> {
+    ) -> Option<NewSubmission> {
         let inputs = DsnInputs {
             final_recipient: result.recipient.clone(),
             action: DsnAction::Failed,
@@ -1403,7 +1403,7 @@ impl Relay {
             arrival_date: arrival,
             original_envelope_id: None,
         };
-        self.enqueue_dsn(row, inputs, &result.recipient).await
+        self.build_dsn(row, inputs, &result.recipient)
     }
 
     async fn enqueue_permanent_dsns(
@@ -1413,14 +1413,11 @@ impl Relay {
         permanent_failures: &[DeliveryFailure],
         arrival: DateTime<Utc>,
     ) -> Vec<String> {
-        let mut units = Vec::new();
+        let mut submissions = Vec::new();
         if !rejected_results.is_empty() {
             for result in rejected_results {
-                if let Some(unit) = self
-                    .enqueue_rejection_dsn(row, result, &None, arrival)
-                    .await
-                {
-                    units.push(unit);
+                if let Some(new) = self.build_rejection_dsn(row, result, &None, arrival) {
+                    submissions.push(new);
                 }
             }
         } else {
@@ -1444,12 +1441,12 @@ impl Relay {
                     arrival_date: arrival,
                     original_envelope_id: None,
                 };
-                if let Some(unit) = self.enqueue_dsn(row, inputs, recipient).await {
-                    units.push(unit);
+                if let Some(new) = self.build_dsn(row, inputs, recipient) {
+                    submissions.push(new);
                 }
             }
         }
-        units
+        self.enqueue_dsn_batch(submissions).await
     }
 
     async fn enqueue_expired_dsns(
@@ -1457,7 +1454,7 @@ impl Relay {
         row: &QueuedSubmission,
         arrival: DateTime<Utc>,
     ) -> Vec<String> {
-        let mut units = Vec::new();
+        let mut submissions = Vec::new();
         for recipient in &row.recipients {
             let inputs = DsnInputs::delivery_expired(
                 recipient.clone(),
@@ -1465,11 +1462,11 @@ impl Relay {
                 "smtp; 4.4.7 delivery time expired at the relay (retry ceiling reached)"
                     .to_string(),
             );
-            if let Some(unit) = self.enqueue_dsn(row, inputs, recipient).await {
-                units.push(unit);
+            if let Some(new) = self.build_dsn(row, inputs, recipient) {
+                submissions.push(new);
             }
         }
-        units
+        self.enqueue_dsn_batch(submissions).await
     }
 
     async fn enqueue_message_too_large_dsns(
@@ -1477,7 +1474,7 @@ impl Relay {
         row: &QueuedSubmission,
         arrival: DateTime<Utc>,
     ) -> Vec<String> {
-        let mut units = Vec::new();
+        let mut submissions = Vec::new();
         for recipient in &row.recipients {
             let inputs = DsnInputs {
                 final_recipient: recipient.clone(),
@@ -1488,23 +1485,44 @@ impl Relay {
                 arrival_date: arrival,
                 original_envelope_id: None,
             };
-            if let Some(unit) = self.enqueue_dsn(row, inputs, recipient).await {
-                units.push(unit);
+            if let Some(new) = self.build_dsn(row, inputs, recipient) {
+                submissions.push(new);
             }
         }
-        units
+        self.enqueue_dsn_batch(submissions).await
     }
 
-    /// Generate and durably enqueue one DSN. Returns the DSN ledger key when
-    /// a DSN was generated (including when it already existed — the unit is
-    /// then already queued), `None` for a null return path or generation
-    /// failure.
-    async fn enqueue_dsn(
+    /// Enqueue a whole DSN batch with ONE ledger statement. Every generated
+    /// DSN maps to one deterministic `send_unit`, so the ledger's
+    /// `ON CONFLICT (send_unit) DO NOTHING` keeps the retry idempotency.
+    async fn enqueue_dsn_batch(&self, submissions: Vec<NewSubmission>) -> Vec<String> {
+        if submissions.is_empty() {
+            return Vec::new();
+        }
+        let units: Vec<String> = submissions
+            .iter()
+            .map(|new| new.send_unit.clone())
+            .collect();
+        match self.ledger.enqueue_dsns(submissions, Utc::now()).await {
+            Ok(_) => units,
+            Err(error) => {
+                tracing::error!(
+                    dsn_count = units.len(),
+                    error = %error,
+                    "failed to enqueue the DSN batch on the durable ledger"
+                );
+                Vec::new()
+            }
+        }
+    }
+
+    /// Generate one DSN submission (no database access).
+    fn build_dsn(
         &self,
         row: &QueuedSubmission,
         inputs: DsnInputs,
         key_tag: &str,
-    ) -> Option<String> {
+    ) -> Option<NewSubmission> {
         let sender = row.envelope_from.as_deref()?;
         let generated = match self.dsn.generate(&inputs, Some(sender), &row.message) {
             Ok(generated) => generated,
@@ -1519,8 +1537,8 @@ impl Relay {
             }
         };
         let dsn_unit = format!("{}:dsn:{}", row.send_unit, sanitize_key(key_tag));
-        let new = NewSubmission {
-            send_unit: dsn_unit.clone(),
+        Some(NewSubmission {
+            send_unit: dsn_unit,
             tenant_id: row.tenant_id.clone(),
             queue_id: row.queue_id,
             // The DSN's own delivery contract (deterministic unit key +
@@ -1532,18 +1550,7 @@ impl Relay {
             message: generated.message,
             requested_source_ip: row.requested_source_ip,
             max_attempts: self.config.retry.max_attempts,
-        };
-        match self.ledger.enqueue_dsn(new, Utc::now()).await {
-            Ok(_inserted) => Some(dsn_unit),
-            Err(error) => {
-                tracing::error!(
-                    send_unit = %row.send_unit,
-                    error = %error,
-                    "failed to enqueue DSN on the durable ledger"
-                );
-                None
-            }
-        }
+        })
     }
 }
 

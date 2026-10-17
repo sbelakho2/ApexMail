@@ -192,6 +192,24 @@ pub trait RelayLedger: Send + Sync {
         now: DateTime<Utc>,
     ) -> Result<bool, LedgerError>;
 
+    /// Insert several DSNs at once, returning the per-submission inserted
+    /// flag (same idempotency contract as [`Self::enqueue_dsn`]).
+    ///
+    /// The default implementation is the per-row loop; [`PgLedger`] overrides
+    /// it with one multi-row `INSERT ... ON CONFLICT (send_unit) DO NOTHING`,
+    /// so a multi-recipient failure does not cost one round trip per DSN.
+    async fn enqueue_dsns(
+        &self,
+        news: Vec<NewSubmission>,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<bool>, LedgerError> {
+        let mut inserted = Vec::with_capacity(news.len());
+        for new in news {
+            inserted.push(self.enqueue_dsn(new, now).await?);
+        }
+        Ok(inserted)
+    }
+
     async fn get(&self, send_unit: &str) -> Result<Option<QueuedSubmission>, LedgerError>;
 
     /// Return crashed `delivering` rows (expired lease) to `pending`.
@@ -723,6 +741,71 @@ impl RelayLedger for PgLedger {
         Ok(result.rows_affected() == 1)
     }
 
+    async fn enqueue_dsns(
+        &self,
+        news: Vec<NewSubmission>,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<bool>, LedgerError> {
+        if news.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Materialize the bound JSON/IP values first so the query builder can
+        // borrow them for the whole statement.
+        let recipients: Vec<serde_json::Value> = news
+            .iter()
+            .map(|new| {
+                serde_json::Value::Array(
+                    new.recipients
+                        .iter()
+                        .map(|recipient| serde_json::Value::String(recipient.clone()))
+                        .collect(),
+                )
+            })
+            .collect();
+        let source_ips: Vec<Option<String>> = news
+            .iter()
+            .map(|new| new.requested_source_ip.map(|ip| ip.to_string()))
+            .collect();
+
+        let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+            "INSERT INTO outbound_relay_ledger \
+             (send_unit, tenant_id, queue_id, state, envelope_from, recipients, message, \
+              requested_source_ip, attempt, max_attempts, next_attempt_at, updated_at) VALUES ",
+        );
+        for (index, new) in news.iter().enumerate() {
+            if index > 0 {
+                qb.push(", ");
+            }
+            qb.push("(");
+            qb.push_bind(&new.send_unit);
+            qb.push(", ");
+            qb.push_bind(&new.tenant_id);
+            qb.push(", ");
+            qb.push_bind(new.queue_id);
+            qb.push(", 'pending', NULL, ");
+            qb.push_bind(&recipients[index]);
+            qb.push(", ");
+            qb.push_bind(&new.message);
+            qb.push(", ");
+            qb.push_bind(&source_ips[index]);
+            qb.push("::text::inet, 0, ");
+            qb.push_bind(i32::try_from(new.max_attempts).unwrap_or(i32::MAX));
+            qb.push(", ");
+            qb.push_bind(now);
+            qb.push(", NOW())");
+        }
+        qb.push(" ON CONFLICT (send_unit) DO NOTHING RETURNING send_unit");
+
+        let rows: Vec<(String,)> = qb.build_query_as().fetch_all(&self.pool).await?;
+        let inserted: std::collections::HashSet<String> =
+            rows.into_iter().map(|(send_unit,)| send_unit).collect();
+        Ok(news
+            .iter()
+            .map(|new| inserted.contains(&new.send_unit))
+            .collect())
+    }
+
     async fn get(&self, send_unit: &str) -> Result<Option<QueuedSubmission>, LedgerError> {
         let select =
             format!("SELECT {LEDGER_COLUMNS} FROM outbound_relay_ledger WHERE send_unit = $1");
@@ -1131,6 +1214,130 @@ mod tests {
         .execute(pool)
         .await
         .expect("seed ledger row");
+    }
+
+    /// Per-STATEMENT counters: a `FOR EACH STATEMENT` trigger fires once per
+    /// INSERT/UPDATE/DELETE statement, not per row — the only way to prove a
+    /// batch stayed one round trip.
+    async fn install_statement_counters(pool: &PgPool, tables: &[&str]) {
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS _apexmail_test_stmt_counts (
+                 probed_table TEXT NOT NULL,
+                 op TEXT NOT NULL,
+                 statements BIGINT NOT NULL DEFAULT 0,
+                 PRIMARY KEY (probed_table, op)
+             )",
+        )
+        .execute(pool)
+        .await
+        .expect("create statement-count table");
+        sqlx::query(
+            "CREATE OR REPLACE FUNCTION _apexmail_test_count_stmt() RETURNS trigger \
+             LANGUAGE plpgsql AS $$ \
+             BEGIN \
+               INSERT INTO _apexmail_test_stmt_counts (probed_table, op, statements) \
+               VALUES (TG_TABLE_NAME, TG_OP, 1) \
+               ON CONFLICT (probed_table, op) \
+               DO UPDATE SET statements = _apexmail_test_stmt_counts.statements + 1; \
+               RETURN NULL; \
+             END $$",
+        )
+        .execute(pool)
+        .await
+        .expect("create statement-count function");
+        for table in tables {
+            assert!(
+                table
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_'),
+                "statement counter table name must be identifier-shaped: {table}"
+            );
+            sqlx::query(&format!(
+                "CREATE OR REPLACE TRIGGER _apexmail_test_count_stmt \
+                 AFTER INSERT OR UPDATE OR DELETE ON {table} \
+                 FOR EACH STATEMENT EXECUTE FUNCTION _apexmail_test_count_stmt()"
+            ))
+            .execute(pool)
+            .await
+            .expect("install statement-count trigger");
+        }
+    }
+
+    async fn reset_statement_counts(pool: &PgPool) {
+        sqlx::query("UPDATE _apexmail_test_stmt_counts SET statements = 0")
+            .execute(pool)
+            .await
+            .expect("reset statement counts");
+    }
+
+    async fn statement_count(pool: &PgPool, table: &str, op: &str) -> i64 {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT statements FROM _apexmail_test_stmt_counts \
+             WHERE probed_table = $1 AND op = $2",
+        )
+        .bind(table)
+        .bind(op)
+        .fetch_optional(pool)
+        .await
+        .expect("read statement count")
+        .unwrap_or(0)
+    }
+
+    /// A multi-recipient DSN fan-out must write the whole batch with ONE
+    /// INSERT. The old path called `enqueue_dsn` per DSN (N statements); this
+    /// test fails on that code and passes with the batched
+    /// `INSERT ... ON CONFLICT DO NOTHING` while preserving the deterministic
+    /// unit-key idempotency.
+    #[tokio::test]
+    async fn enqueue_dsns_writes_the_whole_batch_in_one_statement() {
+        let Some(pool) = pg_ledger_pool("dsn-batch").await else {
+            return;
+        };
+        let ledger = PgLedger::new(pool.clone());
+        let parent = format!("outbound-mta-test:dsn-batch:{}", Uuid::new_v4());
+        let now = Utc::now();
+        let submission = |index: usize| NewSubmission {
+            send_unit: format!("{parent}:dsn:user-{index}@example.com"),
+            tenant_id: Some("tenant-test".to_string()),
+            queue_id: None,
+            request_fingerprint: None,
+            envelope_from: None,
+            recipients: vec!["sender@example.com".to_string()],
+            message: format!("From: MAILER-DAEMON\r\n\r\nreport {index}").into_bytes(),
+            requested_source_ip: None,
+            max_attempts: 5,
+        };
+        let batch: Vec<NewSubmission> = (0..20).map(submission).collect();
+
+        install_statement_counters(&pool, &["outbound_relay_ledger"]).await;
+        reset_statement_counts(&pool).await;
+
+        let inserted = ledger.enqueue_dsns(batch.clone(), now).await.unwrap();
+        assert_eq!(inserted, vec![true; 20], "every unit is new");
+        assert_eq!(
+            statement_count(&pool, "outbound_relay_ledger", "INSERT").await,
+            1,
+            "20 DSNs must be enqueued by ONE INSERT statement"
+        );
+
+        // Replay: idempotent (all false) and still one statement.
+        reset_statement_counts(&pool).await;
+        let replayed = ledger.enqueue_dsns(batch.clone(), now).await.unwrap();
+        assert_eq!(replayed, vec![false; 20], "the unit keys already exist");
+        assert_eq!(
+            statement_count(&pool, "outbound_relay_ledger", "INSERT").await,
+            1
+        );
+        let rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM outbound_relay_ledger WHERE send_unit LIKE $1",
+        )
+        .bind(format!("{parent}:dsn:%"))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rows, 20, "the replay did not duplicate rows");
+
+        pool.close().await;
     }
 
     /// Round-trips every ledger statement against a REAL Postgres schema

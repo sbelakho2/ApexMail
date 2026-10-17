@@ -387,4 +387,90 @@ pub(crate) mod test_db {
             Err(error) => panic!("{}", error.panic_message()),
         }
     }
+
+    /// DML-statement counters for the batched-hotspot tests.
+    ///
+    /// Installs a `FOR EACH STATEMENT` trigger on each named table that bumps
+    /// `_apexmail_test_stmt_counts` once per INSERT/UPDATE/DELETE statement
+    /// (NOT once per row). That is what lets a test assert a batched path is
+    /// O(1) in statements where the old per-row path was O(N): row-count
+    /// assertions cannot distinguish the two, statement counts can.
+    ///
+    /// The caller must pass code-owned identifier-shaped table names; they are
+    /// interpolated after a strict validation (no SQL injection surface).
+    pub(crate) async fn install_statement_counters(pool: &PgPool, tables: &[&str]) -> Vec<String> {
+        let mut installed = Vec::new();
+        for table in tables {
+            if !table
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+            {
+                panic!("statement counter table name must be identifier-shaped: {table}");
+            }
+            // Column names in the counter table carry the probing table so one
+            // helper call can instrument several tables at once.
+            installed.push((*table).to_string());
+        }
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS _apexmail_test_stmt_counts (
+                 probed_table TEXT NOT NULL,
+                 op TEXT NOT NULL,
+                 statements BIGINT NOT NULL DEFAULT 0,
+                 PRIMARY KEY (probed_table, op)
+             )",
+        )
+        .execute(pool)
+        .await
+        .expect("create statement-count table");
+
+        let counter_fn = "CREATE OR REPLACE FUNCTION _apexmail_test_count_stmt() RETURNS trigger \
+                          LANGUAGE plpgsql AS $$ \
+                          BEGIN \
+                            INSERT INTO _apexmail_test_stmt_counts (probed_table, op, statements) \
+                            VALUES (TG_TABLE_NAME, TG_OP, 1) \
+                            ON CONFLICT (probed_table, op) \
+                            DO UPDATE SET statements = _apexmail_test_stmt_counts.statements + 1; \
+                            RETURN NULL; \
+                          END $$";
+        sqlx::query(counter_fn)
+            .execute(pool)
+            .await
+            .expect("create statement-count function");
+
+        for table in &installed {
+            sqlx::query(&format!(
+                "CREATE OR REPLACE TRIGGER _apexmail_test_count_stmt \
+                 AFTER INSERT OR UPDATE OR DELETE ON {table} \
+                 FOR EACH STATEMENT EXECUTE FUNCTION _apexmail_test_count_stmt()"
+            ))
+            .execute(pool)
+            .await
+            .expect("install statement-count trigger");
+        }
+        installed
+    }
+
+    /// Statements recorded for `(table, op)` since the last
+    /// [`reset_statement_counts`]. `op` is one of `INSERT`/`UPDATE`/`DELETE`.
+    pub(crate) async fn statement_count(pool: &PgPool, table: &str, op: &str) -> i64 {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT statements FROM _apexmail_test_stmt_counts \
+             WHERE probed_table = $1 AND op = $2",
+        )
+        .bind(table)
+        .bind(op)
+        .fetch_optional(pool)
+        .await
+        .expect("read statement count")
+        .unwrap_or(0)
+    }
+
+    /// Zero every counter (the triggers stay installed).
+    pub(crate) async fn reset_statement_counts(pool: &PgPool) {
+        sqlx::query("UPDATE _apexmail_test_stmt_counts SET statements = 0")
+            .execute(pool)
+            .await
+            .expect("reset statement counts");
+    }
 }

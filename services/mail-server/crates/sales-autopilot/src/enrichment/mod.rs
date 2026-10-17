@@ -947,72 +947,142 @@ async fn find_or_create_account(
 }
 
 /// Persist evidence + facts for a completed waterfall run.
+///
+/// ONE statement per table: a waterfall fills up to `MAX_REQUESTED_FIELDS`
+/// fields, so the former one-evidence + one-fact insert per field was an
+/// N+1 write pattern. The conflict rules are unchanged.
 async fn persist_facts(
     db: &PgPool,
     tenant_id: &str,
     account_id: Uuid,
     outcome: &EnrichmentOutcome,
 ) -> Result<(), SalesError> {
+    if outcome.facts.is_empty() {
+        return Ok(());
+    }
     let mut tx = db
         .begin()
         .await
         .map_err(|error| SalesError::Database(error.to_string()))?;
 
-    for named in &outcome.facts {
-        let proposition = format!(
-            "{} = {}",
-            named.field,
-            truncate_chars(&compact_json(&named.fact.value), 400)
-        );
-        sqlx::query(
-            "INSERT INTO sales_evidence (
-                id, tenant_id, account_id, contact_id, proposition, confidence,
-                source_kind, source_ref, source_hash, observed_at, expires_at
-             ) VALUES ($1, $2, $3, NULL, $4, $5, $6, $7, NULL, $8, $9)
-             ON CONFLICT (id) DO NOTHING",
-        )
-        .bind(named.fact.evidence_id)
-        .bind(tenant_id)
-        .bind(account_id)
-        .bind(&proposition)
-        .bind(f64::from(named.fact.confidence))
-        .bind(named.source_kind)
-        .bind(named.fact.provider.as_str())
-        .bind(named.fact.observed_at)
-        .bind(named.fact.expires_at)
-        .execute(&mut *tx)
-        .await
-        .map_err(|error| SalesError::Database(error.to_string()))?;
+    let evidence_ids: Vec<Uuid> = outcome
+        .facts
+        .iter()
+        .map(|named| named.fact.evidence_id)
+        .collect();
+    let propositions: Vec<String> = outcome
+        .facts
+        .iter()
+        .map(|named| {
+            format!(
+                "{} = {}",
+                named.field,
+                truncate_chars(&compact_json(&named.fact.value), 400)
+            )
+        })
+        .collect();
+    let confidences: Vec<f64> = outcome
+        .facts
+        .iter()
+        .map(|named| f64::from(named.fact.confidence))
+        .collect();
+    let source_kinds: Vec<&str> = outcome
+        .facts
+        .iter()
+        .map(|named| named.source_kind)
+        .collect();
+    let providers: Vec<&str> = outcome
+        .facts
+        .iter()
+        .map(|named| named.fact.provider.as_str())
+        .collect();
+    let observed_at: Vec<DateTime<Utc>> = outcome
+        .facts
+        .iter()
+        .map(|named| named.fact.observed_at)
+        .collect();
+    let expires_at: Vec<Option<DateTime<Utc>>> = outcome
+        .facts
+        .iter()
+        .map(|named| named.fact.expires_at)
+        .collect();
 
-        sqlx::query(
-            "INSERT INTO sales_enrichment_facts (
-                id, tenant_id, subject_type, subject_id, field, value, provider,
-                confidence, observed_at, expires_at, evidence_id, cost_eur, created_at
-             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::float8::numeric, NOW())
-             ON CONFLICT (tenant_id, subject_type, subject_id, field, provider) DO UPDATE SET
-                value = EXCLUDED.value,
-                confidence = EXCLUDED.confidence,
-                observed_at = EXCLUDED.observed_at,
-                expires_at = EXCLUDED.expires_at,
-                evidence_id = EXCLUDED.evidence_id,
-                cost_eur = EXCLUDED.cost_eur",
-        )
-        .bind(Uuid::new_v4())
-        .bind(tenant_id)
-        .bind(SubjectType::Account.as_str())
-        .bind(account_id)
-        .bind(&named.field)
-        .bind(&named.fact.value)
-        .bind(named.fact.provider.as_str())
-        .bind(f64::from(named.fact.confidence))
-        .bind(named.fact.observed_at)
-        .bind(named.fact.expires_at)
-        .bind(named.fact.evidence_id)
-        .bind(named.cost_eur.max(0.0))
-        .execute(&mut *tx)
-        .await
-        .map_err(|error| SalesError::Database(error.to_string()))?;
-    }
+    sqlx::query(
+        "INSERT INTO sales_evidence (
+            id, tenant_id, account_id, contact_id, proposition, confidence,
+            source_kind, source_ref, source_hash, observed_at, expires_at
+         )
+         SELECT id, $2, $3, NULL, proposition, confidence, source_kind, source_ref, NULL,
+                observed_at, expires_at
+         FROM unnest($1::uuid[], $4::text[], $5::float8[], $6::text[], $7::text[],
+                     $8::timestamptz[], $9::timestamptz[])
+              AS batch(id, proposition, confidence, source_kind, source_ref,
+                       observed_at, expires_at)
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .bind(&evidence_ids)
+    .bind(tenant_id)
+    .bind(account_id)
+    .bind(&propositions)
+    .bind(&confidences)
+    .bind(&source_kinds)
+    .bind(&providers)
+    .bind(&observed_at)
+    .bind(&expires_at)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| SalesError::Database(error.to_string()))?;
+
+    let row_ids: Vec<Uuid> = outcome.facts.iter().map(|_| Uuid::new_v4()).collect();
+    let fields: Vec<&str> = outcome
+        .facts
+        .iter()
+        .map(|named| named.field.as_str())
+        .collect();
+    let values: Vec<&serde_json::Value> = outcome
+        .facts
+        .iter()
+        .map(|named| &named.fact.value)
+        .collect();
+    let costs: Vec<f64> = outcome
+        .facts
+        .iter()
+        .map(|named| named.cost_eur.max(0.0))
+        .collect();
+    sqlx::query(
+        "INSERT INTO sales_enrichment_facts (
+            id, tenant_id, subject_type, subject_id, field, value, provider,
+            confidence, observed_at, expires_at, evidence_id, cost_eur, created_at
+         )
+         SELECT id, $2, $3, $4, field, value, provider, confidence, observed_at,
+                expires_at, evidence_id, cost_eur::float8::numeric, NOW()
+         FROM unnest($1::uuid[], $5::text[], $6::jsonb[], $7::text[], $8::float8[],
+                     $9::timestamptz[], $10::timestamptz[], $11::uuid[], $12::float8[])
+              AS batch(id, field, value, provider, confidence, observed_at,
+                       expires_at, evidence_id, cost_eur)
+         ON CONFLICT (tenant_id, subject_type, subject_id, field, provider) DO UPDATE SET
+            value = EXCLUDED.value,
+            confidence = EXCLUDED.confidence,
+            observed_at = EXCLUDED.observed_at,
+            expires_at = EXCLUDED.expires_at,
+            evidence_id = EXCLUDED.evidence_id,
+            cost_eur = EXCLUDED.cost_eur",
+    )
+    .bind(&row_ids)
+    .bind(tenant_id)
+    .bind(SubjectType::Account.as_str())
+    .bind(account_id)
+    .bind(&fields)
+    .bind(&values)
+    .bind(&providers)
+    .bind(&confidences)
+    .bind(&observed_at)
+    .bind(&expires_at)
+    .bind(&evidence_ids)
+    .bind(&costs)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| SalesError::Database(error.to_string()))?;
 
     tx.commit()
         .await
@@ -1782,5 +1852,100 @@ mod residual_tests {
                 .collect::<Vec<_>>(),
             "the provider-declared union in priority order"
         );
+    }
+
+    /// Facts are persisted by ONE INSERT per table (pre-fix: one evidence +
+    /// one fact insert per field — up to 64 fields per waterfall).
+    #[tokio::test]
+    async fn persisted_facts_use_one_statement_per_table() {
+        let Some(pool) =
+            crate::test_db::canonical_test_pool("enrichment::tests::persist_facts_batch").await
+        else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("enrich-batch");
+        let account_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO sales_accounts (id, tenant_id, company, domain, lifecycle, created_at, updated_at) \
+             VALUES ($1, $2, 'Enrichment Fixture', $3, 'discovered', NOW(), NOW())",
+        )
+        .bind(account_id)
+        .bind(&tenant)
+        .bind(format!("{account_id}.example"))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        crate::test_probe::install_insert_probe(&pool, "sales_evidence", "tenant_id").await;
+        crate::test_probe::install_insert_probe(&pool, "sales_enrichment_facts", "tenant_id").await;
+        crate::test_probe::reset_probe(&pool, "sales_evidence", &tenant).await;
+        crate::test_probe::reset_probe(&pool, "sales_enrichment_facts", &tenant).await;
+
+        let observed_at = Utc::now();
+        let facts: Vec<NamedFact> = (0..6)
+            .map(|index| NamedFact {
+                field: format!("field_{index}"),
+                fact: EnrichedFact {
+                    value: serde_json::json!(format!("value-{index}")),
+                    provider: ProviderId("http_gateway"),
+                    confidence: 0.9,
+                    observed_at,
+                    expires_at: None,
+                    evidence_id: Uuid::new_v4(),
+                },
+                source_kind: "provider_api",
+                cost_eur: 0.01,
+            })
+            .collect();
+        let outcome = EnrichmentOutcome {
+            facts,
+            requested_fields: (0..6).map(|index| format!("field_{index}")).collect(),
+            missing_fields: Vec::new(),
+            provider_failures: Vec::new(),
+            provider_calls: 1,
+        };
+        persist_facts(&pool, &tenant, account_id, &outcome)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            crate::test_probe::probe_count(&pool, "sales_evidence", &tenant).await,
+            1,
+            "all evidence rows must be ONE INSERT (pre-fix: one per fact)"
+        );
+        assert_eq!(
+            crate::test_probe::probe_count(&pool, "sales_enrichment_facts", &tenant).await,
+            1,
+            "all facts must be ONE INSERT (pre-fix: one per fact)"
+        );
+        let evidence: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sales_evidence WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let stored: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sales_enrichment_facts WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!((evidence, stored), (6, 6));
+
+        sqlx::query("DELETE FROM sales_enrichment_facts WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM sales_evidence WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM sales_accounts WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 }

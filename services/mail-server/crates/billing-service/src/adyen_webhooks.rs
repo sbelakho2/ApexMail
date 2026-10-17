@@ -64,6 +64,9 @@ const DEADLETTER_RETRY_POLL_INTERVAL_SECS: u64 = 60;
 const DEADLETTER_RETRY_BACKOFF_SECONDS: [i64; 5] = [300, 900, 1800, 3600, 7200];
 /// Maximum number of deadletter entries to retry per batch.
 const DEADLETTER_RETRY_BATCH_SIZE: usize = 10;
+/// Keys per MGET / ZREM round trip. Bounds a single Redis command's args
+/// while keeping the retry pass O(1) round trips instead of O(entries).
+const DEADLETTER_KEY_CHUNK: usize = 100;
 const DUNNING_STATUS_CACHE_TTL_SECONDS: u64 = 300;
 
 /// The success answer Adyen expects: the bare body `[accepted]` (text).
@@ -2844,6 +2847,8 @@ async fn process_deadletter_retries(state: &AppState) -> Result<(), String> {
         .map_err(|error| format!("Redis connection error: {error}"))?;
 
     // Fetch all entries due for retry (score <= now_ms).
+    #[cfg(test)]
+    crate::test_support::query_count::bump("deadletter.redis");
     let due_entries: Vec<String> = redis::cmd("ZRANGEBYSCORE")
         .arg(DEADLETTER_RETRY_INDEX_KEY)
         .arg(0i64)
@@ -2852,9 +2857,8 @@ async fn process_deadletter_retries(state: &AppState) -> Result<(), String> {
         .await
         .map_err(|error| format!("Failed to query retry index: {error}"))?;
 
-    let batch: Vec<&str> = due_entries
-        .iter()
-        .map(String::as_str)
+    let batch: Vec<String> = due_entries
+        .into_iter()
         .take(DEADLETTER_RETRY_BATCH_SIZE)
         .collect();
     if batch.is_empty() {
@@ -2864,22 +2868,37 @@ async fn process_deadletter_retries(state: &AppState) -> Result<(), String> {
         batch_size = batch.len(),
         "retrying deadlettered webhook events"
     );
-    for event_key in &batch {
-        // Read the full deadletter entry from the event key.
-        let entry_json: Option<String> = redis::cmd("GET")
-            .arg(event_key)
+
+    // P3 fix 4 — read every due entry in ONE MGET per chunk instead of one
+    // GET per key (the per-key GET/DEL loop was O(batch) round trips). The
+    // connection is released before replay: each replay does DB work and
+    // must not pin a Redis connection for the whole batch.
+    let mut entry_jsons: Vec<Option<String>> = Vec::with_capacity(batch.len());
+    for chunk in batch.chunks(DEADLETTER_KEY_CHUNK) {
+        #[cfg(test)]
+        crate::test_support::query_count::bump("deadletter.redis");
+        let values: Vec<Option<String>> = redis::cmd("MGET")
+            .arg(chunk)
             .query_async(&mut *conn)
             .await
-            .map_err(|error| format!("Failed to read deadletter entry: {error}"))?;
+            .map_err(|error| format!("Failed to read deadletter entries: {error}"))?;
+        entry_jsons.extend(values);
+    }
+    drop(conn);
 
+    // Batch the index mutations: stale/corrupt/handled keys accumulate into
+    // one (chunked) ZREM, reschedules into one pipelined SET+ZADD, exhausted
+    // TTL shortenings into one pipelined SETEX. Net outcomes are identical
+    // to the per-key writes; a crash before the flush only means the entries
+    // remain due and are replayed (replay is idempotent).
+    let mut remove_from_index: Vec<String> = Vec::new();
+    let mut shorten_ttl: Vec<(String, String)> = Vec::new();
+    let mut reschedule: Vec<(String, String, i64)> = Vec::new();
+
+    for (event_key, entry_json) in batch.iter().zip(entry_jsons) {
         let Some(entry_json) = entry_json else {
             // Entry already evicted — remove stale retry index member.
-            let _: () = redis::cmd("ZREM")
-                .arg(DEADLETTER_RETRY_INDEX_KEY)
-                .arg(event_key)
-                .query_async(&mut *conn)
-                .await
-                .unwrap_or_default();
+            remove_from_index.push(event_key.clone());
             continue;
         };
 
@@ -2887,12 +2906,7 @@ async fn process_deadletter_retries(state: &AppState) -> Result<(), String> {
             Ok(entry) => entry,
             Err(error) => {
                 warn!(error = %error, key = %event_key, "corrupt deadletter entry, removing from retry index");
-                let _: () = redis::cmd("ZREM")
-                    .arg(DEADLETTER_RETRY_INDEX_KEY)
-                    .arg(event_key)
-                    .query_async(&mut *conn)
-                    .await
-                    .unwrap_or_default();
+                remove_from_index.push(event_key.clone());
                 continue;
             }
         };
@@ -2900,24 +2914,14 @@ async fn process_deadletter_retries(state: &AppState) -> Result<(), String> {
         // Only retry processing_failed entries that have body + signature.
         if entry.reason != "processing_failed" || entry.body.is_none() || entry.signature.is_none()
         {
-            let _: () = redis::cmd("ZREM")
-                .arg(DEADLETTER_RETRY_INDEX_KEY)
-                .arg(event_key)
-                .query_async(&mut *conn)
-                .await
-                .unwrap_or_default();
+            remove_from_index.push(event_key.clone());
             continue;
         }
 
         match replay_deadletter(state, &entry).await {
             Ok(()) => {
                 // Success — remove from retry index (deadletter remains for audit).
-                let _: () = redis::cmd("ZREM")
-                    .arg(DEADLETTER_RETRY_INDEX_KEY)
-                    .arg(event_key)
-                    .query_async(&mut *conn)
-                    .await
-                    .unwrap_or_default();
+                remove_from_index.push(event_key.clone());
                 info!(
                     event_id = ?entry.event_id,
                     "deadletter retry succeeded"
@@ -2941,24 +2945,13 @@ async fn process_deadletter_retries(state: &AppState) -> Result<(), String> {
                         retry_count = next_count,
                         "deadletter retry exhausted, giving up"
                     );
-                    let _: () = redis::cmd("ZREM")
-                        .arg(DEADLETTER_RETRY_INDEX_KEY)
-                        .arg(event_key)
-                        .query_async(&mut *conn)
-                        .await
-                        .unwrap_or_default();
+                    remove_from_index.push(event_key.clone());
 
                     // Shorten TTL to 7 days for final review.
                     let mut final_entry = entry.clone();
                     final_entry.retry_count = next_count;
                     if let Ok(json) = serde_json::to_string(&final_entry) {
-                        let _: () = redis::cmd("SETEX")
-                            .arg(event_key)
-                            .arg(7 * 24 * 60 * 60usize)
-                            .arg(json)
-                            .query_async(&mut *conn)
-                            .await
-                            .unwrap_or_default();
+                        shorten_ttl.push((event_key.clone(), json));
                     }
                 } else {
                     // Schedule next retry with exponential backoff.
@@ -2971,24 +2964,63 @@ async fn process_deadletter_retries(state: &AppState) -> Result<(), String> {
                     let mut updated_entry = entry.clone();
                     updated_entry.retry_count = next_count;
                     if let Ok(json) = serde_json::to_string(&updated_entry) {
-                        let _: () = redis::pipe()
-                            .atomic()
-                            .cmd("SET")
-                            .arg(event_key)
-                            .arg(json)
-                            .ignore()
-                            .cmd("ZADD")
-                            .arg(DEADLETTER_RETRY_INDEX_KEY)
-                            .arg(next_retry_ms)
-                            .arg(event_key)
-                            .ignore()
-                            .query_async(&mut *conn)
-                            .await
-                            .unwrap_or_default();
+                        reschedule.push((event_key.clone(), json, next_retry_ms));
                     }
                 }
             }
         }
+    }
+
+    if remove_from_index.is_empty() && shorten_ttl.is_empty() && reschedule.is_empty() {
+        return Ok(());
+    }
+
+    let mut conn = state
+        .redis
+        .get()
+        .await
+        .map_err(|error| format!("Redis connection error: {error}"))?;
+
+    // ONE ZREM per chunk carries every removed member (the old loop issued
+    // one ZREM per entry).
+    for chunk in remove_from_index.chunks(DEADLETTER_KEY_CHUNK) {
+        #[cfg(test)]
+        crate::test_support::query_count::bump("deadletter.redis");
+        let mut command = redis::cmd("ZREM");
+        command.arg(DEADLETTER_RETRY_INDEX_KEY);
+        for key in chunk {
+            command.arg(key);
+        }
+        let _: () = command.query_async(&mut *conn).await.unwrap_or_default();
+    }
+
+    if !shorten_ttl.is_empty() || !reschedule.is_empty() {
+        // ONE atomic pipeline carries every SETEX + SET/ZADD pair (atomic:
+        // the retry-counter update and its index score move together, like
+        // the per-entry pipe this replaces).
+        #[cfg(test)]
+        crate::test_support::query_count::bump("deadletter.redis");
+        let mut pipe = redis::pipe();
+        pipe.atomic();
+        for (event_key, json) in &shorten_ttl {
+            pipe.cmd("SETEX")
+                .arg(event_key)
+                .arg(7 * 24 * 60 * 60usize)
+                .arg(json)
+                .ignore();
+        }
+        for (event_key, json, next_retry_ms) in &reschedule {
+            pipe.cmd("SET")
+                .arg(event_key)
+                .arg(json)
+                .ignore()
+                .cmd("ZADD")
+                .arg(DEADLETTER_RETRY_INDEX_KEY)
+                .arg(*next_retry_ms)
+                .arg(event_key)
+                .ignore();
+        }
+        let _: () = pipe.query_async(&mut *conn).await.unwrap_or_default();
     }
 
     Ok(())
@@ -7126,6 +7158,86 @@ mod coverage_adversarial {
                 .expect("cleanup");
         }
     );
+
+    // P3 fix 4 — the retry pass must use O(1) Redis round trips, not one
+    // GET + one ZREM per key. Five due entries (two evicted, three
+    // non-replayable) take three commands: ZRANGEBYSCORE, ONE MGET, ONE
+    // multi-member ZREM. The pre-fix loop issued 1 + 2×5 = 11.
+    env_test!(retry_worker_batches_redis_reads_and_index_removals, |env| {
+        use crate::test_support::query_count;
+
+        let isolated = crate::test_support::spawn_isolated_redis();
+        let state = state_with_isolated_redis(env, &isolated);
+        let mut conn = pool_conn(&isolated.pool).await;
+        let _: () = redis::cmd("ZREMRANGEBYSCORE")
+            .arg(DEADLETTER_RETRY_INDEX_KEY)
+            .arg("-inf")
+            .arg("+inf")
+            .query_async(&mut conn)
+            .await
+            .expect("clear retry index");
+
+        // Two index members whose body was evicted.
+        for index in 0..2 {
+            let key = format!("adyen:deadletter:event:batch_evicted_{index}");
+            let _: () = redis::cmd("ZADD")
+                .arg(DEADLETTER_RETRY_INDEX_KEY)
+                .arg(1)
+                .arg(&key)
+                .query_async(&mut conn)
+                .await
+                .expect("schedule evicted");
+        }
+        // Three stored entries that are NOT replayable (foreign reason):
+        // removed without a replay, exercising the batched removal path.
+        let foreign = DeadletterEntry {
+            reason: "invalid_signature".into(),
+            ..Default::default()
+        };
+        let foreign_json = serde_json::to_string(&foreign).expect("json");
+        for index in 0..3 {
+            let key = format!("adyen:deadletter:event:batch_foreign_{index}");
+            let _: () = redis::cmd("SET")
+                .arg(&key)
+                .arg(&foreign_json)
+                .query_async(&mut conn)
+                .await
+                .expect("store foreign");
+            let _: () = redis::cmd("ZADD")
+                .arg(DEADLETTER_RETRY_INDEX_KEY)
+                .arg(1)
+                .arg(&key)
+                .query_async(&mut conn)
+                .await
+                .expect("schedule foreign");
+        }
+        drop(conn);
+
+        query_count::reset();
+        retry_deadlettered_webhooks(&state)
+            .await
+            .expect("batched retry pass");
+        let commands = query_count::count("deadletter.redis");
+        assert!(
+            commands <= 3,
+            "five due keys must cost one ZRANGEBYSCORE + one MGET + one ZREM, got {commands}"
+        );
+
+        let mut conn = pool_conn(&isolated.pool).await;
+        let remaining: i64 = redis::cmd("ZCARD")
+            .arg(DEADLETTER_RETRY_INDEX_KEY)
+            .query_async(&mut conn)
+            .await
+            .expect("card");
+        assert_eq!(remaining, 0, "every handled key leaves the retry index");
+        let _: () = redis::cmd("DEL")
+            .arg("adyen:deadletter:event:batch_foreign_0")
+            .arg("adyen:deadletter:event:batch_foreign_1")
+            .arg("adyen:deadletter:event:batch_foreign_2")
+            .query_async(&mut conn)
+            .await
+            .expect("cleanup");
+    });
 
     env_test!(retry_worker_empty_index_is_a_clean_noop, |env| {
         let isolated = crate::test_support::spawn_isolated_redis();

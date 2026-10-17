@@ -37,18 +37,30 @@ def redis_cli(cfg, *args: str, host: str | None = None, port: int | None = None)
     return result.stdout
 
 
+# Redis DEL accepts many keys per call; batching keeps the control-plane
+# cost at O(scans + keys/chunk) subprocesses instead of O(scans + keys).
+DEL_CHUNK = 200
+
+
+def _chunks(items: list[str], size: int):
+    for start in range(0, len(items), size):
+        yield items[start:start + size]
+
+
 def clear_redis_patterns(cfg, patterns: tuple[str, ...] | None = None,
                          host: str | None = None, port: int | None = None) -> int:
     from .config import RATE_KEYS
 
     cleared = 0
+    keys: list[str] = []
     for pattern in patterns or RATE_KEYS:
-        keys = redis_cli(cfg, "--scan", "--pattern", pattern, host=host, port=port).splitlines()
-        for key in keys:
+        for key in redis_cli(cfg, "--scan", "--pattern", pattern, host=host, port=port).splitlines():
             key = key.strip()
             if key:
-                redis_cli(cfg, "del", key, host=host, port=port)
+                keys.append(key)
                 cleared += 1
+    for chunk in _chunks(keys, DEL_CHUNK):
+        redis_cli(cfg, "del", *chunk, host=host, port=port)
     return cleared
 
 

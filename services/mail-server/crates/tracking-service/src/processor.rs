@@ -1495,16 +1495,7 @@ impl EventProcessor {
         }
 
         tokio::spawn(async move {
-            if let Ok(mut conn) = redis.get().await {
-                for (tenant_id, payload) in events_for_pubsub {
-                    let channel = format!("events:{tenant_id}");
-                    let _: Result<(), _> = redis::cmd("PUBLISH")
-                        .arg(&channel)
-                        .arg(&payload)
-                        .query_async(&mut *conn)
-                        .await;
-                }
-            }
+            publish_event_frames(&redis, &events_for_pubsub).await;
         });
 
         Ok(())
@@ -2180,6 +2171,39 @@ fn build_dead_letter_entry(
     serde_json::to_string(&entry).unwrap_or_default()
 }
 
+// ── SSE pub/sub fan-out (P3) ─────────────────────────────────────────────────
+
+/// Publish one JSON frame per event to `events:{tenant_id}`, in order.
+///
+/// P3: the frames go out as ONE pipelined Redis round trip (`redis::pipe`) per
+/// flush instead of one round trip per event (≤500 per flush). The wire
+/// contract is UNCHANGED — one `PUBLISH events:{tenant} <json>` command per
+/// event, byte-identical to the per-event loop, so the SSE subscriber's frame
+/// shape and ordering are untouched. A new batched payload was deliberately
+/// NOT introduced: the consumer expects one event per frame.
+///
+/// Fire-and-forget: SSE is best-effort, Postgres is the source of truth, and a
+/// Redis failure is dropped silently (as before). The pipeline's own error
+/// would otherwise be lost, so it is logged at debug level.
+pub(crate) async fn publish_event_frames(redis: &RedisPool, frames: &[(String, String)]) {
+    if frames.is_empty() {
+        return;
+    }
+    let Ok(mut conn) = redis.get().await else {
+        return;
+    };
+    let mut pipe = redis::pipe();
+    for (tenant_id, payload) in frames {
+        pipe.cmd("PUBLISH")
+            .arg(format!("events:{tenant_id}"))
+            .arg(payload)
+            .ignore();
+    }
+    if let Err(error) = pipe.query_async::<()>(&mut *conn).await {
+        tracing::debug!(error = %error, frames = frames.len(), "SSE publish pipeline failed");
+    }
+}
+
 // ── Suppression retry records (F2) ────────────────────────────────────────────
 
 /// A pending suppression insert queued for retry. Serialized with camelCase
@@ -2228,14 +2252,30 @@ fn bump_suppression_retry(raw: &str) -> Option<String> {
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 /// One delivery per (event, subscribed webhook) for tracking events. The
-// queue id is deterministic — `v5(event id, webhook id)` — so a duplicate
+/// queue id is deterministic — `v5(event id, webhook id)` — so a duplicate
 /// event (ON CONFLICT DO NOTHING upstream) can never enqueue a second
 /// One deliverable tracking event:
 /// `(event id, tenant id, event type, message id, recipient)`.
 type DeliverableEvent = (String, String, String, Option<String>, Option<String>);
 
+/// One `webhook_queue` row staged for the bulk insert.
+struct WebhookQueueRow {
+    id: String,
+    webhook_id: String,
+    tenant_id: String,
+    event_type: String,
+    payload: serde_json::Value,
+}
+
 /// delivery; a genuine event always does. Best-effort: a failure logs and
 /// the events remain the source of truth.
+///
+/// P3: one query per tenant replaces the pre-fix shape (a duplicate
+/// subscription query, then one INSERT per (event × webhook)). The row set is
+/// identical — the deterministic v5 ids, the `message.{type}` event name, the
+/// payload shape and `ON CONFLICT (id) DO NOTHING` are preserved — and the
+/// inserts are pushed with [`sqlx::QueryBuilder::push_values`] in bounded
+/// chunks (the same idiom the events/analytics inserts above use).
 async fn enqueue_tracking_event_webhooks(db: &sqlx::PgPool, events: &[DeliverableEvent]) {
     use std::collections::HashMap;
     let mut by_tenant: HashMap<&str, Vec<&DeliverableEvent>> = HashMap::new();
@@ -2248,10 +2288,15 @@ async fn enqueue_tracking_event_webhooks(db: &sqlx::PgPool, events: &[Deliverabl
         0x31,
     ]);
 
+    /// Rows per bulk INSERT — bounds the statement size for a 500-event flush
+    /// fanned out to many webhooks.
+    const WEBHOOK_QUEUE_INSERT_CHUNK: usize = 500;
+
     for (tenant_id, tenant_events) in by_tenant {
-        // Fetch the tenant's subscribed webhooks once per batch.
-        let webhooks: Vec<(String,)> = match sqlx::query_as(
-            "SELECT id FROM webhooks \
+        // ONE query for the tenant's subscriptions: id + the event list the
+        // pre-fix code fetched with a second, redundant query.
+        let webhooks: Vec<(String, serde_json::Value)> = match sqlx::query_as(
+            "SELECT id, events FROM webhooks \
              WHERE tenant_id = $1 AND enabled = true",
         )
         .bind(tenant_id)
@@ -2269,37 +2314,31 @@ async fn enqueue_tracking_event_webhooks(db: &sqlx::PgPool, events: &[Deliverabl
         }
         // Which event types does each webhook subscribe to?
         let mut wanted_events: HashMap<String, Vec<String>> = HashMap::new();
-        if let Ok(rows) = sqlx::query_as::<_, (String, serde_json::Value)>(
-            "SELECT id, events FROM webhooks WHERE tenant_id = $1 AND enabled = true",
-        )
-        .bind(tenant_id)
-        .fetch_all(db)
-        .await
-        {
-            for (id, events_json) in rows {
-                let mut targets: Vec<String> = Vec::new();
-                if let Some(items) = events_json.as_array() {
-                    for item in items {
-                        if let Some(name) = item.as_str() {
-                            match name {
-                                "message.opened" => targets.push("opened".to_string()),
-                                "message.clicked" => targets.push("clicked".to_string()),
-                                "*" => {
-                                    targets.push("opened".to_string());
-                                    targets.push("clicked".to_string());
-                                }
-                                _ => {}
+        for (id, events_json) in &webhooks {
+            let mut targets: Vec<String> = Vec::new();
+            if let Some(items) = events_json.as_array() {
+                for item in items {
+                    if let Some(name) = item.as_str() {
+                        match name {
+                            "message.opened" => targets.push("opened".to_string()),
+                            "message.clicked" => targets.push("clicked".to_string()),
+                            "*" => {
+                                targets.push("opened".to_string());
+                                targets.push("clicked".to_string());
                             }
+                            _ => {}
                         }
                     }
                 }
-                wanted_events.insert(id, targets);
             }
+            wanted_events.insert(id.clone(), targets);
         }
 
+        // Stage every (event × subscribed webhook) row, then bulk-insert.
+        let mut rows: Vec<WebhookQueueRow> = Vec::new();
         for event in tenant_events {
-            let (event_id, _tenant, event_type, message_id, recipient) = event;
-            for (webhook_id,) in &webhooks {
+            let (event_id, _, event_type, message_id, recipient) = event;
+            for (webhook_id, _) in &webhooks {
                 let targets = wanted_events.get(webhook_id);
                 let subscribed = targets.is_some_and(|t| t.iter().any(|v| v == event_type));
                 if !subscribed {
@@ -2320,22 +2359,34 @@ async fn enqueue_tracking_event_webhooks(db: &sqlx::PgPool, events: &[Deliverabl
                         "recipient": recipient,
                     },
                 });
-                if let Err(error) = sqlx::query(
-                    "INSERT INTO webhook_queue \
-                     (id, webhook_id, tenant_id, event_type, payload, status, attempt, created_at) \
-                     VALUES ($1, $2, $3, $4, $5, 'pending', 1, NOW()) \
-                     ON CONFLICT (id) DO NOTHING",
-                )
-                .bind(&queue_id)
-                .bind(webhook_id)
-                .bind(&event.1)
-                .bind(format!("message.{event_type}"))
-                .bind(&payload)
-                .execute(db)
-                .await
-                {
-                    tracing::warn!(error = %error, event_id, "tracking webhook enqueue failed");
-                }
+                rows.push(WebhookQueueRow {
+                    id: queue_id,
+                    webhook_id: webhook_id.clone(),
+                    tenant_id: event.1.clone(),
+                    event_type: format!("message.{event_type}"),
+                    payload,
+                });
+            }
+        }
+
+        for chunk in rows.chunks(WEBHOOK_QUEUE_INSERT_CHUNK) {
+            let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+                "INSERT INTO webhook_queue \
+                 (id, webhook_id, tenant_id, event_type, payload, status, attempt, created_at) ",
+            );
+            builder.push_values(chunk, |mut b, row| {
+                b.push_bind(row.id.clone())
+                    .push_bind(row.webhook_id.clone())
+                    .push_bind(row.tenant_id.clone())
+                    .push_bind(row.event_type.clone())
+                    .push_bind(row.payload.clone())
+                    .push_bind("pending")
+                    .push_bind(1_i32)
+                    .push("NOW()");
+            });
+            builder.push(" ON CONFLICT (id) DO NOTHING");
+            if let Err(error) = builder.build().execute(db).await {
+                tracing::warn!(error = %error, tenant_id, "tracking webhook enqueue failed");
             }
         }
     }

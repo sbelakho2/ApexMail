@@ -19,6 +19,9 @@ pub mod google;
 pub mod scheduler;
 pub mod snds;
 
+#[cfg(test)]
+pub(crate) mod test_support;
+
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 

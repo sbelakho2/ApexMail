@@ -167,16 +167,62 @@ fn parse_complaint(s: &str) -> Option<f64> {
     Some(if v <= 1.0 { v } else { v / 100.0 })
 }
 
+/// Rows per multi-row upsert statement.
+const UPSERT_BATCH_ROWS: usize = 500;
+
 pub async fn upsert_records(db: &PgPool, rows: &[SndsRecord]) -> Result<usize, String> {
-    let mut n = 0;
-    for r in rows {
-        let ip_str = r.ip.to_string();
+    if rows.is_empty() {
+        return Ok(0);
+    }
+
+    // Collapse duplicate (ip, observed_at) pairs: one ON CONFLICT DO UPDATE
+    // statement cannot touch the same key twice. The LAST occurrence wins,
+    // matching the old sequential loop.
+    let mut deduped: Vec<&SndsRecord> = Vec::with_capacity(rows.len());
+    let mut positions: std::collections::HashMap<(std::net::IpAddr, NaiveDate), usize> =
+        std::collections::HashMap::new();
+    for row in rows {
+        let key = (row.ip, row.observed_at);
+        if let Some(&index) = positions.get(&key) {
+            deduped[index] = row;
+        } else {
+            positions.insert(key, deduped.len());
+            deduped.push(row);
+        }
+    }
+
+    let mut n = 0usize;
+    for chunk in deduped.chunks(UPSERT_BATCH_ROWS) {
+        let payload = serde_json::Value::Array(
+            chunk
+                .iter()
+                .map(serde_json::to_value)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| format!("serialize SNDS row: {e}"))?,
+        );
         sqlx::query(
             "INSERT INTO postmaster_snds_reputation
                (ip, observed_at, activity_start, activity_end, rcpt_commands,
                 data_commands, message_recipients, filter_result,
                 complaint_rate, trap_hits, sample_helo, sample_from, raw, fetched_at)
-             VALUES ($1::inet, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW())
+             SELECT ip, observed_at, activity_start, activity_end, rcpt_commands,
+                    data_commands, message_recipients, filter_result,
+                    complaint_rate, trap_hits, sample_helo, sample_from, raw, NOW()
+               FROM jsonb_to_recordset($1::jsonb) AS r(
+                    ip inet,
+                    observed_at date,
+                    activity_start timestamptz,
+                    activity_end timestamptz,
+                    rcpt_commands bigint,
+                    data_commands bigint,
+                    message_recipients bigint,
+                    filter_result text,
+                    complaint_rate double precision,
+                    trap_hits bigint,
+                    sample_helo text,
+                    sample_from text,
+                    raw jsonb
+               )
              ON CONFLICT (ip, observed_at) DO UPDATE SET
                activity_start = EXCLUDED.activity_start,
                activity_end = EXCLUDED.activity_end,
@@ -191,23 +237,11 @@ pub async fn upsert_records(db: &PgPool, rows: &[SndsRecord]) -> Result<usize, S
                raw = EXCLUDED.raw,
                fetched_at = NOW()",
         )
-        .bind(&ip_str)
-        .bind(r.observed_at)
-        .bind(r.activity_start)
-        .bind(r.activity_end)
-        .bind(r.rcpt_commands)
-        .bind(r.data_commands)
-        .bind(r.message_recipients)
-        .bind(&r.filter_result)
-        .bind(r.complaint_rate)
-        .bind(r.trap_hits)
-        .bind(&r.sample_helo)
-        .bind(&r.sample_from)
-        .bind(&r.raw)
+        .bind(payload)
         .execute(db)
         .await
         .map_err(|e| format!("DB error: {e}"))?;
-        n += 1;
+        n += chunk.len();
     }
     debug!(rows = n, "SNDS records upserted");
     Ok(n)
@@ -425,6 +459,57 @@ mod adversarial_tests {
 
         // An empty batch is a no-op.
         assert_eq!(upsert_records(&pool, &[]).await.unwrap(), 0);
+        pool.close().await;
+    }
+
+    /// One INSERT statement per batch, not one per row (the old loop issued
+    /// N statements). The statement-count trigger makes the difference
+    /// observable; row-count assertions alone cannot.
+    #[tokio::test]
+    async fn upsert_records_batches_many_rows_into_one_statement() {
+        let pool = match migrator::test_support::fresh_canonical_pool(
+            "snds_upsert_batch",
+            "snds_upsert_batch",
+        )
+        .await
+        {
+            Ok(Some(pool)) => pool,
+            Ok(None) => return,
+            Err(error) => panic!("{}", error.panic_message()),
+        };
+
+        let rows: Vec<SndsRecord> = (1..=25)
+            .map(|last_octet| record(&format!("198.51.100.{last_octet}"), "GREEN", 0.001))
+            .collect();
+
+        crate::postmaster::test_support::install_statement_counters(
+            &pool,
+            &["postmaster_snds_reputation"],
+        )
+        .await;
+        crate::postmaster::test_support::reset_statement_counts(&pool).await;
+
+        assert_eq!(upsert_records(&pool, &rows).await.unwrap(), 25);
+        let inserts = crate::postmaster::test_support::statement_count(
+            &pool,
+            "postmaster_snds_reputation",
+            "INSERT",
+        )
+        .await;
+        assert_eq!(
+            inserts, 1,
+            "25 rows must be written by ONE INSERT statement, got {inserts}"
+        );
+
+        let stored: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM postmaster_snds_reputation WHERE observed_at = $1",
+        )
+        .bind(NaiveDate::from_ymd_opt(2026, 1, 15).unwrap())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(stored, 25, "every row in the batch is persisted");
+
         pool.close().await;
     }
 }

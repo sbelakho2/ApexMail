@@ -96,6 +96,55 @@ async fn webhook_signing_secret(
     )
 }
 
+/// P1 (claim lane): the webhook claim. Its `ORDER BY wq2.created_at ASC` is
+/// the key order a partial `(status, created_at) WHERE status = 'pending'`
+/// index must provide (verified: with that index the plan is an ordered
+/// Index Scan with NO Sort node; without it the planner materializes and
+/// sorts every pending row of the queue on each claim).
+const FETCH_WEBHOOK_JOBS_SQL: &str = r#"
+            WITH claimed_jobs AS (
+                UPDATE webhook_queue wq
+                SET status = 'processing',
+                    locked_until = NOW() + $2 * INTERVAL '1 second',
+                    -- F10: mint the claim's owner token — every completion
+                    -- write below is fenced on it, so a worker whose lease
+                    -- expired cannot reschedule or delete a row the new
+                    -- owner holds.
+                    claim_token = gen_random_uuid()::text,
+                    updated_at = NOW()
+                WHERE wq.id IN (
+                    SELECT wq2.id
+                    FROM webhook_queue wq2
+                    JOIN webhooks w ON w.id = wq2.webhook_id
+                    WHERE wq2.status = 'pending'
+                      AND (wq2.scheduled_at IS NULL OR wq2.scheduled_at <= NOW())
+                      AND (wq2.locked_until IS NULL OR wq2.locked_until < NOW())
+                      AND w.enabled = true
+                      -- A webhook paused/disabled through the API
+                      -- (`status` = 'paused' | 'disabled') must stop
+                      -- receiving deliveries; `enabled` alone never goes
+                      -- false on that path, so gating on it only would
+                      -- deliver right through an operator's pause.
+                      AND w.status = 'active'
+                    ORDER BY wq2.created_at ASC
+                    LIMIT $1
+                    FOR UPDATE OF wq2 SKIP LOCKED
+                )
+                RETURNING wq.id, wq.webhook_id, wq.tenant_id, wq.event_type,
+                          wq.payload, wq.attempt, wq.created_at, wq.claim_token
+            )
+            SELECT
+                cj.id, cj.webhook_id as "webhookId", cj.tenant_id as "tenantId",
+                cj.event_type as "eventType", cj.payload, cj.attempt, cj.created_at as "createdAt",
+                cj.claim_token as "claimToken",
+                w.url, w.secret, w.headers,
+                (w.retry_policy->>'maxRetries')::int as "maxRetries",
+                (w.retry_policy->>'retryDelay')::int as "retryDelay",
+                (w.retry_policy->>'backoffMultiplier')::float as "backoffMultiplier"
+            FROM claimed_jobs cj
+            JOIN webhooks w ON w.id = cj.webhook_id
+            "#;
+
 /// Webhook processor.
 pub struct WebhookProcessor {
     db: PgPool,
@@ -234,55 +283,11 @@ impl WebhookProcessor {
 
     /// Fetch webhook jobs from queue.
     async fn fetch_jobs(&self, limit: usize) -> ProcessorResult<Vec<WebhookJob>> {
-        let jobs = sqlx::query_as::<_, WebhookJob>(
-            r#"
-            WITH claimed_jobs AS (
-                UPDATE webhook_queue wq
-                SET status = 'processing',
-                    locked_until = NOW() + $2 * INTERVAL '1 second',
-                    -- F10: mint the claim's owner token — every completion
-                    -- write below is fenced on it, so a worker whose lease
-                    -- expired cannot reschedule or delete a row the new
-                    -- owner holds.
-                    claim_token = gen_random_uuid()::text,
-                    updated_at = NOW()
-                WHERE wq.id IN (
-                    SELECT wq2.id
-                    FROM webhook_queue wq2
-                    JOIN webhooks w ON w.id = wq2.webhook_id
-                    WHERE wq2.status = 'pending'
-                      AND (wq2.scheduled_at IS NULL OR wq2.scheduled_at <= NOW())
-                      AND (wq2.locked_until IS NULL OR wq2.locked_until < NOW())
-                      AND w.enabled = true
-                      -- A webhook paused/disabled through the API
-                      -- (`status` = 'paused' | 'disabled') must stop
-                      -- receiving deliveries; `enabled` alone never goes
-                      -- false on that path, so gating on it only would
-                      -- deliver right through an operator's pause.
-                      AND w.status = 'active'
-                    ORDER BY wq2.created_at ASC
-                    LIMIT $1
-                    FOR UPDATE OF wq2 SKIP LOCKED
-                )
-                RETURNING wq.id, wq.webhook_id, wq.tenant_id, wq.event_type,
-                          wq.payload, wq.attempt, wq.created_at, wq.claim_token
-            )
-            SELECT
-                cj.id, cj.webhook_id as "webhookId", cj.tenant_id as "tenantId",
-                cj.event_type as "eventType", cj.payload, cj.attempt, cj.created_at as "createdAt",
-                cj.claim_token as "claimToken",
-                w.url, w.secret, w.headers,
-                (w.retry_policy->>'maxRetries')::int as "maxRetries",
-                (w.retry_policy->>'retryDelay')::int as "retryDelay",
-                (w.retry_policy->>'backoffMultiplier')::float as "backoffMultiplier"
-            FROM claimed_jobs cj
-            JOIN webhooks w ON w.id = cj.webhook_id
-            "#,
-        )
-        .bind(limit as i64)
-        .bind(self.config.base.visibility_timeout.as_secs() as i64)
-        .fetch_all(&self.db)
-        .await?;
+        let jobs = sqlx::query_as::<_, WebhookJob>(FETCH_WEBHOOK_JOBS_SQL)
+            .bind(limit as i64)
+            .bind(self.config.base.visibility_timeout.as_secs() as i64)
+            .fetch_all(&self.db)
+            .await?;
 
         Ok(jobs)
     }
@@ -4147,5 +4152,94 @@ mod residual_arms {
         );
         pool.close().await;
         Ok(())
+    }
+    // ---------------------------------------------------------------------
+    // P1 (item 7): the claim lane's ordering index
+    // ---------------------------------------------------------------------
+
+    /// P1: the claim's `ORDER BY wq2.created_at ASC` must stay aligned with
+    /// the partial index the sibling migration adds:
+    ///
+    /// ```sql
+    /// CREATE INDEX IF NOT EXISTS idx_webhook_queue_pending_created
+    ///     ON webhook_queue (status, created_at) WHERE status = 'pending';
+    /// ```
+    ///
+    /// (The pre-existing `idx_webhook_queue_pending (status,
+    /// next_attempt_at) WHERE status = 'pending'` cannot serve this order.)
+    /// No query change was needed; this guard fails if the claim's shape
+    /// drifts away from what the index can serve.
+    #[test]
+    fn claim_sql_orders_by_created_at_for_the_pending_partial_index() {
+        assert!(
+            FETCH_WEBHOOK_JOBS_SQL.contains("wq2.status = 'pending'"),
+            "the partial index predicate is implied by the claim's status filter"
+        );
+        assert!(
+            FETCH_WEBHOOK_JOBS_SQL.contains("ORDER BY wq2.created_at ASC"),
+            "the (status, created_at) WHERE status = 'pending' index serves exactly this \
+             order; the claim must keep it"
+        );
+    }
+
+    /// P1: with that index present the claim plans an ORDERED index scan —
+    /// no Sort node materializing the whole pending queue per claim (the
+    /// pre-index plan was `Sort -> Hash Join -> Bitmap Heap Scan`).
+    #[tokio::test]
+    async fn claim_plan_uses_the_pending_created_at_index_without_a_sort() {
+        let Some(pool) = test_pool("wh_claim_lane_p1").await else {
+            return;
+        };
+        let tenant = unique_tenant();
+        let webhook = insert_webhook(&pool, &tenant, "https://hooks.example.test/p1", true).await;
+        for _ in 0..25 {
+            insert_queue_row(
+                &pool,
+                &webhook,
+                &tenant,
+                serde_json::json!({"p1": true}),
+                1,
+                "tok-p1",
+                ClaimOffsets::default(),
+            )
+            .await;
+        }
+
+        // The sibling migration's index (created here so the plan assertion
+        // is meaningful on the canonical schema).
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_webhook_queue_pending_created \
+             ON webhook_queue (status, created_at) WHERE status = 'pending'",
+        )
+        .execute(&pool)
+        .await
+        .expect("create pending-created index");
+
+        let mut tx = pool.begin().await.expect("tx for plan probe");
+        sqlx::query("SET LOCAL enable_seqscan = off")
+            .execute(&mut *tx)
+            .await
+            .expect("prefer index paths");
+        let plan: serde_json::Value = sqlx::query_scalar(&format!(
+            "EXPLAIN (GENERIC_PLAN, FORMAT JSON) {FETCH_WEBHOOK_JOBS_SQL}"
+        ))
+        .bind(50_i64)
+        .bind(30_i64)
+        .fetch_one(&mut *tx)
+        .await
+        .expect("explain the claim");
+        tx.rollback().await.ok();
+
+        let text = plan.to_string();
+        assert!(
+            text.contains("idx_webhook_queue_pending_created"),
+            "the claim must resolve through the pending-created index: {text}"
+        );
+        assert!(
+            !text.contains(r#""Node Type": "Sort""#),
+            "the claim must not sort the pending queue (the index provides the order): {text}"
+        );
+
+        pool.close().await;
     }
 }

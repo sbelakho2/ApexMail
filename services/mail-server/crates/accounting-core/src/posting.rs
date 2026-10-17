@@ -179,29 +179,53 @@ pub async fn post_journal_entry_in(
         }
     };
 
-    for (index, line) in req.lines.iter().enumerate() {
-        sqlx::query(
-            r#"
-            INSERT INTO journal_lines (
-                entry_id, line_no, account_id, debit_cents, credit_cents,
-                currency, net_cents, vat_cents, vat_rate_bp, vat_code, description
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-            "#,
-        )
-        .bind(entry_id)
-        .bind(index as i32 + 1)
-        .bind(line.account_id)
-        .bind(line.debit_cents)
-        .bind(line.credit_cents)
-        .bind(&line.currency)
-        .bind(line.net_cents)
-        .bind(line.vat_cents)
-        .bind(line.vat_rate_bp)
-        .bind(line.vat_code.as_deref())
-        .bind(&line.description)
-        .execute(&mut *conn)
-        .await?;
+    // One multi-row INSERT per chunk instead of one INSERT per line. The
+    // lines of an entry are written in request order with line_no 1..N, so
+    // the row contents are identical to the per-line path; only the round
+    // trip count changes.
+    const LINES_PER_INSERT: usize = 5_000;
+    let mut line_no = 0usize;
+    for chunk in req.lines.chunks(LINES_PER_INSERT) {
+        let mut sql = String::from(
+            "INSERT INTO journal_lines \
+                (entry_id, line_no, account_id, debit_cents, credit_cents, \
+                 currency, net_cents, vat_cents, vat_rate_bp, vat_code, description) VALUES ",
+        );
+        for offset in 0..chunk.len() {
+            if offset > 0 {
+                sql.push_str(", ");
+            }
+            let base = 2 + offset * 10;
+            sql.push_str(&format!(
+                "($1, ${base}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${})",
+                base + 1,
+                base + 2,
+                base + 3,
+                base + 4,
+                base + 5,
+                base + 6,
+                base + 7,
+                base + 8,
+                base + 9
+            ));
+        }
+
+        let mut query = sqlx::query(&sql).bind(entry_id);
+        for line in chunk {
+            query = query
+                .bind((line_no + 1) as i32)
+                .bind(line.account_id)
+                .bind(line.debit_cents)
+                .bind(line.credit_cents)
+                .bind(&line.currency)
+                .bind(line.net_cents)
+                .bind(line.vat_cents)
+                .bind(line.vat_rate_bp)
+                .bind(line.vat_code.as_deref())
+                .bind(&line.description);
+            line_no += 1;
+        }
+        query.execute(&mut *conn).await?;
     }
 
     let posted = sqlx::query(
@@ -530,5 +554,123 @@ mod tests {
         assert!(production.contains("SET posted_at = NOW(), posted_by = $2"));
         assert!(!production.contains(&format!("UPDATE {}", "journal_lines")));
         assert!(!production.contains(&format!("DELETE FROM {}", "journal_entries")));
+    }
+}
+
+#[cfg(test)]
+mod db_tests {
+    //! DB-backed proof that an entry's lines are written by ONE INSERT
+    //! statement (the pre-fix loop issued one per line). A STATEMENT-level
+    //! trigger on `journal_lines` counts the statements.
+
+    use super::*;
+    use crate::chart;
+    use crate::provisioning;
+
+    #[tokio::test]
+    async fn journal_lines_are_written_by_one_insert_statement() {
+        let Some(pool) =
+            (match migrator::test_support::fresh_canonical_pool("posting_batch", "posting_batch")
+                .await
+            {
+                Ok(pool) => pool,
+                Err(error) => panic!("{}", error.panic_message()),
+            })
+        else {
+            return;
+        };
+
+        let mut conn = pool.acquire().await.expect("connection");
+        let date = NaiveDate::from_ymd_opt(2026, 6, 15).expect("date");
+        let (entity, period) = provisioning::ensure_ledger_ready_in(&mut conn, date)
+            .await
+            .expect("ledger ready");
+        let ar = chart::resolve_account_role(&mut conn, entity, ROLE_AR)
+            .await
+            .expect("ar");
+        let revenue = chart::resolve_account_role(&mut conn, entity, ROLE_REVENUE)
+            .await
+            .expect("revenue");
+        let ap = chart::resolve_account_role(&mut conn, entity, ROLE_AP)
+            .await
+            .expect("ap");
+        let other_income = chart::resolve_account_role(&mut conn, entity, ROLE_OTHER_INCOME)
+            .await
+            .expect("other income");
+
+        sqlx::raw_sql(
+            r#"
+            CREATE TABLE journal_line_insert_statements (n INTEGER NOT NULL);
+            CREATE OR REPLACE FUNCTION journal_line_insert_count_fn() RETURNS trigger
+            LANGUAGE plpgsql AS $$
+            BEGIN
+                INSERT INTO journal_line_insert_statements (n) VALUES (1);
+                RETURN NULL;
+            END
+            $$;
+            CREATE TRIGGER journal_line_insert_count
+                AFTER INSERT ON journal_lines
+                FOR EACH STATEMENT EXECUTE FUNCTION journal_line_insert_count_fn();
+            "#,
+        )
+        .execute(&mut *conn)
+        .await
+        .expect("statement trigger");
+        drop(conn);
+
+        let lines = vec![
+            JournalLine::debit(ar, 400, "EUR").with_description("receivable"),
+            JournalLine::credit(revenue, 200, "EUR").with_description("revenue"),
+            JournalLine::credit(ap, 100, "EUR").with_description("payable"),
+            JournalLine::credit(other_income, 100, "EUR").with_description("other income"),
+        ];
+        let request = PostJournalRequest {
+            legal_entity_id: entity,
+            fiscal_period_id: period,
+            entry_date: date,
+            entry_type: EntryType::Standard,
+            memo: "batch line insert".to_string(),
+            posted_by: "test".to_string(),
+            idempotency_key: "posting-batch:test:1".to_string(),
+            source: None,
+            reversal_of_entry_id: None,
+            lines,
+        };
+        let outcome = post_journal_entry(&pool, &request)
+            .await
+            .expect("post entry");
+        assert_eq!(outcome.status, PostStatus::Posted);
+
+        let statements: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::bigint FROM journal_line_insert_statements")
+                .fetch_one(&pool)
+                .await
+                .expect("statement count");
+        assert_eq!(
+            statements, 1,
+            "four lines must be written by ONE INSERT statement \
+             (the pre-fix loop issued one per line)"
+        );
+
+        // Contents and order are unchanged.
+        let stored: Vec<(i32, i64, i64, String)> = sqlx::query_as(
+            "SELECT line_no, debit_cents, credit_cents, description \
+             FROM journal_lines WHERE entry_id = $1 ORDER BY line_no",
+        )
+        .bind(outcome.entry_id.expect("entry id"))
+        .fetch_all(&pool)
+        .await
+        .expect("stored lines");
+        assert_eq!(
+            stored,
+            vec![
+                (1, 400, 0, "receivable".to_string()),
+                (2, 0, 200, "revenue".to_string()),
+                (3, 0, 100, "payable".to_string()),
+                (4, 0, 100, "other income".to_string()),
+            ]
+        );
+
+        pool.close().await;
     }
 }

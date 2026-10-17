@@ -199,6 +199,14 @@ pub(crate) async fn import_domain_report(
     }
 
     // Accept a domain id or a name; the row must belong to the caller's tenant.
+    //
+    // domains.id is UUID (canonical schema): parse the query as a UUID and
+    // compare `id = $3::uuid` natively, so the primary key is usable. A query
+    // that is not UUID-shaped (a domain name, or garbage) binds NULL there and
+    // resolves through `name = $2` — the same rows the old
+    // `id::text = $2 OR name = $2` predicate matched, with the id arm now
+    // indexable and normalized (uuid spellings are compared as UUIDs).
+    let domain_id = uuid::Uuid::parse_str(query).ok();
     let row: Option<(
         String,
         String,
@@ -208,11 +216,12 @@ pub(crate) async fn import_domain_report(
     )> = sqlx::query_as(
         "SELECT id::text, name, dkim_selector, dkim_public_key, dkim_private_key
              FROM domains
-             WHERE tenant_id = $1 AND (id::text = $2 OR name = $2)
+             WHERE tenant_id = $1 AND (id = $3::uuid OR name = $2)
              LIMIT 1",
     )
     .bind(&auth.tenant_id)
     .bind(query)
+    .bind(domain_id)
     .fetch_optional(&state.db)
     .await?;
     let Some((_id, name, selector, public_key, private_key)) = row else {

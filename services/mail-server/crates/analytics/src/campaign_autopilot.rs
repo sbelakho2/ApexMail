@@ -98,19 +98,39 @@ impl CampaignAutopilot {
             .map_err(|e| anyhow::anyhow!("campaign id must be a canonical UUID: {e}"))?;
 
         let mut tx = self.pool.begin().await?;
-        for (arm_index, template_id) in template_ids.iter().enumerate() {
-            let index = i32::try_from(arm_index)?;
-            sqlx::query(
+        // ONE multi-row INSERT per chunk instead of one round trip per arm.
+        // `ON CONFLICT (campaign_id, arm_index) DO NOTHING` keeps the exact
+        // idempotent semantics the per-row loop had: existing arms are never
+        // reset by a replay.
+        const ARMS_PER_INSERT: usize = 10_000;
+        let mut arm_index = 0usize;
+        for chunk in template_ids.chunks(ARMS_PER_INSERT) {
+            let mut sql = String::from(
                 "INSERT INTO campaign_arms \
-                     (campaign_id, arm_index, template_id, alpha, beta, trials, successes) \
-                 VALUES ($1, $2, $3, 1.0, 1.0, 0, 0) \
-                 ON CONFLICT (campaign_id, arm_index) DO NOTHING",
-            )
-            .bind(campaign_uuid)
-            .bind(index)
-            .bind(template_id)
-            .execute(&mut *tx)
-            .await?;
+                     (campaign_id, arm_index, template_id, alpha, beta, trials, successes) VALUES ",
+            );
+            for offset in 0..chunk.len() {
+                if offset > 0 {
+                    sql.push_str(", ");
+                }
+                // $1 is the campaign UUID (shared by every row); each row
+                // binds its own arm_index and template_id.
+                let index_param = 2 + offset * 2;
+                let template_param = index_param + 1;
+                sql.push_str(&format!(
+                    "($1, ${index_param}, ${template_param}, 1.0, 1.0, 0, 0)"
+                ));
+            }
+            sql.push_str(" ON CONFLICT (campaign_id, arm_index) DO NOTHING");
+
+            let mut query = sqlx::query(&sql).bind(campaign_uuid);
+            for (offset, template_id) in chunk.iter().enumerate() {
+                let index = i32::try_from(arm_index + offset)?;
+                query = query.bind(index).bind(template_id);
+            }
+            query.execute(&mut *tx).await?;
+
+            arm_index += chunk.len();
         }
         tx.commit().await?;
         Ok(())
@@ -1209,5 +1229,98 @@ mod tests {
         let (lo, hi) = credible_interval_95(1.0, 0.0);
         assert!(lo.is_finite() && hi.is_finite());
         assert!(lo <= hi);
+    }
+}
+
+#[cfg(test)]
+mod db_tests {
+    //! DB-backed proof that the arm producer is ONE statement per call, not
+    //! one statement per arm. Gated on `TEST_DATABASE_URL` (workspace
+    //! convention); a configured-but-broken provisioning is a hard failure.
+
+    use super::*;
+    use crate::test_support::count_statements_starting_with;
+
+    fn autopilot(pool: &sqlx::PgPool) -> CampaignAutopilot {
+        let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:1/1")
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("lazy pool needs no server");
+        CampaignAutopilot::new(pool.clone(), redis)
+    }
+
+    #[tokio::test]
+    async fn ensure_arms_inserts_every_arm_in_one_statement() {
+        let Some(pool) = (match migrator::test_support::fresh_canonical_pool(
+            "autopilot_arm_batch",
+            "autopilot_arm_batch",
+        )
+        .await
+        {
+            Ok(pool) => pool,
+            Err(error) => panic!("{}", error.panic_message()),
+        }) else {
+            return;
+        };
+
+        let tenant = "tenant_arm_batch";
+        let campaign = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO sales_campaigns (id, tenant_id, name, template_id, audience) \
+             VALUES ($1, $2, 'arm batch', 'tpl-base', 'all')",
+        )
+        .bind(campaign)
+        .bind(tenant)
+        .execute(&pool)
+        .await
+        .expect("seed campaign");
+
+        let templates: Vec<String> = (0..5).map(|i| format!("tpl-{i}")).collect();
+        let service = autopilot(&pool);
+        let counter = count_statements_starting_with("INSERT INTO campaign_arms");
+
+        service
+            .ensure_arms(tenant, &campaign.to_string(), &templates)
+            .await
+            .expect("ensure_arms");
+
+        assert_eq!(
+            counter.get(),
+            1,
+            "five arms must be created by ONE multi-row INSERT; the pre-fix path issued \
+             one INSERT per arm (five statements). Statements seen: {:?}",
+            counter.summaries()
+        );
+
+        let rows: Vec<(i32, String, f64, f64, i64)> = sqlx::query_as(
+            "SELECT arm_index, template_id, alpha, beta, trials \
+             FROM campaign_arms WHERE campaign_id = $1 ORDER BY arm_index",
+        )
+        .bind(campaign)
+        .fetch_all(&pool)
+        .await
+        .expect("arm rows");
+        assert_eq!(rows.len(), 5);
+        for (index, row) in rows.iter().enumerate() {
+            assert_eq!(row.0, index as i32);
+            assert_eq!(row.1, templates[index], "template order must be preserved");
+            assert_eq!(row.2, 1.0, "Beta(1,1) prior");
+            assert_eq!(row.3, 1.0, "Beta(1,1) prior");
+            assert_eq!(row.4, 0);
+        }
+
+        // Replay is still idempotent: no resets, no duplicates.
+        service
+            .ensure_arms(tenant, &campaign.to_string(), &templates)
+            .await
+            .expect("replay ensure_arms");
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::bigint FROM campaign_arms WHERE campaign_id = $1")
+                .bind(campaign)
+                .fetch_one(&pool)
+                .await
+                .expect("arm count after replay");
+        assert_eq!(count, 5);
+
+        pool.close().await;
     }
 }

@@ -92,6 +92,8 @@
 //!   other folder. `compliance::legal_archive` is the regulatory
 //!   disclosure archive (GDPR evidence), explicitly NOT a mail archive.
 
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use tracing::{info, warn};
@@ -637,16 +639,31 @@ pub async fn sweep_product_line_months(state: &AppState) -> Result<ProductLineSw
             .map_err(|e| format!("product-line sweep: tenant query failed: {e}"))?;
 
         let page_len = tenants.len();
+        // P3 fix 3 — the page's contracts and billing currencies load in ONE
+        // query each. Before this, `load_contracts` ran once per tenant and
+        // `resolve_tenant_billing_currency` once per tenant-MONTH (up to 2),
+        // so a 100-tenant page cost up to 300 round trips before any billing
+        // work; now it costs two.
+        let contracts_by_tenant = load_contracts_for_tenants(state, &tenants).await?;
+        let currencies_by_tenant = load_billing_currencies(&state.db, &tenants).await?;
         for tenant_id in &tenants {
             result.tenants_checked += 1;
-            let contracts = load_contracts(state, tenant_id).await?;
+            let contracts = contracts_by_tenant
+                .get(tenant_id)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let currency = currencies_by_tenant
+                .get(tenant_id)
+                .cloned()
+                .unwrap_or_else(|| DEFAULT_PRODUCT_LINE_CURRENCY.to_string());
             for &(month_start, month_end) in &months {
                 if let Err(error) = process_tenant_month(
                     state,
                     tenant_id,
                     month_start,
                     month_end,
-                    &contracts,
+                    contracts,
+                    &currency,
                     &mut result,
                 )
                 .await
@@ -674,23 +691,66 @@ pub async fn sweep_product_line_months(state: &AppState) -> Result<ProductLineSw
     Ok(result)
 }
 
-async fn load_contracts(
+/// Load the sweepable contracts for a whole PAGE of tenants in ONE query,
+/// grouped by tenant. This replaces the per-tenant load that made the sweep
+/// N+1 in its tenant dimension (P3 fix 3). Tenants without a contract simply
+/// have no map entry.
+async fn load_contracts_for_tenants(
     state: &AppState,
-    tenant_id: &str,
-) -> Result<Vec<ProductLineContractRow>, String> {
-    sqlx::query_as(
+    tenant_ids: &[String],
+) -> Result<HashMap<String, Vec<ProductLineContractRow>>, String> {
+    let mut by_tenant: HashMap<String, Vec<ProductLineContractRow>> = HashMap::new();
+    if tenant_ids.is_empty() {
+        return Ok(by_tenant);
+    }
+    #[cfg(test)]
+    crate::test_support::query_count::bump("product_lines.contract_load");
+    let rows: Vec<ProductLineContractRow> = sqlx::query_as(
         r#"
         SELECT tenant_id, product_line, active_from, ended_at
         FROM product_line_contracts
-        WHERE tenant_id = $1
+        WHERE tenant_id = ANY($1)
           AND (status = 'active' OR (status = 'terminated' AND ended_at IS NOT NULL))
-        ORDER BY product_line
+        ORDER BY tenant_id, product_line
         "#,
     )
-    .bind(tenant_id)
+    .bind(tenant_ids)
     .fetch_all(&state.db)
     .await
-    .map_err(|e| format!("product-line sweep: contract query failed: {e}"))
+    .map_err(|e| format!("product-line sweep: contract query failed: {e}"))?;
+    for row in rows {
+        by_tenant
+            .entry(row.tenant_id.clone())
+            .or_default()
+            .push(row);
+    }
+    Ok(by_tenant)
+}
+
+/// Resolve the billing currency for a whole PAGE of tenants in ONE query
+/// (P3 fix 3: this used to run once per tenant-month). Missing/invalid
+/// settings normalize to [`DEFAULT_PRODUCT_LINE_CURRENCY`] exactly like the
+/// single-tenant resolver did.
+async fn load_billing_currencies(
+    db: &PgPool,
+    tenant_ids: &[String],
+) -> Result<HashMap<String, String>, String> {
+    let mut currencies = HashMap::new();
+    if tenant_ids.is_empty() {
+        return Ok(currencies);
+    }
+    #[cfg(test)]
+    crate::test_support::query_count::bump("product_lines.currency_load");
+    let rows: Vec<(String, Option<String>)> =
+        sqlx::query_as("SELECT id, settings->>'billingCurrency' FROM tenants WHERE id = ANY($1)")
+            .bind(tenant_ids)
+            .fetch_all(db)
+            .await
+            .map_err(|e| format!("product-line sweep: billing currency query failed: {e}"))?;
+    for (tenant_id, raw) in rows {
+        currencies.insert(tenant_id, normalize_billing_currency(raw.as_deref()));
+    }
+    Ok(currencies)
 }
 
 /// The lines billable for one month: a contract row per line that covered
@@ -730,6 +790,7 @@ async fn process_tenant_month(
     period_start: DateTime<Utc>,
     period_end: DateTime<Utc>,
     contracts: &[ProductLineContractRow],
+    currency: &str,
     result: &mut ProductLineSweepResult,
 ) -> Result<(), String> {
     let lines = billable_lines_for_month(contracts, period_start, period_end);
@@ -738,7 +799,7 @@ async fn process_tenant_month(
     }
     result.tenant_months_checked += 1;
 
-    ensure_period_records(state, tenant_id, period_start, period_end, &lines).await?;
+    ensure_period_records(state, tenant_id, period_start, period_end, &lines, currency).await?;
 
     let mut tx = state
         .db
@@ -1076,9 +1137,9 @@ async fn ensure_period_records(
     period_start: DateTime<Utc>,
     period_end: DateTime<Utc>,
     lines: &[&ProductLineContractRow],
+    currency: &str,
 ) -> Result<(), String> {
-    let currency = resolve_tenant_billing_currency(&state.db, tenant_id).await?;
-    let price_currency = catalog_price_currency(&currency);
+    let price_currency = catalog_price_currency(currency);
 
     let mut tx = state
         .db
@@ -1114,7 +1175,7 @@ async fn ensure_period_records(
         .bind(line.product_line.as_str())
         .bind(period_start)
         .bind(period_end)
-        .bind(&currency)
+        .bind(currency)
         .bind(plan_name)
         .bind(rate_millicents.map(|rate| rate as i32))
         .bind(snapshot.to_string())
@@ -1359,20 +1420,6 @@ async fn mailbox_seats(
         ))
     })?;
     Ok(row)
-}
-
-/// The tenant's billing currency, resolved exactly like the api-server
-/// resolver normalizes it ([`normalize_billing_currency`]).
-async fn resolve_tenant_billing_currency(db: &PgPool, tenant_id: &str) -> Result<String, String> {
-    let raw: Option<String> = sqlx::query_scalar(
-        "SELECT settings->>'billingCurrency' AS billing_currency FROM tenants WHERE id = $1",
-    )
-    .bind(tenant_id)
-    .fetch_optional(db)
-    .await
-    .map_err(|e| format!("product-line sweep: billing currency query failed: {e}"))?
-    .flatten();
-    Ok(normalize_billing_currency(raw.as_deref()))
 }
 
 /// Whether the tenant has a billing address on file (mandatory on a VAT
@@ -2511,6 +2558,76 @@ mod coverage_adversarial {
             "every contracted tenant visited exactly once, in keyset order"
         );
     });
+
+    // P3 fix 3 — contracts and billing currencies load ONCE for the whole
+    // tenant page, not once per tenant (contracts) / per tenant-month
+    // (currency). The counters would read 3 (contracts) and 3–6 (currency)
+    // on the pre-fix per-tenant loops; they must read exactly 1 and 1 here,
+    // including when the real sweep drives them.
+    env_test!(
+        contract_and_currency_loads_are_one_statement_per_page,
+        |env| {
+            use crate::test_support::query_count;
+
+            let (start, _end) = target_month();
+            let mut tenants = Vec::new();
+            for suffix in ["a", "b", "c"] {
+                let tenant = format!("plcov_batch_{suffix}");
+                seed_tenant(env, &tenant, Some("USD")).await;
+                seed_contract(
+                    env,
+                    &tenant,
+                    "platform",
+                    "active",
+                    start - chrono::Duration::days(30),
+                    None,
+                )
+                .await;
+                tenants.push(tenant);
+            }
+
+            // Helper level: one statement, full map.
+            query_count::reset();
+            let contracts = load_contracts_for_tenants(&env.state, &tenants)
+                .await
+                .expect("batch contracts");
+            assert_eq!(query_count::count("product_lines.contract_load"), 1);
+            assert_eq!(contracts.len(), 3);
+            assert!(
+                contracts
+                    .values()
+                    .all(|rows| rows.len() == 1 && rows[0].product_line == PLATFORM_PRODUCT_LINE),
+                "every tenant's contract is present"
+            );
+
+            query_count::reset();
+            let currencies = load_billing_currencies(&env.pool, &tenants)
+                .await
+                .expect("batch currencies");
+            assert_eq!(query_count::count("product_lines.currency_load"), 1);
+            assert_eq!(currencies.len(), 3);
+            assert!(currencies.values().all(|currency| currency == "USD"));
+
+            // Sweep level: the same two statements drive all three tenants
+            // (no addresses: the months are surfaced as needs_review, which is
+            // irrelevant to the load count).
+            query_count::reset();
+            let sweep = sweep_product_line_months(&env.state)
+                .await
+                .expect("batch sweep");
+            assert_eq!(sweep.tenants_checked, 3, "{sweep:?}");
+            assert_eq!(
+                query_count::count("product_lines.contract_load"),
+                1,
+                "contracts load once for the page, not once per tenant"
+            );
+            assert_eq!(
+                query_count::count("product_lines.currency_load"),
+                1,
+                "currencies load once for the page, not once per tenant-month"
+            );
+        }
+    );
 
     env_test!(
         a_backdated_line_never_silently_joins_an_existing_month_invoice,

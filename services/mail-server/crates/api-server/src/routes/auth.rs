@@ -4544,10 +4544,17 @@ async fn revoke_api_key(
     // Scope gate (F2): destroying credentials is a write operation.
     require_scopes(&auth, &["api-keys:write"])?;
 
+    // api_keys.id is UUID (canonical schema): bind the parsed UUID so the
+    // primary key is used. A path segment that is not a UUID cannot name a key
+    // and resolves to the SAME 404 the `id::text = 'garbage'` comparison
+    // produced (no-match), instead of a database cast error.
+    let key_id =
+        uuid::Uuid::parse_str(&id).map_err(|_| ApiError::NotFound("API key not found".into()))?;
+
     let deleted_key_hash: Option<String> = sqlx::query_scalar(
-        "DELETE FROM api_keys WHERE id::text = $1 AND tenant_id = $2 RETURNING key_hash",
+        "DELETE FROM api_keys WHERE id = $1 AND tenant_id = $2 RETURNING key_hash",
     )
-    .bind(id)
+    .bind(key_id)
     .bind(auth.tenant_id)
     .fetch_optional(&state.db)
     .await?;
@@ -5826,12 +5833,15 @@ mod tests {
             "absent expiry must resolve to the shared 90-day default"
         );
 
-        let row: Option<(String, chrono::DateTime<Utc>)> =
-            sqlx::query_as("SELECT key_hash, expires_at FROM api_keys WHERE id::text = $1")
-                .bind(&minted.id)
-                .fetch_optional(&pool)
-                .await
-                .expect("load key row");
+        let row: Option<(String, chrono::DateTime<Utc>)> = sqlx::query_as(
+            // api_keys.id is UUID: bind natively (the `id::text = $1` cast
+            // forced a scan on every key lookup).
+            "SELECT key_hash, expires_at FROM api_keys WHERE id = $1::uuid",
+        )
+        .bind(&minted.id)
+        .fetch_optional(&pool)
+        .await
+        .expect("load key row");
         let (stored_hash, stored_expiry) = row.expect("key persisted");
         assert_eq!(
             stored_hash,
@@ -10584,6 +10594,24 @@ mod adversarial_auth_tests_3 {
             .await,
             Err(ApiError::NotFound(_))
         ));
+        // A path segment that is NOT a UUID is the same opaque 404: the
+        // handler binds the primary key natively (`WHERE id = $1::uuid`), and
+        // a value the column could never hold resolves to no-match rather than
+        // a database cast error — exactly what `id::text = 'garbage'` did.
+        for garbage in ["not-a-uuid", "12345", "", "am_live_x"] {
+            assert!(
+                matches!(
+                    revoke_api_key(
+                        State(fx.state.clone()),
+                        revoke_auth.clone(),
+                        Path(garbage.to_string())
+                    )
+                    .await,
+                    Err(ApiError::NotFound(_))
+                ),
+                "{garbage:?} must be an opaque NotFound"
+            );
+        }
         // A suspended tenant's keys cannot be minted.
         sqlx::query("UPDATE tenants SET status = 'suspended' WHERE id = $1")
             .bind(&tenant)

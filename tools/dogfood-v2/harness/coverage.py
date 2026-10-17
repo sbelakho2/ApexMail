@@ -78,21 +78,42 @@ def _rule_matches(rule: str, surface_id: str, kind: str) -> bool:
     return rule == surface_id
 
 
+def _probe_index(registry) -> tuple[dict[str, list[str]], list[tuple[str, str]],
+                                    dict[str, list[str]], dict[str, list[str]]]:
+    """Invert the probe registry once: (explicit surface id, prefix rules,
+    kind rules, exact rules) -> probe ids.
+
+    The former per-surface loop rescanned every probe (O(surfaces x probes));
+    the index makes the surface pass O(surfaces x matching rules) with exact
+    and kind lookups in O(1). Rule precedence mirrors _rule_matches.
+    """
+    explicit: dict[str, list[str]] = {}
+    prefixes: list[tuple[str, str]] = []
+    kinds: dict[str, list[str]] = {}
+    exact: dict[str, list[str]] = {}
+    for probe in registry.all():
+        for surface_id in probe.surfaces:
+            explicit.setdefault(surface_id, []).append(probe.id)
+        for rule in probe.subsumes:
+            if rule.endswith("*"):
+                prefixes.append((rule[:-1], probe.id))
+            elif rule.startswith("kind:"):
+                kinds.setdefault(rule.split(":", 1)[1], []).append(probe.id)
+            else:
+                exact.setdefault(rule, []).append(probe.id)
+    return explicit, prefixes, kinds, exact
+
+
 def compute_coverage(ledger, registry, allowlist_path: Path) -> CoverageResult:
     allow, problems = load_allowlist(allowlist_path)
     result = CoverageResult(invalid_allowlist=problems)
+    explicit, prefixes, kinds, exact = _probe_index(registry)
     counts: dict[str, int] = {}
     for surface in ledger.surfaces:
         counts[surface.kind] = counts.get(surface.kind, 0) + 1
-        probes = []
-        for probe in registry.all():
-            if surface.id in probe.surfaces:
-                probes.append(probe.id)
-                continue
-            for rule in probe.subsumes:
-                if _rule_matches(rule, surface.id, surface.kind):
-                    probes.append(probe.id)
-                    break
+        probes = [*explicit.get(surface.id, ()), *kinds.get(surface.kind, ()),
+                  *exact.get(surface.id, ())]
+        probes.extend(pid for prefix, pid in prefixes if surface.id.startswith(prefix))
         if probes:
             result.covered[surface.id] = sorted(set(probes))
         elif surface.id in allow:

@@ -1397,3 +1397,143 @@ async fn crash_between_send_commit_and_bookkeeping_reuses_message_and_quota() {
         "both attempts called admission; the dedup key arbitrated"
     );
 }
+
+// ---------------------------------------------------------------------------
+// P1: one rule load per tick, one skipped-run insert per event
+// ---------------------------------------------------------------------------
+
+/// Install a statement-level counter on `automation_runs` INSERTs: the
+/// AFTER INSERT ... FOR EACH STATEMENT trigger fires exactly once per INSERT
+/// statement (even one that conflict-skips every row), so the test asserts
+/// real statement counts, not timing.
+async fn install_run_insert_statement_counter(pool: &PgPool) {
+    sqlx::query("DROP TABLE IF EXISTS automation_run_stmt_counter")
+        .execute(pool)
+        .await
+        .expect("drop counter table");
+    sqlx::query(
+        "CREATE TABLE automation_run_stmt_counter \
+             (id int PRIMARY KEY, inserts bigint NOT NULL DEFAULT 0)",
+    )
+    .execute(pool)
+    .await
+    .expect("create counter table");
+    sqlx::query("INSERT INTO automation_run_stmt_counter (id, inserts) VALUES (1, 0)")
+        .execute(pool)
+        .await
+        .expect("seed counter");
+    sqlx::query(
+        "CREATE OR REPLACE FUNCTION count_automation_run_insert() RETURNS trigger AS $$ \
+         BEGIN \
+           UPDATE automation_run_stmt_counter SET inserts = inserts + 1 WHERE id = 1; \
+           RETURN NULL; \
+         END; \
+         $$ LANGUAGE plpgsql",
+    )
+    .execute(pool)
+    .await
+    .expect("counter fn");
+    sqlx::query("DROP TRIGGER IF EXISTS automation_run_insert_counter ON automation_runs")
+        .execute(pool)
+        .await
+        .expect("drop old trigger");
+    sqlx::query(
+        "CREATE TRIGGER automation_run_insert_counter AFTER INSERT ON automation_runs \
+         FOR EACH STATEMENT EXECUTE FUNCTION count_automation_run_insert()",
+    )
+    .execute(pool)
+    .await
+    .expect("counter trigger");
+}
+
+async fn run_insert_statements(pool: &PgPool) -> i64 {
+    sqlx::query_scalar("SELECT inserts FROM automation_run_stmt_counter WHERE id = 1")
+        .fetch_one(pool)
+        .await
+        .expect("counter value")
+}
+
+/// P1: two events against K rules load the tenant's rules ONCE (not once per
+/// event) and persist all K skipped runs of an event with ONE INSERT
+/// statement — while producing exactly the same skipped rows as before.
+#[tokio::test]
+async fn two_events_against_k_rules_batch_the_rule_load_and_skip_inserts() {
+    let Some(pool) = fresh_pool("autoexec_p1_batch").await else {
+        return;
+    };
+    let backend = Arc::new(FakeAdmissionBackend::new());
+    let engine = executor(&pool, backend.clone());
+
+    let tenant = fresh_tenant();
+    insert_tenant(&pool, &tenant).await;
+    let domain = insert_domain(&pool, &tenant).await;
+    let template = insert_template(&pool, &tenant).await;
+
+    // K enabled rules whose trigger matches `contact.created` but whose
+    // condition can never match the seeded contact -> every rule records a
+    // skipped run for every event.
+    const K: usize = 3;
+    let mut rules = Vec::new();
+    for index in 0..K {
+        rules.push(
+            insert_automation(
+                &pool,
+                &tenant,
+                &format!("P1 rule {index}"),
+                json!({"type": "event", "event": "contact.created"}),
+                json!({"all": [{"field": "tags", "operator": "contains", "value": "never"}]}),
+                send_email_action(&format!("welcome@{domain}"), &template),
+            )
+            .await,
+        );
+    }
+
+    // Two events in the same tick: one `contact.created` per contact
+    // (emitted by the migration-224 trigger).
+    insert_contact(&pool, &tenant, "p1-a@example.com", &["standard"]).await;
+    insert_contact(&pool, &tenant, "p1-b@example.com", &["standard"]).await;
+
+    install_run_insert_statement_counter(&pool).await;
+
+    let report = engine.tick().await.expect("tick");
+
+    assert_eq!(report.events_processed, 2, "{report:?}");
+    assert_eq!(report.runs_skipped, (2 * K) as u64, "{report:?}");
+    assert_eq!(
+        report.rules_loaded, K as u64,
+        "the tenant's rules are materialized once per tick, not once per event: {report:?}"
+    );
+
+    let inserts = run_insert_statements(&pool).await;
+    assert_eq!(
+        inserts, 2,
+        "one multi-row skipped-run INSERT per event (2 events x {K} rules), \
+         not one INSERT per (event x rule)"
+    );
+
+    // Identical observable outcomes: K skipped rows per event, each carrying
+    // the pre-batching skip reason text.
+    for rule in &rules {
+        let runs = run_rows(&pool, &tenant, *rule).await;
+        assert_eq!(runs.len(), 2, "one skipped run per event for rule {rule}");
+        for run in &runs {
+            assert_eq!(run.0, "skipped");
+            assert!(
+                run.1
+                    .as_deref()
+                    .unwrap_or_default()
+                    .starts_with("condition_not_met"),
+                "the skip reason must be recorded: {:?}",
+                run.1
+            );
+        }
+    }
+    assert!(message_categories(&pool, &tenant).await.is_empty());
+    assert_eq!(backend.reserves(), 0, "no admission call for skipped rules");
+
+    // A second tick claims nothing (both events settled) and writes no runs.
+    let again = engine.tick().await.expect("second tick");
+    assert_eq!(again.events_claimed, 0);
+    assert_eq!(again.rules_loaded, 0);
+    assert_eq!(run_insert_statements(&pool).await, inserts);
+}

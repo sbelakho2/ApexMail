@@ -373,6 +373,7 @@ dependencies = [
  "apexmail-db",
  "apexmail-dns-resolver",
  "apexmail-lib",
+ "argon2",
  "ato-protection",
  "aws-config",
  "aws-sdk-sesv2",

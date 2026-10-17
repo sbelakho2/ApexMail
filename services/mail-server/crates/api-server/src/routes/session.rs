@@ -299,6 +299,43 @@ fn impersonation_lifetime_within_cap(exp_ms: i64, now_ms: i64) -> bool {
     exp_ms - now_ms <= MAX_IMPERSONATION_SESSION_TTL_MS
 }
 
+/// Resolve the operator's account status by user id OR email.
+///
+/// The single `WHERE id::text = $1 OR LOWER(email) = LOWER($1)` predicate
+/// defeated the `users` primary-key index: the cast forced a sequential scan
+/// on EVERY impersonation-session introspection, and the `OR` made the two
+/// arms unable to use their own indexes. This issues ONE indexed statement
+/// per lookup:
+///
+///   * `$1` parses as a UUID → `WHERE id = $1` (primary key);
+///   * otherwise → `WHERE LOWER(email) = LOWER($1)`.
+///
+/// Observable semantics are unchanged for both real callers: a session
+/// `operatorId` is either the ULID/UUID user id (users.id is UUID, migration
+/// 052) or an operator email — an email can never parse as a UUID, and a
+/// UUID string can never equal an email, so the two arms never overlap.
+/// A garbage value that is neither keeps returning `None` (unknown operator),
+/// exactly as the `id::text = 'garbage'` arm did.
+async fn operator_status_by_id_or_email(
+    db: &sqlx::PgPool,
+    operator_id: &str,
+) -> Result<Option<String>, sqlx::Error> {
+    match uuid::Uuid::parse_str(operator_id) {
+        Ok(user_id) => {
+            sqlx::query_scalar("SELECT status FROM users WHERE id = $1 LIMIT 1")
+                .bind(user_id)
+                .fetch_optional(db)
+                .await
+        }
+        Err(_) => {
+            sqlx::query_scalar("SELECT status FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1")
+                .bind(operator_id)
+                .fetch_optional(db)
+                .await
+        }
+    }
+}
+
 /// Revalidate an impersonation session against server-side state.
 ///
 /// Every introspection re-derives liveness from the same stores the token
@@ -359,16 +396,12 @@ async fn revalidate_impersonation_session(
         .as_deref()
         .filter(|id| !id.is_empty())
         .ok_or_else(|| "impersonation session missing operator".to_string())?;
-    let operator_status: Option<String> = sqlx::query_scalar(
-        "SELECT status FROM users WHERE id::text = $1 OR LOWER(email) = LOWER($1) LIMIT 1",
-    )
-    .bind(operator_id)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|error| {
-        tracing::error!(error = %error, "operator status recheck failed for impersonation session");
-        "impersonation session could not be revalidated".to_string()
-    })?;
+    let operator_status = operator_status_by_id_or_email(&state.db, operator_id)
+        .await
+        .map_err(|error| {
+            tracing::error!(error = %error, "operator status recheck failed for impersonation session");
+            "impersonation session could not be revalidated".to_string()
+        })?;
     match operator_status.as_deref() {
         Some("active") => Ok(()),
         // A missing row is a deleted operator — treated exactly like a
@@ -1168,6 +1201,133 @@ mod tests {
             let body = introspect(&app, &token).await;
             assert_eq!(body["authenticated"], false, "{body}");
             assert_eq!(body["reason"], "user account is no longer active", "{body}");
+        }
+    }
+
+    // ─── Operator status: indexed uuid arm vs email arm ─────────
+
+    mod operator_lookup_tests {
+        use super::*;
+
+        #[test]
+        fn operator_ids_route_to_the_uuid_arm_only_when_they_parse_as_uuids() {
+            // Real session operatorIds are UUIDs (users.id, migration 052).
+            assert!(uuid::Uuid::parse_str("3f2504e0-4f89-11d3-9a0c-0305e82c3301").is_ok());
+            // Emails, ULID-style ids, and free text cannot parse: they take
+            // the email arm, exactly the values the old OR-predicate resolved
+            // through `LOWER(email) = LOWER($1)`.
+            for value in [
+                "operator@example.com",
+                "01HZX8W6Q7J9K0M1N2P3R4S5T6",
+                "op_1",
+                "",
+                "not-a-uuid-3f2504e0",
+            ] {
+                assert!(uuid::Uuid::parse_str(value).is_err(), "{value}");
+            }
+        }
+
+        /// Both arms against the real `users` schema (users.id UUID,
+        /// `idx_users_email_lower` present): the rewrite must resolve the
+        /// same operator either way, and a garbage value keeps resolving to
+        /// "unknown" rather than erroring.
+        #[tokio::test]
+        async fn operator_status_resolves_by_uuid_and_by_email_without_crossing() {
+            let Some(pool) = crate::test_db::canonical_pool("session_operator_lookup").await else {
+                return;
+            };
+            let tenant = apexmail_lib::id::generate_id("ses_lookup", 14);
+            sqlx::query("INSERT INTO tenants (id, name, slug, status) VALUES ($1, 'Lookup Co', $2, 'active')")
+                .bind(&tenant)
+                .bind(format!("lookup-{tenant}"))
+                .execute(&pool)
+                .await
+                .expect("seed tenant");
+
+            let uuid_user = uuid::Uuid::new_v4();
+            // Mixed-case stored address: the email arm is case-insensitive,
+            // like the predicate it replaced.
+            let uuid_email = format!("Owner-{}@Example.com", uuid_user.simple());
+            sqlx::query(
+                "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status, email_verified)
+                 VALUES ($1, $2, $3, 'Owner', 'x', 'owner', 'active', true)",
+            )
+            .bind(uuid_user)
+            .bind(&tenant)
+            .bind(&uuid_email)
+            .execute(&pool)
+            .await
+            .expect("seed uuid user");
+
+            let suspended_user = uuid::Uuid::new_v4();
+            let suspended_email = format!("suspended-{}@example.com", suspended_user.simple());
+            sqlx::query(
+                "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status, email_verified)
+                 VALUES ($1, $2, $3, 'Suspended', 'x', 'member', 'suspended', true)",
+            )
+            .bind(suspended_user)
+            .bind(&tenant)
+            .bind(&suspended_email)
+            .execute(&pool)
+            .await
+            .expect("seed suspended user");
+
+            // uuid arm
+            assert_eq!(
+                operator_status_by_id_or_email(&pool, &uuid_user.to_string())
+                    .await
+                    .expect("uuid arm executes"),
+                Some("active".to_string())
+            );
+            // email arm (lowercase input vs mixed-case stored address)
+            assert_eq!(
+                operator_status_by_id_or_email(&pool, &uuid_email.to_lowercase())
+                    .await
+                    .expect("email arm executes"),
+                Some("active".to_string())
+            );
+            // a non-active operator resolves to its status; the caller treats
+            // anything but "active" as dead.
+            assert_eq!(
+                operator_status_by_id_or_email(&pool, &suspended_email)
+                    .await
+                    .expect("email arm executes"),
+                Some("suspended".to_string())
+            );
+            assert_eq!(
+                operator_status_by_id_or_email(&pool, &suspended_user.to_string())
+                    .await
+                    .expect("uuid arm executes"),
+                Some("suspended".to_string())
+            );
+
+            // The arms never cross: the uuid of one user is not its email.
+            assert_eq!(
+                operator_status_by_id_or_email(&pool, &suspended_user.to_string())
+                    .await
+                    .unwrap(),
+                Some("suspended".into()),
+                "a uuid must resolve through the id arm, never the email arm"
+            );
+
+            // Unknown operator and garbage: None, never an error (the old
+            // `id::text = 'garbage'` comparison was just false).
+            for unknown in [
+                uuid::Uuid::new_v4().to_string(),
+                "nobody@example.com".to_string(),
+                "not-a-uuid-and-not-an-email".to_string(),
+                String::new(),
+            ] {
+                assert_eq!(
+                    operator_status_by_id_or_email(&pool, &unknown)
+                        .await
+                        .expect("unknown operators must be a result, not an error"),
+                    None,
+                    "{unknown}"
+                );
+            }
+
+            pool.close().await;
         }
     }
 }

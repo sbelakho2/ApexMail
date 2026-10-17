@@ -41,8 +41,12 @@ fn default_limit() -> i64 {
     50
 }
 
+/// Enumerate every tenant-scoped table AND the declared type of its
+/// `tenant_id` column: the type decides how the per-table delete binds the
+/// tenant id (native text comparison for text/varchar columns, a parsed UUID
+/// for the rare uuid-typed column), so the cast never defeats an index.
 const TENANT_SCOPED_TABLES_QUERY: &str = "
-    SELECT DISTINCT columns.table_name
+    SELECT DISTINCT columns.table_name, columns.data_type
     FROM information_schema.columns AS columns
     JOIN information_schema.tables AS tables
       ON tables.table_schema = columns.table_schema
@@ -54,6 +58,56 @@ const TENANT_SCOPED_TABLES_QUERY: &str = "
       AND tables.table_type = 'BASE TABLE'
     ORDER BY columns.table_name
 ";
+
+/// How one per-table delete binds the tenant id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TenantIdBind {
+    /// Text/varchar `tenant_id` column: bind the id directly so the column's
+    /// index is usable (`WHERE tenant_id = $1`).
+    Text,
+    /// `tenant_id` is UUID: bind the parsed UUID (`= $1::uuid`).
+    Uuid(uuid::Uuid),
+}
+
+/// Plan the DELETE for one tenant-scoped table from its declared
+/// `tenant_id` type.
+///
+/// * `character varying`/`text`/`character` (the canonical shape after
+///   migration 064): `WHERE tenant_id = $1` — the native text comparison the
+///   `tenant_id::text = $1` cast prevented (a cast on the COLUMN disables its
+///   index; a cast on the PARAMETER does not).
+/// * `uuid`: bind the tenant id as a UUID when it parses as one. A tenant id
+///   that is not a UUID cannot equal any `uuid::text` value (uuid text is 36
+///   lowercase hyphenated chars; tenant ids are at most 26 chars), so the
+///   delete is provably a no-op and `None` says "skip it".
+/// * anything else (unexpected in the canonical schema): keep the historical
+///   text cast so behaviour does not silently change for an unknown type.
+///
+/// The table name is quoted through [`quote_identifier`] and only comes from
+/// information_schema; no caller input reaches the SQL text.
+fn tenant_delete_plan(
+    table_name: &str,
+    tenant_id_type: &str,
+    tenant_id: &str,
+) -> Option<(String, TenantIdBind)> {
+    let quoted = quote_identifier(table_name);
+    match tenant_id_type.to_ascii_lowercase().as_str() {
+        "character varying" | "text" | "character" => Some((
+            format!("DELETE FROM {quoted} WHERE tenant_id = $1"),
+            TenantIdBind::Text,
+        )),
+        "uuid" => uuid::Uuid::parse_str(tenant_id).ok().map(|id| {
+            (
+                format!("DELETE FROM {quoted} WHERE tenant_id = $1"),
+                TenantIdBind::Uuid(id),
+            )
+        }),
+        _ => Some((
+            format!("DELETE FROM {quoted} WHERE tenant_id::text = $1"),
+            TenantIdBind::Text,
+        )),
+    }
+}
 
 /// Evidence tables a tenant deletion must NEVER touch (P1-6). Their rows
 /// outlive the tenant: `audit_logs` is the hash-chained compliance record
@@ -191,7 +245,7 @@ pub async fn delete_tenant_records(
     )
     .await?;
 
-    let mut pending_tables = sqlx::query_scalar::<_, String>(TENANT_SCOPED_TABLES_QUERY)
+    let mut pending_tables: Vec<(String, String)> = sqlx::query_as(TENANT_SCOPED_TABLES_QUERY)
         .fetch_all(&mut *transaction)
         .await?;
 
@@ -199,19 +253,27 @@ pub async fn delete_tenant_records(
         let pending_count = pending_tables.len();
         let mut blocked_tables = Vec::new();
 
-        for table_name in pending_tables {
-            let delete_query = format!(
-                "DELETE FROM {} WHERE tenant_id::text = $1",
-                quote_identifier(&table_name)
-            );
+        for (table_name, tenant_id_type) in pending_tables {
+            let Some((delete_query, bind)) =
+                tenant_delete_plan(&table_name, &tenant_id_type, tenant_id)
+            else {
+                // uuid-typed tenant_id and a tenant id that cannot be one:
+                // no row can match, so there is nothing to delete (and the
+                // old cast couldn't match either).
+                continue;
+            };
 
-            match sqlx::query(&delete_query)
-                .bind(tenant_id)
-                .execute(&mut *transaction)
-                .await
-            {
+            let mut query = sqlx::query(&delete_query);
+            query = match bind {
+                TenantIdBind::Text => query.bind(tenant_id),
+                TenantIdBind::Uuid(id) => query.bind(id),
+            };
+
+            match query.execute(&mut *transaction).await {
                 Ok(_) => {}
-                Err(error) if is_foreign_key_violation(&error) => blocked_tables.push(table_name),
+                Err(error) if is_foreign_key_violation(&error) => {
+                    blocked_tables.push((table_name, tenant_id_type))
+                }
                 Err(error) => return Err(error),
             }
         }
@@ -219,7 +281,11 @@ pub async fn delete_tenant_records(
         if blocked_tables.len() == pending_count {
             return Err(sqlx::Error::Protocol(format!(
                 "could not resolve tenant cleanup order for tables: {}",
-                blocked_tables.join(", ")
+                blocked_tables
+                    .iter()
+                    .map(|(table, _)| table.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )));
         }
 
@@ -572,6 +638,62 @@ mod tests {
             );
         }
         assert!(TENANT_SCOPED_TABLES_QUERY.contains("NOT IN"));
+    }
+
+    /// The per-table delete binds the tenant id NATIVELY for text/varchar
+    /// `tenant_id` columns (canonical after migration 064), parses a UUID for
+    /// uuid-typed columns, and skips a uuid column when the tenant id cannot
+    /// be a UUID (no row could ever match — the old text cast matched nothing
+    /// there either, it just scanned).
+    #[test]
+    fn tenant_delete_plan_binds_the_native_type_and_skips_impossible_matches() {
+        let text = tenant_delete_plan("events", "character varying", "ten_abc")
+            .expect("varchar tenant_id is deletable");
+        assert_eq!(
+            text,
+            (
+                "DELETE FROM \"events\" WHERE tenant_id = $1".to_string(),
+                TenantIdBind::Text
+            ),
+            "text columns must compare natively, never through ::text"
+        );
+        assert!(!text.0.contains("::text"));
+
+        let text_col = tenant_delete_plan("metreing_markers", "text", "ten_abc")
+            .expect("text tenant_id is deletable");
+        assert_eq!(
+            text_col.0,
+            "DELETE FROM \"metreing_markers\" WHERE tenant_id = $1"
+        );
+
+        let tenant_uuid = "3f2504e0-4f89-11d3-9a0c-0305e82c3301";
+        let uuid_col = tenant_delete_plan("queue_jobs", "uuid", tenant_uuid)
+            .expect("uuid tenant_id with a uuid tenant id is deletable");
+        assert_eq!(
+            uuid_col.0,
+            "DELETE FROM \"queue_jobs\" WHERE tenant_id = $1"
+        );
+        assert_eq!(
+            uuid_col.1,
+            TenantIdBind::Uuid(uuid::Uuid::parse_str(tenant_uuid).expect("uuid"))
+        );
+
+        // A canonical tenant id is at most 26 chars, so it can never equal a
+        // uuid column's text form: the statement is skipped, not executed.
+        assert_eq!(tenant_delete_plan("queue_jobs", "uuid", "ten_abc"), None);
+
+        // Unknown/legacy column types keep the historical text cast rather
+        // than silently changing behaviour.
+        let legacy = tenant_delete_plan("odd_table", "custom_type", "ten_abc")
+            .expect("unknown types stay deletable");
+        assert_eq!(
+            legacy.0,
+            "DELETE FROM \"odd_table\" WHERE tenant_id::text = $1"
+        );
+
+        // Identifiers are quoted (no injection surface from the catalog read).
+        let quoted = tenant_delete_plan("Mixed Case", "text", "ten_abc").expect("quoted");
+        assert_eq!(quoted.0, "DELETE FROM \"Mixed Case\" WHERE tenant_id = $1");
     }
 
     #[test]
@@ -1180,6 +1302,90 @@ mod adversarial_tests {
         };
         let env = AdvEnv::admin(pool.clone()).await;
         let tenant = seed_tenant(&pool, "d").await;
+        let other_tenant = seed_tenant(&pool, "other").await;
+
+        // Seed one row per tenant-scoped table shape the reflection-driven
+        // delete must handle: text/varchar tenant_id columns (events,
+        // messages, suppressions, domains, api_keys, dedicated_ips) and a
+        // uuid-typed tenant_id column (queue_jobs). A sibling row for another
+        // tenant must survive every statement.
+        for (index, owner) in [&tenant, &other_tenant].into_iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO events (id, tenant_id, event_type, recipient, timestamp) \
+                 VALUES ($1, $2, 'delivered', 'cascade@example.com', NOW())",
+            )
+            .bind(format!(
+                "evt_del_{}",
+                &uuid::Uuid::new_v4().simple().to_string()[..12]
+            ))
+            .bind(owner)
+            .execute(&pool)
+            .await
+            .expect("seed event");
+            sqlx::query(
+                "INSERT INTO messages (id, tenant_id, from_email, to_emails, status) \
+                 VALUES ($1, $2, 'sender@apexmail.ee', '[]'::jsonb, 'sent')",
+            )
+            .bind(uuid::Uuid::new_v4())
+            .bind(owner)
+            .execute(&pool)
+            .await
+            .expect("seed message");
+            sqlx::query(
+                "INSERT INTO suppressions (id, tenant_id, email, reason, source, created_at) \
+                 VALUES ($1, $2, $3, 'manual', 'test', NOW())",
+            )
+            .bind(apexmail_lib::id::generate_id("sup", 22))
+            .bind(owner)
+            .bind(format!("cascade-{owner}@example.com"))
+            .execute(&pool)
+            .await
+            .expect("seed suppression");
+            sqlx::query(
+                "INSERT INTO domains (id, tenant_id, name, status) VALUES ($1, $2, $3, 'verified')",
+            )
+            .bind(uuid::Uuid::new_v4())
+            .bind(owner)
+            .bind(format!("cascade-{owner}.example"))
+            .execute(&pool)
+            .await
+            .expect("seed domain");
+            sqlx::query(
+                "INSERT INTO api_keys (id, tenant_id, name, key_prefix, key_hash, scopes, created_at, updated_at) \
+                 VALUES ($1, $2, 'cascade', 'am_test_', $3, '[\"*\"]'::jsonb, NOW(), NOW())",
+            )
+            .bind(uuid::Uuid::new_v4())
+            .bind(owner)
+            .bind(format!("cascade-key-hash-{owner}"))
+            .execute(&pool)
+            .await
+            .expect("seed api key");
+            sqlx::query(
+                "INSERT INTO dedicated_ips (id, tenant_id, ip_address, status) \
+                 VALUES ($1, $2, $3, 'active')",
+            )
+            .bind(apexmail_lib::id::generate_id("dip", 20))
+            .bind(owner)
+            .bind(format!("203.0.113.{}", 10 + index))
+            .execute(&pool)
+            .await
+            .expect("seed dedicated ip");
+        }
+        // queue_jobs.tenant_id is UUID: no canonical tenant id (<= 26 chars)
+        // can equal a uuid's text form, so this row must survive the delete
+        // untouched — and the planner must SKIP the statement rather than
+        // scan (or error) trying to match it.
+        let queue_job_id = uuid::Uuid::new_v4();
+        let queue_job_tenant = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO queue_jobs (id, tenant_id, queue, payload) \
+             VALUES ($1, $2, 'mail', '{}'::jsonb)",
+        )
+        .bind(queue_job_id)
+        .bind(queue_job_tenant)
+        .execute(&pool)
+        .await
+        .expect("seed queue job");
 
         // Wrong confirmation phrase is a 400 naming the expected phrase.
         let (status, body) = env
@@ -1255,6 +1461,43 @@ mod adversarial_tests {
             .await
             .expect("count");
         assert_eq!(remaining, 0, "tenant row gone");
+
+        // Every tenant-scoped row of the deleted tenant is gone, the other
+        // tenant's rows are untouched, and the uuid-typed queue row survives.
+        for (table, column) in [
+            ("events", "tenant_id"),
+            ("messages", "tenant_id"),
+            ("suppressions", "tenant_id"),
+            ("domains", "tenant_id"),
+            ("api_keys", "tenant_id"),
+            ("dedicated_ips", "tenant_id"),
+        ] {
+            let gone: i64 =
+                sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table} WHERE {column} = $1"))
+                    .bind(&tenant)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("count target rows");
+            assert_eq!(gone, 0, "{table} rows for the deleted tenant must be gone");
+            let kept: i64 =
+                sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table} WHERE {column} = $1"))
+                    .bind(&other_tenant)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("count other rows");
+            assert_eq!(kept, 1, "{table} rows for another tenant must survive");
+        }
+        let queue_job_still_there: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM queue_jobs WHERE id = $1")
+                .bind(queue_job_id)
+                .fetch_one(&pool)
+                .await
+                .expect("count queue job");
+        assert_eq!(
+            queue_job_still_there, 1,
+            "a uuid tenant_id row cannot belong to a text tenant id; it must survive"
+        );
+
         let (action,): (String,) = sqlx::query_as(
             "SELECT action FROM audit_logs WHERE action = 'control_plane.tenant.deleted' AND resource_id = $1",
         )

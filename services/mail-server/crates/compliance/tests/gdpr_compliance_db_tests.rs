@@ -3617,3 +3617,344 @@ async fn held_erasure_defers_the_mirror_too() {
     .expect("deferral audit entry");
     assert_eq!(lifecycle, "dsr.lifecycle.completed");
 }
+
+// ── P3: set-based statutory-expiry sweep, per-row legal accounting ──────────
+
+/// P3 item 9: `advance_due_archives` is set-based per source table — one
+/// `DELETE … WHERE id = ANY($1::uuid[]) RETURNING id` and one archive
+/// transition per table (the pre-fix sweep ran `DELETE … WHERE id::text = $1`
+/// plus a three-statement state advance PER ROW). The legal accounting is
+/// preserved: a source record that is already gone still completes the
+/// transition, and a row whose source record cannot be purged is accounted and
+/// LEFT in `statutory_expired` (never certified as deleted) instead of failing
+/// the batch.
+#[tokio::test]
+async fn archive_sweep_is_set_based_and_accounts_failing_rows() {
+    use compliance::legal_archive::{
+        advance_due_archives, STATE_DELETED, STATE_LEGALLY_RESTRICTED, STATE_STATUTORY_EXPIRED,
+    };
+
+    let Some(pool) = sweep_pool("archive_set_based").await else {
+        return;
+    };
+    let tenant = unique_tenant();
+    seed_tenant(&pool, &tenant).await;
+    let expired_at = chrono::Utc::now() - chrono::Duration::days(1);
+
+    async fn archive_row(
+        pool: &PgPool,
+        tenant: &str,
+        source_table: &str,
+        source_record_id: &str,
+        expiry: chrono::DateTime<chrono::Utc>,
+    ) -> String {
+        let id = Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO legal_retention_archive
+               (id, tenant_id, subject_email_hash, source_table, source_record_id,
+                retention_class_id, reason, state, archived_at, statutory_expiry_at)
+             VALUES ($1,$2,'hash',$3,$4,'stat-class','seven years','legally_restricted',NOW(),$5)",
+        )
+        .bind(&id)
+        .bind(tenant)
+        .bind(source_table)
+        .bind(source_record_id)
+        .bind(expiry)
+        .execute(pool)
+        .await
+        .expect("archive row");
+        id
+    }
+
+    // Three real invoices past their statutory expiry.
+    for _ in 0..3 {
+        let (invoice_id,): (Uuid,) = sqlx::query_as(
+            "INSERT INTO invoices (tenant_id, amount, billing_address, issued_at)
+             VALUES ($1, 10, '{}', NOW() - INTERVAL '8 years') RETURNING id",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("invoice");
+        archive_row(
+            &pool,
+            &tenant,
+            "invoices",
+            &invoice_id.to_string(),
+            expired_at,
+        )
+        .await;
+    }
+    // An archived invoice that is already gone from `invoices`: the transition
+    // still completes (pre-fix behaviour), the source counter does not move.
+    let already_gone_id = archive_row(
+        &pool,
+        &tenant,
+        "invoices",
+        &Uuid::new_v4().to_string(),
+        expired_at,
+    )
+    .await;
+    // A source id that cannot be a UUID primary key: accounted per row.
+    let poison_id = archive_row(&pool, &tenant, "invoices", "not-a-uuid", expired_at).await;
+    // An expired row whose source table this crate does not own: reported.
+    let unowned_id = archive_row(&pool, &tenant, "unowned_store", "rec-1", expired_at).await;
+    // A row still inside its statutory window: never touched.
+    let future_id = archive_row(
+        &pool,
+        &tenant,
+        "invoices",
+        &Uuid::new_v4().to_string(),
+        chrono::Utc::now() + chrono::Duration::days(30),
+    )
+    .await;
+
+    let outcome = advance_due_archives(&pool, chrono::Utc::now())
+        .await
+        .expect("archive sweep runs");
+    assert_eq!(outcome.expired, 6, "every due row advances one step");
+    assert_eq!(
+        outcome.deleted, 4,
+        "3 real invoices + the already-gone source record"
+    );
+    assert_eq!(
+        outcome.source_records_deleted, 3,
+        "only source rows the DELETE actually removed are counted"
+    );
+    assert_eq!(
+        outcome.stuck_unpurgeable, 1,
+        "the unowned source table is reported, not purged"
+    );
+
+    // Every intended source row is gone; no unintended row was removed.
+    let invoices_left: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM invoices WHERE tenant_id = $1")
+            .bind(&tenant)
+            .fetch_one(&pool)
+            .await
+            .expect("invoices left");
+    assert_eq!(invoices_left, 0, "every archived invoice is purged");
+
+    async fn state_of(pool: &PgPool, id: &str) -> (String, bool) {
+        sqlx::query_as(
+            "SELECT state, deleted_at IS NOT NULL FROM legal_retention_archive WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .expect("archive state")
+    }
+    assert_eq!(
+        state_of(&pool, &already_gone_id).await,
+        (STATE_DELETED.to_string(), true)
+    );
+    assert_eq!(
+        state_of(&pool, &poison_id).await,
+        (STATE_STATUTORY_EXPIRED.to_string(), false),
+        "a row whose source record could not be purged is NOT certified deleted"
+    );
+    assert_eq!(
+        state_of(&pool, &unowned_id).await,
+        (STATE_STATUTORY_EXPIRED.to_string(), false)
+    );
+    assert_eq!(
+        state_of(&pool, &future_id).await,
+        (STATE_LEGALLY_RESTRICTED.to_string(), false),
+        "a row inside its statutory window is untouched"
+    );
+
+    // Idempotent: a second sweep finds nothing due and repeats the same
+    // honest accounting for the rows it must leave behind.
+    let again = advance_due_archives(&pool, chrono::Utc::now())
+        .await
+        .expect("second sweep runs");
+    assert_eq!(
+        (again.expired, again.deleted, again.source_records_deleted),
+        (0, 0, 0)
+    );
+    assert_eq!(again.stuck_unpurgeable, 1);
+    assert_eq!(
+        state_of(&pool, &poison_id).await,
+        (STATE_STATUTORY_EXPIRED.to_string(), false)
+    );
+
+    // Fail-before evidence, computed in-test against the pre-fix per-row
+    // shape: `DELETE … WHERE id::text = $1` matches NOTHING for a source id
+    // that is not a UUID, and the old sweep advanced the archive row
+    // UNCONDITIONALLY — certifying a record that never existed as deleted.
+    let legacy_row = archive_row(&pool, &tenant, "invoices", "legacy-not-a-uuid", expired_at).await;
+    sqlx::query(
+        "UPDATE legal_retention_archive
+            SET state = 'statutory_expired', statutory_expired_at = NOW(), updated_at = NOW()
+          WHERE id = $1",
+    )
+    .bind(&legacy_row)
+    .execute(&pool)
+    .await
+    .expect("legacy expiry step");
+    let legacy_deleted = sqlx::query("DELETE FROM invoices WHERE id::text = $1")
+        .bind("legacy-not-a-uuid")
+        .execute(&pool)
+        .await
+        .expect("legacy delete")
+        .rows_affected();
+    assert_eq!(
+        legacy_deleted, 0,
+        "the ::text comparison matches no source row"
+    );
+    sqlx::query(
+        "UPDATE legal_retention_archive SET state = 'deleted', deleted_at = NOW(), updated_at = NOW()
+          WHERE id = $1",
+    )
+    .bind(&legacy_row)
+    .execute(&pool)
+    .await
+    .expect("legacy advance");
+    assert_eq!(
+        state_of(&pool, &legacy_row).await.0,
+        STATE_DELETED,
+        "the pre-fix sweep certified the row deleted despite deleting nothing"
+    );
+}
+
+// ── P3: set-based invoice-snapshot redaction ────────────────────────────────
+
+/// P3 item 10: the invoice-snapshot rewrite is one set-based
+/// `UPDATE … FROM unnest($1::uuid[], $2::text[])` per chunk (the pre-fix path
+/// ran one `UPDATE … WHERE id::text = $1` per invoice — a sequential scan and
+/// a round trip each). The post-erasure snapshots must be byte-identical to
+/// what the per-row path produced: only rows addressed to the subject are
+/// rewritten, every other key is preserved, and unrelated/malformed/NULL
+/// snapshots are untouched.
+#[tokio::test]
+async fn invoice_snapshot_redaction_is_set_based_and_byte_identical() {
+    let Some(redis) = redis_pool().await else {
+        eprintln!("skipping: set TEST_REDIS_URL for the invoice snapshot test");
+        return;
+    };
+    let Some(pool) = test_pool("invoice_snapshot_batch").await else {
+        return;
+    };
+    let tenant = unique_tenant();
+    seed_tenant(&pool, &tenant).await;
+    let subject = format!("snap-{}@x.com", Uuid::new_v4().simple());
+    let req_id = Uuid::new_v4().to_string();
+    seed_request(&pool, &req_id, &tenant, &subject, "erasure").await;
+
+    let insert_invoice = |snapshot: Option<String>| {
+        let pool = pool.clone();
+        let tenant = tenant.clone();
+        async move {
+            let (id,): (Uuid,) = sqlx::query_as(
+                "INSERT INTO invoices (tenant_id, amount, billing_address, issued_at)
+                 VALUES ($1, 42, $2, NOW() - INTERVAL '2 days') RETURNING id",
+            )
+            .bind(&tenant)
+            .bind(snapshot)
+            .fetch_one(&pool)
+            .await
+            .expect("invoice");
+            id
+        }
+    };
+
+    // A: addressed to the subject (valid JSON, extra keys).
+    let matching = insert_invoice(Some(
+        serde_json::json!({"email": &subject, "country": "EE", "vat": "EE123"}).to_string(),
+    ))
+    .await;
+    // B: addressed to the subject in a different case (case-insensitive match).
+    let matching_upper = insert_invoice(Some(
+        serde_json::json!({"email": subject.to_uppercase(), "country": "FI"}).to_string(),
+    ))
+    .await;
+    // C: another subject — must stay byte-identical.
+    let other_snapshot =
+        serde_json::json!({"email": "someone-else@x.com", "country": "LV"}).to_string();
+    let unrelated = insert_invoice(Some(other_snapshot.clone())).await;
+    // D: malformed legacy snapshot — skipped, never a SQL JSON-cast abort.
+    let malformed = insert_invoice(Some("not-json-at-all".to_string())).await;
+    // E: no snapshot at all.
+    let empty = insert_invoice(None).await;
+
+    let gdpr = GdprAutomation::new(pool.clone(), redis, test_gdpr_config());
+    gdpr.process_request(&req_id).await.expect("erasure");
+
+    let snapshot_of = |id: Uuid| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, Option<String>>(
+                "SELECT billing_address FROM invoices WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .expect("snapshot")
+        }
+    };
+
+    for id in [matching, matching_upper] {
+        let raw = snapshot_of(id).await.expect("snapshot present");
+        let snapshot: serde_json::Value = serde_json::from_str(&raw).expect("valid JSON");
+        assert!(
+            snapshot["email"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("erased+"),
+            "the subject's email is replaced by the redaction marker: {raw}"
+        );
+        assert!(
+            !raw.to_lowercase().contains(&subject.to_lowercase()),
+            "no plaintext subject email survives: {raw}"
+        );
+    }
+    // Every unrelated key is preserved on the rewritten snapshots.
+    let rewritten: serde_json::Value =
+        serde_json::from_str(&snapshot_of(matching).await.unwrap()).expect("JSON");
+    assert_eq!(rewritten["country"], "EE");
+    assert_eq!(rewritten["vat"], "EE123");
+
+    // Rows that were not addressed to the subject are byte-identical.
+    assert_eq!(
+        snapshot_of(unrelated).await.as_deref(),
+        Some(other_snapshot.as_str())
+    );
+    assert_eq!(
+        snapshot_of(malformed).await.as_deref(),
+        Some("not-json-at-all")
+    );
+    assert_eq!(snapshot_of(empty).await, None);
+
+    // Only the two matching invoices are archived.
+    let archived: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM legal_retention_archive
+          WHERE tenant_id = $1 AND source_table = 'invoices'",
+    )
+    .bind(&tenant)
+    .fetch_one(&pool)
+    .await
+    .expect("archive rows");
+    assert_eq!(archived, 2, "one archive row per redacted invoice");
+
+    // Garbage / absent ids behave as before: * binding a non-existent (but
+    // well-formed) UUID is a 0-row no-op, exactly like the old text
+    // comparison, and * the new predicate never binds garbage because the id
+    // is fetched as a UUID — a garbage string can no longer reach the
+    // comparison at all (the old `id::text = 'garbage'` silently matched
+    // nothing).
+    let affected =
+        sqlx::query("UPDATE invoices SET billing_address = billing_address WHERE id = $1")
+            .bind(Uuid::new_v4())
+            .execute(&pool)
+            .await
+            .expect("well-formed absent id is a no-op")
+            .rows_affected();
+    assert_eq!(affected, 0);
+    let legacy_garbage_matches: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM invoices WHERE id::text = $1")
+            .bind("garbage")
+            .fetch_one(&pool)
+            .await
+            .expect("the old text comparison never errored on garbage");
+    assert_eq!(legacy_garbage_matches, 0);
+}

@@ -150,6 +150,7 @@ def _free_port() -> int:
 
 
 def run_self_test(cfg: Config, ledger) -> int:
+    from .perf_selftest import perf_selfcheck
     from .registry import REGISTRY
     from .runner import finalize, run_probes
 
@@ -159,6 +160,9 @@ def run_self_test(cfg: Config, ledger) -> int:
     gate_ok, gate_lines = mutation_partition_gate_selfcheck()
     for line in gate_lines:
         print(f"[dogfood-v2] mutation-gate self-check: {line}", flush=True)
+    perf_ok, perf_lines = perf_selfcheck()
+    for line in perf_lines:
+        print(f"[dogfood-v2] perf self-check: {line}", flush=True)
 
     web_port = _free_port()
     tracking_port = _free_port()
@@ -218,12 +222,14 @@ def run_self_test(cfg: Config, ledger) -> int:
         f"self-test: {len(result.observations)} checks, {len(dynamic_failures)} dynamic failures, "
         f"{len(static_failures)} repo-static notes"
     )
-    if dynamic_failures or not rule_ok or not gate_ok:
+    if dynamic_failures or not rule_ok or not gate_ok or not perf_ok:
         print("SELF-TEST FAILED — the harness disagrees with its own honest fixture:")
         if not rule_ok:
             print("  - ledger self-check failed (fail-if-unprobed rule or allowlist justification)")
         if not gate_ok:
             print("  - mutation-gate self-check failed (evidence-strict partition coverage)")
+        if not perf_ok:
+            print("  - performance-invariant self-check failed (see the FAIL lines above)")
         for obs in dynamic_failures[:60]:
             print(f"  - {obs.probe_id} :: {obs.title} :: {obs.observed[:200]}")
         return 1

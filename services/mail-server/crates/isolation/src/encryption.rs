@@ -491,6 +491,39 @@ impl EncryptionService {
         Ok(())
     }
 
+    /// Rotate every organization's active key whose rotation deadline has
+    /// passed.
+    ///
+    /// One set-based scan finds all due organizations (the old cron arm
+    /// iterated known orgs — in practice it did nothing), then each due
+    /// tenant's key is rotated. [`reencrypt_data`] already writes refreshed
+    /// field values in batches of 250, so a rotation does not issue one
+    /// UPDATE per record.
+    ///
+    /// A rotation failure is returned to the caller (the cron logs it) so the
+    /// remaining due keys are retried on the next tick rather than silently
+    /// skipped.
+    pub async fn rotate_expiring_keys(&self) -> anyhow::Result<Vec<String>> {
+        let due: Vec<(String,)> = sqlx::query_as(
+            "SELECT organization_id
+               FROM iso_encryption_keys
+              WHERE status = 'active'
+                AND expires_at IS NOT NULL
+                AND expires_at <= NOW()
+              GROUP BY organization_id
+              ORDER BY organization_id",
+        )
+        .fetch_all(&self.db)
+        .await?;
+
+        let mut rotated = Vec::with_capacity(due.len());
+        for (organization_id,) in due {
+            self.rotate_key(&organization_id).await?;
+            rotated.push(organization_id);
+        }
+        Ok(rotated)
+    }
+
     async fn get_or_create_active_key(
         &self,
         organization_id: &str,
@@ -1032,5 +1065,104 @@ mod tests {
                 session_timeout_minutes: 30,
             },
         )
+    }
+
+    /// Rotation sweep: ONE set-based scan must find every tenant whose key is
+    /// past its deadline and rotate exactly those. An untouched tenant's key
+    /// keeps its version and id.
+    ///
+    /// The old cron arm only logged "Key rotation check completed" — it never
+    /// scanned or rotated anything, so this test fails on that code (nothing
+    /// rotated).
+    #[tokio::test]
+    async fn rotate_expiring_keys_rotates_only_due_tenants() {
+        let pool = match migrator::test_support::fresh_canonical_pool(
+            "isolation_rotation_scan",
+            "iso_rotation_scan",
+        )
+        .await
+        {
+            Ok(Some(pool)) => pool,
+            Ok(None) => return,
+            Err(error) => panic!("{}", error.panic_message()),
+        };
+        let svc = EncryptionService::new(
+            pool.clone(),
+            SecurityConfig {
+                encryption_key: Zeroizing::new("test-master-key-change-in-prod!!".to_string()),
+                data_key_rotation_days: 90,
+                audit_retention_days: 365,
+                session_timeout_minutes: 30,
+            },
+        );
+
+        // iso_encryption_keys.organization_id references iso_organizations.
+        for org in ["org-due", "org-future"] {
+            sqlx::query(
+                "INSERT INTO iso_organizations (id, name, slug, billing_email, owner_id)
+                 VALUES ($1, $1, $1, 'ops@example.com', 'owner-1')",
+            )
+            .bind(org)
+            .execute(&pool)
+            .await
+            .expect("seed organization");
+        }
+
+        let due_key = svc
+            .get_or_create_active_key("org-due")
+            .await
+            .expect("due key");
+        let future_key = svc
+            .get_or_create_active_key("org-future")
+            .await
+            .expect("future key");
+        sqlx::query(
+            "UPDATE iso_encryption_keys SET expires_at = NOW() - INTERVAL '1 hour' WHERE id = $1",
+        )
+        .bind(&due_key.id)
+        .execute(&pool)
+        .await
+        .expect("expire due key");
+
+        let rotated = svc.rotate_expiring_keys().await.expect("rotation sweep");
+        assert_eq!(rotated, vec!["org-due".to_string()]);
+
+        // Due tenant: the old key is retired and a new active version exists.
+        let retired: String =
+            sqlx::query_scalar("SELECT status FROM iso_encryption_keys WHERE id = $1")
+                .bind(&due_key.id)
+                .fetch_one(&pool)
+                .await
+                .expect("old key row");
+        assert_eq!(retired, "retired");
+        let (active_id, active_version): (String, i32) = sqlx::query_as(
+            "SELECT id, version FROM iso_encryption_keys
+             WHERE organization_id = 'org-due' AND status = 'active'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("new active key");
+        assert_ne!(active_id, due_key.id);
+        assert_eq!(active_version, due_key.version + 1);
+
+        // Not-due tenant: completely untouched.
+        let (future_status, future_version, future_id): (String, i32, String) =
+            sqlx::query_as("SELECT status, version, id FROM iso_encryption_keys WHERE id = $1")
+                .bind(&future_key.id)
+                .fetch_one(&pool)
+                .await
+                .expect("future key row");
+        assert_eq!(future_status, "active");
+        assert_eq!(future_version, future_key.version);
+        assert_eq!(future_id, future_key.id);
+
+        // The sweep is idempotent: nothing is due on the next tick.
+        assert!(svc
+            .rotate_expiring_keys()
+            .await
+            .expect("second sweep")
+            .is_empty());
+
+        pool.close().await;
     }
 }

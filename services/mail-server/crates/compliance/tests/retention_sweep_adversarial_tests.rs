@@ -770,3 +770,246 @@ async fn dsr_outbox_replays_collapse_on_the_tenant_request_identity() {
         .await
         .expect("the identity must not collide across tenants");
 }
+
+// ── P3: keyset batch deletes + indexed considered-count ─────────────────────
+
+/// One row of the DELETE probe log: `boundary` marks the end of one DELETE
+/// statement (AFTER STATEMENT triggers fire after the row triggers, so the
+/// boundary row always lands after the ids of its own pass).
+#[derive(sqlx::FromRow)]
+struct DeleteLogRow {
+    id: Option<String>,
+    boundary: bool,
+}
+
+/// A pass = the ids between two boundary markers.
+struct DeletePass {
+    ids: Vec<String>,
+}
+
+async fn install_delete_pass_probe(pool: &PgPool, table: &str) {
+    sqlx::query(&format!(
+        "CREATE TABLE sweep_delete_log_{table} (
+             seq bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+             id text,
+             boundary boolean NOT NULL DEFAULT false)"
+    ))
+    .execute(pool)
+    .await
+    .expect("probe log table");
+    sqlx::query(&format!(
+        r#"
+        CREATE OR REPLACE FUNCTION sweep_row_logger_{table}() RETURNS trigger AS $$
+        BEGIN
+            INSERT INTO sweep_delete_log_{table} (id) VALUES (OLD.id::text);
+            RETURN OLD;
+        END $$ LANGUAGE plpgsql
+    "#
+    ))
+    .execute(pool)
+    .await
+    .expect("row logger");
+    sqlx::query(&format!(
+        r#"
+        CREATE OR REPLACE FUNCTION sweep_pass_marker_{table}() RETURNS trigger AS $$
+        BEGIN
+            INSERT INTO sweep_delete_log_{table} (id, boundary) VALUES (NULL, true);
+            RETURN NULL;
+        END $$ LANGUAGE plpgsql
+    "#
+    ))
+    .execute(pool)
+    .await
+    .expect("pass marker");
+    sqlx::query(&format!(
+        "CREATE TRIGGER trg_sweep_rows_{table} AFTER DELETE ON {table} \
+         FOR EACH ROW EXECUTE FUNCTION sweep_row_logger_{table}()"
+    ))
+    .execute(pool)
+    .await
+    .expect("row trigger");
+    sqlx::query(&format!(
+        "CREATE TRIGGER trg_sweep_pass_{table} AFTER DELETE ON {table} \
+         FOR EACH STATEMENT EXECUTE FUNCTION sweep_pass_marker_{table}()"
+    ))
+    .execute(pool)
+    .await
+    .expect("pass trigger");
+}
+
+async fn delete_passes(pool: &PgPool, table: &str) -> Vec<DeletePass> {
+    let log: Vec<DeleteLogRow> = sqlx::query_as(&format!(
+        "SELECT id, boundary FROM sweep_delete_log_{table} ORDER BY seq"
+    ))
+    .fetch_all(pool)
+    .await
+    .expect("probe log");
+    let mut passes: Vec<DeletePass> = Vec::new();
+    let mut current = DeletePass { ids: Vec::new() };
+    for row in log {
+        match (row.boundary, row.id) {
+            (true, _) => passes.push(std::mem::replace(
+                &mut current,
+                DeletePass { ids: Vec::new() },
+            )),
+            (false, Some(id)) => current.ids.push(id),
+            (false, None) => panic!("non-boundary row without an id"),
+        }
+    }
+    passes
+}
+
+/// P3 item 7: the batched delete walked `ctid IN (SELECT ctid … LIMIT n)`,
+/// which re-probes the predicate from the start of the table on every pass and
+/// always returns rows in PHYSICAL order. With 12,000 expired rows (three
+/// batches of `DELETE_BATCH_ROWS` = 5,000) the new keyset walk must:
+///   * delete every intended row and no unintended one,
+///   * take exactly ceil(N/B) passes (no re-probing),
+///   * delete strictly ascending, disjoint id ranges per pass — the property
+///     the ctid loop did NOT have (physical order is uncorrelated with the
+///     random UUID primary key).
+#[tokio::test]
+async fn keyset_delete_batches_are_bounded_and_disjoint() {
+    let Some(pool) = sweep_db("keyset_batches").await else {
+        return;
+    };
+    let tenant = unique_tenant();
+    seed_tenant(&pool, &tenant, false, None).await;
+
+    // 12,000 expired rows: 3 batches of 5,000 (the probe's pass count is only
+    // meaningful with >2 batches, as the audit asked).
+    sqlx::query(
+        "INSERT INTO messages (tenant_id, from_email, to_emails, subject, created_at)
+         SELECT $1, 'sender@example.test', '[\"k@example.test\"]'::jsonb, 'keyset',
+                NOW() - INTERVAL '30 days'
+         FROM generate_series(1, 12000)",
+    )
+    .bind(&tenant)
+    .execute(&pool)
+    .await
+    .expect("seed 12k expired rows");
+    // Rows the sweep must NOT touch.
+    sqlx::query(
+        "INSERT INTO messages (tenant_id, from_email, to_emails, subject, created_at)
+         SELECT $1, 'sender@example.test', '[\"k@example.test\"]'::jsonb, 'fresh', NOW()
+         FROM generate_series(1, 500)",
+    )
+    .bind(&tenant)
+    .execute(&pool)
+    .await
+    .expect("seed fresh rows");
+
+    install_delete_pass_probe(&pool, "messages").await;
+
+    let audit = quiet_audit(&pool).await;
+    let report = RetentionSweeper::new(pool.clone(), 7, 30, 365)
+        .run_sweep(&audit)
+        .await
+        .expect("sweep runs");
+
+    let messages = category(&report, "messages");
+    assert_eq!(messages.status, SweepStatus::Deleted, "{messages:?}");
+    assert_eq!(messages.deleted, 12_000, "{messages:?}");
+
+    // Every intended row gone; every fresh row kept.
+    let expired_left: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM messages WHERE tenant_id = $1 AND created_at < NOW() - INTERVAL '20 days'",
+    )
+    .bind(&tenant)
+    .fetch_one(&pool)
+    .await
+    .expect("expired left");
+    assert_eq!(expired_left, 0, "every intended row is deleted");
+    assert_eq!(
+        tenant_messages_count(&pool, Some(&tenant)).await,
+        500,
+        "only the fresh rows survive (no unintended row deleted)"
+    );
+
+    let passes = delete_passes(&pool, "messages").await;
+    assert_eq!(
+        passes.len(),
+        3,
+        "ceil(12000/5000) passes — one DELETE statement per batch, no re-probing"
+    );
+    let sizes: Vec<usize> = passes.iter().map(|p| p.ids.len()).collect();
+    assert_eq!(sizes, vec![5_000, 5_000, 2_000], "{sizes:?}");
+
+    // The keyset property: strictly ascending, disjoint ranges per pass.
+    let mut previous_max: Option<String> = None;
+    for (i, pass) in passes.iter().enumerate() {
+        let min = pass.ids.iter().min().expect("non-empty pass").clone();
+        let max = pass.ids.iter().max().expect("non-empty pass").clone();
+        if let Some(prev) = &previous_max {
+            assert!(
+                min.as_str() > prev.as_str(),
+                "pass {i} must start AFTER the previous pass's highest id \
+                 (keyset walk, not a physical-order re-probe): {min} <= {prev}"
+            );
+        }
+        previous_max = Some(max);
+    }
+}
+
+/// P3 item 7: the `considered` count still means exactly what the old
+/// `{ts} < $1 OR tenant_id = ANY($2)` predicate meant — same value, but
+/// computed as two disjoint single-column predicates that can each use their
+/// own index instead of one un-indexable OR. The test computes the old
+/// predicate's count with raw SQL and compares.
+#[tokio::test]
+async fn considered_count_is_unchanged_by_the_split_predicate() {
+    let Some(pool) = sweep_db("considered_split").await else {
+        return;
+    };
+    let default_tenant = unique_tenant();
+    let zero_tenant = unique_tenant();
+    seed_tenant(&pool, &default_tenant, false, None).await;
+    seed_tenant(&pool, &zero_tenant, false, None).await;
+    sqlx::query(
+        "INSERT INTO ent_compliance_configs (tenant_id, zero_retention_mode) VALUES ($1, true)",
+    )
+    .bind(&zero_tenant)
+    .execute(&pool)
+    .await
+    .expect("zero-retention overlay");
+
+    // Past the default 30d window (counted via the timestamp arm).
+    seed_event(&pool, Some(&default_tenant), 40).await;
+    seed_event(&pool, Some(&zero_tenant), 40).await;
+    // FRESH rows of the zero-retention tenant: not past the default window but
+    // still considered (counted via the tenant arm only — no double count).
+    seed_event(&pool, Some(&zero_tenant), 0).await;
+    seed_event(&pool, Some(&zero_tenant), 1).await;
+    // A fresh row of a normal tenant: not considered.
+    seed_event(&pool, Some(&default_tenant), 0).await;
+
+    // The old predicate, evaluated by Postgres on the same fixture.
+    let zero_ids = vec![zero_tenant.clone()];
+    let expected: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM events
+         WHERE timestamp < NOW() - INTERVAL '30 days' OR tenant_id = ANY($1)",
+    )
+    .bind(&zero_ids)
+    .fetch_one(&pool)
+    .await
+    .expect("old OR count");
+    assert_eq!(expected, 4, "2 past-cutoff + 2 zero-retention-only");
+
+    let audit = quiet_audit(&pool).await;
+    let report = RetentionSweeper::new(pool.clone(), 7, 30, 365)
+        .run_sweep(&audit)
+        .await
+        .expect("sweep runs");
+
+    let events = category(&report, "events");
+    assert_eq!(events.status, SweepStatus::Deleted, "{events:?}");
+    assert_eq!(
+        events.considered, expected,
+        "the split count must equal the old OR predicate's count"
+    );
+    assert_eq!(events.zero_retention_tenants, 1);
+    // The zero-retention tenant is purged regardless of window; the normal
+    // tenant keeps its fresh row.
+    assert_eq!(tenant_events_count(&pool, Some(&zero_tenant)).await, 0);
+    assert_eq!(tenant_events_count(&pool, Some(&default_tenant)).await, 1);
+}

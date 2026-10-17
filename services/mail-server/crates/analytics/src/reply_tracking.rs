@@ -248,32 +248,31 @@ impl ReplyTrackingService {
 
         let since = Utc::now() - chrono::Duration::days(days);
 
-        let (total_replies,): (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM reply_events WHERE tenant_id = $1 AND timestamp >= $2",
-        )
-        .bind(tenant_id)
-        .bind(since)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(|e| anyhow::anyhow!("reply metrics total_replies query failed: {e}"))?;
-
-        let (auto_replies,): (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM reply_events WHERE tenant_id = $1 AND timestamp >= $2 AND is_auto_reply = true",
-        )
-        .bind(tenant_id)
-        .bind(since)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(|e| anyhow::anyhow!("reply metrics auto_replies query failed: {e}"))?;
-
-        let (total_sent,): (i64,) = sqlx::query_as(
-            "SELECT COUNT(DISTINCT message_id) FROM events WHERE tenant_id = $1 AND event_type = 'sent' AND timestamp >= $2",
-        )
-        .bind(tenant_id)
-        .bind(since)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(|e| anyhow::anyhow!("reply metrics total_sent query failed: {e}"))?;
+        // One round trip, one scan of the tenant's window: the reply counts
+        // and the average depth come from a single FILTER aggregate, and the
+        // sent total is a scalar subquery over the same window. Before this,
+        // a cache miss issued FOUR sequential queries (COUNT, COUNT ... AND
+        // is_auto_reply, COUNT(DISTINCT) on events, AVG) — three of them
+        // scanning the same reply_events slice. The result columns are
+        // identical to the four-query path (COUNT never NULL, AVG over zero
+        // rows NULL).
+        let (total_replies, auto_replies, avg_depth, total_sent): (i64, i64, Option<f64>, i64) =
+            sqlx::query_as(
+                "SELECT \
+                 COUNT(*)::bigint, \
+                 COUNT(*) FILTER (WHERE is_auto_reply)::bigint, \
+                 AVG(thread_depth)::double precision, \
+                 (SELECT COUNT(DISTINCT e.message_id) FROM events e \
+                   WHERE e.tenant_id = $1 AND e.event_type = 'sent' \
+                     AND e.timestamp >= $2) \
+             FROM reply_events \
+             WHERE tenant_id = $1 AND timestamp >= $2",
+            )
+            .bind(tenant_id)
+            .bind(since)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| anyhow::anyhow!("reply metrics aggregate query failed: {e}"))?;
 
         let human_replies = total_replies - auto_replies;
         let reply_rate = if total_sent > 0 {
@@ -281,18 +280,6 @@ impl ReplyTrackingService {
         } else {
             0.0
         };
-
-        let (avg_depth,): (Option<f64>,) = sqlx::query_as(
-            // F67:thread_depth is INTEGER, so AVG() yields NUMERIC — cast
-            // in SQL to keep the existing f64 result binding.
-            "SELECT AVG(thread_depth)::double precision FROM reply_events \
-             WHERE tenant_id = $1 AND timestamp >= $2",
-        )
-        .bind(tenant_id)
-        .bind(since)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(|e| anyhow::anyhow!("reply metrics avg_depth query failed: {e}"))?;
 
         let metrics = ReplyMetrics {
             total_replies,
@@ -751,7 +738,14 @@ mod db_tests {
 
     use super::*;
     use chrono::DateTime;
+    use sqlx::ConnectOptions;
     use std::collections::HashMap;
+    use std::str::FromStr;
+
+    /// Statement counter: the pool is built with `log_statements(Debug)`, so
+    /// every executed statement emits one `sqlx::query` tracing event; the
+    /// shared test subscriber counts those on the calling thread.
+    use crate::test_support::count_queries_on_this_thread;
 
     /// Canonical reply_events shape — migration 159.
     const REPLY_EVENTS_DDL: &str = r#"
@@ -828,7 +822,13 @@ CREATE TABLE IF NOT EXISTS events (
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(5)
             .acquire_timeout(Duration::from_secs(5))
-            .connect(&isolated_url)
+            // Exact statement counts: never issue a pool-level liveness probe.
+            .test_before_acquire(false)
+            .connect_with(
+                sqlx::postgres::PgConnectOptions::from_str(&isolated_url)
+                    .ok()?
+                    .log_statements(tracing::log::LevelFilter::Debug),
+            )
             .await
             .ok()?;
 
@@ -1057,5 +1057,148 @@ CREATE TABLE IF NOT EXISTS events (
         // And B's metrics never count A's rows.
         let metrics_b = svc.get_metrics("tenant_b", 1).await.expect("metrics B");
         assert_eq!(metrics_b.total_replies, 1);
+    }
+
+    /// The cache-miss metrics path is ONE aggregate statement (it issued four
+    /// sequential COUNT/AVG queries before this fix), and its results are
+    /// byte-for-byte the fixture the four-query path computed.
+    #[tokio::test]
+    async fn db_metrics_cache_miss_is_one_query_and_matches_the_fixture() {
+        let Some(pool) = isolated_pool("reply_aggregate").await else {
+            return;
+        };
+        let now = Utc::now();
+        let tenant = "tenant_agg";
+
+        // reply_events: five in-window rows (two auto, depths 1..=5 → avg
+        // 3.0), one outside the 30-day window, and one belonging to a
+        // different tenant.
+        let in_window: [(&str, bool, i32); 5] = [
+            ("agg-1", false, 1),
+            ("agg-2", true, 2),
+            ("agg-3", false, 3),
+            ("agg-4", true, 4),
+            ("agg-5", false, 5),
+        ];
+        for (i, (message_id, is_auto, depth)) in in_window.iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO reply_events \
+                     (event_id, message_id, tenant_id, is_auto_reply, thread_depth, timestamp) \
+                 VALUES ($1, $2, $3, $4, $5, $6)",
+            )
+            .bind(format!("agg-event-{i}"))
+            .bind(format!("<{message_id}@example.com>"))
+            .bind(tenant)
+            .bind(*is_auto)
+            .bind(*depth)
+            .bind(now - chrono::Duration::hours(1))
+            .execute(&pool)
+            .await
+            .expect("seed reply event");
+        }
+        sqlx::query(
+            "INSERT INTO reply_events \
+                 (event_id, message_id, tenant_id, is_auto_reply, thread_depth, timestamp) \
+             VALUES ('agg-old', '<agg-old@example.com>', $1, false, 30, $2)",
+        )
+        .bind(tenant)
+        .bind(now - chrono::Duration::days(40))
+        .execute(&pool)
+        .await
+        .expect("seed out-of-window reply");
+        sqlx::query(
+            "INSERT INTO reply_events \
+                 (event_id, message_id, tenant_id, is_auto_reply, thread_depth, timestamp) \
+             VALUES ('agg-other', '<agg-other@example.com>', 'tenant_agg_other', true, 7, $1)",
+        )
+        .bind(now - chrono::Duration::hours(1))
+        .execute(&pool)
+        .await
+        .expect("seed other-tenant reply");
+
+        // events: 3 distinct in-window `sent` message ids (the duplicate and
+        // the NULL id do not change COUNT(DISTINCT)), plus out-of-window,
+        // other-tenant and non-`sent` rows that must all be ignored.
+        for (idx, message_id) in [
+            Some("sent-1"),
+            Some("sent-2"),
+            Some("sent-3"),
+            Some("sent-1"), // duplicate
+            None,           // NULL never counts
+        ]
+        .iter()
+        .enumerate()
+        {
+            sqlx::query(
+                "INSERT INTO events (id, tenant_id, message_id, event_type, timestamp) \
+                 VALUES ($1, $2, $3, 'sent', $4)",
+            )
+            .bind(format!("agg-sent-{idx}"))
+            .bind(tenant)
+            .bind(*message_id)
+            .bind(now - chrono::Duration::hours(2))
+            .execute(&pool)
+            .await
+            .expect("seed sent event");
+        }
+        for (id, event_type, tenant_id, age_hours) in [
+            ("agg-sent-old", "sent", tenant, 24 * 40),
+            ("agg-sent-other", "sent", "tenant_agg_other", 1),
+            ("agg-delivered", "delivered", tenant, 1),
+        ] {
+            sqlx::query(
+                "INSERT INTO events (id, tenant_id, message_id, event_type, timestamp) \
+                 VALUES ($1, $2, $3, $4, $5)",
+            )
+            .bind(id)
+            .bind(tenant_id)
+            .bind(format!("<{id}@example.com>"))
+            .bind(event_type)
+            .bind(now - chrono::Duration::hours(age_hours))
+            .execute(&pool)
+            .await
+            .expect("seed ignored event");
+        }
+
+        let svc = ReplyTrackingService::new(pool.clone());
+        let counter = count_queries_on_this_thread();
+
+        counter.reset();
+        let m30 = svc.get_metrics(tenant, 30).await.expect("30d metrics");
+        assert_eq!(
+            counter.get(),
+            1,
+            "a cache miss must be ONE aggregate query (the pre-fix path issued four)"
+        );
+        assert_eq!(m30.total_replies, 5);
+        assert_eq!(m30.auto_replies, 2);
+        assert_eq!(m30.human_replies, 3);
+        assert!((m30.avg_thread_depth - 3.0).abs() < f64::EPSILON);
+        assert!(
+            (m30.reply_rate - 1.0).abs() < f64::EPSILON,
+            "reply rate = human replies / distinct sent = 3/3"
+        );
+
+        // Warm cache: zero statements, same values.
+        counter.reset();
+        let cached = svc.get_metrics(tenant, 30).await.expect("cached metrics");
+        assert_eq!(counter.get(), 0, "a warm cache hit must not query");
+        assert_eq!(cached.total_replies, m30.total_replies);
+        assert_eq!(cached.auto_replies, m30.auto_replies);
+        assert_eq!(cached.avg_thread_depth, m30.avg_thread_depth);
+        assert_eq!(cached.reply_rate, m30.reply_rate);
+
+        // Empty-window semantics: zero counts, AVG over zero rows → 0.0.
+        counter.reset();
+        let empty = svc
+            .get_metrics("tenant_agg_empty", 1)
+            .await
+            .expect("empty metrics");
+        assert_eq!(counter.get(), 1);
+        assert_eq!(empty.total_replies, 0);
+        assert_eq!(empty.auto_replies, 0);
+        assert_eq!(empty.human_replies, 0);
+        assert_eq!(empty.avg_thread_depth, 0.0);
+        assert_eq!(empty.reply_rate, 0.0);
     }
 }

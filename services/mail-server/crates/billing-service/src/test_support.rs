@@ -435,3 +435,36 @@ pub(crate) async fn clear_pending_metering_keys(redis: &deadpool_redis::Pool) {
             .expect("delete stale pending key");
     }
 }
+
+/// Test-only, thread-local counter of DB statements / Redis round trips.
+///
+/// The perf wave's fail-before/pass-after tests need to observe HOW MANY
+/// statements a sweep issues, not just its result. A thread-local map gives
+/// each `#[tokio::test]` (current-thread runtime) an isolated counter even
+/// though the whole test binary runs its tests in parallel. Production
+/// builds compile the call sites away (`#[cfg(test)]`), and tests never
+/// depend on wall-clock timing.
+#[cfg(test)]
+pub(crate) mod query_count {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    thread_local! {
+        static COUNTS: RefCell<HashMap<&'static str, usize>> = RefCell::new(HashMap::new());
+    }
+
+    /// Record one statement/round trip under `label`.
+    pub(crate) fn bump(label: &'static str) {
+        COUNTS.with(|counts| *counts.borrow_mut().entry(label).or_insert(0) += 1);
+    }
+
+    /// Zero every counter on this thread.
+    pub(crate) fn reset() {
+        COUNTS.with(|counts| counts.borrow_mut().clear());
+    }
+
+    /// The number of statements/round trips recorded under `label`.
+    pub(crate) fn count(label: &'static str) -> usize {
+        COUNTS.with(|counts| counts.borrow().get(label).copied().unwrap_or(0))
+    }
+}

@@ -428,6 +428,83 @@ fn build_assessment_alerts(
     alerts
 }
 
+/// Tenants assessed per transaction. The assessment deletes the tenant's
+/// unacknowledged high/critical alerts and re-inserts the current breaches;
+/// batching keeps one transaction's row set bounded (500 tenants × at most 2
+/// alerts) instead of holding one transaction open for every tenant on the
+/// platform.
+const RISK_ASSESSMENT_TENANT_CHUNK: usize = 500;
+
+/// Replace every tenant's unacknowledged high/critical alerts with the alert
+/// set the current metrics produce: ONE `DELETE ... tenant_id = ANY($1)` and
+/// ONE `INSERT ... FROM unnest(...)` per chunk of tenants, instead of a
+/// per-tenant delete + per-alert insert (3-4 statements × tenants).
+///
+/// Per-tenant effects are unchanged: a tenant's old unacknowledged
+/// high/critical alerts are gone before its new ones land (all deletes for a
+/// chunk precede that chunk's insert, but they touch disjoint tenant rows),
+/// and the insert count returned is the number of alert rows written.
+async fn apply_assessment_alerts(
+    db: &sqlx::PgPool,
+    rows: &[RiskAssessmentRow],
+    thresholds: &Thresholds,
+    assessed_at: chrono::DateTime<chrono::Utc>,
+) -> Result<usize, ApiError> {
+    let mut alerts_created = 0usize;
+
+    for chunk in rows.chunks(RISK_ASSESSMENT_TENANT_CHUNK) {
+        let mut tx = db.begin().await?;
+
+        let tenant_ids: Vec<String> = chunk.iter().map(|row| row.tenant_id.clone()).collect();
+        sqlx::query(
+            "DELETE FROM reputation_alerts
+             WHERE tenant_id = ANY($1)
+               AND acknowledged = false
+               AND alert_type IN ('high', 'critical')",
+        )
+        .bind(&tenant_ids)
+        .execute(&mut *tx)
+        .await?;
+
+        let mut alert_ids: Vec<String> = Vec::new();
+        let mut alert_tenants: Vec<String> = Vec::new();
+        let mut alert_types: Vec<String> = Vec::new();
+        let mut alert_values: Vec<f64> = Vec::new();
+        let mut alert_thresholds: Vec<f64> = Vec::new();
+        for row in chunk {
+            let metrics = build_risk_metrics(row.bounces, row.complaints, row.sent);
+            for (alert_type, value, threshold) in build_assessment_alerts(&metrics, thresholds) {
+                alert_ids.push(apexmail_lib::id::generate_id("", 26));
+                alert_tenants.push(row.tenant_id.clone());
+                alert_types.push(alert_type.to_string());
+                alert_values.push(value);
+                alert_thresholds.push(threshold);
+            }
+        }
+
+        if !alert_ids.is_empty() {
+            let inserted = sqlx::query(
+                "INSERT INTO reputation_alerts (id, tenant_id, alert_type, value, threshold, acknowledged, created_at)
+                 SELECT unnest($1::text[]), unnest($2::text[]), unnest($3::text[]),
+                        unnest($4::float8[]), unnest($5::float8[]), false, $6",
+            )
+            .bind(&alert_ids)
+            .bind(&alert_tenants)
+            .bind(&alert_types)
+            .bind(&alert_values)
+            .bind(&alert_thresholds)
+            .bind(assessed_at)
+            .execute(&mut *tx)
+            .await?;
+            alerts_created += inserted.rows_affected() as usize;
+        }
+
+        tx.commit().await?;
+    }
+
+    Ok(alerts_created)
+}
+
 async fn run_risk_assessment(
     db: &sqlx::PgPool,
     thresholds: &Thresholds,
@@ -437,41 +514,7 @@ async fn run_risk_assessment(
     let mut alerts_created = 0usize;
 
     if table_exists(db, "reputation_alerts").await? {
-        let mut tx = db.begin().await?;
-
-        for row in &rows {
-            let metrics = build_risk_metrics(row.bounces, row.complaints, row.sent);
-            let alerts = build_assessment_alerts(&metrics, thresholds);
-
-            sqlx::query(
-                "DELETE FROM reputation_alerts
-                 WHERE tenant_id = $1
-                   AND acknowledged = false
-                   AND alert_type IN ('high', 'critical')",
-            )
-            .bind(&row.tenant_id)
-            .execute(&mut *tx)
-            .await?;
-
-            for (alert_type, value, threshold) in alerts {
-                sqlx::query(
-                    "INSERT INTO reputation_alerts (id, tenant_id, alert_type, value, threshold, acknowledged, created_at)
-                     VALUES ($1, $2, $3, $4, $5, false, $6)",
-                )
-                .bind(apexmail_lib::id::generate_id("", 26))
-                .bind(&row.tenant_id)
-                .bind(alert_type)
-                .bind(value)
-                .bind(threshold)
-                .bind(assessed_at)
-                .execute(&mut *tx)
-                .await?;
-
-                alerts_created += 1;
-            }
-        }
-
-        tx.commit().await?;
+        alerts_created = apply_assessment_alerts(db, &rows, thresholds, assessed_at).await?;
     }
 
     save_last_assessed_at(db, assessed_at).await?;
@@ -1367,6 +1410,266 @@ mod adversarial_tests {
                 .await
                 .expect("the flag row still exists in the private database");
         assert!(acknowledged, "ResolveFlag must acknowledge the row");
+        pool.close().await;
+    }
+
+    // ── Batched assessment (P2: per-tenant statements → per-chunk) ──
+
+    /// Seed the reputation inputs the assessment reads: one `reputation_stats`
+    /// row per tenant for today (the window `load_risk_rows` aggregates) and
+    /// the tenant row itself.
+    async fn seed_assessed_tenant(
+        pool: &sqlx::PgPool,
+        name: &str,
+        bounces: i64,
+        complaints: i64,
+        sent: i64,
+    ) -> String {
+        let tenant = apexmail_lib::id::generate_id("", 26);
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at)
+             VALUES ($1, $2, $3, 'free', 'active', NOW(), NOW())",
+        )
+        .bind(&tenant)
+        .bind(name)
+        .bind(format!("risk-batch-{}", &tenant[tenant.len() - 8..]))
+        .execute(pool)
+        .await
+        .expect("seed tenant");
+        sqlx::query(
+            "INSERT INTO reputation_stats (tenant_id, date, bounces, complaints, sent)
+             VALUES ($1, CURRENT_DATE, $2, $3, $4)",
+        )
+        .bind(&tenant)
+        .bind(bounces)
+        .bind(complaints)
+        .bind(sent)
+        .execute(pool)
+        .await
+        .expect("seed reputation stats");
+        tenant
+    }
+
+    async fn seed_alert(
+        pool: &sqlx::PgPool,
+        tenant: &str,
+        alert_type: &str,
+        acknowledged: bool,
+        value: f64,
+    ) -> String {
+        let id = apexmail_lib::id::generate_id("", 26);
+        sqlx::query(
+            "INSERT INTO reputation_alerts (id, tenant_id, alert_type, value, threshold, acknowledged, created_at)
+             VALUES ($1, $2, $3, $4, 0, $5, NOW())",
+        )
+        .bind(&id)
+        .bind(tenant)
+        .bind(alert_type)
+        .bind(value)
+        .bind(acknowledged)
+        .execute(pool)
+        .await
+        .expect("seed alert");
+        id
+    }
+
+    async fn alert_rows(
+        pool: &sqlx::PgPool,
+        tenant: &str,
+    ) -> Vec<(String, f64, f64, bool, String)> {
+        sqlx::query_as(
+            "SELECT alert_type, value, threshold, acknowledged, id \
+             FROM reputation_alerts WHERE tenant_id = $1 \
+             ORDER BY alert_type, value, id",
+        )
+        .bind(tenant)
+        .fetch_all(pool)
+        .await
+        .expect("load alert rows")
+    }
+
+    /// Equivalence + batching proof for `run_risk_assessment`.
+    ///
+    /// Old behaviour: per tenant one DELETE + one INSERT per breach, all in
+    /// one transaction. New behaviour: per 500-tenant chunk one DELETE with
+    /// `tenant_id = ANY($1)` + one `INSERT ... FROM unnest(...)`.
+    ///
+    /// The test proves BOTH halves:
+    ///  * rows — for every tenant the surviving alert set equals exactly what
+    ///    the old per-tenant delete/re-insert produced (unacknowledged
+    ///    high/critical replaced by the current breaches; acknowledged and
+    ///    non-high/critical rows untouched); and
+    ///  * statements — one DELETE statement and one INSERT statement total for
+    ///    three tenants (the old loop issued four of the former and four of
+    ///    the latter), counted by FOR EACH STATEMENT triggers, not row counts.
+    #[tokio::test]
+    async fn risk_assessment_batches_alerts_and_matches_the_per_tenant_effect() {
+        let Some(pool) = crate::test_db::canonical_pool("risk_batch_assessment").await else {
+            return;
+        };
+        crate::test_db::install_statement_counters(&pool, &["reputation_alerts"]).await;
+
+        // t1: 8% bounce (warn) + 2% complaint (warn)  -> two 'high' alerts
+        // t2: 12% bounce (critical) + 4% complaint (critical) -> two 'critical'
+        // t3: clean -> no alerts
+        let t1 = seed_assessed_tenant(&pool, "risk batch t1", 8, 2, 100).await;
+        let t2 = seed_assessed_tenant(&pool, "risk batch t2", 12, 4, 100).await;
+        let t3 = seed_assessed_tenant(&pool, "risk batch t3", 0, 0, 100).await;
+
+        // Pre-existing state the replacement must respect:
+        //  * unacknowledged 'high' row for t1 -> deleted
+        //  * ACKNOWLEDGED 'critical' row for t1 -> preserved
+        //  * unacknowledged 'low' row for t1 -> preserved (not high/critical)
+        let stale_high = seed_alert(&pool, &t1, "high", false, 99.0).await;
+        let acknowledged_critical = seed_alert(&pool, &t1, "critical", true, 88.0).await;
+        let low_row = seed_alert(&pool, &t1, "low", false, 77.0).await;
+
+        crate::test_db::reset_statement_counts(&pool).await;
+        let (assessed_at, tenants_assessed, alerts_created) =
+            run_risk_assessment(&pool, &Thresholds::default())
+                .await
+                .expect("batched assessment runs");
+
+        assert_eq!(
+            tenants_assessed,
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM tenants")
+                .fetch_one(&pool)
+                .await
+                .expect("tenant count") as usize,
+            "every tenant in the database is assessed"
+        );
+        assert_eq!(alerts_created, 4, "2 breaches for t1, 2 for t2, 0 for t3");
+
+        // Batching proof: one DELETE + one INSERT statement for the chunk.
+        assert_eq!(
+            crate::test_db::statement_count(&pool, "reputation_alerts", "DELETE").await,
+            1,
+            "one DELETE ... ANY($1) per chunk, not one per tenant"
+        );
+        assert_eq!(
+            crate::test_db::statement_count(&pool, "reputation_alerts", "INSERT").await,
+            1,
+            "one INSERT ... FROM unnest(...) per chunk, not one per alert"
+        );
+
+        // Equivalence: rebuild the expected surviving set from the same pure
+        // functions the old loop used, tenant by tenant.
+        for (tenant, bounces, complaints, sent) in
+            [(&t1, 8, 2, 100), (&t2, 12, 4, 100), (&t3, 0, 0, 100)]
+        {
+            let metrics = build_risk_metrics(bounces, complaints, sent);
+            let mut expected: Vec<(String, f64, f64, bool, String)> =
+                build_assessment_alerts(&metrics, &Thresholds::default())
+                    .into_iter()
+                    .map(|(alert_type, value, threshold)| {
+                        (
+                            alert_type.to_string(),
+                            value,
+                            threshold,
+                            false,
+                            String::new(),
+                        )
+                    })
+                    .collect();
+            if *tenant == t1 {
+                expected.push((
+                    "critical".into(),
+                    88.0,
+                    0.0,
+                    true,
+                    acknowledged_critical.clone(),
+                ));
+                expected.push(("low".into(), 77.0, 0.0, false, low_row.clone()));
+            }
+            expected.sort_by(|a, b| {
+                (a.0.as_str(), a.1, a.4.as_str())
+                    .partial_cmp(&(b.0.as_str(), b.1, b.4.as_str()))
+                    .expect("no NaN in test fixtures")
+            });
+
+            let actual = alert_rows(&pool, tenant).await;
+            assert_eq!(actual.len(), expected.len(), "tenant {tenant}: {actual:?}");
+            for (got, want) in actual.iter().zip(expected.iter()) {
+                assert_eq!(got.0, want.0, "alert_type for {tenant}");
+                assert_eq!(got.1, want.1, "value for {tenant}");
+                assert_eq!(got.2, want.2, "threshold for {tenant}");
+                assert_eq!(got.3, want.3, "acknowledged for {tenant}");
+                if !want.4.is_empty() {
+                    assert_eq!(got.4, want.4, "preserved pre-existing row for {tenant}");
+                }
+            }
+            assert!(
+                actual.iter().all(|row| row.4 != stale_high),
+                "the stale unacknowledged high alert must be replaced"
+            );
+        }
+
+        // The fresh alerts carry the assessment timestamp.
+        let created_at: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+            "SELECT MIN(created_at) FROM reputation_alerts WHERE tenant_id = $1 AND acknowledged = false",
+        )
+        .bind(&t2)
+        .fetch_one(&pool)
+        .await
+        .expect("created_at");
+        assert!(
+            (created_at - assessed_at).num_seconds().abs() < 60,
+            "alerts are stamped with the assessment time"
+        );
+
+        pool.close().await;
+    }
+
+    /// The chunking bound is real: with more tenants than
+    /// `RISK_ASSESSMENT_TENANT_CHUNK` the assessment issues one
+    /// delete/insert pair per chunk, so a platform-sized tenant list never
+    /// holds one unbounded transaction. Proven with a lowered chunk constant
+    /// is not possible (it is a const), so this test drives the batch
+    /// function directly with 2× the chunk size of synthetic rows on a
+    /// database whose tenant table is empty of other rows.
+    #[tokio::test]
+    async fn risk_assessment_chunk_size_is_the_documented_bound() {
+        assert_eq!(RISK_ASSESSMENT_TENANT_CHUNK, 500);
+        let Some(pool) = crate::test_db::canonical_pool("risk_chunk_bound").await else {
+            return;
+        };
+        crate::test_db::install_statement_counters(&pool, &["reputation_alerts"]).await;
+
+        // 501 synthetic assessment rows: 500 in the first chunk, 1 leftover.
+        // 10%+ bounce rate with no complaints -> exactly one critical alert.
+        let mut rows = Vec::new();
+        for i in 0..(RISK_ASSESSMENT_TENANT_CHUNK + 1) {
+            rows.push(RiskAssessmentRow {
+                tenant_id: format!("chunk-tenant-{i:04}"),
+                tenant_name: "chunk".into(),
+                domain: String::new(),
+                bounces: (i % 20) as i64 + 10,
+                complaints: 0,
+                sent: 100,
+                critical_alerts: 0,
+                high_alerts: 0,
+            });
+        }
+
+        crate::test_db::reset_statement_counts(&pool).await;
+        let created =
+            apply_assessment_alerts(&pool, &rows, &Thresholds::default(), chrono::Utc::now())
+                .await
+                .expect("chunked assessment applies");
+        assert_eq!(
+            created,
+            rows.len(),
+            "one bounce breach per synthetic tenant"
+        );
+        assert_eq!(
+            crate::test_db::statement_count(&pool, "reputation_alerts", "DELETE").await,
+            2,
+            "501 tenants span exactly two chunks"
+        );
+        assert_eq!(
+            crate::test_db::statement_count(&pool, "reputation_alerts", "INSERT").await,
+            2
+        );
         pool.close().await;
     }
 }

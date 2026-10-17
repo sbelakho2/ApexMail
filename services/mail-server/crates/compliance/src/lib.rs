@@ -8,6 +8,11 @@ pub mod breach_notification;
 pub mod claims_registry;
 pub mod config;
 pub mod consent_enforcement;
+// The consent-expiry sweep (P3: batched + set-based). It previously existed as
+// an orphan file — no `mod` declaration anywhere in the workspace — so it never
+// compiled, never ran, and could not be tested. Declaring it here makes the
+// sweep reachable (the job is started by an owner process, exactly like before).
+pub mod consent_expiry;
 pub mod content_scanner;
 pub mod control_mappings;
 pub mod deployment_products;

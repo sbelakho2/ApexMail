@@ -102,106 +102,117 @@ pub async fn recompute(db: &PgPool) -> Result<(usize, usize, usize), String> {
         serde_json::Value, // payload
     )> = Vec::new();
 
+    // Build every summary row in memory first, then apply them with ONE
+    // prior-band SELECT and ONE multi-row UPSERT. The old form issued
+    // SELECT + UPDATE (or INSERT) per domain/IP — a 2–3×N round-trip
+    // pattern even though it shared one transaction.
+    let mut writes: Vec<SummaryWrite> = Vec::with_capacity(domain_rows.len() + ip_rows.len());
     for (domain, latest_band, spf, dkim, dmarc, spam) in &domain_rows {
         let (score, factors) = score_google(latest_band.as_deref(), *spf, *dkim, *dmarc, *spam);
-        let band = ReputationBand::from_score(score);
-        let (new_event, from_band_str) =
-            upsert_summary_in_tx(&mut tx, "domain", domain, "google", score, band, &factors)
-                .await?;
-        if new_event {
-            events += 1;
-            if let Some(from) = from_band_str {
-                let severity = match band {
-                    ReputationBand::Red => "critical",
-                    ReputationBand::Amber => "warn",
-                    ReputationBand::Green => "info",
-                };
-                let event_type = if matches!(band, ReputationBand::Red) {
-                    "red_listed"
-                } else {
-                    "band_drop"
-                };
-                let payload = serde_json::json!({
-                    "score": score,
-                    "factors": factors,
-                });
-                event_rows.push((
-                    "domain".into(),
-                    domain.clone(),
-                    "google".into(),
-                    severity.into(),
-                    event_type.into(),
-                    Some(from),
-                    band.as_str().into(),
-                    payload,
-                ));
-            }
-        }
+        writes.push(SummaryWrite {
+            scope: "domain",
+            identity: domain.clone(),
+            provider: "google",
+            score,
+            band: ReputationBand::from_score(score),
+            factors,
+        });
     }
-
     for (ip, filter, complaint, traps) in &ip_rows {
         let (score, factors) = score_snds(filter.as_deref(), *complaint, *traps);
-        let band = ReputationBand::from_score(score);
-        let (new_event, from_band_str) =
-            upsert_summary_in_tx(&mut tx, "ip", ip, "microsoft", score, band, &factors).await?;
-        if new_event {
-            events += 1;
-            if let Some(from) = from_band_str {
-                let severity = match band {
-                    ReputationBand::Red => "critical",
-                    ReputationBand::Amber => "warn",
-                    ReputationBand::Green => "info",
-                };
-                let event_type = if matches!(band, ReputationBand::Red) {
-                    "red_listed"
-                } else {
-                    "band_drop"
-                };
-                let payload = serde_json::json!({
-                    "score": score,
-                    "factors": factors,
-                });
-                event_rows.push((
-                    "ip".into(),
-                    ip.clone(),
-                    "microsoft".into(),
-                    severity.into(),
-                    event_type.into(),
-                    Some(from),
-                    band.as_str().into(),
-                    payload,
-                ));
-            }
-        }
+        writes.push(SummaryWrite {
+            scope: "ip",
+            identity: ip.clone(),
+            provider: "microsoft",
+            score,
+            band: ReputationBand::from_score(score),
+            factors,
+        });
     }
+
+    let prior_bands = load_prior_bands(&mut tx, &writes).await?;
+    for write in &writes {
+        let key = (
+            write.scope.to_string(),
+            write.identity.clone(),
+            write.provider.to_string(),
+        );
+        let Some(previous) = prior_bands.get(&key) else {
+            continue;
+        };
+        if *previous == write.band {
+            continue;
+        }
+        events += 1;
+        let severity = match write.band {
+            ReputationBand::Red => "critical",
+            ReputationBand::Amber => "warn",
+            ReputationBand::Green => "info",
+        };
+        let event_type = if matches!(write.band, ReputationBand::Red) {
+            "red_listed"
+        } else {
+            "band_drop"
+        };
+        let payload = serde_json::json!({
+            "score": write.score,
+            "factors": write.factors,
+        });
+        event_rows.push((
+            write.scope.into(),
+            write.identity.clone(),
+            write.provider.into(),
+            severity.into(),
+            event_type.into(),
+            Some(previous.as_str().into()),
+            write.band.as_str().into(),
+            payload,
+        ));
+    }
+
+    upsert_summaries(&mut tx, &writes).await?;
 
     // Batch-INSERT all band-change events in a single statement.
     if !event_rows.is_empty() {
-        // The tuple parentheses are load-bearing: `VALUES ` without `(`
-        // produced `VALUES $1, $2, …`, which PostgreSQL rejects with
-        // "syntax error at or near \"$1\"" — aborting the whole recompute
-        // transaction (including its summary writes) on ANY band change.
+        // Every row MUST be wrapped in its own tuple parentheses. The
+        // previous builder emitted `VALUES ($1, …, $9, $10, …` for multiple
+        // events — PostgreSQL rejects that with "INSERT has more expressions
+        // than target columns", aborting the whole recompute transaction on
+        // any run with two or more band changes.
         let mut query_builder = sqlx::QueryBuilder::new(
             "INSERT INTO postmaster_reputation_events
                (tenant_id, scope, identity, provider, severity, event_type,
                 from_band, to_band, payload)
-             VALUES (",
+             VALUES ",
         );
-        let mut sep = query_builder.separated(", ");
-        for (scope, identity, provider, severity, event_type, from_band, to_band, payload) in
-            &event_rows
+        for (
+            index,
+            (scope, identity, provider, severity, event_type, from_band, to_band, payload),
+        ) in event_rows.iter().enumerate()
         {
-            sep.push_bind(None::<String>); // tenant_id (NULL for global events)
-            sep.push_bind(scope);
-            sep.push_bind(identity);
-            sep.push_bind(provider);
-            sep.push_bind(severity);
-            sep.push_bind(event_type);
-            sep.push_bind(from_band);
-            sep.push_bind(to_band);
-            sep.push_bind(payload);
+            if index > 0 {
+                query_builder.push(", ");
+            }
+            query_builder.push("(");
+            query_builder.push_bind(None::<String>); // tenant_id (NULL for global events)
+            query_builder.push(", ");
+            query_builder.push_bind(scope);
+            query_builder.push(", ");
+            query_builder.push_bind(identity);
+            query_builder.push(", ");
+            query_builder.push_bind(provider);
+            query_builder.push(", ");
+            query_builder.push_bind(severity);
+            query_builder.push(", ");
+            query_builder.push_bind(event_type);
+            query_builder.push(", ");
+            query_builder.push_bind(from_band);
+            query_builder.push(", ");
+            query_builder.push_bind(to_band);
+            query_builder.push(", ");
+            query_builder.push_bind(payload);
+            query_builder.push(")");
         }
-        query_builder.push(")");
         query_builder
             .build()
             .execute(&mut *tx)
@@ -222,102 +233,119 @@ pub async fn recompute(db: &PgPool) -> Result<(usize, usize, usize), String> {
     Ok((domain_rows.len(), ip_rows.len(), events))
 }
 
-/// UPSERT a summary row within an existing transaction.
-///
-/// Returns `(band_changed, previous_band_string)` where `previous_band_string`
-/// is `Some(old_band)` if the band changed, or `None` if this is a new row
-/// or the band stayed the same.  The caller is responsible for batched event
-/// INSERTs (DB-5).
-async fn upsert_summary_in_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    scope: &str,
-    identity: &str,
-    provider: &str,
+/// One computed summary row awaiting persistence.
+struct SummaryWrite {
+    scope: &'static str,
+    identity: String,
+    provider: &'static str,
     score: i32,
     band: ReputationBand,
-    factors: &[String],
-) -> Result<(bool, Option<String>), String> {
-    // Migration 061 replaced the old UNIQUE (scope, identity, provider) with
-    // UNIQUE (scope, identity, provider, computed_at) to retain history, so
-    // the previous `ON CONFLICT (scope, identity, provider)` matched NO
-    // constraint and every recompute failed with "there is no unique or
-    // exclusion constraint matching the ON CONFLICT specification" — the
-    // whole reputation summary/alert pipeline was dead. Migration 227
-    // restored the 3-column uniqueness (failing loudly on legacy duplicates),
-    // so there is now at most one row per key and this SELECT + UPDATE-or-
-    // INSERT is exact; the unique index is also the backstop that turns a
-    // concurrent double-insert into a retryable error instead of a silently
-    // duplicated summary. The prior band is read in the same transaction so
-    // band-change events stay exactly-once.
-    let prior: Option<(String,)> = sqlx::query_as(
-        "SELECT band FROM postmaster_reputation_summary
-         WHERE scope = $1 AND identity = $2 AND provider = $3
-         ORDER BY computed_at DESC, id DESC
-         LIMIT 1",
-    )
-    .bind(scope)
-    .bind(identity)
-    .bind(provider)
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(|e| format!("DB error: {e}"))?;
-    let prior_band = prior.as_ref().and_then(|(b,)| ReputationBand::parse(b));
+    factors: Vec<String>,
+}
 
-    let factors_json = serde_json::to_value(factors).map_err(|e| format!("JSON: {e}"))?;
-    let updated = sqlx::query(
-        "UPDATE postmaster_reputation_summary SET
-           reputation_score = $4,
-           band = $5,
-           factors = $6,
-           suggested_throttle_pct = $7,
-           window_days = $8,
-           computed_at = NOW()
-         WHERE id = (
-           SELECT id FROM postmaster_reputation_summary
-           WHERE scope = $1 AND identity = $2 AND provider = $3
-           ORDER BY computed_at DESC, id DESC
-           LIMIT 1
-         )",
+/// Read the CURRENT band for every summary key in ONE query.
+///
+/// Migration 227 restored the 3-column uniqueness the `ON CONFLICT` target
+/// below depends on (one current summary per scope/identity/provider); the
+/// `DISTINCT ON` is defensive for databases that still carry the older
+/// per-computation history rows.
+async fn load_prior_bands(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    writes: &[SummaryWrite],
+) -> Result<std::collections::HashMap<(String, String, String), ReputationBand>, String> {
+    if writes.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let keys = serde_json::Value::Array(
+        writes
+            .iter()
+            .map(|write| {
+                serde_json::json!({
+                    "scope": write.scope,
+                    "identity": write.identity,
+                    "provider": write.provider,
+                })
+            })
+            .collect(),
+    );
+    let rows: Vec<(String, String, String, String)> = sqlx::query_as(
+        "SELECT DISTINCT ON (s.scope, s.identity, s.provider)
+                s.scope, s.identity, s.provider, s.band
+           FROM postmaster_reputation_summary s
+           JOIN jsonb_to_recordset($1::jsonb) AS k(scope text, identity text, provider text)
+             ON s.scope = k.scope AND s.identity = k.identity AND s.provider = k.provider
+          ORDER BY s.scope, s.identity, s.provider, s.computed_at DESC, s.id DESC",
     )
-    .bind(scope)
-    .bind(identity)
-    .bind(provider)
-    .bind(score)
-    .bind(band.as_str())
-    .bind(&factors_json)
-    .bind(band.suggested_throttle_pct())
-    .bind(LOOKBACK_DAYS as i32)
+    .bind(keys)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|e| format!("DB error (prior bands): {e}"))?;
+
+    Ok(rows
+        .into_iter()
+        .filter_map(|(scope, identity, provider, band)| {
+            ReputationBand::parse(&band).map(|band| ((scope, identity, provider), band))
+        })
+        .collect())
+}
+
+/// UPSERT every summary row with ONE multi-row statement.
+///
+/// Returns `(band_changed, previous_band_string)` semantics from the old
+/// per-row helper are handled by the caller from [`load_prior_bands`].
+async fn upsert_summaries(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    writes: &[SummaryWrite],
+) -> Result<(), String> {
+    if writes.is_empty() {
+        return Ok(());
+    }
+    let payload = serde_json::Value::Array(
+        writes
+            .iter()
+            .map(|write| {
+                serde_json::json!({
+                    "scope": write.scope,
+                    "identity": write.identity,
+                    "provider": write.provider,
+                    "reputation_score": write.score,
+                    "band": write.band.as_str(),
+                    "factors": write.factors,
+                    "suggested_throttle_pct": write.band.suggested_throttle_pct(),
+                    "window_days": LOOKBACK_DAYS as i32,
+                })
+            })
+            .collect(),
+    );
+    sqlx::query(
+        "INSERT INTO postmaster_reputation_summary
+           (scope, identity, provider, reputation_score, band, factors,
+            suggested_throttle_pct, window_days, computed_at)
+         SELECT scope, identity, provider, reputation_score, band, factors,
+                suggested_throttle_pct, window_days, NOW()
+           FROM jsonb_to_recordset($1::jsonb) AS r(
+                scope text,
+                identity text,
+                provider text,
+                reputation_score integer,
+                band text,
+                factors jsonb,
+                suggested_throttle_pct integer,
+                window_days integer
+           )
+         ON CONFLICT (scope, identity, provider) DO UPDATE SET
+           reputation_score = EXCLUDED.reputation_score,
+           band = EXCLUDED.band,
+           factors = EXCLUDED.factors,
+           suggested_throttle_pct = EXCLUDED.suggested_throttle_pct,
+           window_days = EXCLUDED.window_days,
+           computed_at = NOW()",
+    )
+    .bind(payload)
     .execute(&mut **tx)
     .await
-    .map_err(|e| format!("DB error: {e}"))?;
-
-    if updated.rows_affected() == 0 {
-        sqlx::query(
-            "INSERT INTO postmaster_reputation_summary
-               (scope, identity, provider, reputation_score, band, factors,
-                suggested_throttle_pct, window_days, computed_at)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8, NOW())",
-        )
-        .bind(scope)
-        .bind(identity)
-        .bind(provider)
-        .bind(score)
-        .bind(band.as_str())
-        .bind(&factors_json)
-        .bind(band.suggested_throttle_pct())
-        .bind(LOOKBACK_DAYS as i32)
-        .execute(&mut **tx)
-        .await
-        .map_err(|e| format!("DB error: {e}"))?;
-    }
-
-    let band_changed = prior_band.map(|b| b != band).unwrap_or(false);
-    let prev_str = if band_changed {
-        prior_band.map(|b| b.as_str().to_string())
-    } else {
-        None
-    };
-    Ok((band_changed, prev_str))
+    .map_err(|e| format!("DB error (summary upsert): {e}"))?;
+    Ok(())
 }
 
 /// Score 0..=100 from Google Postmaster signals.  Algorithm (transparent so
@@ -499,6 +527,120 @@ mod adversarial_db_tests {
         .fetch_all(pool)
         .await
         .expect("events")
+    }
+
+    /// The recompute must apply ALL summary rows with ONE upsert statement
+    /// and emit all band-change events with ONE insert statement.
+    ///
+    /// The old implementation ran SELECT + UPDATE (or INSERT) per domain/IP,
+    /// so this test (statement counters, pre-seeded summaries force the
+    /// UPDATE path) fails with 20 UPDATE statements on that code and passes
+    /// with one set-based `ON CONFLICT` upsert.
+    #[tokio::test]
+    async fn recompute_batches_summary_upserts_and_events() {
+        let Some(pool) = pool("postmaster_summary_batch").await else {
+            return;
+        };
+
+        for index in 0..10 {
+            insert_google(&pool, &format!("batch-{index}.example"), 0, "BAD").await;
+        }
+        for last_octet in 1..=10 {
+            insert_snds(&pool, &format!("198.51.100.{last_octet}"), 0, "RED", 0).await;
+        }
+
+        // Pre-seed every key with a GREEN summary so the run must update
+        // existing rows (and every band change must emit an event).
+        for index in 0..10 {
+            sqlx::query(
+                "INSERT INTO postmaster_reputation_summary
+                   (scope, identity, provider, reputation_score, band, factors,
+                    suggested_throttle_pct, window_days)
+                 VALUES ('domain', $1, 'google', 90, 'green', '[]'::jsonb, 0, 7)",
+            )
+            .bind(format!("batch-{index}.example"))
+            .execute(&pool)
+            .await
+            .expect("seed domain summary");
+            sqlx::query(
+                "INSERT INTO postmaster_reputation_summary
+                   (scope, identity, provider, reputation_score, band, factors,
+                    suggested_throttle_pct, window_days)
+                 VALUES ('ip', $1, 'microsoft', 90, 'green', '[]'::jsonb, 0, 7)",
+            )
+            .bind(format!("198.51.100.{last_octet}", last_octet = index + 1))
+            .execute(&pool)
+            .await
+            .expect("seed ip summary");
+        }
+
+        crate::postmaster::test_support::install_statement_counters(
+            &pool,
+            &[
+                "postmaster_reputation_summary",
+                "postmaster_reputation_events",
+            ],
+        )
+        .await;
+        crate::postmaster::test_support::reset_statement_counts(&pool).await;
+
+        let (domains, ips, events) = recompute(&pool).await.expect("recompute");
+        assert_eq!((domains, ips), (10, 10));
+        assert_eq!(events, 20, "one event per band change");
+
+        // An INSERT ... ON CONFLICT DO UPDATE fires both the INSERT and the
+        // UPDATE statement trigger once, so each count is 1 for ONE upsert
+        // statement. The old per-row UPDATE path produced 20 UPDATE
+        // statements.
+        let updates = crate::postmaster::test_support::statement_count(
+            &pool,
+            "postmaster_reputation_summary",
+            "UPDATE",
+        )
+        .await;
+        let inserts = crate::postmaster::test_support::statement_count(
+            &pool,
+            "postmaster_reputation_summary",
+            "INSERT",
+        )
+        .await;
+        assert_eq!(
+            updates, 1,
+            "all 20 summary rows must go through ONE upsert statement, got {updates} UPDATE triggers"
+        );
+        assert!(
+            inserts <= 1,
+            "the same single upsert must not fan out into per-row INSERTs, got {inserts}"
+        );
+        assert_eq!(
+            crate::postmaster::test_support::statement_count(
+                &pool,
+                "postmaster_reputation_events",
+                "INSERT"
+            )
+            .await,
+            1,
+            "all band-change events are one INSERT statement"
+        );
+
+        // Equivalence: every key now reports the recomputed RED band.
+        for index in 0..10 {
+            let (_, band, _) = summary(&pool, &format!("batch-{index}.example")).await;
+            assert_eq!(band, "red");
+        }
+        for last_octet in 1..=10 {
+            let (_, band, _) = summary(&pool, &format!("198.51.100.{last_octet}")).await;
+            assert_eq!(band, "red");
+        }
+
+        let event_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM postmaster_reputation_events")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(event_count, 20);
+
+        pool.close().await;
     }
 
     /// Migration 227 regression: the summary table must carry a UNIQUE index

@@ -744,24 +744,31 @@ struct SesAttribution {
     recipient: String,
 }
 
-/// F74: the provider-message → stored delivery record resolution. The
-/// tenant/message/recipient authority comes EXCLUSIVELY from the stored
-/// `email_queue` row that accepted the SES message id — never from the
-/// echoed X-ApexMail-* headers. The callback recipient must match the
-/// row's stored envelope (ownership verification).
-const SES_ATTRIBUTION_SQL: &str = r#"
-    SELECT q.id::text,
-           COALESCE(q.message_id::text, q.id::text),
-           q.tenant_id,
-           q."to"
-    FROM email_queue q
-    WHERE q.smtp_message_id = $1
-      AND q.tenant_id IS NOT NULL
-      AND (
-            LOWER(q."to") = LOWER($2)
-         OR LOWER($2) = ANY (SELECT LOWER(a) FROM unnest(COALESCE(q.to_addresses, ARRAY[q."to"])) AS a)
-      )
-    LIMIT 1
+/// F74: the provider-message → stored delivery record resolution, BATCHED
+/// over every callback recipient of one event. The tenant/message/recipient
+/// authority comes EXCLUSIVELY from the stored `email_queue` row that accepted
+/// the SES message id — never from the echoed X-ApexMail-* headers. A callback
+/// recipient matches only against the row's stored envelope (ownership
+/// verification): its `"to"` value or its `to_addresses` array.
+const SES_ATTRIBUTION_BATCH_SQL: &str = r#"
+    WITH candidates AS (
+        SELECT LOWER(addr) AS matched_recipient,
+               q.id::text AS queue_row_id,
+               COALESCE(q.message_id::text, q.id::text) AS message_id,
+               q.tenant_id AS tenant_id,
+               q."to" AS stored_recipient
+        FROM email_queue q
+        CROSS JOIN LATERAL unnest(
+            COALESCE(q.to_addresses, ARRAY[q."to"]) || ARRAY[q."to"]
+        ) AS a(addr)
+        WHERE q.smtp_message_id = $1
+          AND q.tenant_id IS NOT NULL
+    )
+    SELECT DISTINCT ON (matched_recipient)
+           matched_recipient, queue_row_id, message_id, tenant_id, stored_recipient
+    FROM candidates
+    WHERE matched_recipient = ANY($2::text[])
+    ORDER BY matched_recipient, queue_row_id
 "#;
 
 /// Resolve the authoritative tenant/message/recipient for one provider
@@ -774,19 +781,106 @@ async fn resolve_ses_attribution(
     ses_message_id: &str,
     callback_recipient: &str,
 ) -> Result<Option<SesAttribution>, sqlx::Error> {
-    let row: Option<(String, String, String, String)> = sqlx::query_as(SES_ATTRIBUTION_SQL)
-        .bind(ses_message_id)
-        .bind(callback_recipient)
-        .fetch_optional(db)
-        .await?;
-    Ok(row.map(
-        |(queue_row_id, message_id, tenant_id, recipient)| SesAttribution {
-            queue_row_id,
-            message_id,
-            tenant_id,
-            recipient,
-        },
-    ))
+    let callback_recipient = callback_recipient.to_string();
+    let mut resolved = resolve_ses_attributions(
+        db,
+        ses_message_id,
+        std::slice::from_ref(&callback_recipient),
+    )
+    .await?;
+    Ok(resolved.remove(&callback_recipient.to_lowercase()))
+}
+
+/// F74 batched: resolve EVERY callback recipient of one provider event in ONE
+/// query, keyed by the lowercased callback address.
+///
+/// An SES event can carry hundreds of recipients (a campaign fan-out), and the
+/// per-recipient form ran one attribution SELECT per recipient — one round
+/// trip each, inside the SNS delivery window. Semantics are those of
+/// [`resolve_ses_attribution`] applied per recipient:
+///
+///   * a row matches a callback address when the address equals the stored
+///     envelope recipient (`q."to"`) or appears in `q.to_addresses`
+///     (`COALESCE(q.to_addresses, ARRAY[q."to"])` extended with `q."to"`, the
+///     exact envelope the single-recipient query tested);
+///   * the returned recipient is the STORED `q."to"` (never the callback
+///     value), so aliases cannot rewrite attribution;
+///   * `tenant_id IS NOT NULL` rows only;
+///   * one attribution per callback address (`DISTINCT ON`, deterministic
+///     `ORDER BY ... q.id`) where the old statement's `LIMIT 1` picked
+///     arbitrarily among duplicates.
+async fn resolve_ses_attributions(
+    db: &sqlx::PgPool,
+    ses_message_id: &str,
+    callback_recipients: &[String],
+) -> Result<std::collections::HashMap<String, SesAttribution>, sqlx::Error> {
+    let mut resolved = std::collections::HashMap::new();
+    if callback_recipients.is_empty() {
+        return Ok(resolved);
+    }
+    let lowered: Vec<String> = callback_recipients
+        .iter()
+        .map(|recipient| recipient.to_lowercase())
+        .collect();
+
+    let rows: Vec<(String, String, String, String, String)> =
+        sqlx::query_as(SES_ATTRIBUTION_BATCH_SQL)
+            .bind(ses_message_id)
+            .bind(&lowered)
+            .fetch_all(db)
+            .await?;
+
+    for (matched_recipient, queue_row_id, message_id, tenant_id, stored_recipient) in rows {
+        resolved.insert(
+            matched_recipient,
+            SesAttribution {
+                queue_row_id,
+                message_id,
+                tenant_id,
+                recipient: stored_recipient,
+            },
+        );
+    }
+    Ok(resolved)
+}
+
+/// The FIRST callback recipient of the event with no stored attribution, in
+/// event order — the recipient the old per-recipient loop failed on.
+///
+/// The handler does NOT call this before writing: the pre-batching contract
+/// was partial progress (recipients before the unattributed one had already
+/// committed), so the handlers write every ATTRIBUTABLE recipient first and
+/// only then surface this recipient's retryable 5xx (F-audit P2 restoration).
+fn first_unattributed_recipient<'a>(
+    callback_recipients: &'a [String],
+    resolved: &std::collections::HashMap<String, SesAttribution>,
+) -> Option<&'a str> {
+    callback_recipients
+        .iter()
+        .find(|recipient| !resolved.contains_key(&recipient.to_lowercase()))
+        .map(String::as_str)
+}
+
+/// The recipients of one provider event, in event order, with unattributable
+/// duplicates collapsed: two callback addresses that resolve to the SAME
+/// stored queue row produce identical effects (the analytics event id, the
+/// suppression row and the idempotent queue update are all keyed by the
+/// stored recipient), so processing them once is observably the same as the
+/// old per-recipient loop running them twice.
+fn attributed_recipients<'a>(
+    callback_recipients: &[String],
+    resolved: &'a std::collections::HashMap<String, SesAttribution>,
+) -> Vec<&'a SesAttribution> {
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut ordered = Vec::new();
+    for recipient in callback_recipients {
+        if let Some(attribution) = resolved.get(&recipient.to_lowercase()) {
+            if seen.insert(attribution.queue_row_id.as_str()) {
+                ordered.push(attribution);
+            }
+        }
+    }
+    ordered
 }
 
 /// Deterministic analytics-event id for one (SNS notification, event,
@@ -932,7 +1026,200 @@ async fn insert_analytics_event(
     .map(|result| result.rows_affected() == 1)
 }
 
-// ─── Bounce processing ────────────────────────────────────────
+// ─── Batched per-event writes ──────────────────────────────────
+
+/// One recipient's analytics event in a batched insert.
+struct BatchedAnalyticsEvent {
+    event_id: String,
+    tenant_id: String,
+    message_id: String,
+    event_type: &'static str,
+    recipient: String,
+    at: DateTime<Utc>,
+}
+
+/// ONE `INSERT ... FROM unnest(...)` for every analytics event of a provider
+/// event. Same rows as N calls to [`insert_analytics_event`] with
+/// `link_url`/`user_agent`/`ip_address` null (which is what the SES
+/// bounce/complaint/delivery callers pass): deterministic ids, `ON CONFLICT
+/// (id) DO NOTHING`, actual event timestamps.
+async fn insert_analytics_events_batch(
+    executor: impl sqlx::PgExecutor<'_>,
+    events: &[BatchedAnalyticsEvent],
+) -> Result<(), sqlx::Error> {
+    if events.is_empty() {
+        return Ok(());
+    }
+    let ids: Vec<String> = events.iter().map(|event| event.event_id.clone()).collect();
+    let tenants: Vec<String> = events.iter().map(|event| event.tenant_id.clone()).collect();
+    let messages: Vec<String> = events
+        .iter()
+        .map(|event| event.message_id.clone())
+        .collect();
+    let types: Vec<String> = events
+        .iter()
+        .map(|event| event.event_type.to_string())
+        .collect();
+    let recipients: Vec<String> = events.iter().map(|event| event.recipient.clone()).collect();
+    let timestamps: Vec<DateTime<Utc>> = events.iter().map(|event| event.at).collect();
+
+    sqlx::query(
+        "INSERT INTO events (id, tenant_id, message_id, event_type, recipient, timestamp)
+         SELECT e.id, e.tenant_id, e.message_id, e.event_type, e.recipient, e.at
+         FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::timestamptz[])
+              AS e(id, tenant_id, message_id, event_type, recipient, at)
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .bind(&ids)
+    .bind(&tenants)
+    .bind(&messages)
+    .bind(&types)
+    .bind(&recipients)
+    .bind(&timestamps)
+    .execute(executor)
+    .await
+    .map(|_| ())
+}
+
+/// ONE `INSERT ... FROM unnest(...)` for every auto-suppression of a provider
+/// event (`ON CONFLICT (tenant_id, email) DO NOTHING`, exactly the
+/// idempotency the per-recipient statements had).
+///
+/// `entries` are `(tenant_id, email, reason)` triples.
+async fn insert_suppressions_batch(
+    executor: impl sqlx::PgExecutor<'_>,
+    entries: &[(String, String, String)],
+) -> Result<(), sqlx::Error> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+    let ids: Vec<String> = entries
+        .iter()
+        .map(|_| apexmail_lib::id::generate_id("sup", 22))
+        .collect();
+    let tenants: Vec<String> = entries
+        .iter()
+        .map(|(tenant, _, _)| tenant.clone())
+        .collect();
+    let emails: Vec<String> = entries.iter().map(|(_, email, _)| email.clone()).collect();
+    let reasons: Vec<String> = entries
+        .iter()
+        .map(|(_, _, reason)| reason.clone())
+        .collect();
+
+    sqlx::query(
+        "INSERT INTO suppressions (id, tenant_id, email, reason, source, created_at)
+         SELECT s.id, s.tenant_id, s.email, s.reason, 'ses', NOW()
+         FROM unnest($1::text[], $2::text[], $3::text[], $4::text[])
+              AS s(id, tenant_id, email, reason)
+         ON CONFLICT (tenant_id, email) DO NOTHING",
+    )
+    .bind(&ids)
+    .bind(&tenants)
+    .bind(&emails)
+    .bind(&reasons)
+    .execute(executor)
+    .await
+    .map(|_| ())
+}
+
+/// ONE `UPDATE ... FROM (SELECT unnest(...))` for every hard-bounced
+/// recipient of a provider event: the recipient leaves the queue row's
+/// `pending_recipients` set, the row terminalizes when nothing remains owed,
+/// the bounce reason lands, exactly the per-row effect of the old
+/// per-recipient statement. A statement per row is what the old loop issued;
+/// each row appears at most once here (attributions are deduplicated by queue
+/// row before this call).
+///
+/// `entries` are `(queue_row_id, stored_recipient, reason)` triples.
+async fn mark_recipients_bounced_batch(
+    executor: impl sqlx::PgExecutor<'_>,
+    entries: &[(String, String, String)],
+) -> Result<(), sqlx::Error> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+    let ids: Vec<String> = entries.iter().map(|(id, _, _)| id.clone()).collect();
+    let recipients: Vec<String> = entries
+        .iter()
+        .map(|(_, recipient, _)| recipient.clone())
+        .collect();
+    let reasons: Vec<String> = entries
+        .iter()
+        .map(|(_, _, reason)| reason.clone())
+        .collect();
+
+    sqlx::query(
+        r#"
+        UPDATE email_queue AS q
+        SET metadata = jsonb_set(
+                CASE WHEN jsonb_typeof(q.metadata) = 'object' THEN q.metadata ELSE '{}'::jsonb END,
+                '{pending_recipients}',
+                COALESCE(
+                    q.metadata->'pending_recipients',
+                    CASE WHEN jsonb_array_length(to_jsonb(q.to_addresses)) > 0
+                         THEN to_jsonb(q.to_addresses) END,
+                    CASE WHEN q."to" IS NOT NULL AND q."to" <> ''
+                         THEN to_jsonb(ARRAY[q."to"]) END,
+                    '[]'::jsonb
+                ) - v.recipient
+            ),
+            status = CASE WHEN COALESCE(
+                    q.metadata->'pending_recipients',
+                    CASE WHEN jsonb_array_length(to_jsonb(q.to_addresses)) > 0
+                         THEN to_jsonb(q.to_addresses) END,
+                    CASE WHEN q."to" IS NOT NULL AND q."to" <> ''
+                         THEN to_jsonb(ARRAY[q."to"]) END,
+                    '[]'::jsonb
+                ) - v.recipient = '[]'::jsonb
+                THEN 'bounced' ELSE q.status END,
+            error_message = v.reason,
+            updated_at = NOW()
+        FROM (
+            SELECT unnest($1::uuid[]) AS id,
+                   unnest($2::text[]) AS recipient,
+                   unnest($3::text[]) AS reason
+        ) AS v
+        WHERE q.id = v.id
+        "#,
+    )
+    .bind(&ids)
+    .bind(&recipients)
+    .bind(&reasons)
+    .execute(executor)
+    .await
+    .map(|_| ())
+}
+
+/// ONE `UPDATE ... FROM (SELECT unnest(...))` stamping the FIRST confirmation
+/// time per delivered recipient row (`COALESCE` keeps it idempotent under an
+/// SNS replay). `entries` are `(queue_row_id, delivered_at)` pairs.
+async fn stamp_recipients_delivered_batch(
+    executor: impl sqlx::PgExecutor<'_>,
+    entries: &[(String, DateTime<Utc>)],
+) -> Result<(), sqlx::Error> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+    let ids: Vec<String> = entries.iter().map(|(id, _)| id.clone()).collect();
+    let delivered_at: Vec<DateTime<Utc>> = entries.iter().map(|(_, at)| *at).collect();
+
+    sqlx::query(
+        "UPDATE email_queue AS q
+         SET delivered_at = COALESCE(q.delivered_at, v.delivered_at),
+             updated_at = NOW()
+         FROM (
+             SELECT unnest($1::uuid[]) AS id,
+                    unnest($2::timestamptz[]) AS delivered_at
+         ) AS v
+         WHERE q.id = v.id",
+    )
+    .bind(&ids)
+    .bind(&delivered_at)
+    .execute(executor)
+    .await
+    .map(|_| ())
+}
 
 async fn process_bounce(
     state: &AppState,
@@ -966,41 +1253,41 @@ async fn process_bounce(
     );
 
     if let Some(recipients) = &bounce.bounced_recipients {
-        for recipient in recipients {
-            let Some(email) = recipient.email_address.as_deref() else {
-                continue;
-            };
+        // F74 batched: ONE attribution query for every callback recipient of
+        // the event (the loop used to issue one SELECT per recipient inside
+        // the SNS window).
+        let callback_recipients: Vec<String> = recipients
+            .iter()
+            .filter_map(|recipient| recipient.email_address.clone())
+            .collect();
+        let resolved = resolve_ses_attributions(&state.db, ses_message_id, &callback_recipients)
+            .await
+            .map_err(|e| {
+                metrics::counter!("apexmail_ses_callback_db_errors").increment(1);
+                error!(error = %e, "SES bounce attribution query failed");
+                ApiError::ServiceUnavailable("SES callback storage unavailable".into())
+            })?;
+        // F-audit P2: partition, do NOT bail out. HEAD committed the
+        // attributable recipients preceding the unattributed one; the batched
+        // rewrite must keep that partial-progress contract while still
+        // resolving every recipient in ONE query. The unattributed recipient
+        // is surfaced as the same retryable 5xx AFTER the attributable writes
+        // commit.
+        let unattributed = first_unattributed_recipient(&callback_recipients, &resolved);
+        let attributed = attributed_recipients(&callback_recipients, &resolved);
 
-            // F74: authority comes from the stored provider-message
-            // mapping, with the callback recipient verified against the
-            // row's envelope. Raw headers are diagnostics only.
-            let Some(attribution) = resolve_ses_attribution(&state.db, ses_message_id, email)
-                .await
-                .map_err(|e| {
-                    metrics::counter!("apexmail_ses_callback_db_errors").increment(1);
-                    error!(error = %e, "SES bounce attribution query failed");
-                    ApiError::ServiceUnavailable("SES callback storage unavailable".into())
-                })?
-            else {
-                // Unattributed — observable + retryable, never guessed from
-                // the echoed headers (which may carry another tenant's id).
-                debug!(
-                    diagnostic_header_message_id = ?diagnostic_message_id,
-                    diagnostic_header_tenant_id = ?diagnostic_tenant_id,
-                    "bounce without a stored mapping"
-                );
-                return Err(unattributed_ses_event(Some(ses_message_id), email));
-            };
-
+        if !attributed.is_empty() {
             let reason = if is_permanent {
                 format!("ses_hard_bounce:{bounce_sub_type}")
             } else {
                 format!("ses_soft_bounce:{bounce_sub_type}")
             };
 
-            // State mutations + the shared parent reconciliation run in ONE
-            // transaction, COMMITTED BEFORE the SNS acknowledgement (F75):
-            // a DB failure propagates as 5xx so SNS retries safely.
+            // ONE transaction for the whole event, COMMITTED BEFORE the SNS
+            // acknowledgement (F75): a DB failure propagates as 5xx so SNS
+            // retries safely, and the per-recipient effects are identical to
+            // the per-recipient transactions they replace (each statement is
+            // keyed by the stored recipient/queue row, so replay is a no-op).
             let mut tx = state
                 .db
                 .begin()
@@ -1010,92 +1297,103 @@ async fn process_bounce(
             // Auto-suppress hard bounces (canonical `suppressions` table)
             // using the STORED tenant. Idempotent under SNS replay.
             if is_permanent {
-                let suppression_id = apexmail_lib::id::generate_id("sup", 22);
-                sqlx::query(
-                    "INSERT INTO suppressions (id, tenant_id, email, reason, source, created_at)
-                     VALUES ($1, $2, $3, $4, $5, NOW())
-                     ON CONFLICT (tenant_id, email) DO NOTHING",
-                )
-                .bind(&suppression_id)
-                .bind(&attribution.tenant_id)
-                .bind(&attribution.recipient)
-                .bind(&reason)
-                .bind("ses")
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| ses_db_error("failed to record suppression", e))?;
-                info!(email = %apexmail_lib::pii::redact_email(&attribution.recipient), reason = %reason, "Auto-suppressed hard-bounced address");
-            }
-
-            // F25/F75: the bounce transitions the RECIPIENT delivery record
-            // (mirroring the worker's per-recipient HARD_BOUNCE semantics:
-            // the recipient leaves the pending set, the row terminalizes
-            // only when nothing remains owed), then the SHARED parent
-            // reconciliation derives the aggregate from all recipient rows.
-            if is_permanent {
-                sqlx::query(
-                    r#"
-                    UPDATE email_queue
-                    SET metadata = jsonb_set(
-                            CASE WHEN jsonb_typeof(metadata) = 'object' THEN metadata ELSE '{}'::jsonb END,
-                            '{pending_recipients}',
-                            COALESCE(
-                                metadata->'pending_recipients',
-                                CASE WHEN jsonb_array_length(to_jsonb(to_addresses)) > 0
-                                     THEN to_jsonb(to_addresses) END,
-                                CASE WHEN "to" IS NOT NULL AND "to" <> ''
-                                     THEN to_jsonb(ARRAY["to"]) END,
-                                '[]'::jsonb
-                            ) - $2::text
-                        ),
-                        status = CASE WHEN COALESCE(
-                                metadata->'pending_recipients',
-                                CASE WHEN jsonb_array_length(to_jsonb(to_addresses)) > 0
-                                     THEN to_jsonb(to_addresses) END,
-                                CASE WHEN "to" IS NOT NULL AND "to" <> ''
-                                     THEN to_jsonb(ARRAY["to"]) END,
-                                '[]'::jsonb
-                            ) - $2::text = '[]'::jsonb
-                            THEN 'bounced' ELSE status END,
-                        error_message = $3,
-                        updated_at = NOW()
-                    WHERE id = $1::uuid
-                    "#,
-                )
-                .bind(&attribution.queue_row_id)
-                .bind(&attribution.recipient)
-                .bind(&reason)
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| ses_db_error("failed to record bounce", e))?;
-
-                sqlx::query(apexmail_lib::email_headers::RECONCILE_MESSAGE_PROGRESS_SQL)
-                    .bind(&attribution.message_id)
-                    .bind(&attribution.tenant_id)
-                    .execute(&mut *tx)
+                let suppressions: Vec<(String, String, String)> = attributed
+                    .iter()
+                    .map(|attribution| {
+                        (
+                            attribution.tenant_id.clone(),
+                            attribution.recipient.clone(),
+                            reason.clone(),
+                        )
+                    })
+                    .collect();
+                insert_suppressions_batch(&mut *tx, &suppressions)
                     .await
-                    .map_err(|e| ses_db_error("reconcile message progress", e))?;
+                    .map_err(|e| ses_db_error("failed to record suppression", e))?;
+                for attribution in &attributed {
+                    info!(email = %apexmail_lib::pii::redact_email(&attribution.recipient), reason = %reason, "Auto-suppressed hard-bounced address");
+                }
+
+                // F25/F75: the bounce transitions each RECIPIENT delivery
+                // record (mirroring the worker's per-recipient HARD_BOUNCE
+                // semantics), then the SHARED parent reconciliation derives
+                // the aggregate from all recipient rows.
+                let bounced_rows: Vec<(String, String, String)> = attributed
+                    .iter()
+                    .map(|attribution| {
+                        (
+                            attribution.queue_row_id.clone(),
+                            attribution.recipient.clone(),
+                            reason.clone(),
+                        )
+                    })
+                    .collect();
+                mark_recipients_bounced_batch(&mut *tx, &bounced_rows)
+                    .await
+                    .map_err(|e| ses_db_error("failed to record bounce", e))?;
+
+                // The shared parent reconciliation is only available as a
+                // parameterized statement per message; run it once per
+                // DISTINCT message of the event (the per-recipient loop ran
+                // it once per recipient with the same arguments).
+                let mut reconciled: Vec<(&str, &str)> = Vec::new();
+                for attribution in &attributed {
+                    let key = (
+                        attribution.message_id.as_str(),
+                        attribution.tenant_id.as_str(),
+                    );
+                    if reconciled.contains(&key) {
+                        continue;
+                    }
+                    reconciled.push(key);
+                    sqlx::query(apexmail_lib::email_headers::RECONCILE_MESSAGE_PROGRESS_SQL)
+                        .bind(&attribution.message_id)
+                        .bind(&attribution.tenant_id)
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(|e| ses_db_error("reconcile message progress", e))?;
+                }
             }
 
-            // Deterministic-id analytics event (replay-safe).
-            insert_analytics_event(
-                &mut *tx,
-                &ses_event_id(sns_message_id, "bounced", &attribution.recipient),
-                &attribution.tenant_id,
-                &attribution.message_id,
-                "bounced",
-                Some(&attribution.recipient),
-                None,
-                None,
-                None,
-                bounced_at,
-            )
-            .await
-            .map_err(|e| ses_db_error("failed to record bounce event", e))?;
+            // Deterministic-id analytics events (replay-safe), one statement.
+            let analytics: Vec<BatchedAnalyticsEvent> = attributed
+                .iter()
+                .map(|attribution| BatchedAnalyticsEvent {
+                    event_id: ses_event_id(sns_message_id, "bounced", &attribution.recipient),
+                    tenant_id: attribution.tenant_id.clone(),
+                    message_id: attribution.message_id.clone(),
+                    event_type: "bounced",
+                    recipient: attribution.recipient.clone(),
+                    at: bounced_at,
+                })
+                .collect();
+            insert_analytics_events_batch(&mut *tx, &analytics)
+                .await
+                .map_err(|e| ses_db_error("failed to record bounce event", e))?;
 
             tx.commit().await.map_err(|e| ses_db_error("storage", e))?;
+        }
 
-            // Queue webhook event for the tenant (post-commit; best-effort).
+        // Queue webhook events for the tenant (post-commit; best-effort).
+        // The subscription lookup is hoisted and the queue rows are inserted
+        // in one statement; the per-recipient payloads and their deterministic
+        // dedup ids are unchanged.
+        let mut grouped: std::collections::HashMap<&str, Vec<serde_json::Value>> =
+            std::collections::HashMap::new();
+        let mut payload_seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for recipient in recipients {
+            let Some(email) = recipient.email_address.as_deref() else {
+                continue;
+            };
+            let Some(attribution) = resolved.get(&email.to_lowercase()) else {
+                continue;
+            };
+            // Same collapse as the write phase: aliases onto one stored queue
+            // row produce one deterministic queue id (the old loop inserted
+            // the first and no-op'd the rest).
+            if !payload_seen.insert(attribution.queue_row_id.as_str()) {
+                continue;
+            }
             let payload = serde_json::json!({
                 "event": "message.bounced",
                 "type": bounce.bounce_type,
@@ -1106,7 +1404,27 @@ async fn process_bounce(
                 "diagnosticCode": recipient.diagnostic_code,
                 "timestamp": bounce.timestamp,
             });
-            queue_webhook_event(state, &attribution.tenant_id, "message.bounced", &payload).await;
+            grouped
+                .entry(attribution.tenant_id.as_str())
+                .or_default()
+                .push(payload);
+        }
+        for (tenant_id, payloads) in grouped {
+            queue_webhook_events_batch(state, tenant_id, "message.bounced", &payloads).await;
+        }
+
+        // Partial-progress contract: every attributable recipient's effects
+        // (and webhook) are committed; the first unattributed recipient still
+        // makes the notification a retryable 5xx, exactly like HEAD.
+        if let Some(recipient) = unattributed {
+            // Unattributed — observable + retryable, never guessed from the
+            // echoed headers (which may carry another tenant's id).
+            debug!(
+                diagnostic_header_message_id = ?diagnostic_message_id,
+                diagnostic_header_tenant_id = ?diagnostic_tenant_id,
+                "bounce without a stored mapping for at least one recipient"
+            );
+            return Err(unattributed_ses_event(Some(ses_message_id), recipient));
         }
     }
 
@@ -1144,18 +1462,23 @@ async fn process_complaint(
     );
 
     if let Some(recipients) = &complaint.complained_recipients {
-        for recipient in recipients {
-            let Some(email) = recipient.email_address.as_deref() else {
-                continue;
-            };
+        // Observations are batchable effects: ONE attribution query for the
+        // whole event, ONE transaction, ONE statement per table, then ONE
+        // queued-webhook pass. The stored per-recipient rows are unchanged.
+        let callback_recipients: Vec<String> = recipients
+            .iter()
+            .filter_map(|recipient| recipient.email_address.clone())
+            .collect();
+        let resolved = resolve_ses_attributions(&state.db, ses_message_id, &callback_recipients)
+            .await
+            .map_err(|e| ses_db_error("storage", e))?;
+        // F-audit P2: partial progress — write every attributable recipient
+        // and only then surface the first unattributed one as a retryable 5xx
+        // (HEAD committed the recipients preceding the missing one).
+        let unattributed = first_unattributed_recipient(&callback_recipients, &resolved);
+        let attributed = attributed_recipients(&callback_recipients, &resolved);
 
-            let Some(attribution) = resolve_ses_attribution(&state.db, ses_message_id, email)
-                .await
-                .map_err(|e| ses_db_error("storage", e))?
-            else {
-                return Err(unattributed_ses_event(Some(ses_message_id), email));
-            };
-
+        if !attributed.is_empty() {
             let reason = format!("ses_complaint:{feedback_type}");
 
             // Always suppress — complaints are serious. STORED tenant id,
@@ -1165,43 +1488,51 @@ async fn process_complaint(
                 .begin()
                 .await
                 .map_err(|e| ses_db_error("storage", e))?;
-            let suppression_id = apexmail_lib::id::generate_id("sup", 22);
-            sqlx::query(
-                "INSERT INTO suppressions (id, tenant_id, email, reason, source, created_at)
-                 VALUES ($1, $2, $3, $4, $5, NOW())
-                 ON CONFLICT (tenant_id, email) DO NOTHING",
-            )
-            .bind(&suppression_id)
-            .bind(&attribution.tenant_id)
-            .bind(&attribution.recipient)
-            .bind(&reason)
-            .bind("ses")
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| ses_db_error("failed to record suppression", e))?;
-            info!(email = %apexmail_lib::pii::redact_email(&attribution.recipient), reason = %reason, "Auto-suppressed complained address");
+            let suppressions: Vec<(String, String, String)> = attributed
+                .iter()
+                .map(|attribution| {
+                    (
+                        attribution.tenant_id.clone(),
+                        attribution.recipient.clone(),
+                        reason.clone(),
+                    )
+                })
+                .collect();
+            insert_suppressions_batch(&mut *tx, &suppressions)
+                .await
+                .map_err(|e| ses_db_error("failed to record suppression", e))?;
+            for attribution in &attributed {
+                info!(email = %apexmail_lib::pii::redact_email(&attribution.recipient), reason = %reason, "Auto-suppressed complained address");
+            }
 
-            // Analytics event — one 'complained' row per complained
-            // message (delivery_analytics' complaint rate reads these),
-            // deterministic id for replay dedup.
-            insert_analytics_event(
-                &mut *tx,
-                &ses_event_id(sns_message_id, "complained", &attribution.recipient),
-                &attribution.tenant_id,
-                &attribution.message_id,
-                "complained",
-                Some(&attribution.recipient),
-                None,
-                None,
-                None,
-                complained_at,
-            )
-            .await
-            .map_err(|e| ses_db_error("failed to record complaint event", e))?;
+            // Analytics events — one 'complained' row per complained
+            // recipient (delivery_analytics' complaint rate reads these),
+            // deterministic ids for replay dedup, one statement.
+            let analytics: Vec<BatchedAnalyticsEvent> = attributed
+                .iter()
+                .map(|attribution| BatchedAnalyticsEvent {
+                    event_id: ses_event_id(sns_message_id, "complained", &attribution.recipient),
+                    tenant_id: attribution.tenant_id.clone(),
+                    message_id: attribution.message_id.clone(),
+                    event_type: "complained",
+                    recipient: attribution.recipient.clone(),
+                    at: complained_at,
+                })
+                .collect();
+            insert_analytics_events_batch(&mut *tx, &analytics)
+                .await
+                .map_err(|e| ses_db_error("failed to record complaint event", e))?;
 
             tx.commit().await.map_err(|e| ses_db_error("storage", e))?;
+        }
 
-            // Queue webhook
+        // Queue webhooks (post-commit, best-effort). The payload keeps its
+        // singular `recipient` key, so every payload of ONE complaint event
+        // shares one deterministic queue id — exactly why the per-recipient
+        // loop inserted one row and no-op'd the rest.
+        let mut grouped: std::collections::HashMap<&str, Vec<serde_json::Value>> =
+            std::collections::HashMap::new();
+        for attribution in &attributed {
             let payload = serde_json::json!({
                 "event": "message.complained",
                 "feedbackType": feedback_type,
@@ -1210,13 +1541,19 @@ async fn process_complaint(
                 "sesMessageId": ses_message_id,
                 "timestamp": complaint.timestamp,
             });
-            queue_webhook_event(
-                state,
-                &attribution.tenant_id,
-                "message.complained",
-                &payload,
-            )
-            .await;
+            grouped
+                .entry(attribution.tenant_id.as_str())
+                .or_default()
+                .push(payload);
+        }
+        for (tenant_id, payloads) in grouped {
+            queue_webhook_events_batch(state, tenant_id, "message.complained", &payloads).await;
+        }
+
+        // Partial-progress contract (see process_bounce): attributable writes
+        // and webhooks committed; the unattributed recipient still retries.
+        if let Some(recipient) = unattributed {
+            return Err(unattributed_ses_event(Some(ses_message_id), recipient));
         }
     }
 
@@ -1256,59 +1593,83 @@ async fn process_delivery(
     // reconciliation: messages.delivered_at is stamped only when EVERY
     // recipient copy is confirmed delivered.
     let recipients = delivery.recipients.iter().flatten();
-    for email in recipients {
-        let Some(attribution) = resolve_ses_attribution(&state.db, ses_message_id, email)
-            .await
-            .map_err(|e| ses_db_error("storage", e))?
-        else {
-            return Err(unattributed_ses_event(Some(ses_message_id), email));
-        };
+    let callback_recipients: Vec<String> = recipients.cloned().collect();
 
+    // F75 batched: ONE attribution query for all delivered recipients, ONE
+    // transaction, ONE statement per table (plus the shared per-message
+    // reconciliation), then ONE queued-webhook pass. Per-recipient effects
+    // (delivered_at stamp, analytics event, parent reconciliation) are
+    // unchanged; the stamp stays idempotent under replay because the batched
+    // UPDATE keeps the same COALESCE.
+    let resolved = resolve_ses_attributions(&state.db, ses_message_id, &callback_recipients)
+        .await
+        .map_err(|e| ses_db_error("storage", e))?;
+    // F-audit P2: partial progress — stamp/record every attributable recipient
+    // first, then return the retryable 5xx HEAD returned after committing the
+    // recipients that preceded the unattributed one.
+    let unattributed = first_unattributed_recipient(&callback_recipients, &resolved);
+    let attributed = attributed_recipients(&callback_recipients, &resolved);
+
+    if !attributed.is_empty() {
         let mut tx = state
             .db
             .begin()
             .await
             .map_err(|e| ses_db_error("storage", e))?;
-        sqlx::query(
-            // Idempotent: COALESCE keeps the FIRST confirmation time under
-            // an SNS replay.
-            "UPDATE email_queue
-             SET delivered_at = COALESCE(delivered_at, $2), updated_at = NOW()
-             WHERE id = $1::uuid",
-        )
-        .bind(&attribution.queue_row_id)
-        .bind(delivered_at)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| ses_db_error("failed to record delivery", e))?;
 
-        // F25/F75: the shared parent reconciliation after every confirmed
-        // recipient transition.
-        sqlx::query(apexmail_lib::email_headers::RECONCILE_MESSAGE_PROGRESS_SQL)
-            .bind(&attribution.message_id)
-            .bind(&attribution.tenant_id)
-            .execute(&mut *tx)
+        let stamps: Vec<(String, DateTime<Utc>)> = attributed
+            .iter()
+            .map(|attribution| (attribution.queue_row_id.clone(), delivered_at))
+            .collect();
+        stamp_recipients_delivered_batch(&mut *tx, &stamps)
             .await
-            .map_err(|e| ses_db_error("reconcile message progress", e))?;
+            .map_err(|e| ses_db_error("failed to record delivery", e))?;
 
-        insert_analytics_event(
-            &mut *tx,
-            &ses_event_id(sns_message_id, "delivered", &attribution.recipient),
-            &attribution.tenant_id,
-            &attribution.message_id,
-            "delivered",
-            Some(&attribution.recipient),
-            None,
-            None,
-            None,
-            delivered_at,
-        )
-        .await
-        .map_err(|e| ses_db_error("failed to record delivery event", e))?;
+        // F25/F75: the shared parent reconciliation after the confirmed
+        // recipient transitions — once per DISTINCT message (the per-recipient
+        // loop ran the same statement with the same arguments per recipient).
+        let mut reconciled: Vec<(&str, &str)> = Vec::new();
+        for attribution in &attributed {
+            let key = (
+                attribution.message_id.as_str(),
+                attribution.tenant_id.as_str(),
+            );
+            if reconciled.contains(&key) {
+                continue;
+            }
+            reconciled.push(key);
+            sqlx::query(apexmail_lib::email_headers::RECONCILE_MESSAGE_PROGRESS_SQL)
+                .bind(&attribution.message_id)
+                .bind(&attribution.tenant_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| ses_db_error("reconcile message progress", e))?;
+        }
+
+        let analytics: Vec<BatchedAnalyticsEvent> = attributed
+            .iter()
+            .map(|attribution| BatchedAnalyticsEvent {
+                event_id: ses_event_id(sns_message_id, "delivered", &attribution.recipient),
+                tenant_id: attribution.tenant_id.clone(),
+                message_id: attribution.message_id.clone(),
+                event_type: "delivered",
+                recipient: attribution.recipient.clone(),
+                at: delivered_at,
+            })
+            .collect();
+        insert_analytics_events_batch(&mut *tx, &analytics)
+            .await
+            .map_err(|e| ses_db_error("failed to record delivery event", e))?;
 
         tx.commit().await.map_err(|e| ses_db_error("storage", e))?;
+    }
 
-        // Queue webhook (post-commit; best-effort)
+    // Queue webhooks (post-commit; best-effort). Each payload keeps its
+    // one-recipient `recipients` array, so every payload has its own dedup
+    // identity.
+    let mut grouped: std::collections::HashMap<&str, Vec<serde_json::Value>> =
+        std::collections::HashMap::new();
+    for attribution in &attributed {
         let payload = serde_json::json!({
             "event": "message.delivered",
             "recipients": [attribution.recipient],
@@ -1317,7 +1678,20 @@ async fn process_delivery(
             "smtpResponse": delivery.smtp_response,
             "timestamp": delivery.timestamp,
         });
-        queue_webhook_event(state, &attribution.tenant_id, "message.delivered", &payload).await;
+        grouped
+            .entry(attribution.tenant_id.as_str())
+            .or_default()
+            .push(payload);
+    }
+    for (tenant_id, payloads) in grouped {
+        queue_webhook_events_batch(state, tenant_id, "message.delivered", &payloads).await;
+    }
+
+    // Partial-progress contract (see process_bounce): the attributed
+    // deliveries above are durable; the event still 5xxes so SNS retries the
+    // unattributed recipient's mapping.
+    if let Some(recipient) = unattributed {
+        return Err(unattributed_ses_event(Some(ses_message_id), recipient));
     }
 
     Ok(())
@@ -1539,55 +1913,42 @@ async fn queue_webhook_event(
     event_type: &str,
     payload: &serde_json::Value,
 ) {
-    const NAMESPACE: uuid::Uuid = uuid::Uuid::from_bytes([
-        0x77, 0x31, 0x9c, 0x02, 0x64, 0x1d, 0x4e, 0x07, 0x9a, 0x55, 0x2e, 0x8b, 0x41, 0x90, 0x6d,
-        0x14,
-    ]);
+    queue_webhook_events_batch(state, tenant_id, event_type, std::slice::from_ref(payload)).await;
+}
 
-    let subscribed: Vec<(String,)> = match sqlx::query_as(
-        "SELECT id FROM webhooks \
-         WHERE tenant_id = $1 AND enabled = true \
-           AND (events ? $2 OR events ? '*')",
-    )
-    .bind(tenant_id)
-    .bind(event_type)
-    .fetch_all(&state.db)
-    .await
-    {
-        Ok(rows) => rows,
-        Err(error) => {
-            warn!(error = %error, event_type, "SES webhook subscription lookup failed");
-            return;
-        }
-    };
-    if subscribed.is_empty() {
-        return;
-    }
+/// Namespace for the deterministic webhook queue id (v5 UUID of the event
+/// identity + webhook id).
+const SES_WEBHOOK_QUEUE_NAMESPACE: uuid::Uuid = uuid::Uuid::from_bytes([
+    0x77, 0x31, 0x9c, 0x02, 0x64, 0x1d, 0x4e, 0x07, 0x9a, 0x55, 0x2e, 0x8b, 0x41, 0x90, 0x6d, 0x14,
+]);
 
+/// The deterministic queue id for one (event identity, webhook) pair. Second
+/// granularity in the dedup key: an SNS redelivery of the SAME feedback shares
+/// the provider timestamp; genuinely distinct events a second apart stay
+/// distinct. The key MUST be the provider timestamp (payload `timestamp`, set
+/// by every caller from the SES record) — the previous local `Utc::now()`
+/// made an SNS replay retried across a second boundary insert a SECOND queue
+/// row (caught as the 2026-10-12 full-suite flake "2 queue rows under load":
+/// under fsync latency the test's replay calls straddled a second boundary). A
+/// payload with no provider timestamp cannot be replay-identified, so it keeps
+/// call-unique stamps (over-delivering beats collapsing distinct events) and
+/// says so loudly.
+fn ses_webhook_queue_id(
+    tenant_id: &str,
+    event_type: &str,
+    payload: &serde_json::Value,
+    webhook_id: &str,
+) -> String {
     let message_id = payload
         .get("messageId")
         .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string();
+        .unwrap_or_default();
     let recipient = payload
         .get("recipients")
         .and_then(|v| v.as_array())
         .and_then(|a| a.first())
         .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string();
-    let timestamp = chrono::Utc::now().to_rfc3339();
-    // Second granularity in the dedup key: an SNS redelivery of the SAME
-    // feedback shares the provider timestamp; genuinely distinct events a
-    // second apart stay distinct. The key MUST be the provider timestamp
-    // (payload `timestamp`, set by every caller from the SES record) — the
-    // previous local `Utc::now()` made an SNS replay retried across a
-    // second boundary insert a SECOND queue row (caught as the 2026-10-12
-    // full-suite flake "2 queue rows under load": under fsync latency the
-    // test's replay calls straddled a second boundary). A payload with no
-    // provider timestamp cannot be replay-identified, so it keeps
-    // call-unique stamps (over-delivering beats collapsing distinct
-    // events) and says so loudly.
+        .unwrap_or_default();
     let provider_timestamp = payload
         .get("timestamp")
         .and_then(|v| v.as_str())
@@ -1608,35 +1969,95 @@ async fn queue_webhook_event(
         "{}:{}:{}:{}:{}",
         tenant_id, event_type, message_id, recipient, dedup_stamp
     );
-
-    for (webhook_id,) in subscribed {
-        let queue_id = format!(
-            "whj_{}",
-            uuid::Uuid::new_v5(&NAMESPACE, format!("{identity}:{webhook_id}").as_bytes()).simple()
-        );
-        let envelope = serde_json::json!({
-            "id": format!("evt_{}", uuid::Uuid::new_v4().simple()),
-            "type": event_type,
-            "tenantId": tenant_id,
-            "timestamp": timestamp,
-            "data": payload,
-        });
-        if let Err(error) = sqlx::query(
-            "INSERT INTO webhook_queue \
-             (id, webhook_id, tenant_id, event_type, payload, status, attempt, created_at) \
-             VALUES ($1, $2, $3, $4, $5, 'pending', 1, NOW()) \
-             ON CONFLICT (id) DO NOTHING",
+    format!(
+        "whj_{}",
+        uuid::Uuid::new_v5(
+            &SES_WEBHOOK_QUEUE_NAMESPACE,
+            format!("{identity}:{webhook_id}").as_bytes()
         )
-        .bind(&queue_id)
-        .bind(&webhook_id)
-        .bind(tenant_id)
-        .bind(event_type)
-        .bind(&envelope)
-        .execute(&state.db)
-        .await
-        {
-            warn!(error = %error, event_type, "Failed to queue SES webhook event");
+        .simple()
+    )
+}
+
+/// Batched [`queue_webhook_event`]: ONE subscription lookup and ONE
+/// `INSERT ... FROM unnest(...)` for every payload of the event.
+///
+/// The lookup used to run inside the per-recipient loop (200 subscribers
+/// lookups for a 200-recipient event), and every queued row cost its own
+/// insert round trip. Rows, envelopes and dedup ids are those of the
+/// per-payload statements; `ON CONFLICT (id) DO NOTHING` also collapses
+/// duplicate ids WITHIN one batch, so an event whose recipients all share one
+/// identity (the singular `recipient` key of the bounce/complaint payloads)
+/// still lands exactly one row.
+async fn queue_webhook_events_batch(
+    state: &AppState,
+    tenant_id: &str,
+    event_type: &str,
+    payloads: &[serde_json::Value],
+) {
+    if payloads.is_empty() {
+        return;
+    }
+    let subscribed: Vec<(String,)> = match sqlx::query_as(
+        "SELECT id FROM webhooks \
+         WHERE tenant_id = $1 AND enabled = true \
+           AND (events ? $2 OR events ? '*')",
+    )
+    .bind(tenant_id)
+    .bind(event_type)
+    .fetch_all(&state.db)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            warn!(error = %error, event_type, "SES webhook subscription lookup failed");
+            return;
         }
+    };
+    if subscribed.is_empty() {
+        return;
+    }
+
+    let timestamp = chrono::Utc::now().to_rfc3339();
+    let mut queue_ids: Vec<String> = Vec::with_capacity(subscribed.len() * payloads.len());
+    let mut webhook_ids: Vec<String> = Vec::with_capacity(subscribed.len() * payloads.len());
+    let mut envelopes: Vec<serde_json::Value> =
+        Vec::with_capacity(subscribed.len() * payloads.len());
+    for (webhook_id,) in &subscribed {
+        for payload in payloads {
+            queue_ids.push(ses_webhook_queue_id(
+                tenant_id, event_type, payload, webhook_id,
+            ));
+            webhook_ids.push(webhook_id.clone());
+            envelopes.push(serde_json::json!({
+                "id": format!("evt_{}", uuid::Uuid::new_v4().simple()),
+                "type": event_type,
+                "tenantId": tenant_id,
+                "timestamp": timestamp,
+                "data": payload,
+            }));
+        }
+    }
+
+    let tenants: Vec<String> = queue_ids.iter().map(|_| tenant_id.to_string()).collect();
+    let event_types: Vec<String> = queue_ids.iter().map(|_| event_type.to_string()).collect();
+    if let Err(error) = sqlx::query(
+        "INSERT INTO webhook_queue \
+         (id, webhook_id, tenant_id, event_type, payload, status, attempt, created_at) \
+         SELECT w.id, w.webhook_id, w.tenant_id, w.event_type, w.payload, 'pending', 1, NOW() \
+         FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::jsonb[]) \
+              AS w(id, webhook_id, tenant_id, event_type, payload) \
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .bind(&queue_ids)
+    .bind(&webhook_ids)
+    .bind(&tenants)
+    .bind(&event_types)
+    .bind(&envelopes)
+    .execute(&state.db)
+    .await
+    {
+        warn!(error = %error, event_type, "Failed to queue SES webhook event");
     }
 }
 
@@ -1654,20 +2075,32 @@ mod tests {
     #[test]
     fn attribution_resolves_through_the_stored_mapping_only() {
         // F74: the resolution keys on the stored provider message id
-        // (smtp_message_id) and verifies the callback recipient against
-        // the row's envelope — no X-ApexMail-* header is consulted.
+        // (smtp_message_id) and verifies every callback recipient against the
+        // row's stored envelope (`"to"` plus `to_addresses`) — no
+        // X-ApexMail-* header is consulted. The batched form must keep every
+        // one of those guarantees.
         assert!(
-            SES_ATTRIBUTION_SQL.contains("q.smtp_message_id = $1"),
+            SES_ATTRIBUTION_BATCH_SQL.contains("q.smtp_message_id = $1"),
             "resolution must key on the stored provider message id"
         );
         assert!(
-            SES_ATTRIBUTION_SQL.contains("LOWER(q.\"to\") = LOWER($2)")
-                || SES_ATTRIBUTION_SQL
-                    .contains("LOWER(q.\"to\") = LOWER($2)".replace("\\", "").as_str()),
-            "callback recipient must be verified against the stored envelope"
+            SES_ATTRIBUTION_BATCH_SQL.contains("q.tenant_id IS NOT NULL"),
+            "only rows with a stored tenant are attributable"
         );
         assert!(
-            !SES_ATTRIBUTION_SQL.to_lowercase().contains("apexmail"),
+            SES_ATTRIBUTION_BATCH_SQL.contains("q.to_addresses")
+                && SES_ATTRIBUTION_BATCH_SQL.contains("ARRAY[q.\"to\"]")
+                && SES_ATTRIBUTION_BATCH_SQL.contains("matched_recipient = ANY($2::text[])"),
+            "every callback recipient must match the stored envelope only"
+        );
+        assert!(
+            SES_ATTRIBUTION_BATCH_SQL.contains("q.\"to\" AS stored_recipient"),
+            "the STORED recipient is the authority, never the callback value"
+        );
+        assert!(
+            !SES_ATTRIBUTION_BATCH_SQL
+                .to_lowercase()
+                .contains("apexmail"),
             "raw identity headers must never participate in resolution"
         );
     }
@@ -2952,6 +3385,256 @@ mod adversarial_handler_tests {
         .expect("bounce event")
     }
 
+    /// Seed ONE logical send (one `messages` row + N per-recipient queue rows)
+    /// accepted under one SES message id, exactly the fan-out shape a campaign
+    /// produces.
+    async fn seed_fanout(
+        pool: &Pool,
+        recipients: &[String],
+        tenant: &str,
+        ses_message_id: &str,
+    ) -> uuid::Uuid {
+        let message_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at) \
+             VALUES ($1, 'SES Fanout Co', $2, 'free', 'active', NOW(), NOW())",
+        )
+        .bind(tenant)
+        .bind(format!("slug-{tenant}"))
+        .execute(pool)
+        .await
+        .expect("seed fanout tenant");
+        sqlx::query(
+            "INSERT INTO messages (id, tenant_id, from_email, to_emails, status) \
+             VALUES ($1, $2, 'sender@apexmail.ee', $3::jsonb, 'sent')",
+        )
+        .bind(message_id)
+        .bind(tenant)
+        .bind(json!(recipients).to_string())
+        .execute(pool)
+        .await
+        .expect("seed fanout message");
+
+        let ids: Vec<uuid::Uuid> = recipients.iter().map(|_| uuid::Uuid::new_v4()).collect();
+        sqlx::query(
+            "INSERT INTO email_queue \
+                (id, tenant_id, from_address, to_addresses, \"to\", subject, status, message_id, smtp_message_id, metadata) \
+             SELECT q.id, $1, 'sender@apexmail.ee', ARRAY[q.recipient]::text[], q.recipient, 'subject', 'sent', $2, $3, '{}'::jsonb \
+             FROM unnest($4::uuid[], $5::text[]) AS q(id, recipient)",
+        )
+        .bind(tenant)
+        .bind(message_id)
+        .bind(ses_message_id)
+        .bind(&ids)
+        .bind(recipients)
+        .execute(pool)
+        .await
+        .expect("seed fanout queue rows");
+
+        message_id
+    }
+
+    /// An SES bounce event for many recipients at once.
+    fn fanout_bounce_event(
+        ses_message_id: &str,
+        recipients: &[String],
+        bounce_type: &str,
+    ) -> SesEvent {
+        let bounced: Vec<serde_json::Value> = recipients
+            .iter()
+            .enumerate()
+            .map(|(i, recipient)| {
+                json!({
+                    "emailAddress": recipient,
+                    "status": "5.1.1",
+                    "action": "failed",
+                    "diagnosticCode": format!("550 unknown user #{i}")
+                })
+            })
+            .collect();
+        serde_json::from_value(json!({
+            "eventType": "Bounce",
+            "mail": {
+                "messageId": ses_message_id,
+                "destination": recipients,
+                "headers": []
+            },
+            "bounce": {
+                "bounceType": bounce_type,
+                "bounceSubType": "General",
+                "bouncedRecipients": bounced,
+                "timestamp": Utc::now().to_rfc3339()
+            }
+        }))
+        .expect("fanout bounce event")
+    }
+
+    /// A 200-recipient bounce is processed with a BOUNDED number of
+    /// statements, and its per-recipient effects are exactly the ones the old
+    /// per-recipient loop produced: one suppression per hard-bounced stored
+    /// recipient under the STORED tenant, one deterministic `bounced`
+    /// analytics event per recipient, every queue row terminalized with its
+    /// pending set emptied and the bounce reason recorded, the parent
+    /// reconciled once, and the subscribed webhook queued (one row — the
+    /// bounce payload's identity has no per-recipient component, so the old
+    /// loop inserted one and no-op'd the rest).
+    ///
+    /// Method for the statement bound: `FOR EACH STATEMENT` triggers on the
+    /// four written tables count STATEMENTS (not rows), so a per-recipient
+    /// loop shows ~200 firings per table while the batched path shows one.
+    #[tokio::test]
+    async fn two_hundred_recipients_are_batched_with_bounded_statements_and_identical_effects() {
+        let Some(pool) = crate::test_db::canonical_pool("ses_batch_200").await else {
+            return;
+        };
+        let state = test_state_over(pool.clone()).await;
+        let Some(_redis_probe) = state.redis.get().await.ok() else {
+            eprintln!("skipping: Redis unavailable");
+            return;
+        };
+        let tenant = unique("tsfanout");
+        let ses_message_id = unique("sesfanout");
+        let recipients: Vec<String> = (0..200)
+            .map(|i| {
+                format!(
+                    "fanout-{i:03}-{}@example.com",
+                    &uuid::Uuid::new_v4().simple().to_string()[..6]
+                )
+            })
+            .collect();
+        let message_id = seed_fanout(&pool, &recipients, &tenant, &ses_message_id).await;
+        // Subscribed webhook so the post-commit path really runs.
+        sqlx::query(
+            "INSERT INTO webhooks (id, tenant_id, url, secret, events, enabled) \
+             VALUES ($1, $2, 'https://hooks.example.test/ses', 'whsec_test', \
+                     '\"message.bounced\"'::jsonb, true)",
+        )
+        .bind(format!(
+            "swh{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..20]
+        ))
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("seed subscribed webhook");
+
+        crate::test_db::install_statement_counters(
+            &pool,
+            &["email_queue", "suppressions", "events", "webhook_queue"],
+        )
+        .await;
+        crate::test_db::reset_statement_counts(&pool).await;
+
+        let event = fanout_bounce_event(&ses_message_id, &recipients, "Permanent");
+        process_bounce(&state, &event, &unique("sns-fanout"))
+            .await
+            .expect("200-recipient bounce processed");
+
+        // Statement bound: one DML statement per table for the whole event.
+        assert_eq!(
+            crate::test_db::statement_count(&pool, "suppressions", "INSERT").await,
+            1,
+            "200 suppressions, one INSERT"
+        );
+        assert_eq!(
+            crate::test_db::statement_count(&pool, "events", "INSERT").await,
+            1,
+            "200 analytics events, one INSERT"
+        );
+        assert_eq!(
+            crate::test_db::statement_count(&pool, "email_queue", "UPDATE").await,
+            1,
+            "200 queue rows, one UPDATE"
+        );
+        assert_eq!(
+            crate::test_db::statement_count(&pool, "webhook_queue", "INSERT").await,
+            1,
+            "one queued-webhook statement"
+        );
+
+        // Effects, per recipient (the old loop's documented semantics).
+        let suppressions: Vec<(String, String)> =
+            sqlx::query_as("SELECT email, reason FROM suppressions WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_all(&pool)
+                .await
+                .expect("suppression rows");
+        assert_eq!(suppressions.len(), 200);
+        assert!(suppressions
+            .iter()
+            .all(|(_, reason)| reason == "ses_hard_bounce:General"));
+        let suppressed: std::collections::HashSet<&str> = suppressions
+            .iter()
+            .map(|(email, _)| email.as_str())
+            .collect();
+        assert!(recipients.iter().all(|r| suppressed.contains(r.as_str())));
+
+        let events: Vec<(String, String)> = sqlx::query_as(
+            "SELECT recipient, event_type FROM events WHERE tenant_id = $1 AND event_type = 'bounced'",
+        )
+        .bind(&tenant)
+        .fetch_all(&pool)
+        .await
+        .expect("bounced events");
+        assert_eq!(events.len(), 200, "one analytics event per recipient");
+        assert_eq!(
+            events
+                .iter()
+                .map(|(recipient, _)| recipient.as_str())
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            200
+        );
+
+        let queue_state: Vec<(String, String, Option<String>, serde_json::Value)> = sqlx::query_as(
+            "SELECT \"to\", status, error_message, metadata->'pending_recipients' \
+             FROM email_queue WHERE tenant_id = $1",
+        )
+        .bind(&tenant)
+        .fetch_all(&pool)
+        .await
+        .expect("queue rows");
+        assert_eq!(queue_state.len(), 200);
+        for (to, status, error_message, pending) in &queue_state {
+            assert_eq!(status, "bounced", "queue row for {to} terminalized");
+            assert_eq!(
+                error_message.as_deref(),
+                Some("ses_hard_bounce:General"),
+                "bounce reason recorded for {to}"
+            );
+            assert_eq!(
+                pending,
+                &json!([]),
+                "the pending-recipient set is emptied for {to}"
+            );
+        }
+
+        // The shared parent reconciliation ran (all recipients bounced).
+        // With every recipient copy terminal, the shared reconciliation
+        // derives 'partial' (some copies bounced) — the same aggregate the
+        // per-recipient reconciliations converged to.
+        let parent_status: String = sqlx::query_scalar("SELECT status FROM messages WHERE id = $1")
+            .bind(message_id)
+            .fetch_one(&pool)
+            .await
+            .expect("parent message");
+        assert_eq!(parent_status, "partial");
+
+        // Webhook: exactly one queue row (the dedup identity has no
+        // per-recipient component; the old loop's 200 inserts collapsed the
+        // same way).
+        let queued: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM webhook_queue WHERE tenant_id = $1 AND event_type = 'message.bounced'",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("webhook queue count");
+        assert_eq!(queued, 1);
+
+        pool.close().await;
+    }
+
     #[tokio::test]
     async fn hard_bounce_suppresses_the_stored_tenant_and_never_a_spoofed_header() {
         let Some(pool) = crate::test_db::optional_pg_pool("ses_adv_bounce").await else {
@@ -3235,6 +3918,114 @@ mod adversarial_handler_tests {
         process_bounce(&state, &event, &unique("sns-secondary"))
             .await
             .expect("case-insensitive envelope match");
+
+        cleanup_delivery(&pool, &fixture).await;
+    }
+
+    /// F-audit P2 (partial attribution): HEAD resolved each recipient inside
+    /// its loop and committed per recipient, so a mapped recipient BEFORE an
+    /// unmapped one kept its effects when the handler returned the retryable
+    /// 5xx. The batched rewrite must partition instead of bailing out: the
+    /// mapped recipient's suppression / analytics / queue transition must
+    /// exist even though the response is the same retryable error.
+    ///
+    /// Fail-before: with `require_attributions` before any write, this fixture
+    /// records ZERO suppressions and ZERO analytics rows and the queue row
+    /// stays 'sent'.
+    #[tokio::test]
+    async fn partial_attribution_commits_mapped_effects_then_returns_the_old_error() {
+        let Some(pool) = crate::test_db::optional_pg_pool("ses_partial_attribution").await else {
+            return;
+        };
+        let state = test_state_over(pool.clone()).await;
+        let fixture = seed_delivery(
+            &pool,
+            &format!("{}@example.com", unique("mapped")),
+            &unique("tses"),
+            &unique("sesmsg"),
+        )
+        .await;
+        let unmapped = format!("{}@example.com", unique("unmapped"));
+        let event: SesEvent = serde_json::from_value(json!({
+            "eventType": "Bounce",
+            "mail": {
+                "messageId": fixture.ses_message_id,
+                "destination": [fixture.recipient, unmapped]
+            },
+            "bounce": {
+                "bounceType": "Permanent",
+                "bounceSubType": "General",
+                "bouncedRecipients": [
+                    {
+                        "emailAddress": fixture.recipient,
+                        "status": "5.1.1",
+                        "action": "failed",
+                        "diagnosticCode": "550 unknown user"
+                    },
+                    {
+                        "emailAddress": unmapped,
+                        "status": "5.1.1",
+                        "action": "failed",
+                        "diagnosticCode": "550 unknown user"
+                    }
+                ],
+                "timestamp": Utc::now().to_rfc3339()
+            }
+        }))
+        .expect("mixed bounce event");
+        let sns_id = unique("sns-partial-attribution");
+
+        let error = process_bounce(&state, &event, &sns_id)
+            .await
+            .expect_err("the unmapped recipient must still fail the notification");
+        assert!(
+            matches!(error, ApiError::ServiceUnavailable(_)),
+            "the response must be the SAME retryable 5xx HEAD returned: {error:?}"
+        );
+
+        // The mapped recipient's effects committed BEFORE the error.
+        let suppression: (String, String) =
+            sqlx::query_as("SELECT tenant_id, reason FROM suppressions WHERE email = $1")
+                .bind(&fixture.recipient)
+                .fetch_one(&pool)
+                .await
+                .expect("the mapped recipient's suppression must exist");
+        assert_eq!(suppression.0, fixture.tenant);
+        assert_eq!(suppression.1, "ses_hard_bounce:General");
+
+        let analytics: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE id = $1")
+            .bind(ses_event_id(&sns_id, "bounced", &fixture.recipient))
+            .fetch_one(&pool)
+            .await
+            .expect("mapped analytics event");
+        assert_eq!(analytics, 1, "the mapped recipient's analytics row exists");
+
+        let (status, error_message): (String, Option<String>) =
+            sqlx::query_as("SELECT status, error_message FROM email_queue WHERE id = $1")
+                .bind(fixture.queue_id)
+                .fetch_one(&pool)
+                .await
+                .expect("queue row");
+        assert_eq!(status, "bounced", "the mapped queue row terminalized");
+        assert_eq!(error_message.as_deref(), Some("ses_hard_bounce:General"));
+
+        let parent_status: String = sqlx::query_scalar("SELECT status FROM messages WHERE id = $1")
+            .bind(fixture.message_id)
+            .fetch_one(&pool)
+            .await
+            .expect("parent message");
+        assert_eq!(
+            parent_status, "partial",
+            "the shared reconciliation ran for the mapped recipient"
+        );
+
+        // Nothing was guessed for the unmapped address.
+        let leaked: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM suppressions WHERE email = $1")
+            .bind(&unmapped)
+            .fetch_one(&pool)
+            .await
+            .expect("unmapped suppression count");
+        assert_eq!(leaked, 0);
 
         cleanup_delivery(&pool, &fixture).await;
     }

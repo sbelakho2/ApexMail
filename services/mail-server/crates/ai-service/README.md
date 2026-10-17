@@ -30,6 +30,14 @@
 - Basic text sentiment, summary, and local analytics utility functions.
 - HTML sanitization and preview generation.
 
+## Configuration
+
+`AI_EMAIL_AGENT_ENABLED` (default `false`) spawns the draft-only email
+answering agent. It is opt-in by construction: the agent refuses to start
+without mandatory human approval (`AI_EMAIL_REQUIRE_APPROVAL`), every reply it
+writes is stored `pending_approval=true` for review, and no auto-send exists
+anywhere in the path. With the gate off, nothing is spawned.
+
 The authenticated HTTP routes are:
 
 - `POST /suggest`
@@ -40,7 +48,7 @@ Each route returns its deterministic method in the response. `GET /health` is pu
 
 ## Explicit non-goals
 
-This crate does not load or execute models, call external AI providers, train models, persist tenant experiment data, choose campaign variants autonomously, or send mail. The retired `/predict`, `/models`, `/train`, and `/bandits` routes are intentionally not registered.
+The deterministic helpers above do not load or execute models or call external AI providers. The opt-in, approval-gated draft agent (see Configuration) uses the configured LLM client but never sends mail and never approves its own output. This crate does not train models, persist tenant experiment data, choose campaign variants autonomously, or send mail. The retired `/predict`, `/models`, `/train`, and `/bandits` routes are intentionally not registered.
 
 A future model-serving system requires a separate design covering authenticated tenant boundaries, approved artifacts, offline and online evaluation, promotion/rollback, observability, data governance, and deployment.
 

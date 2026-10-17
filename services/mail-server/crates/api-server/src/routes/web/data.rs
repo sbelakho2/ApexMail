@@ -2955,7 +2955,9 @@ fn outstanding_kpis(buckets: LoadState<Vec<(String, i64)>>) -> Vec<KpiCardData> 
 
 async fn web_billing(state: &AppState, tenant: &str, cid: &str) -> ListPageData {
     let plan_state = load_query("web.billing.plan", cid, async {
-        sqlx::query_scalar::<_, String>("SELECT plan FROM tenants WHERE id::text = $1")
+        // tenants.id is VARCHAR(26): bind natively (the `id::text = $1` cast
+        // defeated the primary key index).
+        sqlx::query_scalar::<_, String>("SELECT plan FROM tenants WHERE id = $1")
             .bind(tenant)
             .fetch_optional(&state.db)
             .await
@@ -3051,7 +3053,9 @@ async fn web_dedicated_ips(state: &AppState, tenant: &str, cid: &str) -> ListPag
         cid,
         async {
             sqlx::query_as::<_, (String, Option<String>, Option<String>, String, Option<f64>)>(
-                "SELECT id::text AS id, ip_address, region, status, warmup_progress FROM dedicated_ips WHERE tenant_id::text = $1 ORDER BY created_at DESC LIMIT 100",
+                // dedicated_ips.tenant_id is VARCHAR(26): bind natively so
+                // `idx` lookups stay indexable (the cast defeated them).
+                "SELECT id::text AS id, ip_address, region, status, warmup_progress FROM dedicated_ips WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT 100",
             )
             .bind(tenant)
             .fetch_all(&state.db)
@@ -5028,8 +5032,10 @@ async fn cp_tenant_detail(
 ) -> ui_foundation::view_data::TenantDetailPageData {
     use ui_foundation::view_data::{TenantDetailPageData, TenantDetailPlanChoiceData};
 
-    // tenant ids are UUIDs (migration 052) but the route param is a string:
-    // a non-UUID id is simply "not found", never a database cast error.
+    // tenants.id is VARCHAR(26) (migration 064 standardized every tenant id
+    // to 26-char text; migration 052's UUID shape is long gone). The route
+    // param is compared NATIVELY (`t.id = $1`) so the primary key index is
+    // usable; a non-existent id is simply "not found", never a cast error.
     let row: Option<(
         String,
         String,
@@ -5045,7 +5051,7 @@ async fn cp_tenant_detail(
              FROM tenants t \
              LEFT JOIN plan_overrides o ON o.tenant_id = t.id AND o.active \
                   AND (o.expires_at IS NULL OR o.expires_at > NOW()) \
-             WHERE t.id::text = $1",
+             WHERE t.id = $1",
     )
     .bind(id)
     .fetch_optional(&state.db)
@@ -8222,6 +8228,49 @@ mod coverage_loader_tests {
     }
 
     // ── Database-backed loaders ────────────────────────────────────
+
+    /// Native tenant-id binding across the settings loaders (P2): `tenants.id`
+    /// and `dedicated_ips.tenant_id` are VARCHAR(26), compared directly
+    /// (`= $1`). An id string that names no row must degrade honestly — the
+    /// plan default, zero allocations — rather than turning the bind into a
+    /// read failure.
+    #[tokio::test]
+    async fn settings_loaders_bind_tenant_ids_natively_for_existing_and_unknown_tenants() {
+        let Some(app) = state("cov_native_tenant_bind").await else {
+            eprintln!(
+                "skipping settings_loaders_bind_tenant_ids_natively_for_existing_and_unknown_tenants: no TEST_DATABASE_URL"
+            );
+            return;
+        };
+        let (tenant, tag) = tenant_pair("natb");
+        seed_tenant(&app.db, &tenant, &tag).await;
+        let owner = user(&tenant);
+
+        // Known tenant: the seeded billing/IP rows resolve (proves the native
+        // bind, not just the absence of an error).
+        let billing = web(&app, "/settings/billing", None, &owner).await;
+        assert!(!unavailable_marked(&billing));
+        assert_eq!(kpi(&billing, "Current plan"), "pro");
+        assert_eq!(kpi(&billing, "Invoices"), "1");
+        let ips = web(&app, "/settings/dedicated-ips", None, &owner).await;
+        assert!(!unavailable_marked(&ips));
+        assert_eq!(kpi(&ips, "Assigned"), "1");
+
+        // Unknown tenant (an id string that is not UUID-shaped either): both
+        // loaders answer honestly instead of erroring on a cast.
+        let ghost = user("no-such-tenant-0000000000");
+        let billing = web(&app, "/settings/billing", None, &ghost).await;
+        assert!(
+            !unavailable_marked(&billing),
+            "an unknown tenant id is an empty page, not a read failure"
+        );
+        assert_eq!(kpi(&billing, "Current plan"), "free");
+        assert_eq!(kpi(&billing, "Invoices"), "0");
+        let ips = web(&app, "/settings/dedicated-ips", None, &ghost).await;
+        assert!(!unavailable_marked(&ips));
+        assert_eq!(kpi(&ips, "Assigned"), "0");
+        assert!(table(&ips).rows.is_empty());
+    }
 
     #[tokio::test]
     async fn web_loaders_render_seeded_rows_and_isolate_the_other_tenant() {

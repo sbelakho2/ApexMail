@@ -1174,16 +1174,32 @@ impl SupportService {
     }
 
     /// Check SLA breaches (background job)
+    ///
+    /// The flagged set of tickets is both selected AND marked in one
+    /// `UPDATE ... RETURNING *` statement; the old code fetched the set and
+    /// then issued one UPDATE per ticket (plus one agent lookup per
+    /// notification). Assignee addresses are resolved for the whole batch in
+    /// one query. Concrete SQL beats a loop both in round trips and in
+    /// concurrency: two workers racing the sweep can no longer notify for the
+    /// same breach twice.
+    ///
+    /// Notification is best-effort and runs AFTER the durable mark — the same
+    /// order as the pre-batch code. A failed `queue_email` does not unmark the
+    /// ticket (the mark is the operational state the dashboards read; the
+    /// email is a courtesy), and a failed sweep UPDATE returns Err with
+    /// nothing marked, so the next cycle retries.
     pub async fn check_sla_breaches(&self) -> Result<Vec<SupportTicket>, String> {
         let now = Utc::now();
         let tickets = match sqlx::query_as::<_, SupportTicket>(
-            "SELECT * FROM ent_support_tickets
+            "UPDATE ent_support_tickets
+             SET sla_breached = true
              WHERE status NOT IN ('resolved','closed')
              AND sla_breached = false
              AND (
                (first_response_at IS NULL AND sla_first_response_due < $1)
                OR (sla_resolution_due < $1)
-             )",
+             )
+             RETURNING *",
         )
         .bind(now)
         .fetch_all(&self.db)
@@ -1197,45 +1213,54 @@ impl SupportService {
             Err(error) => return Err(format!("SLA breach check: {error}")),
         };
 
+        // Resolve every assignee in one query (the old per-ticket lookup was
+        // an N+1 on the notification path).
+        let agent_ids: Vec<Uuid> = tickets.iter().filter_map(|t| t.assigned_to).collect();
+        let agent_emails: std::collections::HashMap<Uuid, String> = if agent_ids.is_empty() {
+            std::collections::HashMap::new()
+        } else {
+            sqlx::query_as::<_, (Uuid, String)>(
+                "SELECT id, email FROM ent_support_agents WHERE id = ANY($1)",
+            )
+            .bind(&agent_ids)
+            .fetch_all(&self.db)
+            .await
+            .map(|rows| rows.into_iter().collect())
+            .unwrap_or_default()
+        };
+
         for ticket in &tickets {
-            if let Err(e) =
-                sqlx::query("UPDATE ent_support_tickets SET sla_breached = true WHERE id = $1")
-                    .bind(ticket.id)
-                    .execute(&self.db)
-                    .await
-            {
-                tracing::error!(error = %e, ticket_id = %ticket.id, "Failed to mark SLA breach — ticket will be retried next cycle");
-            }
             info!(ticket_id = %ticket.id, priority = %ticket.priority, "SLA breach detected");
 
             // Notification hook: assignee learns about the breach.
-            if let Some(agent_id) = ticket.assigned_to {
-                if let Ok(Some(agent_email)) = self.agent_email(agent_id).await {
-                    self.notifier
-                        .queue_email(
-                            Some(&ticket.tenant_id),
-                            &agent_email,
-                            &format!(
-                                "[ApexMail Support] SLA breached on ticket #{:?}",
-                                ticket.number
-                            ),
-                            &format!(
-                                "SLA breached on ticket \"{}\" (priority {}). First response due {} / resolution due {}.",
-                                sanitize_notification_text(&ticket.subject),
-                                ticket.priority,
-                                ticket
-                                    .sla_first_response_due
-                                    .map(|t| t.to_rfc3339())
-                                    .unwrap_or_else(|| "n/a".into()),
-                                ticket
-                                    .sla_resolution_due
-                                    .map(|t| t.to_rfc3339())
-                                    .unwrap_or_else(|| "n/a".into()),
-                            ),
-                            "ticket_sla_breach_assignee",
-                        )
-                        .await;
-                }
+            if let Some(agent_email) = ticket
+                .assigned_to
+                .and_then(|agent_id| agent_emails.get(&agent_id))
+            {
+                self.notifier
+                    .queue_email(
+                        Some(&ticket.tenant_id),
+                        agent_email,
+                        &format!(
+                            "[ApexMail Support] SLA breached on ticket #{:?}",
+                            ticket.number
+                        ),
+                        &format!(
+                            "SLA breached on ticket \"{}\" (priority {}). First response due {} / resolution due {}.",
+                            sanitize_notification_text(&ticket.subject),
+                            ticket.priority,
+                            ticket
+                                .sla_first_response_due
+                                .map(|t| t.to_rfc3339())
+                                .unwrap_or_else(|| "n/a".into()),
+                            ticket
+                                .sla_resolution_due
+                                .map(|t| t.to_rfc3339())
+                                .unwrap_or_else(|| "n/a".into()),
+                        ),
+                        "ticket_sla_breach_assignee",
+                    )
+                    .await;
             }
         }
         Ok(tickets)

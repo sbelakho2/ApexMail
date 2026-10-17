@@ -924,9 +924,35 @@ impl MailstoreService for MailstoreServiceImpl {
         // honored, substring value match) instead of the subject/body
         // fulltext index. Headers are not encrypted at rest, so this also
         // works on encrypted stores.
+        //
+        // PERF (audit P3): the header path's COUNT re-runs the same
+        // unindexable `jsonb_each` predicate over the whole mailbox, and the
+        // only RPC consumer (imap-server SEARCH) intersects `messages` without
+        // reading `total`. It is therefore OPT-IN: `include_total` requests
+        // the real count; without it `total` stays 0 (the documented "not
+        // computed" sentinel) rather than a plausible-looking page length.
         let search_result = if let Some((field, value)) = parse_header_query(&req.query) {
+            if req.include_total {
+                self.storage
+                    .search_by_header_with_total(
+                        &account_id,
+                        &mailbox.id,
+                        field,
+                        value,
+                        limit,
+                        offset,
+                    )
+                    .await
+            } else {
+                self.storage
+                    .search_by_header(&account_id, &mailbox.id, field, value, limit, offset)
+                    .await
+                    .map(|messages| (messages, 0))
+            }
+        } else if req.body_only {
+            // IMAP SEARCH BODY: the body scope, not subject/sender.
             self.storage
-                .search_by_header(&account_id, &mailbox.id, field, value, limit, offset)
+                .search_body_messages(&account_id, &mailbox.id, &req.query, limit, offset)
                 .await
         } else {
             self.storage
@@ -3136,6 +3162,8 @@ mod tests {
                 query: header_search_query("Message-ID", &target_mid),
                 limit: 100,
                 offset: 0,
+                include_total: false,
+                body_only: false,
             }))
             .await
             .unwrap()
@@ -3158,6 +3186,8 @@ mod tests {
                 query: header_search_query("Message-ID", "does-not-exist-anywhere"),
                 limit: 100,
                 offset: 0,
+                include_total: false,
+                body_only: false,
             }))
             .await
             .unwrap()
@@ -3729,6 +3759,8 @@ mod tests {
                 query: "invoice".into(),
                 limit: 100,
                 offset: 0,
+                include_total: false,
+                body_only: false,
             }))
             .await
             .unwrap()
@@ -3743,6 +3775,8 @@ mod tests {
                 query: "a".into(),
                 limit: 100,
                 offset: 0,
+                include_total: false,
+                body_only: false,
             }))
             .await
             .unwrap()
@@ -3758,6 +3792,8 @@ mod tests {
                 query: header_search_query("Message-ID", "s2"),
                 limit: 100,
                 offset: 0,
+                include_total: true,
+                body_only: false,
             }))
             .await
             .unwrap()
@@ -3907,6 +3943,74 @@ mod tests {
             .unwrap_err()
             .code(),
             tonic::Code::InvalidArgument
+        );
+
+        pool.close().await;
+    }
+
+    /// PERF (audit P3): the header-search COUNT is opt-in. Without
+    /// `include_total` the reply's `total` is 0 (not a plausible-looking page
+    /// length); with it, `total` is the true match count across pages. This is
+    /// the contract IMAP relies on (it never reads `total`), and it keeps a
+    /// caller that DOES need the count correct.
+    #[tokio::test]
+    async fn search_header_total_is_opt_in_and_true_when_requested() {
+        let Some((svc, pool)) = service_with_db("search_header_total_opt_in").await else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+        let account_id = make_account(&svc, "hdrtotal").await;
+
+        for tag in ["tot1", "tot2", "tot3"] {
+            let raw = format!(
+                "From: Sender <sender@example.com>\r\n\
+                 To: rcpt@example.com\r\n\
+                 Subject: pagination {tag}\r\n\
+                 Message-ID: <{tag}@example.com>\r\n\
+                 X-Batch: shared-value\r\n\
+                 \r\n\
+                 body\r\n"
+            );
+            svc.store_message(Request::new(store_request(
+                &account_id,
+                "Inbox",
+                raw.into_bytes(),
+            )))
+            .await
+            .unwrap();
+        }
+
+        let page = |include_total: bool| {
+            let svc = &svc;
+            let account_id = account_id.clone();
+            async move {
+                svc.search_messages(Request::new(SearchMessagesRequest {
+                    account_id,
+                    mailbox: "Inbox".into(),
+                    query: header_search_query("X-Batch", "shared-value"),
+                    limit: 1,
+                    offset: 0,
+                    include_total,
+                    body_only: false,
+                }))
+                .await
+                .unwrap()
+                .into_inner()
+            }
+        };
+
+        let uncounted = page(false).await;
+        assert_eq!(uncounted.messages.len(), 1, "the page is still returned");
+        assert_eq!(
+            uncounted.total, 0,
+            "without include_total the total is the documented not-computed sentinel"
+        );
+
+        let counted = page(true).await;
+        assert_eq!(counted.messages.len(), 1, "the page size is unchanged");
+        assert_eq!(
+            counted.total, 3,
+            "with include_total the total spans all pages"
         );
 
         pool.close().await;

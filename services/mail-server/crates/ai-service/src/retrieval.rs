@@ -175,6 +175,11 @@ pub async fn reindex(pool: &PgPool, dir: &Path) -> Result<usize, String> {
     let files = collect_markdown(dir);
     let mut count = 0usize;
 
+    // Chunks are accumulated and written in batches: the old path issued one
+    // INSERT per chunk (documents routinely produce dozens), which is a pure
+    // round-trip multiplier. Ordering is preserved (chunks are pushed in
+    // traversal order) and the ON CONFLICT identity is unchanged.
+    let mut batch: Vec<serde_json::Value> = Vec::with_capacity(REINDEX_BATCH_ROWS);
     for path in files {
         let Ok(content) = std::fs::read_to_string(&path) else {
             continue;
@@ -190,25 +195,23 @@ pub async fn reindex(pool: &PgPool, dir: &Path) -> Result<usize, String> {
             if chunk.is_empty() {
                 continue;
             }
-            sqlx::query(
-                r#"INSERT INTO ai_docs_chunks
-                       (tenant_scope, docs_version, path, title, locale, chunk_index, content)
-                   VALUES ('public', $1, $2, $3, $4, $5, $6)
-                   ON CONFLICT (tenant_scope, path, chunk_index, docs_version)
-                   DO UPDATE SET title = EXCLUDED.title, content = EXCLUDED.content,
-                                 locale = EXCLUDED.locale"#,
-            )
-            .bind(&version)
-            .bind(&rel)
-            .bind(&title)
-            .bind(&locale)
-            .bind(idx as i32)
-            .bind(&chunk)
-            .execute(pool)
-            .await
-            .map_err(|e| format!("reindex insert {rel}: {e}"))?;
+            batch.push(serde_json::json!({
+                "tenant_scope": "public",
+                "docs_version": version,
+                "path": rel,
+                "title": title,
+                "locale": locale,
+                "chunk_index": idx as i32,
+                "content": chunk,
+            }));
             count += 1;
+            if batch.len() >= REINDEX_BATCH_ROWS {
+                flush_reindex_batch(pool, &mut batch).await?;
+            }
         }
+    }
+    if !batch.is_empty() {
+        flush_reindex_batch(pool, &mut batch).await?;
     }
 
     sqlx::query("DELETE FROM ai_docs_chunks WHERE docs_version <> $1")
@@ -218,6 +221,40 @@ pub async fn reindex(pool: &PgPool, dir: &Path) -> Result<usize, String> {
         .map_err(|e| format!("reindex prune: {e}"))?;
 
     Ok(count)
+}
+
+/// Rows per multi-row index upsert.
+const REINDEX_BATCH_ROWS: usize = 500;
+
+/// Write one accumulated reindex batch with a single statement.
+async fn flush_reindex_batch(
+    pool: &PgPool,
+    batch: &mut Vec<serde_json::Value>,
+) -> Result<(), String> {
+    let payload = serde_json::Value::Array(std::mem::take(batch));
+    batch.reserve(REINDEX_BATCH_ROWS);
+    sqlx::query(
+        r#"INSERT INTO ai_docs_chunks
+               (tenant_scope, docs_version, path, title, locale, chunk_index, content)
+           SELECT tenant_scope, docs_version, path, title, locale, chunk_index, content
+             FROM jsonb_to_recordset($1::jsonb) AS r(
+                  tenant_scope text,
+                  docs_version text,
+                  path text,
+                  title text,
+                  locale text,
+                  chunk_index integer,
+                  content text
+             )
+           ON CONFLICT (tenant_scope, path, chunk_index, docs_version)
+           DO UPDATE SET title = EXCLUDED.title, content = EXCLUDED.content,
+                         locale = EXCLUDED.locale"#,
+    )
+    .bind(payload)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("reindex insert batch: {e}"))?;
+    Ok(())
 }
 
 /// Hybrid lexical search: ts_rank full-text fused with trigram similarity
@@ -675,6 +712,128 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.contains("docs dir not found"));
+
+        sqlx::query("DELETE FROM ai_docs_chunks")
+            .execute(&pool)
+            .await
+            .unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Per-STATEMENT counters: a `FOR EACH STATEMENT` trigger fires once per
+    /// INSERT/UPDATE/DELETE statement, which is the only way to prove the
+    /// reindex stayed a fixed number of round trips as the corpus grows.
+    async fn install_statement_counters(pool: &PgPool, tables: &[&str]) {
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS _apexmail_test_stmt_counts (
+                 probed_table TEXT NOT NULL,
+                 op TEXT NOT NULL,
+                 statements BIGINT NOT NULL DEFAULT 0,
+                 PRIMARY KEY (probed_table, op)
+             )",
+        )
+        .execute(pool)
+        .await
+        .expect("create statement-count table");
+        sqlx::query(
+            "CREATE OR REPLACE FUNCTION _apexmail_test_count_stmt() RETURNS trigger \
+             LANGUAGE plpgsql AS $$ \
+             BEGIN \
+               INSERT INTO _apexmail_test_stmt_counts (probed_table, op, statements) \
+               VALUES (TG_TABLE_NAME, TG_OP, 1) \
+               ON CONFLICT (probed_table, op) \
+               DO UPDATE SET statements = _apexmail_test_stmt_counts.statements + 1; \
+               RETURN NULL; \
+             END $$",
+        )
+        .execute(pool)
+        .await
+        .expect("create statement-count function");
+        for table in tables {
+            assert!(
+                table
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_'),
+                "statement counter table name must be identifier-shaped: {table}"
+            );
+            sqlx::query(&format!(
+                "CREATE OR REPLACE TRIGGER _apexmail_test_count_stmt \
+                 AFTER INSERT OR UPDATE OR DELETE ON {table} \
+                 FOR EACH STATEMENT EXECUTE FUNCTION _apexmail_test_count_stmt()"
+            ))
+            .execute(pool)
+            .await
+            .expect("install statement-count trigger");
+        }
+    }
+
+    async fn reset_statement_counts(pool: &PgPool) {
+        sqlx::query("UPDATE _apexmail_test_stmt_counts SET statements = 0")
+            .execute(pool)
+            .await
+            .expect("reset statement counts");
+    }
+
+    async fn statement_count(pool: &PgPool, table: &str, op: &str) -> i64 {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT statements FROM _apexmail_test_stmt_counts \
+             WHERE probed_table = $1 AND op = $2",
+        )
+        .bind(table)
+        .bind(op)
+        .fetch_optional(pool)
+        .await
+        .expect("read statement count")
+        .unwrap_or(0)
+    }
+
+    /// Reindex must write the whole corpus in BATCHES, not one INSERT per
+    /// chunk. The old code issued N statements for N chunks; with a
+    /// `FOR EACH STATEMENT` trigger this test fails on that code (25) and
+    /// passes when 25 chunks go through one `jsonb_to_recordset` upsert.
+    #[tokio::test]
+    async fn reindex_writes_chunks_in_batched_statements() {
+        let Some(_lock) = crate::test_support::serial_lock("docs-index-serial").await else {
+            return;
+        };
+        let Some(pool) = crate::test_support::shared_pool().await else {
+            return;
+        };
+        sqlx::query("DELETE FROM ai_docs_chunks")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let dir = std::env::temp_dir().join(format!("ai-reindex-batch-{}", uuid::Uuid::new_v4())); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
+        std::fs::create_dir_all(&dir).unwrap();
+        for index in 0..25 {
+            std::fs::write(
+                dir.join(format!("doc-{index}.md")),
+                format!("# Doc {index}\n\nUnique batched content number {index}.\n"),
+            )
+            .unwrap();
+        }
+
+        install_statement_counters(&pool, &["ai_docs_chunks"]).await;
+        reset_statement_counts(&pool).await;
+
+        let count = reindex(&pool, &dir).await.expect("reindex");
+        assert_eq!(count, 25);
+        assert_eq!(
+            statement_count(&pool, "ai_docs_chunks", "INSERT").await,
+            1,
+            "25 chunks must be written by ONE INSERT statement"
+        );
+
+        // Idempotent replay: still one statement, no duplicates.
+        reset_statement_counts(&pool).await;
+        assert_eq!(reindex(&pool, &dir).await.expect("replay"), 25);
+        assert_eq!(statement_count(&pool, "ai_docs_chunks", "INSERT").await, 1);
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM ai_docs_chunks")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, 25, "the replay upserted in place");
 
         sqlx::query("DELETE FROM ai_docs_chunks")
             .execute(&pool)

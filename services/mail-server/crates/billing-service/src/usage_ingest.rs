@@ -45,7 +45,7 @@ use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
 
 use crate::routes::append_audit_log;
@@ -195,100 +195,32 @@ fn day_bounds(day: NaiveDate) -> (chrono::DateTime<Utc>, chrono::DateTime<Utc>) 
     (start, end)
 }
 
-/// Record one derived daily aggregate idempotently: marker + metering event
-/// + audit entry in a single transaction. Returns `Ok(true)` when the
-///   aggregate was newly recorded, `Ok(false)` when the (tenant, event_type,
-///   day, source) marker already exists.
-async fn record_derived_daily_aggregate(
-    pool: &PgPool,
-    tenant_id: &str,
-    event_type: &str,
-    day: NaiveDate,
-    source: &str,
-    quantity: i64,
-    recorded_at: DateTime<Utc>,
-) -> Result<bool, sqlx::Error> {
-    let event_id = derived_event_id(tenant_id, event_type, day, source);
-    let metadata = serde_json::json!({
-        "source": source,
-        "derived": true,
-        "day": day.to_string(),
-    });
+/// Rows per multi-row INSERT.
+///
+/// PostgreSQL rejects any statement carrying more than 65,535 bound
+/// parameters (`42P08`/protocol error). The widest insert in this module binds
+/// 12 columns per row (reconciliation reports), so 5,000 rows <= 60,000 binds
+/// stays below the ceiling while keeping the statement count low.
+const MULTI_ROW_INSERT_CHUNK_ROWS: usize = 5_000;
 
-    let mut tx = pool.begin().await?;
-
-    // 1. Marker first — UNIQUE(tenant, event_type, day, source) makes this
-    //    the idempotency gate for the whole aggregate. Zero-quantity days
-    //    still get a marker so the sweep does not re-derive emptiness.
-    let marker = sqlx::query(
-        r#"
-        INSERT INTO metering_daily_markers (tenant_id, event_type, day, source, quantity)
-        VALUES ($1, $2, $3, $4, $5)
-        ON CONFLICT (tenant_id, event_type, day, source) DO NOTHING
-        "#,
-    )
-    .bind(tenant_id)
-    .bind(event_type)
-    .bind(day)
-    .bind(source)
-    .bind(quantity.max(0))
-    .execute(&mut *tx)
-    .await?;
-
-    if marker.rows_affected() == 0 {
-        tx.rollback().await?;
-        return Ok(false);
-    }
-
-    if quantity <= 0 {
-        // Marker-only row: nothing to meter.
-        tx.commit().await?;
-        return Ok(false);
-    }
-
-    // 2. Metering event (deterministic id — ON CONFLICT is the belt to the
-    //    marker's braces). The table is RANGE-partitioned by "timestamp"
-    //    with PRIMARY KEY (id, timestamp): the bare (id) arbiter raises
-    //    42P10 and the derived sweep could never record a single aggregate.
-    sqlx::query(
-        r#"
-        INSERT INTO metering_events (id, tenant_id, event_type, quantity, timestamp, metadata)
-        VALUES ($1, $2, $3, $4, $5, $6)
-        ON CONFLICT (id, "timestamp") DO NOTHING
-        "#,
-    )
-    .bind(event_id)
-    .bind(tenant_id)
-    .bind(event_type)
-    .bind(quantity)
-    .bind(recorded_at)
-    .bind(&metadata)
-    .execute(&mut *tx)
-    .await?;
-
-    // 3. Immutable audit record. An aggregate without its audit trail must
-    //    not be silently committed — abort the whole transaction on failure.
-    append_audit_log(
-        &mut tx,
-        tenant_id,
-        "billing.metering_derived_aggregate_recorded",
-        "metering_event",
-        Some(&event_id.to_string()),
-        json!({
-            "eventType": event_type,
-            "quantity": quantity,
-            "day": day.to_string(),
-            "source": source,
-        }),
-        recorded_at,
-    )
-    .await
-    .map_err(sqlx::Error::Protocol)?;
-
-    tx.commit().await?;
-    Ok(true)
-}
-
+/// Record one derived daily aggregate per tenant, idempotently, for a whole
+/// source sweep in a bounded number of statements (P3: the pre-fix path ran
+/// one transaction + marker + event + audit per tenant row).
+///
+/// Ordering and semantics are preserved:
+/// 1. Multi-row marker INSERTs (one per [`MULTI_ROW_INSERT_CHUNK_ROWS`] chunk)
+///    are the idempotency gate; only rows the statements actually inserted
+///    are returned (a replay gets none).
+/// 2. Multi-row metering-event INSERTs (one per chunk) carry every newly-gated
+///    tenant with a positive quantity (deterministic ids; `ON CONFLICT` is the
+///    belt to the marker's braces).
+/// 3. One audit entry per newly-metered aggregate, appended INSIDE the same
+///    transaction — the audit trail is a global hash chain and cannot be
+///    set-based without changing its ordering contract, so this is the only
+///    remaining per-row statement (2: chain-head UPDATE + INSERT).
+///
+/// Returns the number of newly recorded non-zero aggregates (the previous
+/// per-row return contract).
 async fn record_tenant_counts(
     pool: &PgPool,
     event_type: &str,
@@ -297,23 +229,125 @@ async fn record_tenant_counts(
     rows: Vec<TenantCountRow>,
     recorded_at: DateTime<Utc>,
 ) -> Result<i64, sqlx::Error> {
-    let mut recorded = 0_i64;
-    for row in rows {
-        if record_derived_daily_aggregate(
-            pool,
-            &row.tenant_id,
-            event_type,
-            day,
-            source,
-            row.quantity,
-            recorded_at,
-        )
-        .await?
-        {
-            recorded += 1;
+    record_tenant_counts_chunked(
+        pool,
+        event_type,
+        day,
+        source,
+        rows,
+        recorded_at,
+        MULTI_ROW_INSERT_CHUNK_ROWS,
+    )
+    .await
+}
+
+/// [`record_tenant_counts`] with an explicit chunk size (tests shrink it to
+/// exercise the chunk boundary on a small fixture; production uses
+/// [`MULTI_ROW_INSERT_CHUNK_ROWS`]).
+async fn record_tenant_counts_chunked(
+    pool: &PgPool,
+    event_type: &str,
+    day: NaiveDate,
+    source: &str,
+    rows: Vec<TenantCountRow>,
+    recorded_at: DateTime<Utc>,
+    chunk_rows: usize,
+) -> Result<i64, sqlx::Error> {
+    if rows.is_empty() {
+        return Ok(0);
+    }
+    let chunk_rows = chunk_rows.max(1);
+
+    let mut tx = pool.begin().await?;
+
+    // 1. Markers first — UNIQUE(tenant, event_type, day, source) makes this
+    //    the idempotency gate for every aggregate. Zero-quantity days still
+    //    get a marker so the sweep does not re-derive emptiness. Chunked: a
+    //    source sweep can carry one row per tenant and blow the 65,535-bind
+    //    statement ceiling in one unbounded multi-row INSERT.
+    let mut fresh: Vec<(String, i64)> = Vec::with_capacity(rows.len());
+    for chunk in rows.chunks(chunk_rows) {
+        #[cfg(test)]
+        crate::test_support::query_count::bump("derived.db.markers");
+        let mut marker_builder = QueryBuilder::<Postgres>::new(
+            "INSERT INTO metering_daily_markers (tenant_id, event_type, day, source, quantity) ",
+        );
+        marker_builder.push_values(chunk, |mut values, row| {
+            values
+                .push_bind(row.tenant_id.clone())
+                .push_bind(event_type)
+                .push_bind(day)
+                .push_bind(source)
+                .push_bind(row.quantity.max(0));
+        });
+        marker_builder.push(
+            " ON CONFLICT (tenant_id, event_type, day, source) DO NOTHING
+              RETURNING tenant_id, quantity",
+        );
+        fresh.extend(
+            marker_builder
+                .build_query_as::<(String, i64)>()
+                .fetch_all(&mut *tx)
+                .await?,
+        );
+    }
+
+    let positive: Vec<(String, i64)> = fresh
+        .into_iter()
+        .filter(|(_, quantity)| *quantity > 0)
+        .collect();
+
+    if !positive.is_empty() {
+        // 2. Multi-row metering insert, one statement per chunk. The table is
+        //    RANGE-partitioned by "timestamp" with PRIMARY KEY (id, timestamp):
+        //    the bare (id) arbiter raises 42P10.
+        let metadata = serde_json::json!({
+            "source": source,
+            "derived": true,
+            "day": day.to_string(),
+        });
+        for chunk in positive.chunks(chunk_rows) {
+            #[cfg(test)]
+            crate::test_support::query_count::bump("derived.db.events");
+            let mut event_builder = QueryBuilder::<Postgres>::new(
+                "INSERT INTO metering_events (id, tenant_id, event_type, quantity, timestamp, metadata) ",
+            );
+            event_builder.push_values(chunk, |mut values, (tenant_id, quantity)| {
+                values
+                    .push_bind(derived_event_id(tenant_id, event_type, day, source))
+                    .push_bind(tenant_id.clone())
+                    .push_bind(event_type)
+                    .push_bind(*quantity)
+                    .push_bind(recorded_at)
+                    .push_bind(metadata.clone());
+            });
+            event_builder.push(" ON CONFLICT (id, \"timestamp\") DO NOTHING");
+            event_builder.build().execute(&mut *tx).await?;
+        }
+
+        // 3. Immutable audit records (one per aggregate; chain order).
+        for (tenant_id, quantity) in &positive {
+            append_audit_log(
+                &mut tx,
+                tenant_id,
+                "billing.metering_derived_aggregate_recorded",
+                "metering_event",
+                Some(&derived_event_id(tenant_id, event_type, day, source).to_string()),
+                json!({
+                    "eventType": event_type,
+                    "quantity": quantity,
+                    "day": day.to_string(),
+                    "source": source,
+                }),
+                recorded_at,
+            )
+            .await
+            .map_err(sqlx::Error::Protocol)?;
         }
     }
-    Ok(recorded)
+
+    tx.commit().await?;
+    Ok(i64::try_from(positive.len()).unwrap_or(i64::MAX))
 }
 
 fn is_missing_table(error: &sqlx::Error) -> bool {
@@ -724,6 +758,18 @@ pub async fn reconcile_daily_deliveries(
     pool: &PgPool,
     now: DateTime<Utc>,
 ) -> Result<ReconciliationSummary, String> {
+    reconcile_daily_deliveries_chunked(pool, now, MULTI_ROW_INSERT_CHUNK_ROWS).await
+}
+
+/// [`reconcile_daily_deliveries`] with an explicit report-insert chunk size
+/// (tests shrink it to cross the chunk boundary; production uses
+/// [`MULTI_ROW_INSERT_CHUNK_ROWS`]).
+async fn reconcile_daily_deliveries_chunked(
+    pool: &PgPool,
+    now: DateTime<Utc>,
+    chunk_rows: usize,
+) -> Result<ReconciliationSummary, String> {
+    let chunk_rows = chunk_rows.max(1);
     let day = sweep_target_day(now);
     let (day_start, day_end) = day_bounds(day);
     let mut summary = ReconciliationSummary {
@@ -735,6 +781,8 @@ pub async fn reconcile_daily_deliveries(
     //    NUMERIC in PostgreSQL, which cannot decode into Option<i64> — the
     //    reconciliation sweep failed on every day that actually had usage.
     //    Cast each aggregate back to bigint.
+    #[cfg(test)]
+    crate::test_support::query_count::bump("recon.db.usage");
     let usage_rows: Vec<ReconUsageRow> = sqlx::query_as(
         r#"
         SELECT tenant_id,
@@ -780,6 +828,24 @@ pub async fn reconcile_daily_deliveries(
 
     summary.tenants_compared = i64::try_from(usage_rows.len()).unwrap_or(i64::MAX);
 
+    // P3 fix 2 — the report writes are multi-row INSERTs (per-row INSERT was
+    // the last O(tenants) statement in this sweep), one statement per
+    // `MULTI_ROW_INSERT_CHUNK_ROWS` chunk so an unbounded tenant count cannot
+    // exceed PostgreSQL's 65,535 bound-parameter ceiling. `ON CONFLICT DO
+    // NOTHING RETURNING` preserves the exact accounting: only rows this run
+    // actually inserted count toward `reports_written`, and only those can
+    // raise `overage_candidates`.
+    struct ReconciliationReportRow {
+        tenant_id: String,
+        reserved: i64,
+        delivered: i64,
+        bounced: i64,
+        complained: i64,
+        unaccounted: i64,
+        candidate: bool,
+        details: serde_json::Value,
+    }
+    let mut reports: Vec<ReconciliationReportRow> = Vec::with_capacity(usage_rows.len());
     for row in usage_rows {
         let reserved = row.reserved.unwrap_or(0);
         let delivered = row.delivered.unwrap_or(0);
@@ -789,41 +855,61 @@ pub async fn reconcile_daily_deliveries(
             .copied()
             .unwrap_or(0);
         let (unaccounted, candidate) = classify_reconciliation(reserved, delivered, bounced);
+        reports.push(ReconciliationReportRow {
+            tenant_id: row.tenant_id,
+            reserved,
+            delivered,
+            bounced,
+            complained,
+            unaccounted,
+            candidate,
+            details: json!({
+                "reservedButBounced": bounced,
+                "note": "reserved-but-bounced sends are delivery failures, not quota leaks",
+            }),
+        });
+    }
 
-        let inserted = sqlx::query(
-            r#"
-            INSERT INTO billing_reconciliation_reports (
-                id, tenant_id, period_start, period_end,
-                reserved_emails, delivered_emails, bounced_emails, complained_emails,
-                unaccounted_emails, overage_candidate, status, details, created_at
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'open', $11, NOW())
-            ON CONFLICT (tenant_id, period_start, period_end) DO NOTHING
-            "#,
-        )
-        .bind(Uuid::new_v4())
-        .bind(&row.tenant_id)
-        .bind(day)
-        .bind(day + Duration::days(1))
-        .bind(reserved)
-        .bind(delivered)
-        .bind(bounced)
-        .bind(complained)
-        .bind(unaccounted)
-        .bind(candidate)
-        .bind(json!({
-            "reservedButBounced": bounced,
-            "note": "reserved-but-bounced sends are delivery failures, not quota leaks",
-        }))
-        .execute(pool)
-        .await
-        .map_err(|error| format!("reconciliation report write failed: {error}"))?;
-
-        if inserted.rows_affected() == 1 {
-            summary.reports_written += 1;
-            if candidate {
-                summary.overage_candidates += 1;
-            }
+    if !reports.is_empty() {
+        for chunk in reports.chunks(chunk_rows) {
+            #[cfg(test)]
+            crate::test_support::query_count::bump("recon.db.write");
+            let mut builder = QueryBuilder::<Postgres>::new(
+                "INSERT INTO billing_reconciliation_reports (
+                    id, tenant_id, period_start, period_end,
+                    reserved_emails, delivered_emails, bounced_emails, complained_emails,
+                    unaccounted_emails, overage_candidate, status, details, created_at
+                 ) ",
+            );
+            builder.push_values(chunk, |mut values, report| {
+                values
+                    .push_bind(Uuid::new_v4())
+                    .push_bind(report.tenant_id.clone())
+                    .push_bind(day)
+                    .push_bind(day + Duration::days(1))
+                    .push_bind(report.reserved)
+                    .push_bind(report.delivered)
+                    .push_bind(report.bounced)
+                    .push_bind(report.complained)
+                    .push_bind(report.unaccounted)
+                    .push_bind(report.candidate)
+                    .push_bind("open")
+                    .push_bind(report.details.clone())
+                    .push("NOW()");
+            });
+            builder.push(
+                " ON CONFLICT (tenant_id, period_start, period_end) DO NOTHING
+                  RETURNING overage_candidate",
+            );
+            let inserted: Vec<(bool,)> = builder
+                .build_query_as()
+                .fetch_all(pool)
+                .await
+                .map_err(|error| format!("reconciliation report write failed: {error}"))?;
+            summary.reports_written += i64::try_from(inserted.len()).unwrap_or(i64::MAX);
+            summary.overage_candidates +=
+                i64::try_from(inserted.iter().filter(|(candidate,)| *candidate).count())
+                    .unwrap_or(i64::MAX);
         }
     }
 
@@ -835,6 +921,8 @@ async fn collect_bounce_counts(
     day: NaiveDate,
 ) -> Result<HashMap<String, i64>, sqlx::Error> {
     // Aggregated bounce pipeline first (covers SES + self-hosted feeds).
+    #[cfg(test)]
+    crate::test_support::query_count::bump("recon.db.bounce");
     let aggregated: Vec<ReconBounceRow> = sqlx::query_as(
         r#"
         SELECT tenant_id, SUM(total_bounces)::bigint AS bounced
@@ -855,6 +943,8 @@ async fn collect_bounce_counts(
     if counts.is_empty() {
         // Fallback: terminal-bounced queue rows attributed by updated_at.
         let (day_start, day_end) = day_bounds(day);
+        #[cfg(test)]
+        crate::test_support::query_count::bump("recon.db.bounce");
         let rows: Vec<ReconBounceRow> = sqlx::query_as(
             r#"
             SELECT tenant_id::text AS tenant_id, COUNT(*)::bigint AS bounced
@@ -884,6 +974,8 @@ async fn collect_complaint_counts(
     day_end: DateTime<Utc>,
 ) -> Result<HashMap<String, i64>, sqlx::Error> {
     // `complaints` (069) first; `self_hosted_complaints` (021) as fallback.
+    #[cfg(test)]
+    crate::test_support::query_count::bump("recon.db.complaint");
     let rows: Vec<ReconComplaintRow> = match sqlx::query_as(
         r#"
         SELECT tenant_id, COUNT(*)::bigint AS complained
@@ -1172,53 +1264,293 @@ mod tests {
         let t_zero = unique_tenant("ing_zero_t");
 
         // Fresh non-zero aggregate: recorded with event + audit.
-        let fresh = record_derived_daily_aggregate(
+        let fresh = record_tenant_counts(
             pool,
-            &t_zero,
             "emails_delivered",
             day,
             SOURCE_EMAIL_DELIVERY,
-            5,
+            vec![TenantCountRow {
+                tenant_id: t_zero.clone(),
+                quantity: 5,
+            }],
             now,
         )
         .await
         .expect("fresh aggregate");
-        assert!(fresh);
+        assert_eq!(fresh, 1);
 
         // Zero quantity: a marker-only row, no metering event.
-        let marker_only = record_derived_daily_aggregate(
+        let marker_only = record_tenant_counts(
             pool,
-            &t_zero,
             "emails_delivered",
             day,
             SOURCE_WEBHOOK_EVENTS,
-            0,
+            vec![TenantCountRow {
+                tenant_id: t_zero.clone(),
+                quantity: 0,
+            }],
             now,
         )
         .await
         .expect("marker-only aggregate");
-        assert!(!marker_only, "zero quantity records a marker only");
+        assert_eq!(marker_only, 0, "zero quantity records a marker only");
         let events: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM metering_events WHERE tenant_id = 'ing_zero_t' AND event_type = 'webhooks_delivered'",
+            "SELECT COUNT(*) FROM metering_events WHERE tenant_id = $1 AND event_type = 'webhooks_delivered'",
         )
+        .bind(&t_zero)
         .fetch_one(pool)
         .await
         .expect("count");
         assert_eq!(events, 0, "marker-only rows never meter");
+        let markers: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM metering_daily_markers WHERE tenant_id = $1")
+                .bind(&t_zero)
+                .fetch_one(pool)
+                .await
+                .expect("markers");
+        assert_eq!(markers, 2, "both sources got their marker");
 
-        // Duplicate marker: the idempotency gate rolls back and reports no.
-        let duplicate = record_derived_daily_aggregate(
+        // Duplicate marker: the idempotency gate reports no new aggregate.
+        let duplicate = record_tenant_counts(
             pool,
-            &t_zero,
             "emails_delivered",
             day,
             SOURCE_EMAIL_DELIVERY,
-            5,
+            vec![TenantCountRow {
+                tenant_id: t_zero.clone(),
+                quantity: 5,
+            }],
             now,
         )
         .await
         .expect("duplicate aggregate");
-        assert!(!duplicate, "the marker gate makes re-runs idempotent");
+        assert_eq!(duplicate, 0, "the marker gate makes re-runs idempotent");
+
+        // Exactly ONE audit entry for the ONE newly metered aggregate.
+        let audited: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_logs WHERE tenant_id = $1 AND action = 'billing.metering_derived_aggregate_recorded'",
+        )
+        .bind(&t_zero)
+        .fetch_one(pool)
+        .await
+        .expect("audit rows");
+        assert_eq!(audited, 1);
+
+        owned.finish().await;
+    }
+
+    // P3 item 7 — the derived-aggregate writer was per-tenant (one
+    // transaction + marker + event + audit per row). Markers and events are
+    // now ONE multi-row statement per source; only the hash-chained audit
+    // append stays per newly metered row. Three tenants must cost ONE marker
+    // statement and ONE event statement, not three of each.
+    #[tokio::test]
+    async fn derived_aggregates_write_once_per_source_not_per_tenant() {
+        use crate::test_support::query_count;
+
+        let owned = provision_env("ingest_derived_batch").await;
+        let pool = &owned.pool;
+        let day = yesterday(Utc::now());
+        let mut seeded = Vec::new();
+        for suffix in ["a", "b", "c"] {
+            let tenant = unique_tenant(&format!("ing_derived_batch_{suffix}"));
+            crate::test_support::seed_tenant(pool, &tenant, "growth").await;
+            seed_sent_queue_row(pool, &tenant, day).await;
+            seeded.push(tenant);
+        }
+
+        query_count::reset();
+        let result = sweep_derived_usage(pool, Utc::now())
+            .await
+            .expect("derived sweep");
+        assert_eq!(result.emails_delivered, 3, "all three tenants derived");
+        assert_eq!(
+            query_count::count("derived.db.markers"),
+            1,
+            "one marker INSERT for the whole source, not per tenant"
+        );
+        assert_eq!(
+            query_count::count("derived.db.events"),
+            1,
+            "one event INSERT for the whole source, not per tenant"
+        );
+
+        let metered: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM metering_events
+              WHERE tenant_id = ANY($1) AND event_type = 'emails_delivered'",
+        )
+        .bind(&seeded)
+        .fetch_one(pool)
+        .await
+        .expect("metering events");
+        assert_eq!(metered, 3);
+        let audited: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_logs
+              WHERE tenant_id = ANY($1) AND action = 'billing.metering_derived_aggregate_recorded'",
+        )
+        .bind(&seeded)
+        .fetch_one(pool)
+        .await
+        .expect("audit entries");
+        assert_eq!(audited, 3, "one audit entry per metered aggregate");
+
+        // Replay: markers gate everything; no new markers or events.
+        query_count::reset();
+        let replay = sweep_derived_usage(pool, Utc::now())
+            .await
+            .expect("replay sweep");
+        assert_eq!(replay.emails_delivered, 0);
+        assert_eq!(query_count::count("derived.db.markers"), 1);
+        assert_eq!(
+            query_count::count("derived.db.events"),
+            0,
+            "a replay inserts no events"
+        );
+
+        owned.finish().await;
+    }
+
+    /// F-audit P2 (PostgreSQL 65,535-parameter ceiling): the derived-aggregate
+    /// writer must split an oversized row set into multiple statements. The
+    /// chunk size is shrunk here (production uses the pinned 5,000-row
+    /// constant) so a 5-row fixture crosses the boundary: 5 rows / 2 per
+    /// statement = 3 marker INSERTs and 3 metering-event INSERTs, with every
+    /// row persisted.
+    ///
+    /// Fail-before: the unbounded single `push_values` issues exactly ONE
+    /// statement for all 5 rows.
+    #[tokio::test]
+    async fn derived_aggregate_writes_chunk_above_the_parameter_boundary() {
+        use crate::test_support::query_count;
+
+        let owned = provision_env("ingest_derived_chunk_boundary").await;
+        let pool = &owned.pool;
+        let day = NaiveDate::from_ymd_opt(2026, 8, 20).unwrap();
+        let rows: Vec<TenantCountRow> = (0..5)
+            .map(|index| TenantCountRow {
+                tenant_id: unique_tenant(&format!("ing_derived_chunk_{index}")),
+                quantity: 2,
+            })
+            .collect();
+        let tenants: Vec<String> = rows.iter().map(|row| row.tenant_id.clone()).collect();
+
+        query_count::reset();
+        let recorded = record_tenant_counts_chunked(
+            pool,
+            "emails_delivered",
+            day,
+            SOURCE_EMAIL_DELIVERY,
+            rows,
+            Utc::now(),
+            2,
+        )
+        .await
+        .expect("chunked aggregate write");
+        assert_eq!(recorded, 5, "every row is still recorded");
+        assert_eq!(
+            query_count::count("derived.db.markers"),
+            3,
+            "5 rows at 2 per chunk = 3 marker statements"
+        );
+        assert_eq!(
+            query_count::count("derived.db.events"),
+            3,
+            "5 rows at 2 per chunk = 3 metering-event statements"
+        );
+
+        let markers: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM metering_daily_markers \
+             WHERE tenant_id = ANY($1) AND event_type = 'emails_delivered' AND day = $2",
+        )
+        .bind(&tenants)
+        .bind(day)
+        .fetch_one(pool)
+        .await
+        .expect("marker count");
+        assert_eq!(markers, 5, "all marker rows persist across chunks");
+        let events: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM metering_events \
+             WHERE tenant_id = ANY($1) AND event_type = 'emails_delivered'",
+        )
+        .bind(&tenants)
+        .fetch_one(pool)
+        .await
+        .expect("event count");
+        assert_eq!(events, 5, "all metering events persist across chunks");
+
+        // The production chunk size stays inside the bind ceiling for the
+        // widest statement in this module (12 binds/row).
+        const {
+            assert!(MULTI_ROW_INSERT_CHUNK_ROWS * 12 <= 65_535);
+        }
+
+        owned.finish().await;
+    }
+
+    /// F-audit P2 (PostgreSQL 65,535-parameter ceiling): the reconciliation
+    /// report writer chunks its multi-row INSERT. With a shrunk chunk of 2,
+    /// five tenant-day reports cost 3 statements (not 1 unbounded, not 5
+    /// per-row) and every report row persists.
+    ///
+    /// Fail-before: the unbounded single `push_values` issues exactly ONE
+    /// statement.
+    #[tokio::test]
+    async fn reconciliation_reports_chunk_above_the_parameter_boundary() {
+        use crate::test_support::query_count;
+
+        let owned = provision_env("ingest_recon_chunk_boundary").await;
+        let pool = &owned.pool;
+        let day = yesterday(Utc::now());
+        let (day_start, _day_end) = day_bounds(day);
+        let mut tenants = Vec::new();
+        for index in 0..5 {
+            let tenant = unique_tenant(&format!("ing_recon_chunk_{index}"));
+            crate::test_support::seed_tenant(pool, &tenant, "growth").await;
+            for (event_type, quantity) in [("emails_sent", 100), ("emails_delivered", 10)] {
+                sqlx::query(
+                    r#"
+                    INSERT INTO metering_events (id, tenant_id, event_type, quantity, "timestamp", metadata)
+                    VALUES ($1, $2, $3, $4, $5, '{}')
+                    "#,
+                )
+                .bind(Uuid::new_v4())
+                .bind(&tenant)
+                .bind(event_type)
+                .bind(quantity)
+                .bind(day_start + chrono::Duration::hours(5))
+                .execute(pool)
+                .await
+                .expect("seed metering");
+            }
+            tenants.push(tenant);
+        }
+
+        query_count::reset();
+        let summary = reconcile_daily_deliveries_chunked(pool, Utc::now(), 2)
+            .await
+            .expect("chunked reconciliation");
+        assert_eq!(summary.tenants_compared, 5);
+        assert_eq!(summary.reports_written, 5, "all reports written");
+        assert_eq!(
+            query_count::count("recon.db.write"),
+            3,
+            "5 reports at 2 per chunk = 3 report statements"
+        );
+
+        let persisted: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM billing_reconciliation_reports WHERE tenant_id = ANY($1)",
+        )
+        .bind(&tenants)
+        .fetch_one(pool)
+        .await
+        .expect("report count");
+        assert_eq!(persisted, 5, "all report rows persist across chunks");
+
+        // The ON CONFLICT idempotency still holds per chunk on a replay.
+        let replay = reconcile_daily_deliveries_chunked(pool, Utc::now(), 2)
+            .await
+            .expect("chunked replay");
+        assert_eq!(replay.reports_written, 0, "replay inserts nothing new");
 
         owned.finish().await;
     }
@@ -1351,6 +1683,103 @@ mod tests {
         let rerun = reconcile_daily_deliveries(pool, now).await.expect("rerun");
         assert_eq!(rerun.reports_written, 0);
         assert_eq!(rerun.overage_candidates, 0);
+
+        owned.finish().await;
+    }
+
+    /// P3 fix 2 — reconciliation must not scale DB statements with the
+    /// tenant count. Before the fix each tenant-day issued its own
+    /// `billing_reconciliation_reports` INSERT (the reads were already
+    /// grouped); now one multi-row INSERT with `RETURNING` preserves the
+    /// "only newly inserted rows count" summary. A 1-tenant run and a
+    /// 3-tenant run must issue the SAME number of statements.
+    #[tokio::test]
+    async fn reconciliation_statement_count_is_constant_in_tenant_count() {
+        use crate::test_support::query_count;
+
+        let owned = provision_env("ingest_recon_batch").await;
+        let pool = &owned.pool;
+        let day = yesterday(Utc::now());
+        let (day_start, _day_end) = day_bounds(day);
+
+        async fn seed_tenant_day(pool: &sqlx::PgPool, tenant: &str, day_start: DateTime<Utc>) {
+            crate::test_support::seed_tenant(pool, tenant, "growth").await;
+            for (event_type, quantity) in [("emails_sent", 100), ("emails_delivered", 10)] {
+                sqlx::query(
+                    r#"
+                    INSERT INTO metering_events (id, tenant_id, event_type, quantity, "timestamp", metadata)
+                    VALUES ($1, $2, $3, $4, $5, '{}')
+                    "#,
+                )
+                .bind(Uuid::new_v4())
+                .bind(tenant)
+                .bind(event_type)
+                .bind(quantity)
+                .bind(day_start + chrono::Duration::hours(5))
+                .execute(pool)
+                .await
+                .expect("seed metering");
+            }
+        }
+
+        let t_one = unique_tenant("ing_recon_batch_a");
+        seed_tenant_day(pool, &t_one, day_start).await;
+        query_count::reset();
+        let first = reconcile_daily_deliveries(pool, Utc::now())
+            .await
+            .expect("one-tenant reconciliation");
+        assert_eq!(first.reports_written, 1);
+        assert_eq!(first.overage_candidates, 1);
+        let one_counts = (
+            query_count::count("recon.db.usage"),
+            query_count::count("recon.db.bounce"),
+            query_count::count("recon.db.complaint"),
+            query_count::count("recon.db.write"),
+        );
+        assert_eq!(
+            one_counts,
+            (1, 2, 1, 1),
+            "usage + bounce(aggregate+fallback) + complaints + ONE write"
+        );
+
+        let t_two = unique_tenant("ing_recon_batch_b");
+        let t_three = unique_tenant("ing_recon_batch_c");
+        seed_tenant_day(pool, &t_two, day_start).await;
+        seed_tenant_day(pool, &t_three, day_start).await;
+        query_count::reset();
+        let second = reconcile_daily_deliveries(pool, Utc::now())
+            .await
+            .expect("three-tenant reconciliation");
+        assert_eq!(
+            second.reports_written, 2,
+            "the first tenant's report is idempotent, the two new ones are written"
+        );
+        assert_eq!(second.overage_candidates, 2);
+        let three_counts = (
+            query_count::count("recon.db.usage"),
+            query_count::count("recon.db.bounce"),
+            query_count::count("recon.db.complaint"),
+            query_count::count("recon.db.write"),
+        );
+        assert_eq!(
+            three_counts, one_counts,
+            "statement count must be constant in the tenant count"
+        );
+
+        // Integer semantics preserved: 100 reserved − 10 delivered > slack.
+        let (reserved, delivered, unaccounted, candidate): (i64, i64, i64, bool) = sqlx::query_as(
+            "SELECT reserved_emails, delivered_emails, unaccounted_emails, overage_candidate
+                   FROM billing_reconciliation_reports
+                  WHERE tenant_id = $1",
+        )
+        .bind(&t_three)
+        .fetch_one(pool)
+        .await
+        .expect("reconciliation report");
+        assert_eq!(
+            (reserved, delivered, unaccounted, candidate),
+            (100, 10, 90, true)
+        );
 
         owned.finish().await;
     }

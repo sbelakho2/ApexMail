@@ -123,6 +123,13 @@ pub struct Config {
     /// it must never be a bind address like `0.0.0.0`, which is not a routable
     /// peer and would make every call fail from inside a container.
     pub sales_autopilot_base_url: String,
+    /// Wall-clock budget for ONE console discovery run
+    /// (`POST /web/admin/sales/discovery/run`). The handler fans out with
+    /// bounded concurrency; sources that cannot start (or finish) inside this
+    /// budget are reported as failed instead of rejecting the request. This
+    /// replaces the old hard cap of 10 sources: any list is accepted, but one
+    /// request can never hold a console worker for an unbounded time.
+    pub sales_discovery_run_budget_secs: u64,
     pub internal_service_token: Option<String>,
     // ── P1 #6: per-workload outbound credentials ────────────────
     // One universal INTERNAL_SERVICE_TOKEN authorizing every internal
@@ -1089,6 +1096,9 @@ impl Config {
                 .ok()
                 .filter(|s| !s.is_empty()),
             sales_autopilot_base_url: env_or("SALES_AUTOPILOT_BASE_URL", "http://127.0.0.1:3010"),
+            sales_discovery_run_budget_secs: env_or("SALES_DISCOVERY_RUN_BUDGET_SECS", "120")
+                .parse()
+                .unwrap_or(120),
             ai_service_base_url: env_or("AI_SERVICE_BASE_URL", "http://ai-service:3012"),
             internal_service_token: env::var("INTERNAL_SERVICE_TOKEN")
                 .ok()
@@ -1609,6 +1619,7 @@ pub(crate) mod tests {
             csrf_secret: "test-csrf-secret-1234567890abcdef".into(),
             control_plane_api_key: Some("test-control-plane-api-key-1234567890".into()),
             sales_autopilot_base_url: "http://localhost:3010".into(),
+            sales_discovery_run_budget_secs: 120,
             ai_service_base_url: "http://localhost:3012".into(),
             internal_service_token: None,
             pdf_renderer_auth_token: None,
@@ -1762,6 +1773,7 @@ pub(crate) mod tests {
             csrf_secret: "test-csrf-secret-1234567890abcd".into(),
             control_plane_api_key: None,
             sales_autopilot_base_url: "http://localhost:3010".into(),
+            sales_discovery_run_budget_secs: 120,
             ai_service_base_url: "http://localhost:3012".into(),
             internal_service_token: None,
             pdf_renderer_auth_token: None,

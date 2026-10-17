@@ -1602,21 +1602,23 @@ impl CampaignManager {
             normalized_emails.push(normalized);
         }
 
-        let mut added = 0usize;
-        for normalized in normalized_emails {
-            let result = sqlx::query(
-                "INSERT INTO sales_campaign_recipients (campaign_id, email) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-            )
-            .bind(id)
-            .bind(&normalized)
-            .execute(&self.db)
-            .await
-            .map_err(|e| SalesError::Database(e.to_string()))?;
-
-            if result.rows_affected() > 0 {
-                added += 1;
-            }
+        if normalized_emails.is_empty() {
+            return Ok(0);
         }
+        // ONE statement for the whole batch: `ON CONFLICT DO NOTHING` also
+        // skips duplicates proposed twice in the same command, so `added`
+        // matches the old per-email loop exactly.
+        let added = sqlx::query(
+            "INSERT INTO sales_campaign_recipients (campaign_id, email) \
+             SELECT $1, email FROM unnest($2::text[]) AS batch(email) \
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(id)
+        .bind(&normalized_emails)
+        .execute(&self.db)
+        .await
+        .map_err(|e| SalesError::Database(e.to_string()))?
+        .rows_affected() as usize;
 
         Ok(added)
     }
@@ -3168,6 +3170,68 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+        sqlx::query("DELETE FROM sales_campaign_recipients WHERE campaign_id = $1")
+            .bind(campaign.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM sales_campaigns WHERE id = $1")
+            .bind(campaign.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    /// One INSERT for the whole recipient batch (pre-fix: one INSERT per
+    /// address — an N+1 write path for arbitrarily long lists).
+    #[tokio::test]
+    async fn add_recipients_writes_the_batch_with_one_statement() {
+        let Some(pool) = canonical_test_pool("campaigns::tests::add_recipients_batch").await else {
+            return;
+        };
+        let tenant = unique_test_tenant("camp-batch");
+        let mgr = CampaignManager::new(10, pool.clone());
+        let campaign = mgr
+            .create_campaign(
+                tenant.clone(),
+                "Batch recipients".into(),
+                "tmpl_batch".into(),
+                "all".into(),
+            )
+            .await
+            .unwrap();
+
+        crate::test_probe::install_insert_probe(&pool, "sales_campaign_recipients", "campaign_id")
+            .await;
+        let probe_key = campaign.id.to_string();
+        crate::test_probe::reset_probe(&pool, "sales_campaign_recipients", &probe_key).await;
+
+        let emails: Vec<String> = (0..25)
+            .map(|index| format!("batch-{index}-{}@example.com", &tenant[..12]))
+            .collect();
+        let added = mgr
+            .add_recipients(&tenant, campaign.id, emails.clone())
+            .await
+            .unwrap();
+        assert_eq!(added, 25);
+        assert_eq!(
+            crate::test_probe::probe_count(&pool, "sales_campaign_recipients", &probe_key).await,
+            1,
+            "the whole batch must be ONE INSERT statement (pre-fix: one per address)"
+        );
+
+        // A replay adds nothing and still issues one statement: the probe
+        // counts statements that INSERTED rows, so the count stays at one.
+        let replayed = mgr
+            .add_recipients(&tenant, campaign.id, emails)
+            .await
+            .unwrap();
+        assert_eq!(replayed, 0, "the batch is idempotent");
+        assert_eq!(
+            crate::test_probe::probe_count(&pool, "sales_campaign_recipients", &probe_key).await,
+            1
+        );
+
         sqlx::query("DELETE FROM sales_campaign_recipients WHERE campaign_id = $1")
             .bind(campaign.id)
             .execute(&pool)

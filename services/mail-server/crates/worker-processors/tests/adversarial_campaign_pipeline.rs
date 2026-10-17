@@ -426,7 +426,13 @@ async fn due_scheduled_campaign_is_claimed_to_sending_not_left_scheduled() {
     backend.set_limit(0);
     let exec = executor(&pool, backend.clone(), "adv-claim-worker");
 
-    let campaign = insert_ready_campaign(&pool, &tenant, "scheduled", Some(Utc::now())).await;
+    let campaign = insert_ready_campaign(
+        &pool,
+        &tenant,
+        "scheduled",
+        Some(Utc::now() - chrono::Duration::seconds(30)),
+    )
+    .await;
     let list = insert_list(&pool, &tenant).await;
     for i in 0..2 {
         let contact =
@@ -483,7 +489,13 @@ async fn future_due_scheduled_campaign_is_untouched() {
     let backend = Arc::new(FakeAdmission::new());
     let exec = executor(&pool, backend, "adv-future-worker");
 
-    let due = insert_ready_campaign(&pool, &tenant, "scheduled", Some(Utc::now())).await;
+    let due = insert_ready_campaign(
+        &pool,
+        &tenant,
+        "scheduled",
+        Some(Utc::now() - chrono::Duration::seconds(30)),
+    )
+    .await;
     let future = insert_ready_campaign(
         &pool,
         &tenant,
@@ -546,7 +558,13 @@ async fn two_workers_cannot_double_claim_or_double_send() {
     let worker_a = executor(&pool, backend.clone(), "adv-race-a");
     let worker_b = executor(&pool, backend.clone(), "adv-race-b");
 
-    let campaign = insert_ready_campaign(&pool, &tenant, "scheduled", Some(Utc::now())).await;
+    let campaign = insert_ready_campaign(
+        &pool,
+        &tenant,
+        "scheduled",
+        Some(Utc::now() - chrono::Duration::seconds(30)),
+    )
+    .await;
     let list = insert_list(&pool, &tenant).await;
     let mut emails = Vec::new();
     for i in 0..6 {
@@ -645,7 +663,13 @@ async fn suppressed_recipient_is_never_enqueued_even_on_resend() {
     backend.suppress("blocked@example.test");
     let exec = executor(&pool, backend, "adv-supp-worker");
 
-    let campaign = insert_ready_campaign(&pool, &tenant, "scheduled", Some(Utc::now())).await;
+    let campaign = insert_ready_campaign(
+        &pool,
+        &tenant,
+        "scheduled",
+        Some(Utc::now() - chrono::Duration::seconds(30)),
+    )
+    .await;
     let list = insert_list(&pool, &tenant).await;
     let clean = "clean@example.test";
     let blocked = "Blocked@Example.TEST";
@@ -761,12 +785,23 @@ async fn empty_audience_stays_honest_and_never_expands_to_every_contact() {
     }
 
     // Campaign with NO lists and NO segment: the honest empty audience.
-    let empty = insert_ready_campaign(&pool, &tenant, "scheduled", Some(Utc::now())).await;
+    let empty = insert_ready_campaign(
+        &pool,
+        &tenant,
+        "scheduled",
+        Some(Utc::now() - chrono::Duration::seconds(30)),
+    )
+    .await;
     // Second empty campaign whose list_ids points at a list with zero
     // subscribers: also empty, also must not fabricate.
     let empty_list = insert_list(&pool, &tenant).await;
-    let empty_subscribed =
-        insert_ready_campaign(&pool, &tenant, "scheduled", Some(Utc::now())).await;
+    let empty_subscribed = insert_ready_campaign(
+        &pool,
+        &tenant,
+        "scheduled",
+        Some(Utc::now() - chrono::Duration::seconds(30)),
+    )
+    .await;
     attach_lists(&pool, empty_subscribed, &[empty_list], &[]).await;
 
     let report = exec.tick().await.expect("tick");
@@ -900,7 +935,13 @@ async fn audience_expansion_honors_lists_excludes_status_and_segment_tags() {
     // ---- Campaign 1: list_ids + exclude_list_ids + segment list union ----
     let seg_lists =
         insert_segment(&pool, &tenant, &[l_seg], &[l_seg_ex], serde_json::json!({})).await;
-    let campaign_lists = insert_ready_campaign(&pool, &tenant, "scheduled", Some(Utc::now())).await;
+    let campaign_lists = insert_ready_campaign(
+        &pool,
+        &tenant,
+        "scheduled",
+        Some(Utc::now() - chrono::Duration::seconds(30)),
+    )
+    .await;
     attach_lists(&pool, campaign_lists, &[l_in], &[l_ex]).await;
     attach_segment(&pool, campaign_lists, seg_lists).await;
 
@@ -913,7 +954,13 @@ async fn audience_expansion_honors_lists_excludes_status_and_segment_tags() {
         serde_json::json!({ "tags_all": ["vip"] }),
     )
     .await;
-    let campaign_vip = insert_ready_campaign(&pool, &tenant, "scheduled", Some(Utc::now())).await;
+    let campaign_vip = insert_ready_campaign(
+        &pool,
+        &tenant,
+        "scheduled",
+        Some(Utc::now() - chrono::Duration::seconds(30)),
+    )
+    .await;
     attach_lists(&pool, campaign_vip, &[l_in], &[]).await;
     attach_segment(&pool, campaign_vip, seg_vip).await;
 
@@ -926,7 +973,13 @@ async fn audience_expansion_honors_lists_excludes_status_and_segment_tags() {
         serde_json::json!({ "tags_any": ["beta"] }),
     )
     .await;
-    let campaign_beta = insert_ready_campaign(&pool, &tenant, "scheduled", Some(Utc::now())).await;
+    let campaign_beta = insert_ready_campaign(
+        &pool,
+        &tenant,
+        "scheduled",
+        Some(Utc::now() - chrono::Duration::seconds(30)),
+    )
+    .await;
     attach_segment(&pool, campaign_beta, seg_beta).await;
 
     let report = exec.tick().await.expect("expansion tick");
@@ -987,7 +1040,13 @@ async fn quota_hard_stop_defers_without_fabricating_sends_then_recovers_once() {
     backend.set_limit(0);
     let exec = executor(&pool, backend.clone(), "adv-quota-worker");
 
-    let campaign = insert_ready_campaign(&pool, &tenant, "scheduled", Some(Utc::now())).await;
+    let campaign = insert_ready_campaign(
+        &pool,
+        &tenant,
+        "scheduled",
+        Some(Utc::now() - chrono::Duration::seconds(30)),
+    )
+    .await;
     let list = insert_list(&pool, &tenant).await;
     let mut emails = Vec::new();
     for i in 0..3 {
@@ -1063,5 +1122,285 @@ async fn quota_hard_stop_defers_without_fabricating_sends_then_recovers_once() {
              re-claim a no-op for {email}"
         );
     }
+    pool.close().await;
+}
+
+// ---------------------------------------------------------------------------
+// P1: finalize batches its per-campaign statements
+// ---------------------------------------------------------------------------
+
+/// Statement-level counters for the two batched DML shapes: an UPDATE of
+/// `campaigns` and an INSERT into `webhook_queue` each fire their trigger
+/// exactly once per statement.
+async fn install_finalize_statement_counters(pool: &PgPool) {
+    for (table, tag) in [
+        ("campaigns", "campaigns_update"),
+        ("webhook_queue", "webhook_queue_insert"),
+    ] {
+        let counter = format!("{tag}_counter");
+        sqlx::query(&format!("DROP TABLE IF EXISTS {counter}"))
+            .execute(pool)
+            .await
+            .expect("drop counter table");
+        sqlx::query(&format!(
+            "CREATE TABLE {counter} (id int PRIMARY KEY, statements bigint NOT NULL DEFAULT 0)"
+        ))
+        .execute(pool)
+        .await
+        .expect("create counter table");
+        sqlx::query(&format!(
+            "INSERT INTO {counter} (id, statements) VALUES (1, 0)"
+        ))
+        .execute(pool)
+        .await
+        .expect("seed counter");
+        let event = if table == "campaigns" {
+            "UPDATE"
+        } else {
+            "INSERT"
+        };
+        let function = format!("count_{tag}_statement");
+        sqlx::query(&format!(
+            "CREATE OR REPLACE FUNCTION {function}() RETURNS trigger AS $$ \
+             BEGIN \
+               UPDATE {counter} SET statements = statements + 1 WHERE id = 1; \
+               RETURN NULL; \
+             END; \
+             $$ LANGUAGE plpgsql"
+        ))
+        .execute(pool)
+        .await
+        .expect("counter fn");
+        let trigger = format!("{tag}_statement_counter");
+        sqlx::query(&format!("DROP TRIGGER IF EXISTS {trigger} ON {table}"))
+            .execute(pool)
+            .await
+            .expect("drop old trigger");
+        sqlx::query(&format!(
+            "CREATE TRIGGER {trigger} AFTER {event} ON {table} \
+             FOR EACH STATEMENT EXECUTE FUNCTION {function}()"
+        ))
+        .execute(pool)
+        .await
+        .expect("counter trigger");
+    }
+}
+
+async fn statement_count(pool: &PgPool, tag: &str) -> i64 {
+    sqlx::query_scalar(&format!(
+        "SELECT statements FROM {tag}_counter WHERE id = 1"
+    ))
+    .fetch_one(pool)
+    .await
+    .expect("counter value")
+}
+
+/// P1: three finished campaigns — plus two subscribed webhooks each — finalize
+/// with ONE `campaigns` UPDATE and ONE `webhook_queue` INSERT while producing
+/// exactly the pre-batching rows: `sent`/`partial` with the real `sent_count`,
+/// and one completed-event queue row per (campaign x subscribed webhook).
+#[tokio::test]
+async fn finalize_batches_counts_updates_and_webhook_enqueues() {
+    let Some(pool) = fresh_pool("advcamp_p1_finalize").await else {
+        return;
+    };
+    let backend = Arc::new(FakeAdmission::new());
+    let engine = executor(&pool, backend.clone(), "advcamp-p1");
+
+    let tenant = fresh_tenant("p1finalize");
+    insert_tenant(&pool, &tenant).await;
+
+    // Three campaigns already in flight with only terminal recipient rows.
+    let all_sent = insert_ready_campaign(&pool, &tenant, "sending", None).await;
+    let with_failure = insert_ready_campaign(&pool, &tenant, "resending", None).await;
+    let with_suppression = insert_ready_campaign(&pool, &tenant, "sending", None).await;
+
+    let statuses: [(Uuid, &[&str]); 3] = [
+        (all_sent, &["sent", "sent"]),
+        (with_failure, &["sent", "failed"]),
+        (with_suppression, &["sent", "suppressed"]),
+    ];
+    for (campaign, recipient_statuses) in statuses {
+        for (index, status) in recipient_statuses.iter().enumerate() {
+            let contact = insert_contact(
+                &pool,
+                &tenant,
+                &format!("{campaign}-{index}@example.com"),
+                "subscribed",
+            )
+            .await;
+            sqlx::query(
+                "INSERT INTO campaign_recipients \
+                     (id, tenant_id, campaign_id, contact_id, email, status) \
+                 VALUES ($1, $2, $3, $4, $5, $6)",
+            )
+            .bind(Uuid::new_v4())
+            .bind(&tenant)
+            .bind(campaign)
+            .bind(contact)
+            .bind(format!("{campaign}-{index}@example.com"))
+            .bind(status)
+            .execute(&pool)
+            .await
+            .expect("insert recipient");
+        }
+    }
+
+    // Webhooks: `subscribed` (campaign.completed) and `wildcard` (*) get a row
+    // per campaign; the disabled one never does; another tenant's wildcard is
+    // never touched.
+    let subscribed = format!("wh_sub_{}", &Uuid::new_v4().simple().to_string()[..16]);
+    let wildcard = format!("wh_any_{}", &Uuid::new_v4().simple().to_string()[..16]);
+    let disabled = format!("wh_dis_{}", &Uuid::new_v4().simple().to_string()[..16]);
+    let other_tenant = fresh_tenant("p1finalother");
+    insert_tenant(&pool, &other_tenant).await;
+    let foreign = format!("wh_for_{}", &Uuid::new_v4().simple().to_string()[..16]);
+    for (id, owner, events, enabled) in [
+        (
+            &subscribed,
+            &tenant,
+            serde_json::json!(["campaign.completed"]),
+            true,
+        ),
+        (&wildcard, &tenant, serde_json::json!(["*"]), true),
+        (
+            &disabled,
+            &tenant,
+            serde_json::json!(["campaign.completed"]),
+            false,
+        ),
+        (
+            &foreign,
+            &other_tenant,
+            serde_json::json!(["campaign.completed"]),
+            true,
+        ),
+    ] {
+        sqlx::query(
+            "INSERT INTO webhooks (id, tenant_id, url, secret, events, enabled, status) \
+             VALUES ($1, $2, 'https://hooks.example.test/' || $1, 'whsec_test', $3, $4, 'active')",
+        )
+        .bind(id)
+        .bind(owner)
+        .bind(events)
+        .bind(enabled)
+        .execute(&pool)
+        .await
+        .expect("insert webhook");
+    }
+
+    install_finalize_statement_counters(&pool).await;
+
+    let report = engine.tick().await.expect("tick");
+    assert_eq!(report.campaigns_completed, 3, "{report:?}");
+
+    // Observable campaign rows are unchanged.
+    assert_eq!(campaign_status(&pool, all_sent).await, ("sent".into(), 2));
+    assert_eq!(
+        campaign_status(&pool, with_failure).await,
+        ("partial".into(), 1)
+    );
+    assert_eq!(
+        campaign_status(&pool, with_suppression).await,
+        ("partial".into(), 1)
+    );
+
+    // One statement per batched shape, not one per campaign: the tick's
+    // scheduled-claim phase UPDATE always executes (a no-op here — no
+    // scheduled campaigns) and the finalize phase adds exactly ONE batched
+    // UPDATE for all three campaigns. The old per-campaign finalize made this
+    // count 1 + 3.
+    assert_eq!(
+        statement_count(&pool, "campaigns_update").await,
+        2,
+        "the three campaign updates must ride one UPDATE ... FROM (VALUES ...) \
+         (plus the phase-1 claim UPDATE that runs on every tick)"
+    );
+    assert_eq!(
+        statement_count(&pool, "webhook_queue_insert").await,
+        1,
+        "every completed-event queue row must ride one multi-row INSERT"
+    );
+
+    // The same queue rows as before: 3 campaigns x 2 subscribed webhooks.
+    let queued: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT webhook_id, event_type, payload->'data'->>'campaign_id' FROM webhook_queue \
+         WHERE tenant_id = $1 ORDER BY webhook_id, payload->'data'->>'campaign_id'",
+    )
+    .bind(&tenant)
+    .fetch_all(&pool)
+    .await
+    .expect("webhook queue rows");
+    assert_eq!(
+        queued.len(),
+        6,
+        "2 subscribed webhooks x 3 campaigns: {queued:?}"
+    );
+    for (webhook_id, event_type, campaign_id) in &queued {
+        assert!(
+            webhook_id == &subscribed || webhook_id == &wildcard,
+            "only enabled subscribed webhooks of the tenant may queue: {webhook_id}"
+        );
+        assert_eq!(event_type, "campaign.completed");
+        assert!(
+            campaign_id == &all_sent.to_string()
+                || campaign_id == &with_failure.to_string()
+                || campaign_id == &with_suppression.to_string()
+        );
+    }
+    let (statuses, attempts): (Vec<String>, Vec<i32>) = sqlx::query_as(
+        "SELECT array_agg(status), array_agg(attempt) FROM webhook_queue WHERE tenant_id = $1",
+    )
+    .bind(&tenant)
+    .fetch_one(&pool)
+    .await
+    .expect("queue statuses");
+    assert!(statuses.iter().all(|status| status == "pending"));
+    assert!(attempts.iter().all(|attempt| *attempt == 1));
+
+    let foreign_rows: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM webhook_queue WHERE tenant_id = $1")
+            .bind(&other_tenant)
+            .fetch_one(&pool)
+            .await
+            .expect("foreign queue rows");
+    assert_eq!(foreign_rows, 0, "another tenant's webhook must not queue");
+
+    let disabled_rows: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM webhook_queue WHERE webhook_id = $1")
+            .bind(&disabled)
+            .fetch_one(&pool)
+            .await
+            .expect("disabled queue rows");
+    assert_eq!(disabled_rows, 0, "a disabled webhook must not queue");
+
+    // The completed payload keeps its shape.
+    let payload: serde_json::Value = sqlx::query_scalar(
+        "SELECT payload FROM webhook_queue \
+         WHERE webhook_id = $1 AND payload->'data'->>'campaign_id' = $2",
+    )
+    .bind(&subscribed)
+    .bind(with_failure.to_string())
+    .fetch_one(&pool)
+    .await
+    .expect("completed payload");
+    assert_eq!(payload["type"], "campaign.completed");
+    assert_eq!(payload["tenantId"], tenant.as_str());
+    assert_eq!(payload["data"]["status"], "partial");
+    assert_eq!(payload["data"]["sent"], 1);
+    assert_eq!(payload["data"]["failed"], 1);
+    assert!(payload["id"]
+        .as_str()
+        .unwrap_or_default()
+        .starts_with("evt_"));
+
+    // A second tick is a no-op: nothing left to finalize. (The phase-1 claim
+    // UPDATE adds one more no-op statement; the finalize UPDATE and the
+    // webhook INSERT do not run.)
+    let again = engine.tick().await.expect("second tick");
+    assert_eq!(again.campaigns_completed, 0);
+    assert_eq!(statement_count(&pool, "campaigns_update").await, 3);
+    assert_eq!(statement_count(&pool, "webhook_queue_insert").await, 1);
+
     pool.close().await;
 }

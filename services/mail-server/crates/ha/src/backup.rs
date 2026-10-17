@@ -27,6 +27,67 @@ use crate::types::{
 };
 
 const BATCH_SIZE: i64 = 10_000;
+/// Rows per multi-row INSERT during restore. The old restore issued one
+/// INSERT per row.
+const RESTORE_BATCH_ROWS: usize = 500;
+
+/// Write bytes to `writer` and fold them into the backup checksum in one
+/// place, so streamed markers and rows can never diverge from the hash.
+fn write_hashed<W: Write + ?Sized>(
+    writer: &mut W,
+    hasher: &mut Sha256,
+    bytes: &[u8],
+) -> std::io::Result<()> {
+    writer.write_all(bytes)?;
+    hasher.update(bytes);
+    Ok(())
+}
+
+/// Index the `--TABLE:<name>:START--` / `--TABLE:<name>:END--` markers in one
+/// pass, returning table name → byte range of its JSONL rows.
+///
+/// The old restore searched the whole archive for each table's markers and
+/// converted the entire payload to a String first, so restoring an archive of
+/// N tables scanned (and potentially copied) N times the file. Here the
+/// payload is touched once and each table is restored from a borrowed slice.
+fn index_backup_sections(data: &[u8]) -> std::collections::HashMap<String, std::ops::Range<usize>> {
+    const PREFIX: &[u8] = b" --TABLE:";
+    let mut sections = std::collections::HashMap::new();
+    let mut open: Option<(String, usize)> = None;
+    let mut line_start = 0usize;
+
+    loop {
+        let line_end = data[line_start..]
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map(|offset| line_start + offset)
+            .unwrap_or(data.len());
+        let line = &data[line_start..line_end];
+
+        if let Some(rest) = line.strip_prefix(PREFIX) {
+            if let Some(name) = rest.strip_suffix(b":START--") {
+                if let Ok(name) = std::str::from_utf8(name) {
+                    open = Some((name.to_string(), (line_end + 1).min(data.len())));
+                }
+            } else if let Some(name) = rest.strip_suffix(b":END--") {
+                if let Ok(name) = std::str::from_utf8(name) {
+                    if let Some((open_name, start)) = open.take() {
+                        if open_name == name {
+                            sections.insert(open_name, start..line_start);
+                        }
+                    }
+                }
+            }
+        }
+
+        if line_end == data.len() {
+            break;
+        }
+        line_start = line_end + 1;
+    }
+
+    sections
+}
 
 ///Encryption constants
 const ENCRYPTION_NONCE_SIZE: usize = 12; // 96 bits for AES-GCM
@@ -269,24 +330,20 @@ impl BackupService {
         for table in &target_tables {
             // Write table start marker
             let start_marker = format!(" --TABLE:{}:START--\n", table);
-            encoder
-                .write_all(start_marker.as_bytes())
+            write_hashed(&mut encoder, &mut hasher, start_marker.as_bytes())
                 .map_err(|e| format!("Write marker: {e}"))?;
-            hasher.update(start_marker.as_bytes());
 
-            let data = self.stream_table(table).await?;
-            hasher.update(&data);
-            encoder
-                .write_all(&data)
-                .map_err(|e| format!("Gzip write: {e}"))?;
-            total_size += data.len() as i64;
+            // Stream rows straight from the cursor into the gzip encoder:
+            // the old code buffered the WHOLE table in a Vec<u8> first,
+            // doubling peak memory for the largest table.
+            total_size += self
+                .stream_table_into(table, &mut encoder, &mut hasher)
+                .await?;
 
             // Write table end marker
             let end_marker = format!(" --TABLE:{}:END--\n", table);
-            encoder
-                .write_all(end_marker.as_bytes())
+            write_hashed(&mut encoder, &mut hasher, end_marker.as_bytes())
                 .map_err(|e| format!("Write marker: {e}"))?;
-            hasher.update(end_marker.as_bytes());
         }
 
         let compressed = encoder.finish().map_err(|e| format!("Gzip finish: {e}"))?;
@@ -368,13 +425,31 @@ impl BackupService {
     }
 
     /// Stream a table's rows in batches using cursor-based pagination.
+    #[cfg(test)]
     async fn stream_table(&self, table: &str) -> Result<Vec<u8>, String> {
+        let mut buffer = Vec::with_capacity((BATCH_SIZE as usize).saturating_mul(256));
+        let mut hasher = Sha256::new();
+        self.stream_table_into(table, &mut buffer, &mut hasher)
+            .await?;
+        Ok(buffer)
+    }
+
+    /// Stream a table's rows in batches straight to `writer` (updating
+    /// `hasher` as each row goes out). Returns the uncompressed row bytes
+    /// written, which is what the backup's compression ratio is computed
+    /// from. Peak memory stays bounded by one FETCH batch instead of the
+    /// whole table.
+    async fn stream_table_into<W: Write + ?Sized>(
+        &self,
+        table: &str,
+        writer: &mut W,
+        hasher: &mut Sha256,
+    ) -> Result<i64, String> {
         // Sanitize table name (prevent SQL injection)
         if !Self::is_valid_identifier(table) {
             return Err(format!("Invalid table name: {table}"));
         }
 
-        let mut all_data = Vec::with_capacity((BATCH_SIZE as usize).saturating_mul(256));
         let mut tx = self
             .pool
             .begin()
@@ -393,11 +468,15 @@ impl BackupService {
             .await
             .map_err(|e| format!("Declare cursor {table}: {e}"))?;
 
+        // The cursor and batch size are fixed for the whole loop — build the
+        // FETCH statement once, not once per batch.
+        let fetch = format!(
+            "FETCH FORWARD {BATCH_SIZE} FROM {cursor}",
+            cursor = quoted_cursor
+        );
+        let mut written: i64 = 0;
+
         loop {
-            let fetch = format!(
-                "FETCH FORWARD {BATCH_SIZE} FROM {cursor}",
-                cursor = quoted_cursor
-            );
             let rows: Vec<(String,)> = sqlx::query_as(&fetch)
                 .fetch_all(&mut *tx)
                 .await
@@ -408,8 +487,16 @@ impl BackupService {
             }
 
             for (json_row,) in &rows {
-                all_data.extend_from_slice(json_row.as_bytes());
-                all_data.push(b'\n');
+                let bytes = json_row.as_bytes();
+                writer
+                    .write_all(bytes)
+                    .map_err(|e| format!("Gzip write: {e}"))?;
+                writer
+                    .write_all(b"\n")
+                    .map_err(|e| format!("Gzip write: {e}"))?;
+                hasher.update(bytes);
+                hasher.update(b"\n");
+                written += (bytes.len() + 1) as i64;
             }
 
             if (rows.len() as i64) < BATCH_SIZE {
@@ -424,7 +511,7 @@ impl BackupService {
         tx.commit()
             .await
             .map_err(|e| format!("Commit cursor transaction: {e}"))?;
-        Ok(all_data)
+        Ok(written)
     }
 
     async fn get_all_tables(&self) -> Result<Vec<String>, String> {
@@ -495,10 +582,24 @@ impl BackupService {
             }
         }
 
-        // Parse and restore each table
+        // Parse and restore each table. The archive is indexed ONCE: the old
+        // restore built a whole-file String and rescanned it twice for every
+        // table (O(tables × bytes)).
         let tables = backup.tables_included.clone().unwrap_or_default();
+        let sections = index_backup_sections(&decompressed);
         for table in &tables {
-            self.restore_table(table, &decompressed).await?;
+            // Validate the recorded table list BEFORE looking it up: a
+            // catalog name smuggled into `tables_included` must be refused as
+            // an invalid identifier, not reported as a missing archive
+            // section.
+            if !Self::is_valid_identifier(table) {
+                return Err(format!("Invalid table name: {table}"));
+            }
+            let rows = sections
+                .get(table)
+                .ok_or_else(|| format!("Table {table} not found in backup"))?;
+            self.restore_table(table, &decompressed[rows.clone()])
+                .await?;
         }
 
         let duration_ms = (Utc::now() - started).num_milliseconds();
@@ -718,28 +819,25 @@ impl BackupService {
         format!("\"{}\"", name.replace('"', "\"\""))
     }
 
-    /// Restore a single table from backup data
+    /// Restore a single table from its JSONL row section (no markers — the
+    /// archive is indexed once by [`index_backup_sections`]).
     async fn restore_table(&self, table: &str, data: &[u8]) -> Result<(), String> {
         // Sanitize table name (prevent SQL injection)
         if !Self::is_valid_identifier(table) {
             return Err(format!("Invalid table name: {table}"));
         }
 
-        // Parse the backup format:table data is JSONL with table markers
-        let content = String::from_utf8_lossy(data);
-
-        // Find this table's section in the backup
-        let marker_start = format!(" --TABLE:{}:START--", table);
-        let marker_end = format!(" --TABLE:{}:END--", table);
-
-        let start_idx = content
-            .find(&marker_start)
-            .ok_or_else(|| format!("Table {} not found in backup", table))?;
-        let end_idx = content
-            .find(&marker_end)
-            .ok_or_else(|| format!("Table {} end marker not found", table))?;
-
-        let table_data = &content[start_idx + marker_start.len()..end_idx];
+        let quoted_table = Self::quote_ident(table);
+        // Hoisted out of the row loop: both statements are constant for the
+        // whole table. jsonb_populate_recordset is the set-based form of the
+        // per-row jsonb_populate_record call the old restore issued N times
+        // (sqlx binds serde_json::Value as `jsonb`, which has no implicit
+        // cast to the `json` argument of the json_populate_record family).
+        let truncate_sql = format!("TRUNCATE TABLE {quoted_table} CASCADE");
+        let insert_sql = format!(
+            "INSERT INTO {quoted_table} \
+             SELECT * FROM jsonb_populate_recordset(NULL::{quoted_table}, $1::jsonb)"
+        );
 
         // Begin transaction for this table's restore
         let mut tx = self
@@ -748,43 +846,34 @@ impl BackupService {
             .await
             .map_err(|e| format!("Begin transaction: {e}"))?;
 
-        // Truncate existing data if requested
-        let truncate_sql = format!("TRUNCATE TABLE {} CASCADE", Self::quote_ident(table));
         sqlx::query(&truncate_sql)
             .execute(&mut *tx)
             .await
-            .map_err(|e| format!("Truncate {}: {e}", table))?;
+            .map_err(|e| format!("Truncate {table}: {e}"))?;
 
-        // Insert each row
-        let mut row_count = 0;
-        for line in table_data.lines() {
-            let line = line.trim();
-            if line.is_empty() {
+        let mut row_count = 0usize;
+        let mut batch: Vec<serde_json::Value> = Vec::with_capacity(RESTORE_BATCH_ROWS);
+        for line in data.split(|byte| *byte == b'\n') {
+            if line.iter().all(u8::is_ascii_whitespace) {
                 continue;
             }
 
-            // Parse JSONL row and generate INSERT
-            if let Ok(row) = serde_json::from_str::<serde_json::Value>(line) {
-                if let Some(obj) = row.as_object() {
-                    // jsonb_populate_record, not json_populate_record: sqlx
-                    // binds serde_json::Value as `jsonb`, and jsonb has no
-                    // implicit cast to the `json` argument of
-                    // json_populate_record — that call failed for every row
-                    // ("function json_populate_record(<table>, jsonb) does not
-                    // exist"), so restores could never insert anything.
-                    let insert_sql = format!(
-                        "INSERT INTO {table} SELECT * FROM jsonb_populate_record(NULL::{table}, $1)",
-                        table = table
-                    );
-
-                    sqlx::query(&insert_sql)
-                        .bind(serde_json::Value::Object(obj.clone()))
-                        .execute(&mut *tx)
-                        .await
-                        .map_err(|e| format!("Insert into {}: {e}", table))?;
-                    row_count += 1;
+            // Parse the JSONL row. Malformed lines are skipped exactly like
+            // the old per-row parser did.
+            if let Ok(serde_json::Value::Object(obj)) =
+                serde_json::from_slice::<serde_json::Value>(line)
+            {
+                batch.push(serde_json::Value::Object(obj));
+                row_count += 1;
+                if batch.len() >= RESTORE_BATCH_ROWS {
+                    self.insert_restore_batch(&mut tx, &insert_sql, table, &mut batch)
+                        .await?;
                 }
             }
+        }
+        if !batch.is_empty() {
+            self.insert_restore_batch(&mut tx, &insert_sql, table, &mut batch)
+                .await?;
         }
 
         tx.commit()
@@ -792,6 +881,24 @@ impl BackupService {
             .map_err(|e| format!("Commit restore: {e}"))?;
 
         info!(table = %table, rows = row_count, "Table restored");
+        Ok(())
+    }
+
+    /// Flush one restore batch as a single multi-row INSERT.
+    async fn insert_restore_batch(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        insert_sql: &str,
+        table: &str,
+        batch: &mut Vec<serde_json::Value>,
+    ) -> Result<(), String> {
+        let payload = serde_json::Value::Array(std::mem::take(batch));
+        batch.reserve(RESTORE_BATCH_ROWS);
+        sqlx::query(insert_sql)
+            .bind(payload)
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| format!("Insert into {table}: {e}"))?;
         Ok(())
     }
 
@@ -883,9 +990,20 @@ impl BackupService {
             }
         }
 
-        // Real sequence:per-table restore.
+        // Real sequence:per-table restore (archive indexed once).
+        let sections = index_backup_sections(&decompressed);
         for table in &tables {
-            if let Err(e) = self.restore_table(table, &decompressed).await {
+            if !Self::is_valid_identifier(table) {
+                return Ok(unsupported(format!(
+                    "restore of table {table} (Invalid table name: {table})"
+                )));
+            }
+            let Some(rows) = sections.get(table) else {
+                return Ok(unsupported(format!(
+                    "restore of table {table} (Table {table} not found in backup)"
+                )));
+            };
+            if let Err(e) = self.restore_table(table, &decompressed[rows.clone()]).await {
                 return Ok(unsupported(format!("restore of table {table} ({e})")));
             }
         }
@@ -1600,5 +1718,72 @@ mod tests {
                 .execute(&pool)
                 .await;
         });
+    }
+
+    // ── Streaming / single-pass restore helpers ────────────────────────
+
+    #[test]
+    fn index_backup_sections_returns_exact_row_ranges_in_one_pass() {
+        let archive = b" --TABLE:users:START--\n{\"id\":1}\n{\"id\":2}\n \
+ --TABLE:users:END--\n --TABLE:emails:START--\n{\"id\":3}\n --TABLE:emails:END--\n";
+        let sections = index_backup_sections(archive);
+
+        assert_eq!(
+            &archive[sections["users"].clone()],
+            b"{\"id\":1}\n{\"id\":2}\n",
+            "row range excludes both marker lines"
+        );
+        assert_eq!(&archive[sections["emails"].clone()], b"{\"id\":3}\n");
+
+        // Empty table section: start marker directly followed by end marker.
+        let empty = b" --TABLE:api_keys:START--\n --TABLE:api_keys:END--\n";
+        let sections = index_backup_sections(empty);
+        assert!(sections["api_keys"].is_empty());
+
+        // Unterminated sections are not indexable (restore refuses them),
+        // and marker-like text inside a JSON row is not a marker (only whole
+        // lines count).
+        let unterminated = b" --TABLE:users:START--\n{\"x\":\" --TABLE:users:END--\"}\n";
+        assert!(index_backup_sections(unterminated).is_empty());
+    }
+
+    #[test]
+    fn streamed_backup_writes_rows_incrementally_and_hashes_them() {
+        // A writer that records every write call proves the row bytes are
+        // handed off as they are fetched instead of being returned as one
+        // contiguous table buffer.
+        #[derive(Default)]
+        struct SpyWriter {
+            bytes: Vec<u8>,
+            calls: usize,
+        }
+        impl std::io::Write for SpyWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.calls += 1;
+                self.bytes.extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut writer = SpyWriter::default();
+        let mut hasher = Sha256::new();
+        write_hashed(&mut writer, &mut hasher, b" --TABLE:users:START--\n").unwrap();
+        write_hashed(&mut writer, &mut hasher, b"{\"id\":1}\n").unwrap();
+        write_hashed(&mut writer, &mut hasher, b"{\"id\":2}\n").unwrap();
+        write_hashed(&mut writer, &mut hasher, b" --TABLE:users:END--\n").unwrap();
+
+        assert_eq!(
+            writer.bytes,
+            b" --TABLE:users:START--\n{\"id\":1}\n{\"id\":2}\n --TABLE:users:END--\n"
+        );
+        assert_eq!(writer.calls, 4, "each chunk is written when it is produced");
+        // The checksum is over exactly the same bytes the archive contains.
+        assert_eq!(
+            format!("{:x}", hasher.finalize()),
+            format!("{:x}", Sha256::digest(&writer.bytes))
+        );
     }
 }

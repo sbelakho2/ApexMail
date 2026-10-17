@@ -125,14 +125,51 @@ enum ConsentDecision {
 /// F55: the single authoritative dispatch-time consent query — global
 /// suppression AND the per-category preference, read together so the two
 /// dimensions cannot disagree.
+///
+/// P1: each arm joins the ONE canonical candidate through `UNNEST` — the same
+/// probe shape the claim-time batch probes use (see
+/// [`SUPPRESSION_BATCH_PROBE_SQL`]). With the sibling migration's
+/// `(tenant_id, lower(email))` functional index both arms are index-nested
+/// loops; `LOWER(s.email)`/`LOWER(sp.email)` on the STORED side is preserved,
+/// so the decision is identical for any row a legacy writer stored
+/// non-canonically.
 const DISPATCH_CONSENT_SQL: &str = r#"
     SELECT
-        (SELECT reason FROM suppressions
-          WHERE tenant_id = $1 AND LOWER(email) = $2
+        (SELECT s.reason FROM suppressions s
+          JOIN UNNEST(ARRAY[$2::text]) AS e(email) ON LOWER(s.email) = e.email
+          WHERE s.tenant_id = $1
           LIMIT 1) AS global_reason,
-        (SELECT NOT subscribed FROM subscription_preferences
-          WHERE tenant_id = $1 AND LOWER(email) = $2 AND category = $3
+        (SELECT NOT sp.subscribed FROM subscription_preferences sp
+          JOIN UNNEST(ARRAY[$2::text]) AS e(email) ON LOWER(sp.email) = e.email
+          WHERE sp.tenant_id = $1 AND sp.category = $3
           LIMIT 1) AS category_opted_out
+"#;
+
+/// P1: the claim-time global-suppression probe. The old
+/// `LOWER(email) = ANY($2)` gives the planner no element values for a bound
+/// array parameter, so it could not use ANY btree index and degraded to a
+/// sequential scan of the tenant's rows per batch. This is the
+/// UNNEST-equality-join form proven in
+/// `api-server/src/routes/provider_import/suppressions.rs`: each canonical
+/// candidate resolves through the `(tenant_id, lower(email))` functional index
+/// the sibling migration adds — and still runs (a scan, never an error)
+/// without it. `e.email` is returned (the canonical candidate the caller keyed
+/// the check with), not a second `LOWER()` of the stored column.
+const SUPPRESSION_BATCH_PROBE_SQL: &str = r#"
+    SELECT e.email, s.reason
+    FROM suppressions s
+    JOIN UNNEST($2::text[]) AS e(email) ON LOWER(s.email) = e.email
+    WHERE s.tenant_id = $1
+"#;
+
+/// P1: the claim-time category opt-out probe — same UNNEST-equality-join
+/// conversion as [`SUPPRESSION_BATCH_PROBE_SQL`] (see that constant for the
+/// index rationale).
+const CATEGORY_OPTOUT_BATCH_PROBE_SQL: &str = r#"
+    SELECT e.email
+    FROM subscription_preferences sp
+    JOIN UNNEST($3::text[]) AS e(email) ON LOWER(sp.email) = e.email
+    WHERE sp.tenant_id = $1 AND sp.category = $2 AND sp.subscribed = false
 "#;
 
 /// Error rate window size.
@@ -562,20 +599,33 @@ const FETCH_JOBS_SQL: &str = r#"
                     -- (scalar metadata, non-array, unknown address) falls back
                     -- to the trusted envelope record, so customer metadata can
                     -- never redirect a delivery to an unvalidated recipient.
+                    --
+                    -- P1: the subset test is jsonb containment (`<@`) against
+                    -- the envelope's jsonb array instead of the previous
+                    -- per-element probe (a correlated subquery over
+                    -- jsonb_array_elements_text compared against the envelope
+                    -- array). For the canonical all-string state, containment
+                    -- is exactly "every pending element is an envelope
+                    -- element" (element-wise, duplicates ignored) — the same
+                    -- contract the old form expressed — and it is a single
+                    -- containment op the planner evaluates without expanding
+                    -- P pending elements against R envelope elements on EVERY
+                    -- claim (the old O(P·R) fan-out). Corrupt-input nuance:
+                    -- containment compares JSON values, so a non-string
+                    -- element (e.g. 123 or null) does NOT equal the
+                    -- envelope's text element and falls back to the trusted
+                    -- envelope; the old text cast could stringify such an
+                    -- element. Falling back is the safe direction.
                     WHEN metadata->'pending_recipients' IS NOT NULL
                      AND jsonb_typeof(metadata) = 'object'
                      AND jsonb_typeof(metadata->'pending_recipients') = 'array'
-                     AND NOT EXISTS (
-                            SELECT 1
-                            FROM jsonb_array_elements_text(metadata->'pending_recipients') AS pending_addr
-                            WHERE pending_addr <> ALL(
-                                COALESCE(
-                                    to_addresses,
-                                    CASE WHEN "to" IS NOT NULL
-                                         THEN ARRAY["to"] ELSE ARRAY[]::text[] END
-                                )
+                     AND metadata->'pending_recipients' <@ to_jsonb(
+                            COALESCE(
+                                to_addresses,
+                                CASE WHEN "to" IS NOT NULL
+                                     THEN ARRAY["to"] ELSE ARRAY[]::text[] END
                             )
-                        )
+                         )
                     THEN ARRAY(
                         SELECT jsonb_array_elements_text(metadata->'pending_recipients')
                     )
@@ -1701,56 +1751,96 @@ struct QueuedEmailRow {
     created_at: DateTime<Utc>,
 }
 
-/// FIX-8: expand one queued row into one [`EmailJob`] per recipient. When
-/// `to_addresses` is present and non-empty, a send unit is created for EVERY
-/// address (previously only the first recipient was used). An EXPLICIT empty
-/// array means "nothing left to send" (all recipients of a multi-recipient
-/// row were already delivered — see `metadata.pending_recipients`) and yields
-/// no jobs; only a NULL column (genuinely legacy row) falls back to the
-/// single-recipient `to` column.
-fn queued_row_to_jobs(row: QueuedEmailRow) -> Vec<EmailJob> {
-    let recipients: Vec<String> = match row.to_addresses {
-        Some(addrs) => addrs,
-        None => vec![row.to.clone()],
-    };
-    recipients
-        .into_iter()
-        .map(|to| EmailJob {
-            id: row.id.clone(),
-            message_id: row.message_id.clone(),
-            tenant_id: row.tenant_id.clone(),
-            domain_id: row.domain_id.clone(),
-            from: row.from.clone(),
-            to,
-            subject: row.subject.clone(),
-            html: row.html.clone(),
-            text: row.text.clone(),
-            headers: row.headers.clone(),
-            attachments: row.attachments.clone(),
-            campaign_id: row.campaign_id.clone(),
-            message_category: row.message_category.clone(),
-            tags: row.tags.clone(),
-            metadata: row.metadata.clone(),
-            sales_step_execution_id: row.sales_step_execution_id.clone(),
-            scheduled_at: row.scheduled_at,
-            attempt: row.attempt,
-            created_at: row.created_at,
-        })
-        .collect()
+/// The recipient count of one claimed row WITHOUT materializing it (the
+/// admit-first measurement [`expand_rows_within_cap_detailed`] takes).
+fn queued_row_recipient_count(row: &QueuedEmailRow) -> usize {
+    match &row.to_addresses {
+        Some(addrs) => addrs.len(),
+        None => 1,
+    }
 }
 
-/// G.3a: expand claimed rows into send units, counting every expanded
-/// recipient against the available concurrency slots.
-fn expand_rows_within_cap(rows: Vec<QueuedEmailRow>, cap: usize) -> Vec<EmailJob> {
+// P1: a thread-local count of [`materialize_email_job`] calls. Each call
+// clones the row's content fields (html/text/headers/attachments/metadata)
+// exactly once, so this counter IS the "body clone" counter the P1 bound test
+// asserts on: the claim must admit recipients BEFORE materializing (1000
+// recipients under a cap of C materialize C jobs, never 1000). It is
+// thread-local, not a global atomic, so parallel tests cannot observe each
+// other's increments.
+//
+// Audit P3: the increment is TEST instrumentation. `cfg!(test)` is a
+// compile-time false in every non-test build, so the update is dead code the
+// compiler removes — no test hook in the production hot path. A test-only
+// attribute cannot be used here: the source-scan tests below split this file
+// at the FIRST test-only attribute and treat everything before it as
+// production, so one here would shrink the scanned region. The item stays
+// declared so the guarded block resolves in every build; it costs nothing
+// when unreferenced.
+std::thread_local! {
+    static JOB_MATERIALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Materialize ONE [`EmailJob`] for `to`, cloning the row's content fields.
+/// The single clone site for recipient expansion: callers slice the recipient
+/// list to the admitted count first (see [`expand_rows_within_cap_detailed`]).
+fn materialize_email_job(row: &QueuedEmailRow, to: String) -> EmailJob {
+    if cfg!(test) {
+        JOB_MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
+    }
+    EmailJob {
+        id: row.id.clone(),
+        message_id: row.message_id.clone(),
+        tenant_id: row.tenant_id.clone(),
+        domain_id: row.domain_id.clone(),
+        from: row.from.clone(),
+        to,
+        subject: row.subject.clone(),
+        html: row.html.clone(),
+        text: row.text.clone(),
+        headers: row.headers.clone(),
+        attachments: row.attachments.clone(),
+        campaign_id: row.campaign_id.clone(),
+        message_category: row.message_category.clone(),
+        tags: row.tags.clone(),
+        metadata: row.metadata.clone(),
+        sales_step_execution_id: row.sales_step_execution_id.clone(),
+        scheduled_at: row.scheduled_at,
+        attempt: row.attempt,
+        created_at: row.created_at,
+    }
+}
+
+/// The observable outcome of one capped expansion.
+#[derive(Debug, Default)]
+struct CappedExpansion {
+    /// The admitted send units (at most `cap`).
+    jobs: Vec<EmailJob>,
+    /// Recipients the cap deferred to the next lease cycle.
+    deferred_recipients: usize,
+}
+
+/// P1: `expand_rows_within_cap` with the deferred-recipient count retained.
+///
+/// Admission happens BEFORE materialization: each row's recipient count is
+/// measured first, the slice admitted by the remaining slots is taken, and
+/// ONLY the admitted recipients pay the per-job clone of the row's content
+/// fields. The old shape called [`queued_row_to_jobs`] for every row and threw
+/// all but the admitted slice away — a 10k-recipient row under a 64-slot cap
+/// cloned html/text/headers/attachments/metadata 10k times per claim.
+///
+/// The admitted output is IDENTICAL to the old shape: same warning, same
+/// first-`remaining` slice in the same envelope order, same cap accounting
+/// across rows (rows past the cap are never touched).
+fn expand_rows_within_cap_detailed(rows: Vec<QueuedEmailRow>, cap: usize) -> CappedExpansion {
     let mut jobs: Vec<EmailJob> = Vec::new();
+    let mut deferred_recipients = 0usize;
     for row in rows {
         if jobs.len() >= cap {
             break;
         }
-        let expanded = queued_row_to_jobs(row);
         let remaining = cap - jobs.len();
-        if expanded.len() > remaining {
-            let claimed_recipients = expanded.len();
+        let claimed_recipients = queued_row_recipient_count(&row);
+        if claimed_recipients > remaining {
             warn!(
                 claimed_recipients,
                 admitted_recipients = remaining,
@@ -1758,9 +1848,25 @@ fn expand_rows_within_cap(rows: Vec<QueuedEmailRow>, cap: usize) -> Vec<EmailJob
                  recipients deferred until the next lease cycle"
             );
         }
-        jobs.extend(expanded.into_iter().take(remaining));
+        deferred_recipients += claimed_recipients.saturating_sub(remaining);
+        // Admit first, then materialize: only `remaining` recipients are ever
+        // cloned. `to_addresses == None` is the legacy single-recipient row
+        // (its one recipient fits by construction — the loop breaks above when
+        // no slot is left).
+        let admitted: Vec<String> = match &row.to_addresses {
+            Some(addrs) => addrs.iter().take(remaining).cloned().collect(),
+            None => vec![row.to.clone()],
+        };
+        jobs.extend(
+            admitted
+                .into_iter()
+                .map(|to| materialize_email_job(&row, to)),
+        );
     }
-    jobs
+    CappedExpansion {
+        jobs,
+        deferred_recipients,
+    }
 }
 
 /// F-21: disposition class for a failed send attempt.
@@ -2519,7 +2625,17 @@ impl EmailProcessor {
         // sends. Recipients beyond the cap remain in the row's pending set
         // and are delivered after the visibility lease expires (or — F5 —
         // immediately, via `release_rows_with_remaining_recipients`).
-        Ok(expand_rows_within_cap(rows, limit))
+        // P1: admission happens before materialization, so a capped row does
+        // not clone its bodies once per claimed recipient.
+        let expansion = expand_rows_within_cap_detailed(rows, limit);
+        if expansion.deferred_recipients > 0 {
+            debug!(
+                deferred_recipients = expansion.deferred_recipients,
+                "claim deferred recipients beyond the concurrency cap; they stay in the \
+                 row's pending set for the next lease cycle"
+            );
+        }
+        Ok(expansion.jobs)
     }
 
     /// F9:actual depth of the deliverable queue — the value the SCALE-H-04
@@ -2667,17 +2783,11 @@ impl EmailProcessor {
 
             // Query database for uncached
             if !uncached.is_empty() {
-                let db_result = sqlx::query_as::<_, (String, String)>(
-                    r#"
-                    SELECT LOWER(email), reason
-                    FROM suppressions
-                    WHERE tenant_id = $1 AND LOWER(email) = ANY($2)
-                    "#,
-                )
-                .bind(&tenant_id)
-                .bind(&uncached)
-                .fetch_all(&self.db)
-                .await;
+                let db_result = sqlx::query_as::<_, (String, String)>(SUPPRESSION_BATCH_PROBE_SQL)
+                    .bind(&tenant_id)
+                    .bind(&uncached)
+                    .fetch_all(&self.db)
+                    .await;
 
                 let suppressions: Vec<(String, String)> = match db_result {
                     Ok(rows) => rows,
@@ -2731,19 +2841,12 @@ impl EmailProcessor {
                 .iter()
                 .map(|email| canonical_recipient(email))
                 .collect();
-            let opted_out: Vec<(String,)> = match sqlx::query_as(
-                r#"
-                SELECT LOWER(email)
-                FROM subscription_preferences
-                WHERE tenant_id = $1 AND category = $2 AND subscribed = false
-                  AND LOWER(email) = ANY($3)
-                "#,
-            )
-            .bind(&tenant_id)
-            .bind(&category)
-            .bind(&canonical)
-            .fetch_all(&self.db)
-            .await
+            let opted_out: Vec<(String,)> = match sqlx::query_as(CATEGORY_OPTOUT_BATCH_PROBE_SQL)
+                .bind(&tenant_id)
+                .bind(&category)
+                .bind(&canonical)
+                .fetch_all(&self.db)
+                .await
             {
                 Ok(rows) => rows,
                 Err(e) => {
@@ -7531,6 +7634,19 @@ mod tests {
     // FIX-8: multi-recipient job expansion
     // ---------------------------------------------------------------------------
 
+    /// FIX-8: expand one queued row into one [`EmailJob`] per recipient (the
+    /// uncapped pre-P1 shape these expansion tests pin) — the production claim
+    /// path is [`expand_rows_within_cap_detailed`], which admits recipients
+    /// before materializing. The two produce identical jobs for one row.
+    fn queued_row_to_jobs(row: QueuedEmailRow) -> Vec<EmailJob> {
+        expand_rows_within_cap_detailed(vec![row], usize::MAX).jobs
+    }
+
+    /// The pre-P1 return shape of the capped expansion (jobs only).
+    fn expand_rows_within_cap(rows: Vec<QueuedEmailRow>, cap: usize) -> Vec<EmailJob> {
+        expand_rows_within_cap_detailed(rows, cap).jobs
+    }
+
     fn queued_row(to: &str, to_addresses: Option<Vec<String>>) -> QueuedEmailRow {
         QueuedEmailRow {
             id: "job-1".into(),
@@ -8156,6 +8272,87 @@ mod tests {
     fn expansion_with_zero_slots_yields_nothing() {
         let rows = vec![row_with_id("r1", Some(vec!["a@example.com".into()]))];
         assert!(expand_rows_within_cap(rows, 0).is_empty());
+    }
+
+    /// P1 equivalence: the admit-first rewrite yields EXACTLY the old
+    /// observable cap semantics — the first `remaining` recipients in envelope
+    /// order, across rows in claim order — and now also reports the deferred
+    /// count the warning described.
+    #[test]
+    fn expansion_admits_the_old_slice_and_reports_deferred_recipients() {
+        let recipients: Vec<String> = (1..=5).map(|i| format!("user{i}@example.com")).collect();
+        let expansion =
+            expand_rows_within_cap_detailed(vec![row_with_id("r1", Some(recipients))], 3);
+        assert_eq!(expansion.jobs.len(), 3);
+        assert_eq!(expansion.deferred_recipients, 2);
+        assert_eq!(expansion.jobs[0].to, "user1@example.com");
+        assert_eq!(expansion.jobs[2].to, "user3@example.com");
+
+        // Multi-row: the detailed form must agree with the historical wrapper
+        // `expand_rows_within_cap` (the old return shape) on the admitted set.
+        let rows = vec![
+            row_with_id("r1", Some(vec!["a@example.com".into()])),
+            row_with_id(
+                "r2",
+                Some(vec![
+                    "b@example.com".into(),
+                    "c@example.com".into(),
+                    "d@example.com".into(),
+                ]),
+            ),
+            row_with_id("r3", Some(vec!["e@example.com".into()])),
+        ];
+        let detailed = expand_rows_within_cap_detailed(rows.clone(), 2);
+        let wrapped = expand_rows_within_cap(rows, 2);
+        assert_eq!(
+            wrapped.iter().map(|job| job.to.clone()).collect::<Vec<_>>(),
+            detailed
+                .jobs
+                .iter()
+                .map(|job| job.to.clone())
+                .collect::<Vec<_>>(),
+            "the historical return shape and the detailed form admit the same jobs"
+        );
+        assert_eq!(detailed.jobs.len(), 2);
+        assert_eq!(
+            detailed.deferred_recipients, 2,
+            "r2 deferred c@ and d@; r3 was never reached (the cap was full)"
+        );
+
+        // An explicit empty recipient array contributes no jobs and no
+        // deferral (the "nothing left to send" row).
+        let empty = expand_rows_within_cap_detailed(vec![row_with_id("r4", Some(vec![]))], 5);
+        assert!(empty.jobs.is_empty());
+        assert_eq!(empty.deferred_recipients, 0);
+    }
+
+    /// P1 bound: a 1000-recipient row under a 64-slot cap materializes (and
+    /// therefore clones html/text/headers/attachments/metadata for) EXACTLY
+    /// the 64 admitted jobs. The count is measured at the single clone site,
+    /// [`materialize_email_job`], via the thread-local `JOB_MATERIALIZATIONS`
+    /// counter; the old expand-everything-then-`take(remaining)` shape
+    /// materializes all 1000.
+    #[test]
+    fn expansion_materializes_only_the_admitted_slice() {
+        let recipients: Vec<String> = (1..=1000).map(|i| format!("user{i}@example.com")).collect();
+        let row = QueuedEmailRow {
+            // The body that must NOT be deep-cloned once per claimed recipient.
+            html: Some("<p>body</p>".repeat(100_000)),
+            ..row_with_id("bulk", Some(recipients))
+        };
+        let cap = 64usize;
+        JOB_MATERIALIZATIONS.with(|count| count.set(0));
+        let expansion = expand_rows_within_cap_detailed(vec![row], cap);
+        let materializations = JOB_MATERIALIZATIONS.with(|count| count.get());
+        assert_eq!(expansion.jobs.len(), cap);
+        assert_eq!(expansion.deferred_recipients, 1000 - cap);
+        assert_eq!(expansion.jobs[0].to, "user1@example.com");
+        assert_eq!(expansion.jobs[cap - 1].to, format!("user{cap}@example.com"));
+        assert_eq!(
+            materializations, cap,
+            "the claim must not clone the body once per claimed recipient: \
+             {materializations} materializations for 1000 recipients under a {cap}-slot cap"
+        );
     }
 
     // ---------------------------------------------------------------------------
@@ -9272,8 +9469,15 @@ mod tests {
             "the pending set must be type-checked (F45)"
         );
         assert!(
-            FETCH_JOBS_SQL.contains("pending_addr <> ALL("),
-            "every pending recipient must be proven to be an envelope recipient (F45)"
+            FETCH_JOBS_SQL.contains("metadata->'pending_recipients' <@ to_jsonb("),
+            "every pending recipient must be proven to be an envelope recipient (F45) — \
+             via the single jsonb containment op, not a per-element probe (P1)"
+        );
+        assert!(
+            !FETCH_JOBS_SQL.contains("NOT EXISTS") && !FETCH_JOBS_SQL.contains("<> ALL("),
+            "P1: the subset guard must not expand P pending elements against R envelope \
+             elements on every claim (the old O(P·R) NOT EXISTS / `<> ALL` probe): \
+             {FETCH_JOBS_SQL}"
         );
         assert!(
             FETCH_JOBS_SQL.contains("ELSE to_addresses"),
@@ -9294,6 +9498,44 @@ mod tests {
         assert!(
             FETCH_JOBS_SQL.contains("OR (status = 'processing' AND locked_until < NOW())"),
             "expired-lease reclaims must be explicit (F24/F21)"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // P1: the claim lane's ordering index (item 8)
+    // ---------------------------------------------------------------------------
+
+    /// P1: the claim's ordering lane is `priority DESC, created_at ASC` over
+    /// pending/expired-lease rows. The index the sibling migration must add
+    /// for `email_queue` is exactly:
+    ///
+    /// ```sql
+    /// CREATE INDEX IF NOT EXISTS idx_email_queue_claim_order
+    ///     ON email_queue (priority DESC, created_at ASC)
+    ///     WHERE status IN ('pending', 'processing');
+    /// ```
+    ///
+    /// Verified on the canonical schema (20k pending rows): with that index
+    /// the claim plans `Limit -> LockRows -> Merge Append -> Index Scan` with
+    /// NO Sort (each partition scans its own ordered lane and stops at the
+    /// limit); the leading-`status` lane from migration 241
+    /// (`idx_email_queue_claim_lane (status, priority DESC, created_at)`)
+    /// cannot order the OR-shaped status predicate and still ends in a Sort of
+    /// every matching row. The query shape NEEDS NO CHANGE — this guard keeps
+    /// it aligned with the index (e.g. flipping the order or dropping the
+    /// partial predicates must fail here, not silently in production).
+    #[test]
+    fn claim_order_matches_the_partial_claim_lane_index() {
+        assert!(
+            FETCH_JOBS_SQL.contains("ORDER BY priority DESC, created_at ASC"),
+            "the claim-lane index is (priority DESC, created_at ASC); the claim must keep \
+             that exact key order: {FETCH_JOBS_SQL}"
+        );
+        assert!(
+            FETCH_JOBS_SQL.contains("status = 'pending'")
+                && FETCH_JOBS_SQL.contains("status = 'processing' AND locked_until < NOW()"),
+            "the partial index predicate (status IN ('pending','processing')) must be implied \
+             by the claim's two status branches: {FETCH_JOBS_SQL}"
         );
     }
 
@@ -13122,19 +13364,23 @@ mod end_to_end_db_tests {
                 created_at: Utc::now(),
             }
         }
-        let jobs = expand_rows_within_cap(vec![row(vec!["a@x.com", "b@x.com", "c@x.com"])], 2);
+        let jobs =
+            expand_rows_within_cap_detailed(vec![row(vec!["a@x.com", "b@x.com", "c@x.com"])], 2)
+                .jobs;
         assert_eq!(jobs.len(), 2);
         assert_eq!(jobs[0].to, "a@x.com");
         assert_eq!(jobs[1].to, "b@x.com");
         assert!(
-            expand_rows_within_cap(vec![row(vec![])], 2).is_empty(),
+            expand_rows_within_cap_detailed(vec![row(vec![])], 2)
+                .jobs
+                .is_empty(),
             "an explicit empty recipient array yields no jobs"
         );
         let legacy = QueuedEmailRow {
             to_addresses: None,
             ..row(vec!["legacy@x.com"])
         };
-        let jobs = expand_rows_within_cap(vec![legacy], 10);
+        let jobs = expand_rows_within_cap_detailed(vec![legacy], 10).jobs;
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].to, "legacy@x.com");
     }
@@ -16036,12 +16282,18 @@ mod orchestration_tests {
         .fetch_one(&pool)
         .await
         .expect("previous hash");
-        let expected_signature = apexmail_lib::audit::audit_log_signature(
-            previous.as_deref(),
-            &row_hash,
-            "apexmail-audit-fallback-key",
-        )
-        .expect("signature");
+        // The worker resolves AUDIT_SIGNING_KEY first and falls back to the
+        // pinned development key only when it is unset (and never in
+        // production). The expectation must use the SAME resolution, or a
+        // suite that exports the key (compliance tests need it) would fail a
+        // correct signature.
+        let signing_key = std::env::var("AUDIT_SIGNING_KEY")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "apexmail-audit-fallback-key".to_string());
+        let expected_signature =
+            apexmail_lib::audit::audit_log_signature(previous.as_deref(), &row_hash, &signing_key)
+                .expect("signature");
         assert_eq!(
             signature, expected_signature,
             "the DLP row's chain link must be signed like every canonical writer's"
@@ -17418,7 +17670,7 @@ mod residual_arms_db_tests {
             attempt: 0,
             created_at: Utc::now(),
         };
-        let jobs = expand_rows_within_cap(vec![row], 1);
+        let jobs = expand_rows_within_cap_detailed(vec![row], 1).jobs;
         assert_eq!(jobs.len(), 1, "only the first recipient fits the cap");
     }
 
@@ -20600,5 +20852,652 @@ mod sales_isolation_db_tests {
                 == 1,
             "the sales route gate must be single-sited"
         );
+    }
+}
+
+#[cfg(test)]
+mod claim_subset_containment_db_tests {
+    //! P1 + F45: the claim's `metadata.pending_recipients` guard. The old
+    //! per-element `NOT EXISTS (SELECT 1 FROM jsonb_array_elements_text(...)
+    //! WHERE pending_addr <> ALL(envelope))` probe was O(P·R) on EVERY
+    //! claim; the new guard is one `jsonb` containment (`<@`) op. These
+    //! tests run the REAL [`FETCH_JOBS_SQL`] against the canonical
+    //! provisioned schema and pin the exact decision table the old probe
+    //! expressed, so the rewrite is an equivalence — including the two
+    //! directions that matter: an exact/strict SUBSET is honored (only the
+    //! owed recipients) and every forged/corrupt shape falls back to the
+    //! trusted envelope.
+    //!
+    //! `TEST_DATABASE_URL` gates the suite exactly like the rest of the
+    //! crate: unset soft-skips, configured-but-broken FAILS.
+
+    use super::*;
+    use sqlx::PgPool;
+
+    async fn subset_pool(test_name: &str) -> Option<PgPool> {
+        crate::test_support::canonical_pool(test_name, test_name).await
+    }
+
+    /// One pending queue row; returns its id.
+    async fn insert_row(
+        pool: &PgPool,
+        to_addresses: &[&str],
+        metadata: serde_json::Value,
+    ) -> uuid::Uuid {
+        let id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO email_queue \
+                 (id, from_address, to_addresses, subject, status, metadata) \
+             VALUES ($1, 'sender@example.com', $2, 'subset', 'pending', $3)",
+        )
+        .bind(id)
+        .bind(
+            to_addresses
+                .iter()
+                .map(|address| address.to_string())
+                .collect::<Vec<_>>(),
+        )
+        .bind(metadata)
+        .execute(pool)
+        .await
+        .expect("insert queue row");
+        id
+    }
+
+    /// Claim every pending row in this (per-test) database and return the
+    /// admitted recipient list per row id.
+    async fn claim_all(pool: &PgPool) -> HashMap<String, Option<Vec<String>>> {
+        let rows = sqlx::query_as::<_, QueuedEmailRow>(FETCH_JOBS_SQL)
+            .bind(Utc::now() + chrono::Duration::minutes(5))
+            .bind(64_i64)
+            .fetch_all(pool)
+            .await
+            .expect("claim pending rows");
+        rows.into_iter()
+            .map(|row| (row.id.clone(), row.to_addresses))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn claim_subset_guard_decisions_match_the_old_probe_exactly(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = subset_pool("claim_subset_containment").await else { return Ok(()) };
+
+        let envelope = ["a@example.com", "b@example.com"];
+
+        // (a) exact subset — honored as-is.
+        let exact = insert_row(
+            &pool,
+            &envelope,
+            serde_json::json!({ "pending_recipients": ["a@example.com", "b@example.com"] }),
+        )
+        .await;
+        // (b) STRICT subset — only the still-owed recipient is admitted; the
+        // delivered one is not re-sent.
+        let strict = insert_row(
+            &pool,
+            &envelope,
+            serde_json::json!({ "pending_recipients": ["a@example.com"] }),
+        )
+        .await;
+        // (c) duplicate of an envelope address — still a subset, duplicates
+        // preserved exactly like the old text-array form.
+        let duplicate = insert_row(
+            &pool,
+            &envelope,
+            serde_json::json!({ "pending_recipients": ["a@example.com", "a@example.com"] }),
+        )
+        .await;
+        // (d) empty array — an explicit "nothing left to send" stays honored
+        // (falling back here would DUPLICATE delivered recipients).
+        let empty = insert_row(
+            &pool,
+            &envelope,
+            serde_json::json!({ "pending_recipients": [] }),
+        )
+        .await;
+        // (e) SUPERSET of the envelope — forged/corrupt: fall back.
+        let superset = insert_row(
+            &pool,
+            &envelope,
+            serde_json::json!({ "pending_recipients": ["a@example.com", "b@example.com", "c@example.com"] }),
+        )
+        .await;
+        // (f) forged address that is NOT an envelope recipient (even at
+        // subset size) — fall back; a delivery can never be redirected.
+        let forged = insert_row(
+            &pool,
+            &envelope,
+            serde_json::json!({ "pending_recipients": ["attacker@evil.example"] }),
+        )
+        .await;
+        // (g) scalar metadata value — not an array: fall back.
+        let scalar = insert_row(
+            &pool,
+            &envelope,
+            serde_json::json!({ "pending_recipients": "a@example.com" }),
+        )
+        .await;
+        // (h) JSON null — jsonb_typeof = 'null': fall back.
+        let json_null = insert_row(
+            &pool,
+            &envelope,
+            serde_json::json!({ "pending_recipients": null }),
+        )
+        .await;
+        // (i) metadata itself is a scalar (not an object): fall back.
+        let scalar_metadata = insert_row(&pool, &envelope, serde_json::json!("forged")).await;
+        // (j) no pending_recipients key at all (legacy row): fall back.
+        let legacy = insert_row(&pool, &envelope, serde_json::json!({})).await;
+
+        let claimed = claim_all(&pool).await;
+        let recipients = |id: uuid::Uuid| -> Option<Vec<String>> {
+            claimed
+                .get(&id.to_string())
+                .cloned()
+                .unwrap_or_else(|| panic!("row {id} was not claimed"))
+        };
+
+        assert_eq!(
+            recipients(exact),
+            Some(vec!["a@example.com".into(), "b@example.com".into()]),
+            "an exact pending subset is honored"
+        );
+        assert_eq!(
+            recipients(strict),
+            Some(vec!["a@example.com".into()]),
+            "a strict pending subset admits ONLY the owed recipient"
+        );
+        assert_eq!(
+            recipients(duplicate),
+            Some(vec!["a@example.com".into(), "a@example.com".into()]),
+            "duplicates are contained (old NOT EXISTS semantics: each element validated)"
+        );
+        assert_eq!(
+            recipients(empty),
+            Some(vec![]),
+            "an explicit empty pending set stays empty (a fallback would duplicate delivered recipients)"
+        );
+        for (label, id) in [
+            ("superset", superset),
+            ("forged address", forged),
+            ("scalar pending_recipients", scalar),
+            ("JSON null pending_recipients", json_null),
+            ("scalar metadata", scalar_metadata),
+            ("missing key", legacy),
+        ] {
+            assert_eq!(
+                recipients(id),
+                Some(envelope.iter().map(|a| a.to_string()).collect::<Vec<_>>()),
+                "{label} must fall back to the trusted envelope recipients"
+            );
+        }
+
+        pool.close().await;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod suppression_probe_db_tests {
+    //! P1: the claim-time suppression / category opt-out probes and the
+    //! dispatch-time consent query. The old `LOWER(email) = ANY($2)` probes
+    //! give the planner no element values for a bound array parameter, so
+    //! against the pre-existing indexes (raw `(tenant_id, email)` /
+    //! `(tenant_id)`) they degraded to a sequential scan of the tenant's rows
+    //! per batch. The new shape is the UNNEST-equality join proven in
+    //! `api-server/src/routes/provider_import/suppressions.rs`: every
+    //! candidate resolves through the `(tenant_id, lower(email))` functional
+    //! index the sibling migration adds, and the probe still runs (a scan,
+    //! never an error) when that index is absent.
+    //!
+    //! These tests pin (a) equivalence with the old forms over a 500-candidate
+    //! seeded fixture — including mixed-case stored rows, the tenant scoping
+    //! and the precedence rules — and (b) that the new probes are a single
+    //! statement whose plan uses the functional index when present.
+    //!
+    //! `TEST_DATABASE_URL` gates the suite exactly like the rest of the crate:
+    //! unset soft-skips, configured-but-broken FAILS.
+
+    use super::*;
+    use sqlx::PgPool;
+    use std::collections::{HashMap, HashSet};
+
+    /// The verbatim pre-change probes — kept ONLY as the equivalence oracle
+    /// (never called by production code).
+    const OLD_SUPPRESSION_PROBE_SQL: &str = "SELECT LOWER(email), reason FROM suppressions \
+         WHERE tenant_id = $1 AND LOWER(email) = ANY($2)";
+    const OLD_CATEGORY_PROBE_SQL: &str = "SELECT LOWER(email) FROM subscription_preferences \
+         WHERE tenant_id = $1 AND category = $2 AND subscribed = false AND LOWER(email) = ANY($3)";
+
+    const CANDIDATES: usize = 500;
+
+    async fn probe_pool(name: &str) -> Option<PgPool> {
+        crate::test_support::canonical_pool(name, name).await
+    }
+
+    async fn insert_tenant(pool: &PgPool, tenant: &str) {
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status) \
+             VALUES ($1, $1, $1, 'free', 'active')",
+        )
+        .bind(tenant)
+        .execute(pool)
+        .await
+        .expect("insert tenant");
+    }
+
+    /// The seeded fixture's expected decision set, keyed by the CANONICAL
+    /// (trimmed + ascii-lowercased) candidate the worker keys its verdicts by.
+    struct SuppressionFixture {
+        tenant_id: String,
+        other_tenant_id: String,
+        candidates: Vec<String>,
+        /// canonical address -> suppression reason
+        suppressed: HashMap<String, String>,
+        /// canonical addresses opted out of the non-exempt `marketing` category
+        opted_out: HashSet<String>,
+    }
+
+    /// 500 candidates: 150 globally suppressed (100 stored lowercase, 50
+    /// stored MIXED CASE), 100 opted out of `marketing` (60 lowercase, 40
+    /// mixed case), plus a same-address decoy under ANOTHER tenant that must
+    /// never leak into the probe result.
+    async fn seed_suppression_fixture(pool: &PgPool) -> SuppressionFixture {
+        let suffix = &uuid::Uuid::new_v4().simple().to_string()[..10];
+        let tenant_id = format!("probe-{suffix}");
+        let other_tenant_id = format!("other-{suffix}");
+        insert_tenant(pool, &tenant_id).await;
+        insert_tenant(pool, &other_tenant_id).await;
+
+        let candidates: Vec<String> = (0..CANDIDATES)
+            .map(|i| format!("cand{i}@example.com"))
+            .collect();
+        let mut suppressed: HashMap<String, String> = HashMap::new();
+        let mut opted_out: HashSet<String> = HashSet::new();
+
+        for i in 0..CANDIDATES {
+            let canonical = format!("cand{i}@example.com");
+            // 150 global suppressions; the second half is stored MIXED CASE so
+            // the probe's stored-side LOWER() is exercised.
+            let (stored, reason) = if i < 100 {
+                (canonical.clone(), "bounce")
+            } else if i < 150 {
+                (format!("Cand{i}@Example.COM"), "unsubscribe")
+            } else {
+                // The decoy: same address, DIFFERENT tenant.
+                sqlx::query(
+                    "INSERT INTO suppressions (id, tenant_id, email, reason, created_at) \
+                     VALUES ('sup_other_' || $2, $1, $3, 'bounce', NOW())",
+                )
+                .bind(&other_tenant_id)
+                .bind(i.to_string())
+                .bind(&canonical)
+                .execute(pool)
+                .await
+                .expect("seed decoy suppression");
+                continue;
+            };
+            sqlx::query(
+                "INSERT INTO suppressions (id, tenant_id, email, reason, created_at) \
+                 VALUES ('sup_' || substr(md5(random()::text), 1, 20), $1, $2, $3, NOW())",
+            )
+            .bind(&tenant_id)
+            .bind(&stored)
+            .bind(reason)
+            .execute(pool)
+            .await
+            .expect("seed suppression");
+            suppressed.insert(canonical, reason.to_string());
+        }
+
+        for i in 0..100 {
+            let canonical = format!("cand{i}@example.com");
+            let stored = if i < 60 {
+                canonical.clone()
+            } else {
+                format!("Cand{i}@Example.COM")
+            };
+            sqlx::query(
+                "INSERT INTO subscription_preferences \
+                     (id, tenant_id, email, category, subscribed, updated_at) \
+                 VALUES ('sp_' || substr(md5(random()::text), 1, 20), $1, $2, 'marketing', false, NOW())",
+            )
+            .bind(&tenant_id)
+            .bind(&stored)
+            .execute(pool)
+            .await
+            .expect("seed category opt-out");
+            opted_out.insert(canonical);
+        }
+
+        SuppressionFixture {
+            tenant_id,
+            other_tenant_id,
+            candidates,
+            suppressed,
+            opted_out,
+        }
+    }
+
+    /// P1 source contract: every suppression probe is the UNNEST-equality join.
+    /// This is the shape-level regression guard — it fails on the old
+    /// `LOWER(email) = ANY($n)` snippet.
+    #[test]
+    fn suppression_probes_are_unnest_equality_joins() {
+        for (name, sql) in [
+            ("SUPPRESSION_BATCH_PROBE_SQL", SUPPRESSION_BATCH_PROBE_SQL),
+            (
+                "CATEGORY_OPTOUT_BATCH_PROBE_SQL",
+                CATEGORY_OPTOUT_BATCH_PROBE_SQL,
+            ),
+            ("DISPATCH_CONSENT_SQL", DISPATCH_CONSENT_SQL),
+        ] {
+            assert!(
+                sql.contains("UNNEST("),
+                "{name} must resolve candidates through an UNNEST equality join: {sql}"
+            );
+            assert!(
+                !sql.contains("= ANY($"),
+                "{name} must not probe with a bound array (the planner has no element \
+                 values for `= ANY($param)`): {sql}"
+            );
+            assert!(
+                sql.contains("LOWER(s.email) = e.email")
+                    || sql.contains("LOWER(sp.email) = e.email"),
+                "{name} must keep the exact stored-side LOWER() semantics: {sql}"
+            );
+        }
+    }
+
+    /// P1 equivalence: over the 500-candidate fixture, the new probes return
+    /// EXACTLY the old probes' result sets (150 suppression hits including the
+    /// 50 mixed-case stored rows, 100 opt-outs), scoped to the right tenant.
+    #[tokio::test]
+    async fn suppression_probes_match_the_old_any_forms_at_n_500(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = probe_pool("suppression_probe_equiv").await else { return Ok(()) };
+        let fixture = seed_suppression_fixture(&pool).await;
+
+        let old: Vec<(String, String)> = sqlx::query_as(OLD_SUPPRESSION_PROBE_SQL)
+            .bind(&fixture.tenant_id)
+            .bind(&fixture.candidates)
+            .fetch_all(&pool)
+            .await?;
+        let new: Vec<(String, String)> = sqlx::query_as(SUPPRESSION_BATCH_PROBE_SQL)
+            .bind(&fixture.tenant_id)
+            .bind(&fixture.candidates)
+            .fetch_all(&pool)
+            .await?;
+        assert_eq!(
+            old.len(),
+            150,
+            "fixture sanity: 100 canonical + 50 mixed-case suppression hits"
+        );
+        assert_eq!(
+            old.iter().cloned().collect::<HashSet<_>>(),
+            new.iter().cloned().collect::<HashSet<_>>(),
+            "the UNNEST join must return the same (email, reason) pairs as = ANY"
+        );
+        for (email, reason) in &new {
+            assert_eq!(
+                fixture.suppressed.get(email),
+                Some(reason),
+                "returned key must be the canonical candidate the worker keys verdicts by"
+            );
+        }
+
+        let old_opt: Vec<(String,)> = sqlx::query_as(OLD_CATEGORY_PROBE_SQL)
+            .bind(&fixture.tenant_id)
+            .bind("marketing")
+            .bind(&fixture.candidates)
+            .fetch_all(&pool)
+            .await?;
+        let new_opt: Vec<(String,)> = sqlx::query_as(CATEGORY_OPTOUT_BATCH_PROBE_SQL)
+            .bind(&fixture.tenant_id)
+            .bind("marketing")
+            .bind(&fixture.candidates)
+            .fetch_all(&pool)
+            .await?;
+        assert_eq!(old_opt.len(), 100, "fixture sanity: 100 opt-outs");
+        assert_eq!(
+            old_opt.iter().cloned().collect::<HashSet<_>>(),
+            new_opt.iter().cloned().collect::<HashSet<_>>(),
+            "the opt-out probe must return the same canonical addresses as = ANY"
+        );
+
+        // The decoy rows under the OTHER tenant never leak: every returned
+        // address is one of THIS tenant's seeded suppressions, and the decoy
+        // set really exists.
+        for (email, _) in &new {
+            assert!(
+                fixture.suppressed.contains_key(email),
+                "a suppression row of another tenant leaked: {email}"
+            );
+        }
+        let decoys: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM suppressions WHERE tenant_id = $1")
+                .bind(&fixture.other_tenant_id)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(
+            decoys, 350,
+            "fixture sanity: the other tenant's same-address decoy rows exist"
+        );
+
+        pool.close().await;
+        Ok(())
+    }
+
+    /// P1 equivalence, end to end: `batch_suppression_check` — the real
+    /// claim-time path — derives every verdict for all 500 candidates in one
+    /// pass, with global suppression taking precedence over the category
+    /// opt-out and clean recipients unverdict-ed.
+    #[tokio::test]
+    async fn batch_suppression_check_verdicts_at_n_500_are_unchanged(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = probe_pool("suppression_probe_verdicts").await else { return Ok(()) };
+        let fixture = seed_suppression_fixture(&pool).await;
+        let processor = probe_processor(&pool).await;
+
+        let jobs: Vec<EmailJob> = fixture
+            .candidates
+            .iter()
+            .map(|to| EmailJob {
+                tenant_id: fixture.tenant_id.clone(),
+                to: to.clone(),
+                message_category: "marketing".into(),
+                ..probe_job()
+            })
+            .collect();
+        let verdicts = processor.batch_suppression_check(&jobs).await;
+
+        for candidate in &fixture.candidates {
+            let key = format!("{}:{}", fixture.tenant_id, candidate);
+            let expected = match (
+                fixture.suppressed.get(candidate),
+                fixture.opted_out.contains(candidate),
+            ) {
+                (Some(reason), _) => Some(format!("global_suppression:{reason}")),
+                (None, true) => Some("category_opt_out:marketing".to_string()),
+                (None, false) => None,
+            };
+            assert_eq!(
+                verdicts.get(&key).cloned(),
+                expected,
+                "verdict for {candidate} must be unchanged by the probe rewrite"
+            );
+        }
+
+        pool.close().await;
+        Ok(())
+    }
+
+    /// P1 plan: with the sibling migration's functional indexes created, the
+    /// new probe resolves through the index (inside a transaction that forces
+    /// index preference, so an indexable plan is mandatory).
+    #[tokio::test]
+    async fn suppression_probe_plan_uses_the_sibling_functional_index(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = probe_pool("suppression_probe_plan").await else { return Ok(()) };
+        let fixture = seed_suppression_fixture(&pool).await;
+        assert!(!fixture.candidates.is_empty(), "fixture sanity");
+
+        // The sibling migration's functional indexes (assumed to exist in
+        // production; created here so the plan assertion is meaningful).
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_suppressions_tenant_lower_email \
+             ON suppressions (tenant_id, lower(email))",
+        )
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_sub_prefs_tenant_lower_email \
+             ON subscription_preferences (tenant_id, lower(email))",
+        )
+        .execute(&pool)
+        .await?;
+
+        // A REALISTIC tenant list makes the index decision meaningful (with a
+        // handful of rows the planner may materialize them instead of probing
+        // the index, which proves nothing about the probe shape). Statistical
+        // ANALYZE gives the planner the row counts.
+        sqlx::query(
+            "INSERT INTO suppressions (id, tenant_id, email, reason, created_at) \
+             SELECT 'sup_bulk_' || i, $1, 'bulk' || i || '@example.com', 'bounce', NOW() \
+             FROM generate_series(1, 3000) i",
+        )
+        .bind(&fixture.tenant_id)
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO subscription_preferences \
+                 (id, tenant_id, email, category, subscribed, updated_at) \
+             SELECT 'sp_bulk_' || i, $1, 'bulk' || i || '@example.com', 'marketing', false, NOW() \
+             FROM generate_series(1, 3000) i",
+        )
+        .bind(&fixture.tenant_id)
+        .execute(&pool)
+        .await?;
+        sqlx::query("ANALYZE suppressions").execute(&pool).await?;
+        sqlx::query("ANALYZE subscription_preferences")
+            .execute(&pool)
+            .await?;
+
+        // The plan assertion forces the index alternative set (no seq scan,
+        // no bitmap, no materialize — a plan that CANNOT resolve candidates
+        // through the functional index has no way out), so it proves the
+        // index is usable for the probe's exact shape without depending on
+        // cost wiggle for this fixture's size.
+        let mut tx = pool.begin().await?;
+        for (setting, value) in [
+            ("enable_seqscan", "off"),
+            ("enable_bitmapscan", "off"),
+            ("enable_hashjoin", "off"),
+            ("enable_mergejoin", "off"),
+            ("enable_material", "off"),
+        ] {
+            sqlx::query(&format!("SET LOCAL {setting} = {value}"))
+                .execute(&mut *tx)
+                .await?;
+        }
+        let plan_suppressions: serde_json::Value = sqlx::query_scalar(&format!(
+            "EXPLAIN (GENERIC_PLAN, FORMAT JSON) {SUPPRESSION_BATCH_PROBE_SQL}"
+        ))
+        .bind(&fixture.tenant_id)
+        .bind(&fixture.candidates)
+        .fetch_one(&mut *tx)
+        .await?;
+        let plan_opt_outs: serde_json::Value = sqlx::query_scalar(&format!(
+            "EXPLAIN (GENERIC_PLAN, FORMAT JSON) {CATEGORY_OPTOUT_BATCH_PROBE_SQL}"
+        ))
+        .bind(&fixture.tenant_id)
+        .bind("marketing")
+        .bind(&fixture.candidates)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.rollback().await?;
+
+        for (name, plan, index) in [
+            (
+                "suppression probe",
+                plan_suppressions,
+                "idx_suppressions_tenant_lower_email",
+            ),
+            (
+                "category opt-out probe",
+                plan_opt_outs,
+                "idx_sub_prefs_tenant_lower_email",
+            ),
+        ] {
+            let text = plan.to_string();
+            assert!(
+                text.contains(index),
+                "{name} must resolve each candidate through {index}: {text}"
+            );
+            assert!(
+                !text.contains(r#""Node Type": "Seq Scan""#),
+                "{name} fell back to a sequential scan: {text}"
+            );
+        }
+
+        pool.close().await;
+        Ok(())
+    }
+
+    fn probe_job() -> EmailJob {
+        EmailJob {
+            id: uuid::Uuid::new_v4().to_string(),
+            message_id: uuid::Uuid::new_v4().to_string(),
+            tenant_id: "probe".into(),
+            domain_id: "00000000-0000-0000-0000-000000000003".into(),
+            from: "sender@example.com".into(),
+            to: "placeholder@example.com".into(),
+            subject: "probe".into(),
+            html: None,
+            text: None,
+            headers: None,
+            attachments: None,
+            campaign_id: None,
+            message_category: "marketing".into(),
+            tags: None,
+            metadata: None,
+            sales_step_execution_id: None,
+            scheduled_at: None,
+            attempt: 0,
+            created_at: Utc::now(),
+        }
+    }
+
+    async fn probe_processor(pool: &PgPool) -> EmailProcessor {
+        let mut config = EmailConfig {
+            base: crate::common::ProcessorConfig {
+                name: "suppression-probe".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        config.tracking.enabled = false;
+        config.tracking.secret_key = None;
+        config.ses.max_send_rate = 0;
+        let url = std::env::var("TEST_REDIS_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "redis://127.0.0.1:6379".to_string());
+        let redis = deadpool_redis::Config::from_url(url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool");
+        EmailProcessor::with_transport(
+            pool.clone(),
+            redis,
+            config,
+            HybridTransport::new(None::<Arc<dyn EmailTransport>>, None),
+        )
+        .await
+        .expect("processor")
     }
 }

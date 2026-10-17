@@ -1377,23 +1377,30 @@ impl ExperimentEngine {
             .begin()
             .await
             .map_err(|error| SalesError::Database(error.to_string()))?;
-        for arm in arms {
-            sqlx::query(
-                "INSERT INTO sales_experiment_arms \
-                     (id, tenant_id, experiment_id, variant, alpha, beta, trials, successes, \
-                      contacts, enrichment_cost_eur, negative_outcomes, is_control, \
-                      created_at, updated_at) \
-                 VALUES (gen_random_uuid(), $1, $2, $3, 1.0, 1.0, 0, 0, 0, 0, 0, $4, NOW(), NOW()) \
-                 ON CONFLICT (experiment_id, variant) DO NOTHING",
-            )
-            .bind(tenant_id)
-            .bind(experiment_id)
-            .bind(arm.variant.trim())
-            .bind(arm.is_control)
-            .execute(&mut *tx)
-            .await
-            .map_err(|error| SalesError::Database(error.to_string()))?;
-        }
+        // ONE statement for every arm (the ceiling is 512, so the old
+        // one-insert-per-arm loop was a real N+1). Variants were validated
+        // unique above, so no two rows in this command can conflict.
+        let ids: Vec<Uuid> = arms.iter().map(|_| Uuid::new_v4()).collect();
+        let variants: Vec<&str> = arms.iter().map(|arm| arm.variant.trim()).collect();
+        let is_control: Vec<bool> = arms.iter().map(|arm| arm.is_control).collect();
+        sqlx::query(
+            "INSERT INTO sales_experiment_arms \
+                 (id, tenant_id, experiment_id, variant, alpha, beta, trials, successes, \
+                  contacts, enrichment_cost_eur, negative_outcomes, is_control, \
+                  created_at, updated_at) \
+             SELECT id, $1, $2, variant, 1.0, 1.0, 0, 0, 0, 0, 0, is_control, NOW(), NOW() \
+             FROM unnest($3::uuid[], $4::text[], $5::boolean[]) \
+                  AS batch(id, variant, is_control) \
+             ON CONFLICT (experiment_id, variant) DO NOTHING",
+        )
+        .bind(tenant_id)
+        .bind(experiment_id)
+        .bind(&ids)
+        .bind(&variants)
+        .bind(&is_control)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| SalesError::Database(error.to_string()))?;
         tx.commit()
             .await
             .map_err(|error| SalesError::Database(error.to_string()))?;
@@ -3306,6 +3313,65 @@ mod tests {
 
     async fn live_pool(test_name: &str) -> Option<PgPool> {
         crate::test_db::canonical_test_pool(test_name).await
+    }
+
+    /// All arms are provisioned by ONE INSERT (pre-fix: one per arm; the
+    /// ceiling is 512).
+    #[tokio::test]
+    async fn arm_provisioning_writes_all_arms_in_one_statement() {
+        let Some(pool) = live_pool("experiments_arm_batch").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("exp-arm-batch");
+        let engine = ExperimentEngine::new(pool.clone());
+        let key = format!("lib-arm-batch-{}", Uuid::new_v4().simple());
+        let id = engine
+            .ensure_experiment(
+                &tenant,
+                &key,
+                "Arm batch",
+                &serde_json::json!({}),
+                &serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+
+        crate::test_probe::install_insert_probe(&pool, "sales_experiment_arms", "tenant_id").await;
+        crate::test_probe::reset_probe(&pool, "sales_experiment_arms", &tenant).await;
+
+        let specs: Vec<ArmSpec> = (0..40)
+            .map(|index| ArmSpec::new(&format!("arm-{index}")))
+            .collect();
+        engine.ensure_arms(&tenant, id, &specs).await.unwrap();
+        assert_eq!(
+            engine.load_arms(&tenant, id).await.unwrap().len(),
+            40,
+            "every arm is provisioned"
+        );
+        assert_eq!(
+            crate::test_probe::probe_count(&pool, "sales_experiment_arms", &tenant).await,
+            1,
+            "the whole arm set must be ONE INSERT (pre-fix: one per arm)"
+        );
+
+        // Replay is idempotent and inserts nothing (still one statement that
+        // inserted rows).
+        engine.ensure_arms(&tenant, id, &specs).await.unwrap();
+        assert_eq!(
+            crate::test_probe::probe_count(&pool, "sales_experiment_arms", &tenant).await,
+            1
+        );
+
+        sqlx::query("DELETE FROM sales_experiment_arms WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM sales_experiments WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 
     /// Provisioning is idempotent, tenant-scoped and validates every hostile

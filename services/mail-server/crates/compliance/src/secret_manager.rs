@@ -533,25 +533,179 @@ impl SecretManager {
     }
 
     /// Process all auto-rotations.
+    ///
+    /// The due set is already read with ONE query; this method then applies
+    /// the whole set with a fixed number of statements (access check, UPDATE,
+    /// version INSERT, version prune, access-log INSERT) instead of the old
+    /// per-secret `rotate_secret` loop, which cost ~7 round trips per secret:
+    /// the scan was one query but the processing was still row-by-row.
+    ///
+    /// The encryption itself is necessarily per-secret (each value is
+    /// generated and encrypted independently); only the database side is
+    /// batched, and that transition runs in one transaction.
     pub async fn process_auto_rotations(&self) -> Result<AutoRotationResult, String> {
         let due = self.get_secrets_for_rotation().await?;
-        let mut rotated = Vec::new();
-        let mut errors = Vec::new();
-
-        for secret in &due {
-            if let Some(rs) = &secret.rotation_schedule {
-                if rs.auto_rotate {
-                    match self
-                        .rotate_secret(&secret.id, &secret.created_by, None)
-                        .await
-                    {
-                        Ok(_) => rotated.push(secret.id.clone()),
-                        Err(e) => errors.push((secret.id.clone(), e)),
-                    }
-                }
-            }
+        let candidates: Vec<&Secret> = due
+            .iter()
+            .filter(|secret| {
+                secret
+                    .rotation_schedule
+                    .as_ref()
+                    .is_some_and(|schedule| schedule.auto_rotate)
+            })
+            .collect();
+        if candidates.is_empty() {
+            return Ok(AutoRotationResult {
+                rotated: Vec::new(),
+                errors: Vec::new(),
+            });
         }
 
+        let ids: Vec<String> = candidates.iter().map(|secret| secret.id.clone()).collect();
+
+        // One set-based access check preserves `rotate_secret`'s authority
+        // rule: the creator needs Write-or-better on the secret, with an
+        // unrevoked, unexpired grant.
+        let allowed: std::collections::HashSet<String> = sqlx::query_scalar::<_, String>(
+            "SELECT s.id
+               FROM secrets s
+               JOIN secret_access a
+                 ON a.secret_id = s.id AND a.user_id = s.created_by
+              WHERE s.id = ANY($1)
+                AND a.revoked_at IS NULL
+                AND (a.expires_at IS NULL OR a.expires_at > NOW())
+                AND a.access_type IN ('write', 'admin')",
+        )
+        .bind(&ids)
+        .fetch_all(&self.db)
+        .await
+        .map_err(|e| format!("DB error: {e}"))?
+        .into_iter()
+        .collect();
+
+        let now = Utc::now();
+        let mut rotated = Vec::with_capacity(candidates.len());
+        let mut errors = Vec::new();
+        let mut updates: Vec<serde_json::Value> = Vec::with_capacity(candidates.len());
+        let mut versions: Vec<serde_json::Value> = Vec::with_capacity(candidates.len());
+        let mut logs: Vec<serde_json::Value> = Vec::with_capacity(candidates.len());
+
+        for secret in candidates {
+            if !allowed.contains(&secret.id) {
+                errors.push((
+                    secret.id.clone(),
+                    "Access denied to modify secret".to_string(),
+                ));
+                continue;
+            }
+            let new_value = generate_secret_value(secret.secret_type);
+            let encrypted = self.encrypt(&new_value)?;
+            let new_version = secret.version + 1;
+            let next_rotation = secret
+                .rotation_schedule
+                .as_ref()
+                .map(|schedule| now + Duration::days(schedule.interval_days));
+
+            updates.push(serde_json::json!({
+                "id": &secret.id,
+                "encrypted_value": &encrypted,
+                "version": new_version,
+                "rotated_at": now,
+                "next_rotation_at": next_rotation,
+            }));
+            versions.push(serde_json::json!({
+                "secret_id": &secret.id,
+                "version": new_version,
+                "encrypted_value": &encrypted,
+            }));
+            logs.push(serde_json::json!({
+                "secret_id": &secret.id,
+                "user_id": &secret.created_by,
+            }));
+            rotated.push(secret.id.clone());
+        }
+
+        if updates.is_empty() {
+            return Ok(AutoRotationResult { rotated, errors });
+        }
+
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|e| format!("DB error: {e}"))?;
+        sqlx::query(
+            "UPDATE secrets s
+                SET encrypted_value = r.encrypted_value,
+                    version = r.version,
+                    last_rotated_at = r.rotated_at,
+                    next_rotation_at = r.next_rotation_at,
+                    updated_at = r.rotated_at
+               FROM jsonb_to_recordset($1::jsonb) AS r(
+                    id text,
+                    encrypted_value text,
+                    version integer,
+                    rotated_at timestamptz,
+                    next_rotation_at timestamptz
+               )
+              WHERE s.id = r.id",
+        )
+        .bind(serde_json::Value::Array(updates))
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("DB error: {e}"))?;
+
+        sqlx::query(
+            "INSERT INTO secret_versions (secret_id, version, encrypted_value, created_at)
+             SELECT secret_id, version, encrypted_value, NOW()
+               FROM jsonb_to_recordset($1::jsonb) AS r(
+                    secret_id text,
+                    version integer,
+                    encrypted_value text
+               )",
+        )
+        .bind(serde_json::Value::Array(versions))
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("DB error: {e}"))?;
+
+        // Keep the newest `max_versions_to_keep` rows per rotated secret.
+        sqlx::query(
+            "DELETE FROM secret_versions v
+               USING (
+                   SELECT secret_id, version,
+                          ROW_NUMBER() OVER (
+                              PARTITION BY secret_id ORDER BY version DESC
+                          ) AS rank
+                     FROM secret_versions
+                    WHERE secret_id = ANY($1)
+               ) ranked
+              WHERE v.secret_id = ranked.secret_id
+                AND v.version = ranked.version
+                AND ranked.rank > $2",
+        )
+        .bind(&rotated)
+        .bind(self.config.max_versions_to_keep)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("DB error: {e}"))?;
+
+        sqlx::query(
+            "INSERT INTO secret_access_log (secret_id, user_id, action, accessed_at)
+             SELECT secret_id, user_id, 'rotate', NOW()
+               FROM jsonb_to_recordset($1::jsonb) AS r(
+                    secret_id text,
+                    user_id text
+               )",
+        )
+        .bind(serde_json::Value::Array(logs))
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("DB error: {e}"))?;
+
+        tx.commit().await.map_err(|e| format!("DB error: {e}"))?;
+
+        info!(secrets = rotated.len(), "Auto-rotation batch completed");
         Ok(AutoRotationResult { rotated, errors })
     }
 
@@ -1077,6 +1231,73 @@ mod db_tests {
         .expect("create")
     }
 
+    /// Per-STATEMENT counters: one bump per INSERT/UPDATE/DELETE statement,
+    /// not per row.
+    async fn install_statement_counters(pool: &PgPool, tables: &[&str]) {
+        sqlx::query(concat!(
+            "CREATE ",
+            "TABLE IF NOT EXISTS _apexmail_test_stmt_counts (
+                 probed_table TEXT NOT NULL,
+                 op TEXT NOT NULL,
+                 statements BIGINT NOT NULL DEFAULT 0,
+                 PRIMARY KEY (probed_table, op)
+             )"
+        ))
+        .execute(pool)
+        .await
+        .expect("create statement-count table");
+        sqlx::query(
+            "CREATE OR REPLACE FUNCTION _apexmail_test_count_stmt() RETURNS trigger \
+             LANGUAGE plpgsql AS $$ \
+             BEGIN \
+               INSERT INTO _apexmail_test_stmt_counts (probed_table, op, statements) \
+               VALUES (TG_TABLE_NAME, TG_OP, 1) \
+               ON CONFLICT (probed_table, op) \
+               DO UPDATE SET statements = _apexmail_test_stmt_counts.statements + 1; \
+               RETURN NULL; \
+             END $$",
+        )
+        .execute(pool)
+        .await
+        .expect("create statement-count function");
+        for table in tables {
+            assert!(
+                table
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_'),
+                "statement counter table name must be identifier-shaped: {table}"
+            );
+            sqlx::query(&format!(
+                "CREATE OR REPLACE TRIGGER _apexmail_test_count_stmt \
+                 AFTER INSERT OR UPDATE OR DELETE ON {table} \
+                 FOR EACH STATEMENT EXECUTE FUNCTION _apexmail_test_count_stmt()"
+            ))
+            .execute(pool)
+            .await
+            .expect("install statement-count trigger");
+        }
+    }
+
+    async fn reset_statement_counts(pool: &PgPool) {
+        sqlx::query("UPDATE _apexmail_test_stmt_counts SET statements = 0")
+            .execute(pool)
+            .await
+            .expect("reset statement counts");
+    }
+
+    async fn statement_count(pool: &PgPool, table: &str, op: &str) -> i64 {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT statements FROM _apexmail_test_stmt_counts \
+             WHERE probed_table = $1 AND op = $2",
+        )
+        .bind(table)
+        .bind(op)
+        .fetch_optional(pool)
+        .await
+        .expect("read statement count")
+        .unwrap_or(0)
+    }
+
     #[tokio::test]
     async fn lifecycle_keeps_plaintext_out_of_metadata_and_prunes_versions() {
         let Some((pool, svc)) = manager("lifecycle").await else {
@@ -1525,6 +1746,92 @@ mod db_tests {
         assert_ne!(auto_value, "old-1");
         // The next rotation moves forward from now.
         assert!(result_auto.next_rotation_at.expect("next") > Utc::now());
+    }
+
+    /// Auto-rotation must apply N secrets with a FIXED number of DB
+    /// statements, not ~7 per secret. The old path called `rotate_secret` per
+    /// row (access SELECT + fetch + UPDATE + version INSERT + prune + log +
+    /// fetch), so this test fails on it (10 UPDATE statements) and passes
+    /// with the batched sweep (one UPDATE, one version INSERT, one log
+    /// INSERT).
+    #[tokio::test]
+    async fn auto_rotation_applies_the_whole_batch_with_one_statement_per_table() {
+        let Some((pool, svc)) = manager("rotation_batch").await else {
+            return;
+        };
+        let tenant = test_support::unique_tenant();
+        let schedule = RotationSchedule {
+            interval_days: 90,
+            auto_rotate: true,
+            notify_before_days: 7,
+        };
+        let mut ids = Vec::new();
+        for index in 0..10 {
+            let secret = create(&svc, &tenant, &format!("batch-{index}"), "old-value").await;
+            sqlx::query(
+                "UPDATE secrets SET rotation_schedule = $1,
+                 next_rotation_at = NOW() - INTERVAL '1 day' WHERE id = $2",
+            )
+            .bind(serde_json::to_value(&schedule).unwrap())
+            .bind(&secret.id)
+            .execute(&pool)
+            .await
+            .expect("expire schedule");
+            ids.push(secret.id);
+        }
+
+        install_statement_counters(&pool, &["secrets", "secret_versions", "secret_access_log"])
+            .await;
+        reset_statement_counts(&pool).await;
+
+        let result = svc.process_auto_rotations().await.expect("rotations");
+        assert_eq!(result.rotated.len(), 10);
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+
+        assert_eq!(
+            statement_count(&pool, "secrets", "UPDATE").await,
+            1,
+            "10 secrets must be updated by ONE statement"
+        );
+        assert_eq!(
+            statement_count(&pool, "secret_versions", "INSERT").await,
+            1,
+            "10 version rows must be inserted by ONE statement"
+        );
+        assert_eq!(
+            statement_count(&pool, "secret_access_log", "INSERT").await,
+            1,
+            "10 access-log rows must be inserted by ONE statement"
+        );
+
+        // Equivalence: every secret is at version 2 with a fresh generated
+        // value, and the new version is readable.
+        for id in &ids {
+            let (secret, value) = svc
+                .get_secret(id, "owner@apexmail.ee")
+                .await
+                .expect("read rotated")
+                .expect("present");
+            assert_eq!(secret.version, 2);
+            assert!(value.starts_with("am_"), "generated API key, got {value}");
+            let versions: Vec<i32> = sqlx::query_scalar(
+                "SELECT version FROM secret_versions WHERE secret_id = $1 ORDER BY version",
+            )
+            .bind(id)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            assert_eq!(versions, vec![1, 2]);
+            let logged: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM secret_access_log
+                  WHERE secret_id = $1 AND action = 'rotate' AND user_id = 'owner@apexmail.ee'",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(logged, 1);
+        }
     }
 
     #[tokio::test]

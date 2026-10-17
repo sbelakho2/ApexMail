@@ -636,14 +636,23 @@ async fn contact_intent_lead(
     }
     // No address in the message: the account owner's own address, when the
     // user key is a real user id (a session always is). Best-effort.
-    let owner: Option<String> =
-        sqlx::query_scalar("SELECT email FROM users WHERE id::text = $1 AND tenant_id = $2")
-            .bind(user_key)
-            .bind(tenant_id)
-            .fetch_optional(&state.db)
-            .await
-            .ok()
-            .flatten();
+    //
+    // users.id is UUID (canonical schema): bind natively so the primary key is
+    // used. A user key that is not a UUID (an API key id, a console
+    // placeholder) cannot name a user row and resolves to no owner — the same
+    // outcome the `id::text = 'garbage'` comparison produced, minus the scan.
+    let owner: Option<String> = match uuid::Uuid::parse_str(user_key) {
+        Ok(user_id) => {
+            sqlx::query_scalar("SELECT email FROM users WHERE id = $1 AND tenant_id = $2")
+                .bind(user_id)
+                .bind(tenant_id)
+                .fetch_optional(&state.db)
+                .await
+                .ok()
+                .flatten()
+        }
+        Err(_) => None,
+    };
     owner.filter(|email| !email.trim().is_empty())
 }
 
@@ -1864,5 +1873,122 @@ mod session_tests {
             .await
             .expect("stale lookup");
         assert_eq!(stale, 0, "sessions past the retention window are pruned");
+    }
+
+    /// The owner-email fallback of `contact_intent_lead` binds `users.id`
+    /// NATIVELY (it is UUID, migration 052) instead of casting the column with
+    /// `id::text = $1` — which defeated the primary key on every contact-intent
+    /// turn. Both arms must behave as before: an intent message with no address
+    /// resolves the signed-in owner's address; a user key that cannot name a
+    /// user row (an API-key identity, another tenant's user) resolves nothing.
+    #[tokio::test]
+    async fn contact_intent_owner_fallback_binds_user_ids_natively() {
+        let Some(pool) = crate::test_db::canonical_pool("ai_chat_owner_fallback").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let tenant = apexmail_lib::id::generate_id("", 26);
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, status) VALUES ($1, 'Chat Co', $2, 'active')",
+        )
+        .bind(&tenant)
+        .bind(format!("chat-{tenant}"))
+        .execute(&pool)
+        .await
+        .expect("seed tenant");
+
+        let owner_id = uuid::Uuid::new_v4();
+        let owner_email = format!("owner-{}@example.com", owner_id.simple());
+        sqlx::query(
+            "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status, email_verified)
+             VALUES ($1, $2, $3, 'Owner', 'x', 'owner', 'active', true)",
+        )
+        .bind(owner_id)
+        .bind(&tenant)
+        .bind(&owner_email)
+        .execute(&pool)
+        .await
+        .expect("seed owner");
+
+        // Other tenant's user: the lookup is tenant-scoped.
+        let other_tenant = apexmail_lib::id::generate_id("", 26);
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, status) VALUES ($1, 'Other Co', $2, 'active')",
+        )
+        .bind(&other_tenant)
+        .bind(format!("chat-{other_tenant}"))
+        .execute(&pool)
+        .await
+        .expect("seed other tenant");
+        let foreign_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status, email_verified)
+             VALUES ($1, $2, 'foreign@example.com', 'Foreign', 'x', 'owner', 'active', true)",
+        )
+        .bind(foreign_id)
+        .bind(&other_tenant)
+        .execute(&pool)
+        .await
+        .expect("seed foreign user");
+
+        // Intent phrase, no address in the message -> the owner's address.
+        assert_eq!(
+            super::contact_intent_lead(
+                &state,
+                &tenant,
+                &owner_id.to_string(),
+                "Please contact me about the enterprise plan"
+            )
+            .await,
+            Some(owner_email.clone()),
+            "the owner fallback must resolve through the native uuid bind"
+        );
+        // An uppercase uuid spelling resolves too (parse_str normalizes; the
+        // old text comparison did not).
+        assert_eq!(
+            super::contact_intent_lead(
+                &state,
+                &tenant,
+                &owner_id.to_string().to_uppercase(),
+                "Please contact me about the enterprise plan"
+            )
+            .await,
+            Some(owner_email.clone())
+        );
+        // A user key that is not a UUID cannot name a users row: no lead.
+        assert_eq!(
+            super::contact_intent_lead(
+                &state,
+                &tenant,
+                "not-a-user-id",
+                "Please contact me about the enterprise plan"
+            )
+            .await,
+            None
+        );
+        // Another tenant's user id resolves nothing (tenant-scoped).
+        assert_eq!(
+            super::contact_intent_lead(
+                &state,
+                &tenant,
+                &foreign_id.to_string(),
+                "Please contact me about the enterprise plan"
+            )
+            .await,
+            None
+        );
+        // No intent phrase: never a lead, even with a resolvable owner.
+        assert_eq!(
+            super::contact_intent_lead(
+                &state,
+                &tenant,
+                &owner_id.to_string(),
+                "What does the Pro plan include?"
+            )
+            .await,
+            None
+        );
+
+        pool.close().await;
     }
 }

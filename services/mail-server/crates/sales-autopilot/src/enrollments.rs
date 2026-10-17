@@ -258,8 +258,8 @@ pub async fn start_outreach(
 
     // ---------------------------------------------------------------------
     // Bulk gate inputs (one round trip each, never per contact). The legal
-    // policy is NOT bulk-fetched from history: it is evaluated per contact
-    // from the current canonical store below.
+    // policy is never read from historical decisions: it is resolved for
+    // every contact from the current canonical store below, in one batch.
     // ---------------------------------------------------------------------
     // The recipient-country facts mirror the worker's `build_policy_input`:
     // `COALESCE(account.country, contact.country)` with the account's
@@ -349,20 +349,18 @@ pub async fn start_outreach(
     let mut rejected = 0usize;
     let mut rejection_reasons: BTreeMap<String, usize> = BTreeMap::new();
 
-    for contact_id in contact_ids {
-        let contact = contacts.get(&contact_id);
-        let point = email_points.get(&contact_id);
-        let already_enrolled = enrollment_states
-            .get(&contact_id)
-            .is_some_and(|state| enrollment_is_live(state));
+    // Cheap, policy-independent gates reject first, so a contact that can
+    // never be enrolled does not cost a legal-policy evaluation.
+    let mut policy_candidates: Vec<(Uuid, &ContactRow, &EmailPointRow)> = Vec::new();
+    for contact_id in &contact_ids {
+        let contact = contacts.get(contact_id);
+        let point = email_points.get(contact_id);
         let address_suppressed = point
             .map(|point| {
                 suppressed_addresses.contains(&point.normalized_value.to_ascii_lowercase())
             })
             .unwrap_or(false);
 
-        // Cheap, policy-independent gates reject first, so a contact that can
-        // never be enrolled does not cost a policy evaluation.
         let cheap_gate = evaluate_pre_policy_gates(
             contact.is_some(),
             point.map(|point| EmailGate {
@@ -382,11 +380,42 @@ pub async fn start_outreach(
                 "contact {contact_id} passed the existence and email gates without a row"
             )));
         };
+        policy_candidates.push((*contact_id, contact, point));
+    }
 
-        // Legal hard gate, re-evaluated for THIS contact from the current
-        // canonical policy store. The input is recipient FACTS (mirroring the
-        // worker's `build_policy_input`), never a stored verdict.
-        let verdict = evaluate_contact_policy(db, tenant_id, contact, point).await?;
+    // Legal hard gate, re-evaluated from the CURRENT canonical policy store
+    // for every candidate. Consent and policy are loaded with a bounded
+    // number of statements (one per source, not one per contact); the
+    // decision rules themselves are identical to the per-contact evaluator.
+    let consent_pairs: Vec<(Uuid, Option<Uuid>)> = policy_candidates
+        .iter()
+        .map(|(contact_id, _, point)| (*contact_id, Some(point.id)))
+        .collect();
+    let consent_states =
+        crate::legal_policy::load_consent_states(db, tenant_id, &consent_pairs).await?;
+    let inputs: Vec<ContactPolicyInputOwned> = policy_candidates
+        .iter()
+        .map(|(contact_id, contact, point)| {
+            contact_policy_input(
+                contact,
+                point,
+                consent_states
+                    .get(contact_id)
+                    .copied()
+                    .unwrap_or(crate::legal_policy::ConsentState::None),
+            )
+        })
+        .collect();
+    let borrowed_inputs: Vec<crate::legal_policy::ContactPolicyInput<'_>> = inputs
+        .iter()
+        .map(|input| input.as_borrowed(tenant_id))
+        .collect();
+    let verdicts = crate::legal_policy::evaluate_batch(db, &borrowed_inputs).await?;
+
+    for ((contact_id, contact, point), verdict) in policy_candidates.into_iter().zip(verdicts) {
+        let already_enrolled = enrollment_states
+            .get(&contact_id)
+            .is_some_and(|state| enrollment_is_live(state));
         let gate = policy_gate(
             verdict.decision,
             verdict.policy_id,
@@ -956,28 +985,25 @@ fn policy_gate(
     }
 }
 
-/// Evaluate the legal hard gate for one contact from CURRENT canonical facts.
+/// Build the legal-policy input for one contact from CURRENT canonical facts.
 ///
 /// The input mirrors the worker's `build_policy_input`: account country with
 /// the contact country as fallback, the account's country confidence, the
 /// canonical professional contact type, the chosen email contact point, the
 /// canonical sequence source, and the account-lifecycle relationship fact.
-/// Consent evidence is loaded from `sales_consent_evidence` (active row
-/// newest by `collected_at`; a withdrawn row becomes
+/// Consent evidence is loaded in batch from `sales_consent_evidence` (active
+/// row newest by `collected_at`; a withdrawn row becomes
 /// `consent_status = "withdrawn"`). Subscriber type has no canonical source,
 /// so it fails closed to Unknown — inferring legal personality from the B2B
 /// persona is forbidden — and the §103¹(2) similar-product/collection-opt-out
 /// facts have no canonical source either, so they stay at the fail-closed
 /// value exactly like the send path.
-async fn evaluate_contact_policy(
-    db: &PgPool,
-    tenant_id: &str,
+fn contact_policy_input(
     contact: &ContactRow,
     point: &EmailPointRow,
-) -> Result<crate::legal_policy::ContactPolicyVerdict, SalesError> {
-    let consent =
-        crate::legal_policy::load_consent_state(db, tenant_id, contact.id, Some(point.id)).await?;
-    let input = ContactPolicyInputOwned {
+    consent: crate::legal_policy::ConsentState,
+) -> ContactPolicyInputOwned {
+    ContactPolicyInputOwned {
         account_id: contact.account_id,
         contact_id: Some(contact.id),
         contact_point_id: Some(point.id),
@@ -1002,8 +1028,7 @@ async fn evaluate_contact_policy(
         similar_product_basis: false,
         // No canonical collection-time opt-out record exists yet.
         collection_opt_out_offered_at: None,
-    };
-    crate::legal_policy::evaluate(db, &input.as_borrowed(tenant_id)).await
+    }
 }
 
 /// Is an enrollment row in a state that blocks a new enrollment?
@@ -3269,5 +3294,168 @@ mod tests {
             .await
             .unwrap();
         cleanup_fixture(&pool, &tenant, fixture.policy_id).await;
+    }
+
+    // -----------------------------------------------------------------------
+    // Query-count proof for the batched legal gate.
+    // -----------------------------------------------------------------------
+
+    /// A dedicated canonical database for one counter test. The suite's
+    /// shared database is used by many tests in parallel, so its server-side
+    /// scan counters cannot attribute scans to one test.
+    async fn isolated_canonical_pool(test_name: &str) -> Option<(PgPool, String)> {
+        let base = std::env::var("SALES_TEST_DATABASE_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                std::env::var("TEST_DATABASE_URL")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+            })?;
+        let db_name = format!("sa_perf_{}", &Uuid::new_v4().simple().to_string()[..16]);
+        let Some(pool) = migrator::test_support::shared_canonical_db(&base, &db_name)
+            .await
+            .unwrap_or_else(|error| panic!("{}", error.panic_message()))
+        else {
+            panic!("SKIP [{test_name}]: isolated database is unconfigured");
+        };
+        crate::routes::initialize_schema(&pool)
+            .await
+            .expect("isolated canonical database must carry the sales schema");
+        Some((pool, db_name))
+    }
+
+    async fn drop_isolated_database(pool: PgPool, db_name: &str) {
+        pool.close().await;
+        let admin_url = std::env::var("TEST_DATABASE_ADMIN_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                let base = std::env::var("SALES_TEST_DATABASE_URL")
+                    .ok()
+                    .or_else(|| std::env::var("TEST_DATABASE_URL").ok())?;
+                let mut url = url::Url::parse(&base).ok()?;
+                url.set_path("/postgres");
+                Some(url.to_string())
+            })
+            .expect("an admin URL is required to drop the isolated test database");
+        let admin = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&admin_url)
+            .await
+            .expect("connect to the admin database");
+        sqlx::query(&format!(
+            "DROP DATABASE IF EXISTS \"{db_name}\" WITH (FORCE)"
+        ))
+        .execute(&admin)
+        .await
+        .expect("drop isolated test database");
+        admin.close().await;
+    }
+
+    /// Scans of `sales_jurisdiction_policies` (seq + index) in THIS database.
+    async fn policy_table_scans(pool: &PgPool) -> i64 {
+        sqlx::query_scalar(
+            "SELECT COALESCE(SUM(seq_scan + idx_scan), 0)::bigint \
+             FROM pg_stat_all_tables WHERE relname = 'sales_jurisdiction_policies'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0)
+    }
+
+    /// Flush every pool session's pending statistics (PG 15+ defers a
+    /// backend's stats flush by up to one second on an idle connection) so a
+    /// reading after this call includes the measured statements.
+    async fn drain_pool_stats(pool: &PgPool) {
+        tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+        let mut connections = Vec::new();
+        for _ in 0..pool.size().clamp(1, 32) {
+            if let Ok(connection) = pool.acquire().await {
+                connections.push(connection);
+            }
+        }
+        for connection in &mut connections {
+            let _: i32 = sqlx::query_scalar("SELECT 1")
+                .fetch_one(&mut **connection)
+                .await
+                .unwrap();
+        }
+    }
+
+    /// The legal gate resolves every contact's jurisdiction policy with ONE
+    /// scan of the policy table per statement, never one query per contact.
+    /// Pre-fix: `evaluate_contact_policy` issued a policy query per contact,
+    /// so 20 contacts produced ~20 scans.
+    #[tokio::test]
+    async fn legal_policy_resolution_is_batched_not_per_contact() {
+        let Some((pool, db_name)) =
+            isolated_canonical_pool("enrollments::tests::policy_batch").await
+        else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("policy-batch");
+        let fixture =
+            seed_fixture_with(&pool, &tenant, Some(("allowed", "legitimate_interest"))).await;
+
+        let mut contact_ids = vec![fixture.contact_id];
+        for index in 1..20 {
+            let contact_id = Uuid::new_v4();
+            let point_id = Uuid::new_v4();
+            let email = format!("policy-batch-{index}-{contact_id}@example.com");
+            sqlx::query(
+                "INSERT INTO sales_contacts (id, tenant_id, account_id, full_name, country) \
+                 VALUES ($1, $2, $3, 'Bulk Prospect', $4)",
+            )
+            .bind(contact_id)
+            .bind(&tenant)
+            .bind(fixture.account_id)
+            .bind(&fixture.jurisdiction)
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO sales_contact_points \
+                     (id, tenant_id, contact_id, channel, value, normalized_value, verification) \
+                 VALUES ($1, $2, $3, 'email', $4, lower($4), 'valid')",
+            )
+            .bind(point_id)
+            .bind(&tenant)
+            .bind(contact_id)
+            .bind(&email)
+            .execute(&pool)
+            .await
+            .unwrap();
+            contact_ids.push(contact_id);
+        }
+        assert_eq!(contact_ids.len(), 20);
+
+        let queue = ActionQueue::new(pool.clone(), format!("test-worker-{tenant}"));
+        drain_pool_stats(&pool).await;
+        let before = policy_table_scans(&pool).await;
+        let response = start_outreach(
+            &pool,
+            &queue,
+            &tenant,
+            &StartOutreachRequest {
+                sequence_id: fixture.sequence_id,
+                contact_ids,
+                autonomy_policy_id: None,
+                experiment_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.accepted + response.rejected, 20);
+        drain_pool_stats(&pool).await;
+        let delta = policy_table_scans(&pool).await - before;
+
+        // Drop before asserting so a failure does not leak the database.
+        drop_isolated_database(pool, &db_name).await;
+        assert!(
+            delta <= 3,
+            "20 contacts in one request must resolve the policy with a bounded number of \
+             table scans (pre-fix: one policy SELECT per contact ≈ 20); got {delta}"
+        );
     }
 }

@@ -353,25 +353,47 @@ pub async fn ingest_bank_statement(
         return Ok(outcome_from_import(account.id, &digest, existing, true));
     };
 
-    for line in &lines {
-        sqlx::query(
+    // One multi-row INSERT per chunk instead of one INSERT per statement
+    // line. The stored rows are identical (same columns, same order); a
+    // statement of thousands of lines no longer costs thousands of round
+    // trips inside the import transaction.
+    const LINES_PER_INSERT: usize = 7_000;
+    for chunk in lines.chunks(LINES_PER_INSERT) {
+        let mut sql = String::from(
             "INSERT INTO bank_statement_lines \
                  (bank_account_id, import_id, external_id, statement_date, value_date, \
-                  amount_cents, currency, reference, counterparty_name, counterparty_account) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
-        )
-        .bind(account.id)
-        .bind(import_id)
-        .bind(&line.external_id)
-        .bind(line.statement_date)
-        .bind(line.value_date)
-        .bind(line.amount_cents)
-        .bind(&line.currency)
-        .bind(&line.reference)
-        .bind(&line.counterparty_name)
-        .bind(&line.counterparty_account)
-        .execute(&mut *tx)
-        .await?;
+                  amount_cents, currency, reference, counterparty_name, counterparty_account) VALUES ",
+        );
+        for offset in 0..chunk.len() {
+            if offset > 0 {
+                sql.push_str(", ");
+            }
+            let base = 3 + offset * 8;
+            sql.push_str(&format!(
+                "($1, $2, ${base}, ${}, ${}, ${}, ${}, ${}, ${}, ${})",
+                base + 1,
+                base + 2,
+                base + 3,
+                base + 4,
+                base + 5,
+                base + 6,
+                base + 7
+            ));
+        }
+
+        let mut query = sqlx::query(&sql).bind(account.id).bind(import_id);
+        for line in chunk {
+            query = query
+                .bind(&line.external_id)
+                .bind(line.statement_date)
+                .bind(line.value_date)
+                .bind(line.amount_cents)
+                .bind(&line.currency)
+                .bind(&line.reference)
+                .bind(&line.counterparty_name)
+                .bind(&line.counterparty_account);
+        }
+        query.execute(&mut *tx).await?;
     }
 
     tx.commit().await?;
@@ -785,5 +807,136 @@ mod tests {
         );
         assert!(parse_iso_date("30.06.2026").is_err());
         assert!(parse_iso_date("2026-13-01").is_err());
+    }
+}
+
+#[cfg(test)]
+mod db_tests {
+    //! DB-backed proof that a statement's lines are stored by ONE INSERT
+    //! statement per chunk (the pre-fix loop issued one per line). A
+    //! STATEMENT-level trigger on `bank_statement_lines` counts statements.
+
+    use super::*;
+    use crate::chart::{self, LegalEntityInput};
+    use chrono::NaiveDate;
+
+    #[tokio::test]
+    async fn statement_lines_are_stored_by_one_insert_statement() {
+        let Some(pool) =
+            (match migrator::test_support::fresh_canonical_pool("bank_batch", "bank_batch").await {
+                Ok(pool) => pool,
+                Err(error) => panic!("{}", error.panic_message()),
+            })
+        else {
+            return;
+        };
+
+        let mut conn = pool.acquire().await.expect("connection");
+        let entity = chart::create_legal_entity(
+            &mut conn,
+            &LegalEntityInput {
+                legal_name: "Bank Batch OÜ".to_string(),
+                trading_name: None,
+                registry_code: "BANK-BATCH".to_string(),
+                vat_number: None,
+                address_line1: None,
+                city: None,
+                postal_code: None,
+                country_code: "EE".to_string(),
+                default_currency: "EUR".to_string(),
+                fiscal_year_start_month: 1,
+                is_default: false,
+            },
+        )
+        .await
+        .expect("entity");
+        chart::ensure_standard_chart(&mut conn, entity)
+            .await
+            .expect("chart");
+        let bank_ledger = chart::resolve_account_role(&mut conn, entity, crate::ROLE_BANK)
+            .await
+            .expect("bank role");
+        drop(conn);
+        let account_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO bank_accounts (legal_entity_id, name, iban, currency, account_id) \
+             VALUES ($1, 'Batch Account', 'EE00BATCH0000000001', 'EUR', $2) RETURNING id",
+        )
+        .bind(entity)
+        .bind(bank_ledger)
+        .fetch_one(&pool)
+        .await
+        .expect("bank account");
+
+        sqlx::raw_sql(
+            r#"
+            CREATE TABLE bank_line_insert_statements (n INTEGER NOT NULL);
+            CREATE OR REPLACE FUNCTION bank_line_insert_count_fn() RETURNS trigger
+            LANGUAGE plpgsql AS $$
+            BEGIN
+                INSERT INTO bank_line_insert_statements (n) VALUES (1);
+                RETURN NULL;
+            END
+            $$;
+            CREATE TRIGGER bank_line_insert_count
+                AFTER INSERT ON bank_statement_lines
+                FOR EACH STATEMENT EXECUTE FUNCTION bank_line_insert_count_fn();
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("statement trigger");
+
+        let csv = [
+            "external_id,statement_date,amount,currency,reference",
+            "BATCH-1,2026-06-05,125.00,EUR,one",
+            "BATCH-2,2026-06-06,-50.00,EUR,two",
+            "BATCH-3,2026-06-07,0,EUR,three",
+        ]
+        .join("\n")
+            + "\n";
+        let outcome = ingest_bank_statement(
+            &pool,
+            &BankStatementImport {
+                bank_account: &account_id.to_string(),
+                period_start: NaiveDate::from_ymd_opt(2026, 6, 1).expect("start"),
+                period_end: NaiveDate::from_ymd_opt(2026, 6, 30).expect("end"),
+                filename: Some("batch.csv"),
+                csv: &csv,
+                imported_by: "test",
+            },
+        )
+        .await
+        .expect("ingest");
+        assert_eq!(outcome.line_count, 3);
+
+        let statements: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::bigint FROM bank_line_insert_statements")
+                .fetch_one(&pool)
+                .await
+                .expect("statement count");
+        assert_eq!(
+            statements, 1,
+            "three lines must be stored by ONE INSERT statement \
+             (the pre-fix loop issued one per line)"
+        );
+
+        let rows: Vec<(String, i64, Option<String>)> = sqlx::query_as(
+            "SELECT external_id, amount_cents, reference FROM bank_statement_lines \
+             WHERE import_id = $1 ORDER BY external_id",
+        )
+        .bind(outcome.import_id)
+        .fetch_all(&pool)
+        .await
+        .expect("stored lines");
+        assert_eq!(
+            rows,
+            vec![
+                ("BATCH-1".to_string(), 12500, Some("one".to_string())),
+                ("BATCH-2".to_string(), -5000, Some("two".to_string())),
+                ("BATCH-3".to_string(), 0, Some("three".to_string())),
+            ]
+        );
+
+        pool.close().await;
     }
 }

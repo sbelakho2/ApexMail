@@ -1006,11 +1006,9 @@ def enumerate() -> Ledger:
 
 
 def _dedupe(items: list[str]) -> list[str]:
-    out = []
-    for item in items:
-        if item not in out:
-            out.append(item)
-    return out
+    # dict.fromkeys is order-preserving and O(n); the former
+    # `if item not in out` scan was O(n^2) on the warning list.
+    return list(dict.fromkeys(items))
 
 
 if __name__ == "__main__":  # pragma: no cover - manual inspection helper

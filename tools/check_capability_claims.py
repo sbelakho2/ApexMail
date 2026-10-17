@@ -84,6 +84,35 @@ COMPOSE_PROD_PATH = ROOT / "docker-compose.prod.yml"
 ENV_PROD_PATH = ROOT / ".env.production.example"
 CRATES_DIR = ROOT / "services/mail-server/crates"
 
+# Every scanned file is read at most once per checker run: the Rust sources,
+# READMEs and evidence files are consulted once per capability/lookup, and
+# the former rust_sources_mention() re-globbed and re-read every .rs file for
+# every env gate (N+1 file reads).
+_TEXT_CACHE: dict[Path, str] = {}
+_RUST_SOURCES: list[tuple[Path, str]] | None = None
+
+
+def _read_text(path: Path) -> str:
+    text = _TEXT_CACHE.get(path)
+    if text is None:
+        text = path.read_text()
+        _TEXT_CACHE[path] = text
+    return text
+
+
+def _rust_sources() -> list[tuple[Path, str]]:
+    global _RUST_SOURCES
+    if _RUST_SOURCES is None:
+        sources: list[tuple[Path, str]] = []
+        if CRATES_DIR.is_dir():
+            for path in CRATES_DIR.rglob("*.rs"):
+                try:
+                    sources.append((path, _read_text(path)))
+                except OSError:
+                    continue
+        _RUST_SOURCES = sources
+    return _RUST_SOURCES
+
 # Audit 2026-10-02 #6: docs/deployment-facts.json is the SHARED authority for
 # deployment truth (what is ON in the managed baseline, what is absent). This
 # checker keeps its unique wiring/surface checks but sources every shared fact
@@ -543,15 +572,7 @@ def compose_has_service(name: str) -> bool:
 
 
 def rust_sources_mention(needle: str) -> list[Path]:
-    hits = []
-    if CRATES_DIR.is_dir():
-        for path in CRATES_DIR.rglob("*.rs"):
-            try:
-                if needle in path.read_text():
-                    hits.append(path)
-            except OSError:
-                continue
-    return hits
+    return [path for path, text in _rust_sources() if needle in text]
 
 
 # ── 1. Per-entry evidence ────────────────────────────────────────────────────
@@ -654,7 +675,7 @@ for fact_id, verifications in sorted(FACT_TREE_VERIFICATIONS.items()):
         if not fpath.is_file():
             check(f"facts-tree:{fact_id}:{rel}", False, f"{rel} missing from the tree")
             continue
-        text = fpath.read_text()
+        text = _read_text(fpath)
         ok = (needle in text) if should else (needle not in text)
         check(
             f"facts-tree:{fact_id}:{needle}@{rel}", ok,
@@ -667,7 +688,7 @@ for fact_id, verifications in sorted(FACT_TREE_VERIFICATIONS.items()):
 _fw = FACTS.get("firewall_inbound_ports")
 _bootstrap = ROOT / "deploy/scripts/hetzner-bootstrap.sh"
 if isinstance(_fw, dict) and isinstance(_fw.get("value"), list) and _bootstrap.is_file():
-    _fw_text = _bootstrap.read_text()
+    _fw_text = _read_text(_bootstrap)
     for port in _fw["value"]:
         check(
             f"facts-tree:firewall_inbound_ports:ufw-allow-{port}",
@@ -677,7 +698,7 @@ if isinstance(_fw, dict) and isinstance(_fw.get("value"), list) and _bootstrap.i
 
 # Managed-baseline agreement: a fact claiming the managed cloud turns the
 # control ON must agree with .env.production.example (and vice versa).
-_env_text = ENV_PROD_PATH.read_text() if ENV_PROD_PATH.is_file() else ""
+_env_text = _read_text(ENV_PROD_PATH) if ENV_PROD_PATH.is_file() else ""
 _env_values = _env_values(_env_text) if _env_text else {}
 for fact_id, var in sorted(FACT_ENV_VARS.items()):
     if fact_id not in FACTS:
@@ -784,7 +805,7 @@ for rel in surfaces:
     if not path.is_file():
         check(f"surface-exists:{rel}", False, "claim surface missing from the tree")
         continue
-    for lineno, line, in_roadmap in surface_findings(path.read_text()):
+    for lineno, line, in_roadmap in surface_findings(_read_text(path)):
         for entry, patterns in compiled:
             stage = entry.get("stage")
             if stage not in STAGE_INDEX:
@@ -824,7 +845,7 @@ for pattern in REGISTRY["scan"].get("matrix_surfaces") or []:
     for path in sorted(ROOT.glob(pattern)):
         if not path.is_file():
             continue
-        for lineno, line in enumerate(path.read_text().splitlines(), start=1):
+        for lineno, line in enumerate(_read_text(path).splitlines(), start=1):
             if line.strip().startswith("#"):
                 continue  # TOML/markdown comments render nothing; they do not claim
             cell = apex_cell(line)
@@ -877,7 +898,7 @@ def exception_holds(name: str, exc: str) -> bool:
         fpath = ROOT / rel
         if not fpath.is_file():
             fpath = ROOT / "services/mail-server" / rel
-        if not fpath.is_file() or needle not in fpath.read_text():
+        if not fpath.is_file() or needle not in _read_text(fpath):
             return False
     return True
 
@@ -896,7 +917,7 @@ for entry in CAPABILITIES:
     rpath = readme_path(entry.get("crate") or "")
     if rpath is None:
         continue
-    text = rpath.read_text()
+    text = _read_text(rpath)
     gate = entry.get("evidence", {}).get("env_gate") or {}
     gate_name = gate.get("name") if isinstance(gate, dict) else None
 

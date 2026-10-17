@@ -2,6 +2,7 @@
 
 use super::helpers::{clamp_limit, default_limit};
 use axum::extract::{Path, Query, State};
+use axum::http::{HeaderMap, HeaderValue};
 use axum::routing::get;
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
@@ -32,6 +33,13 @@ pub struct ListEventsQuery {
     pub event_type: Option<String>,
     #[serde(default)]
     pub message_id: Option<String>,
+    /// Opaque keyset cursor, echoed from the previous response's
+    /// `x-next-cursor` header. Additive: the integer-masquerading `cursor`
+    /// this route used to accept is still refused (an integer is not a
+    /// decodable cursor), and clients that never send one keep the OFFSET
+    /// behaviour byte for byte.
+    #[serde(default)]
+    pub cursor: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -104,20 +112,79 @@ fn resolve_stats_window(
     Ok((from, to))
 }
 
-async fn list_events(
-    State(state): State<AppState>,
-    auth: AuthUser,
-    Query(params): Query<ListEventsQuery>,
-) -> Result<Json<Vec<EventResponse>>, ApiError> {
-    require_scopes(&auth, &["events:read"])?;
+// ─── Keyset cursor ─────────────────────────────────────────────
+//
+// Hex-encoded `(timestamp, id)` pair — the SAME wire format
+// `routes/audit.rs` uses (`encode_cursor`/`decode_cursor` in
+// `routes/helpers.rs`). The tie-break `timestamp = $ts AND id < $id` makes the
+// `timestamp DESC, id DESC` ordering total, so a page boundary inside a group
+// of events sharing one timestamp neither skips nor duplicates rows — the
+// failure mode plain OFFSET cannot avoid under concurrent writes.
 
-    // SM3 (audit F8): `cursor` used to be accepted here as a raw integer
-    // OFFSET — contradicting the crate's documented opaque-keyset contract.
-    // The mislabeled param is gone; pagination is the honestly-named
-    // `offset`. (This list returns a plain array, so a true keyset migration
-    // needs the CursorPage envelope — a breaking client contract — and is
-    // deliberately out of this pass.)
-    let offset = params.offset.clamp(0, 100_000);
+const EVENTS_CURSOR_SEP: char = '\n';
+
+fn encode_events_cursor(timestamp: &DateTime<Utc>, id: &str) -> String {
+    crate::routes::helpers::encode_cursor(&format!(
+        "{}{EVENTS_CURSOR_SEP}{id}",
+        timestamp.to_rfc3339()
+    ))
+}
+
+fn decode_events_cursor(encoded: &str) -> Result<(DateTime<Utc>, String), ApiError> {
+    let Some(decoded) = crate::routes::helpers::decode_cursor(encoded) else {
+        return Err(ApiError::BadRequest(
+            "invalid cursor: malformed encoding".into(),
+        ));
+    };
+    let Some((timestamp, id)) = decoded.split_once(EVENTS_CURSOR_SEP) else {
+        return Err(ApiError::BadRequest(
+            "invalid cursor: must encode a timestamp and row id".into(),
+        ));
+    };
+    let timestamp = DateTime::parse_from_rfc3339(timestamp)
+        .map_err(|_| ApiError::BadRequest("invalid cursor: must be an encoded timestamp".into()))?
+        .with_timezone(&Utc);
+    if !is_valid_event_id(id) {
+        return Err(ApiError::BadRequest(
+            "invalid cursor: malformed row id".into(),
+        ));
+    }
+    Ok((timestamp, id.to_string()))
+}
+
+/// Parse the optional cursor BEFORE any database work: a malformed cursor is
+/// a 400, never a silently different page.
+fn parse_events_cursor(
+    params: &ListEventsQuery,
+) -> Result<Option<(DateTime<Utc>, String)>, ApiError> {
+    match params.cursor.as_deref() {
+        Some(encoded) => Ok(Some(decode_events_cursor(encoded)?)),
+        None => Ok(None),
+    }
+}
+
+// ─── List plan ─────────────────────────────────────────────────
+
+/// The list query plan: SQL plus the keyset/offset parameters it needs.
+struct EventsListPlan {
+    sql: String,
+    event_type: Option<String>,
+    message_id: Option<String>,
+    /// Bind AFTER the filters: keyset `(ts, id)` + fetch limit, or just
+    /// offset + fetch limit.
+    keyset: Option<(DateTime<Utc>, String)>,
+    offset: i64,
+    fetch_limit: i64,
+    /// Rows the caller asked for (the keyset path fetches one extra to detect
+    /// `has_more`).
+    page_limit: i64,
+}
+
+fn build_events_list_plan(
+    params: &ListEventsQuery,
+    keyset: Option<(DateTime<Utc>, String)>,
+) -> EventsListPlan {
+    let page_limit = clamp_limit(params.limit, 200);
 
     let mut sql = String::from(
         "SELECT id, message_id, event_type, recipient, metadata, timestamp FROM events WHERE tenant_id = $1",
@@ -132,24 +199,105 @@ async fn list_events(
         sql.push_str(&format!(" AND message_id = ${param_idx}"));
         param_idx += 1;
     }
-    sql.push_str(&format!(
-        " ORDER BY timestamp DESC LIMIT ${param_idx} OFFSET ${}",
-        param_idx + 1
-    ));
 
-    // Build query dynamically
-    let mut query = sqlx::query_as::<_, EventRow>(&sql).bind(&auth.tenant_id);
-    if let Some(ref event_type) = params.event_type {
+    // Keyset: no OFFSET at all — the scan starts at the cursor position on
+    // the `(tenant_id, timestamp DESC)` index (sibling migration) instead of
+    // walking and discarding up to 100k rows.
+    //
+    // BOTH paths fetch one extra row (`page_limit + 1`) and truncate: the
+    // extra row is what proves `x-has-more` and yields the next cursor
+    // without a second COUNT query. The response body still holds at most
+    // `page_limit` rows.
+    let fetch_limit = page_limit + 1;
+    let (sql_tail, offset) = if keyset.is_some() {
+        let ts_idx = param_idx;
+        let id_idx = param_idx + 1;
+        let limit_idx = param_idx + 2;
+        (
+            format!(
+                " AND (timestamp < ${ts_idx}::timestamptz
+                       OR (timestamp = ${ts_idx}::timestamptz AND id < ${id_idx}))
+                 ORDER BY timestamp DESC, id DESC LIMIT ${limit_idx}"
+            ),
+            0i64,
+        )
+    } else {
+        (
+            format!(
+                " ORDER BY timestamp DESC, id DESC LIMIT ${param_idx} OFFSET ${}",
+                param_idx + 1
+            ),
+            params.offset.clamp(0, 100_000),
+        )
+    };
+
+    EventsListPlan {
+        sql: sql + &sql_tail,
+        event_type: params.event_type.clone(),
+        message_id: params.message_id.clone(),
+        keyset,
+        offset,
+        fetch_limit,
+        page_limit,
+    }
+}
+
+async fn list_events(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Query(params): Query<ListEventsQuery>,
+) -> Result<(HeaderMap, Json<Vec<EventResponse>>), ApiError> {
+    require_scopes(&auth, &["events:read"])?;
+
+    // SM3 (audit F8): the param that used to be `cursor` here was a raw
+    // integer OFFSET — a lie about the crate's opaque-keyset contract. The
+    // pagination inputs are now: the honestly-named `offset` (same offset and
+    // clamp as before; the one ordering change is the deterministic
+    // `id DESC` tie-break among equal timestamps, where the old SQL left the
+    // order arbitrary) and an OPAQUE `cursor` keyset token echoed from
+    // `x-next-cursor`. HEAD had no `cursor` field at all, so `?cursor=1` was
+    // silently ignored; it is now a 400 because it cannot decode as a cursor
+    // (an integer is never read as an offset).
+    let keyset = parse_events_cursor(&params)?;
+    let plan = build_events_list_plan(&params, keyset);
+
+    let mut query = sqlx::query_as::<_, EventRow>(&plan.sql).bind(&auth.tenant_id);
+    if let Some(ref event_type) = plan.event_type {
         query = query.bind(event_type);
     }
-    if let Some(ref message_id) = params.message_id {
+    if let Some(ref message_id) = plan.message_id {
         query = query.bind(message_id);
     }
-    query = query.bind(clamp_limit(params.limit, 200)).bind(offset);
+    if let Some((ref timestamp, ref id)) = plan.keyset {
+        query = query.bind(timestamp).bind(id).bind(plan.fetch_limit);
+    } else {
+        query = query.bind(plan.fetch_limit).bind(plan.offset);
+    }
 
-    let rows = query.fetch_all(&state.db).await?;
+    let mut rows = query.fetch_all(&state.db).await?;
 
-    Ok(Json(rows.into_iter().map(Into::into).collect()))
+    let more = rows.len() as i64 > plan.page_limit;
+    if more {
+        rows.truncate(plan.page_limit as usize);
+    }
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-has-more",
+        HeaderValue::from_static(if more { "true" } else { "false" }),
+    );
+    if let Some(last) = rows.last() {
+        if more {
+            let cursor = encode_events_cursor(&last.timestamp, &last.id);
+            headers.insert(
+                "x-next-cursor",
+                HeaderValue::from_str(&cursor)
+                    .map_err(|e| ApiError::Internal(format!("cursor encoding error: {e}")))?,
+            );
+        }
+    }
+
+    Ok((headers, Json(rows.into_iter().map(Into::into).collect())))
 }
 
 async fn get_event(
@@ -356,8 +504,81 @@ mod tests {
         assert!(!is_valid_event_id("evt\ninjection"));
     }
 
-    // ── Stats window bounds (audit J) ────────────────────────────
+    // ── Keyset pagination (replaces the OFFSET-only path) ────────
 
+    fn list_query(limit: i64, offset: i64, cursor: Option<&str>) -> ListEventsQuery {
+        ListEventsQuery {
+            limit,
+            offset,
+            event_type: None,
+            message_id: None,
+            cursor: cursor.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn keyset_plan_uses_no_offset_and_binds_the_total_order() {
+        let now = Utc::now();
+        let keyset = Some((now, "evt_abc".to_string()));
+        let plan = build_events_list_plan(&list_query(50, 99_999, Some("ignored")), keyset);
+
+        // The keyset page scans from the cursor, never walks-and-discards rows.
+        assert!(!plan.sql.contains("OFFSET"), "{}", plan.sql);
+        assert!(plan.sql.contains("timestamp < $2::timestamptz"));
+        assert!(plan.sql.contains("timestamp = $2::timestamptz AND id < $3"));
+        assert!(plan
+            .sql
+            .contains("ORDER BY timestamp DESC, id DESC LIMIT $4"));
+        // One extra row is fetched to detect `has_more`.
+        assert_eq!(plan.fetch_limit, 51);
+        assert_eq!(plan.page_limit, 50);
+        assert_eq!(plan.offset, 0, "the cursor page must not carry an offset");
+
+        // Without a cursor the legacy OFFSET shape (with its clamp) is kept
+        // byte for byte, including the `timestamp DESC, id DESC` total order.
+        let plan = build_events_list_plan(&list_query(50, 999_999, None), None);
+        assert!(plan
+            .sql
+            .contains("ORDER BY timestamp DESC, id DESC LIMIT $2 OFFSET $3"));
+        assert_eq!(plan.offset, 100_000);
+        assert_eq!(plan.fetch_limit, 51);
+        assert_eq!(plan.page_limit, 50);
+    }
+
+    #[test]
+    fn keyset_cursor_round_trips_and_refuses_integer_masquerades() {
+        let ts = DateTime::parse_from_rfc3339("2026-10-17T12:00:00.123456+00:00")
+            .expect("timestamp")
+            .with_timezone(&Utc);
+        let encoded = encode_events_cursor(&ts, "evt_0123456789abcdef");
+        let (decoded_ts, decoded_id) = decode_events_cursor(&encoded).expect("cursor round trips");
+        assert_eq!(decoded_ts, ts);
+        assert_eq!(decoded_id, "evt_0123456789abcdef");
+
+        // The mislabeled integer cursor is refused, exactly as before the
+        // keyset migration: it cannot decode.
+        for garbage in ["1", "0", "", "zz", "not-hex"] {
+            let params = list_query(10, 0, Some(garbage));
+            match parse_events_cursor(&params) {
+                Err(ApiError::BadRequest(_)) => {}
+                other => panic!("{garbage:?} must be a 400, got {other:?}"),
+            }
+        }
+        // A cursor whose payload is not `timestamp\nid` is refused too.
+        for payload in ["no-separator", "bad-time\nid", "2026-10-17T12:00:00Z\n"] {
+            let params = list_query(10, 0, Some(&crate::routes::helpers::encode_cursor(payload)));
+            assert!(
+                parse_events_cursor(&params).is_err(),
+                "{payload:?} must be refused"
+            );
+        }
+        // No cursor → the offset path (None, not an error).
+        assert!(parse_events_cursor(&list_query(10, 5, None))
+            .expect("absent cursor is fine")
+            .is_none());
+    }
+
+    // ── Stats window bounds (audit J) ────────────────────────────
     fn stats_query(from: Option<DateTime<Utc>>, to: Option<DateTime<Utc>>) -> StatsQuery {
         StatsQuery { from, to }
     }
@@ -550,6 +771,180 @@ mod adversarial_tests {
         let (status, body) = other_env.get("/v1/events").await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body.as_array().map(Vec::len), Some(1));
+    }
+
+    /// Seed one event with an explicit id and timestamp (keyset tests need a
+    /// controlled, total order).
+    async fn seed_event_at(
+        pool: &sqlx::PgPool,
+        tenant: &str,
+        id: &str,
+        at: chrono::DateTime<chrono::Utc>,
+    ) {
+        sqlx::query(
+            "INSERT INTO events (id, tenant_id, event_type, recipient, timestamp)
+             VALUES ($1, $2, 'delivered', 'keyset@example.com', $3)",
+        )
+        .bind(id)
+        .bind(tenant)
+        .bind(at)
+        .execute(pool)
+        .await
+        .expect("seed timestamped event");
+    }
+
+    fn page_ids(body: &serde_json::Value) -> Vec<String> {
+        body.as_array()
+            .expect("array page")
+            .iter()
+            .map(|item| item["id"].as_str().expect("id").to_string())
+            .collect()
+    }
+
+    /// Deep-page equivalence + the additive cursor contract.
+    ///
+    /// The old implementation could only walk pages with `LIMIT/OFFSET`; the
+    /// keyset path must produce IDENTICAL pages for the same data (the row
+    /// order `timestamp DESC, id DESC` is a total order, and the cursor
+    /// reproduces the next page exactly), while exposing the cursor through
+    /// headers so the response body shape is unchanged.
+    #[tokio::test]
+    async fn events_cursor_pages_equal_offset_pages_and_emit_headers() {
+        let Some(pool) = crate::test_db::canonical_pool("events_keyset_equiv").await else {
+            return;
+        };
+        let (env, tenant) = AdvEnv::tenant(pool.clone(), &["events:read"]).await;
+
+        // 25 events, distinct timestamps, ids deliberately NOT in timestamp
+        // order (proves the cursor binds the timestamp, not the id).
+        let base = chrono::Utc::now() - chrono::Duration::minutes(30);
+        let mut seeded: Vec<(chrono::DateTime<chrono::Utc>, String)> = Vec::new();
+        for i in 0..25i64 {
+            let id = format!("evt_key_{:02}", (i * 7) % 25);
+            let at = base + chrono::Duration::seconds(i);
+            seed_event_at(&pool, &tenant, &id, at).await;
+            seeded.push((at, id));
+        }
+        // Newest first is the API contract.
+        seeded.sort_by_key(|a| std::cmp::Reverse(a.0));
+        let expected_ids: Vec<String> = seeded.into_iter().map(|(_, id)| id).collect();
+
+        // Old path: OFFSET pages.
+        let mut offset_ids: Vec<String> = Vec::new();
+        for page in 0..5 {
+            let (status, body) = env
+                .get(&format!("/v1/events?limit=5&offset={}", page * 5))
+                .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            offset_ids.extend(page_ids(&body));
+        }
+
+        // Keyset path: page 1 without a cursor, then follow x-next-cursor.
+        let mut keyset_ids: Vec<String> = Vec::new();
+        let mut cursor: Option<String> = None;
+        for page in 0..5 {
+            let uri = match &cursor {
+                Some(cursor) => format!("/v1/events?limit=5&cursor={cursor}"),
+                None => "/v1/events?limit=5".to_string(),
+            };
+            let (status, headers, bytes) = env.get_raw(&uri).await;
+            assert_eq!(status, StatusCode::OK);
+            let body: serde_json::Value =
+                serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+            assert_eq!(
+                headers
+                    .get("x-has-more")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or(""),
+                if page < 4 { "true" } else { "false" },
+                "page {page} has_more"
+            );
+            keyset_ids.extend(page_ids(&body));
+            cursor = headers
+                .get("x-next-cursor")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            assert_eq!(cursor.is_some(), page < 4, "page {page} cursor presence");
+        }
+
+        assert_eq!(keyset_ids.len(), 25);
+        assert_eq!(
+            keyset_ids, offset_ids,
+            "the keyset pages must reproduce the OFFSET pages exactly"
+        );
+        assert_eq!(keyset_ids, expected_ids, "newest-first total order");
+
+        pool.close().await;
+    }
+
+    /// A group of events sharing one timestamp must neither duplicate nor
+    /// skip rows at a page boundary — the failure mode plain OFFSET cannot
+    /// avoid under concurrent writes, and the reason the cursor carries the
+    /// `(timestamp, id)` tie-break.
+    #[tokio::test]
+    async fn events_cursor_does_not_skip_or_repeat_rows_with_tied_timestamps() {
+        let Some(pool) = crate::test_db::canonical_pool("events_keyset_ties").await else {
+            return;
+        };
+        let (env, tenant) = AdvEnv::tenant(pool.clone(), &["events:read"]).await;
+        let tied = chrono::Utc::now() - chrono::Duration::minutes(5);
+        // 4 events on the SAME timestamp, plus 2 newer — page size 2 forces
+        // page boundaries inside the tie group.
+        for i in 0..4u8 {
+            seed_event_at(&pool, &tenant, &format!("evt_tie_{i}"), tied).await;
+        }
+        seed_event_at(
+            &pool,
+            &tenant,
+            "evt_tie_newer",
+            tied + chrono::Duration::seconds(1),
+        )
+        .await;
+        seed_event_at(
+            &pool,
+            &tenant,
+            "evt_tie_newest",
+            tied + chrono::Duration::seconds(2),
+        )
+        .await;
+
+        let mut seen: Vec<String> = Vec::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..4 {
+            let uri = match &cursor {
+                Some(cursor) => format!("/v1/events?limit=2&cursor={cursor}"),
+                None => "/v1/events?limit=2".to_string(),
+            };
+            let (status, headers, bytes) = env.get_raw(&uri).await;
+            assert_eq!(status, StatusCode::OK);
+            let body: serde_json::Value =
+                serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+            seen.extend(page_ids(&body));
+            cursor = headers
+                .get("x-next-cursor")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            if cursor.is_none() {
+                break;
+            }
+        }
+
+        seen.sort();
+        seen.dedup();
+        assert_eq!(
+            seen,
+            vec![
+                "evt_tie_0".to_string(),
+                "evt_tie_1".to_string(),
+                "evt_tie_2".to_string(),
+                "evt_tie_3".to_string(),
+                "evt_tie_newer".to_string(),
+                "evt_tie_newest".to_string(),
+            ],
+            "every row exactly once across the tie group"
+        );
+
+        pool.close().await;
     }
 
     #[tokio::test]

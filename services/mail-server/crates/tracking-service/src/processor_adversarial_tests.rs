@@ -2834,3 +2834,357 @@ fn dead_letter_entry_shape_contract() {
     b.truncate(b.len());
     assert_eq!(a, b);
 }
+
+// ── P3: pipelined SSE fan-out ────────────────────────────────────────────────
+
+/// P3 item 5: every event still reaches a real subscriber as its OWN frame,
+/// in order — the batching is a pipelined round trip, not a batched payload.
+/// A real Redis subscriber (the same `get_async_pubsub` the SSE route uses)
+/// is attached to `events:{tenant}` before the publish, exactly like the
+/// production consumer.
+#[tokio::test]
+async fn pipelined_publish_delivers_every_frame_in_order() {
+    migrator::test_support::assert_soft_skip_allowed("TEST_REDIS_URL");
+    let Some(redis) = live_redis() else {
+        eprintln!("skipping: set TEST_REDIS_URL");
+        return;
+    };
+    let base_url = std::env::var("TEST_REDIS_URL").expect("checked above");
+    let url = redis_url_in_db(&base_url, 8).expect("url");
+    let client = redis::Client::open(url).expect("redis client");
+    let mut pubsub = client.get_async_pubsub().await.expect("pubsub connection");
+
+    let tenant = unique("sse");
+    let channel = format!("events:{tenant}");
+    pubsub.subscribe(&channel).await.expect("subscribe");
+
+    // Five frames for one tenant (the per-flush unit is bounded at 500, but
+    // five is enough to prove ordering and frame-per-event shape).
+    let frames: Vec<(String, String)> = (0..5)
+        .map(|i| {
+            (
+                tenant.clone(),
+                format!("{{\"seq\":{i},\"tenantId\":\"{tenant}\"}}"),
+            )
+        })
+        .collect();
+    publish_event_frames(&redis, &frames).await;
+
+    let mut stream = pubsub.on_message();
+    use futures::StreamExt;
+    for i in 0..5 {
+        let msg = tokio::time::timeout(Duration::from_secs(5), stream.next())
+            .await
+            .unwrap_or_else(|_| panic!("frame {i} must arrive (pipelined PUBLISH)"))
+            .expect("subscription stream stays open");
+        assert_eq!(
+            msg.get_channel_name(),
+            channel,
+            "frames stay on the tenant channel"
+        );
+        let payload: String = msg.get_payload().expect("payload is a string");
+        assert_eq!(
+            payload,
+            format!("{{\"seq\":{i},\"tenantId\":\"{tenant}\"}}"),
+            "one frame per event, in order (no batched payload)"
+        );
+    }
+
+    // A SECOND pipeline on the same channel continues the stream (no state
+    // carried between flushes).
+    let more: Vec<(String, String)> = (5..8)
+        .map(|i| {
+            (
+                tenant.clone(),
+                format!("{{\"seq\":{i},\"tenantId\":\"{tenant}\"}}"),
+            )
+        })
+        .collect();
+    publish_event_frames(&redis, &more).await;
+    for i in 5..8 {
+        let msg = tokio::time::timeout(Duration::from_secs(5), stream.next())
+            .await
+            .expect("frame arrives")
+            .expect("stream open");
+        let payload: String = msg.get_payload().expect("payload");
+        assert_eq!(
+            payload,
+            format!("{{\"seq\":{i},\"tenantId\":\"{tenant}\"}}")
+        );
+    }
+
+    // An empty batch is a no-op (no connection is taken, no command sent).
+    publish_event_frames(&redis, &[]).await;
+}
+
+// ── P3: webhook fan-out bulk insert ─────────────────────────────────────────
+
+/// Statement-level probe on `webhook_queue` INSERTs (P3 item 6 bound test).
+async fn install_webhook_queue_insert_probe(db: &PgPool, table: &str) {
+    sqlx::query(&format!(
+        "CREATE TABLE IF NOT EXISTS test_whq_insert_probe_{table} (n bigint NOT NULL)"
+    ))
+    .execute(db)
+    .await
+    .expect("probe table");
+    sqlx::query(&format!(
+        r#"
+        CREATE OR REPLACE FUNCTION test_whq_probe_{table}() RETURNS trigger AS $$
+        BEGIN
+            INSERT INTO test_whq_insert_probe_{table} VALUES (1);
+            RETURN NULL;
+        END $$ LANGUAGE plpgsql
+    "#
+    ))
+    .execute(db)
+    .await
+    .expect("probe fn");
+    sqlx::query(&format!(
+        "CREATE TRIGGER trg_test_whq_{table} AFTER INSERT ON {table} \
+         FOR EACH STATEMENT EXECUTE FUNCTION test_whq_probe_{table}()"
+    ))
+    .execute(db)
+    .await
+    .expect("probe trigger");
+}
+
+async fn webhook_insert_statements(db: &PgPool, table: &str) -> i64 {
+    sqlx::query_scalar(&format!(
+        "SELECT COUNT(*) FROM test_whq_insert_probe_{table}"
+    ))
+    .fetch_one(db)
+    .await
+    .expect("probe count")
+}
+
+async fn reset_webhook_insert_probe(db: &PgPool, table: &str) {
+    sqlx::query(&format!("DELETE FROM test_whq_insert_probe_{table}"))
+        .execute(db)
+        .await
+        .expect("probe reset");
+}
+
+/// The pre-fix queueing path, verbatim: a duplicate subscription query plus
+/// one INSERT per (event × webhook). Run against `legacy_whq` (a LIKE-copy of
+/// `webhook_queue`, same PK) so the new path's rows can be compared against
+/// the old path's rows on the SAME fixture.
+async fn legacy_enqueue_tracking_event_webhooks(
+    db: &PgPool,
+    events: &[DeliverableEvent],
+    table: &str,
+) {
+    use std::collections::HashMap;
+    let mut by_tenant: HashMap<&str, Vec<&DeliverableEvent>> = HashMap::new();
+    for event in events {
+        by_tenant.entry(event.1.as_str()).or_default().push(event);
+    }
+    const NAMESPACE: Uuid = Uuid::from_bytes([
+        0x6b, 0x5f, 0x2b, 0x60, 0x43, 0x1c, 0x4f, 0xc2, 0x9e, 0x77, 0x0f, 0x2f, 0x0d, 0x75, 0x9a,
+        0x31,
+    ]);
+    for (tenant_id, tenant_events) in by_tenant {
+        let webhooks: Vec<(String,)> =
+            sqlx::query_as("SELECT id FROM webhooks WHERE tenant_id = $1 AND enabled = true")
+                .bind(tenant_id)
+                .fetch_all(db)
+                .await
+                .expect("legacy webhook lookup");
+        if webhooks.is_empty() {
+            continue;
+        }
+        let mut wanted_events: HashMap<String, Vec<String>> = HashMap::new();
+        if let Ok(rows) = sqlx::query_as::<_, (String, serde_json::Value)>(
+            "SELECT id, events FROM webhooks WHERE tenant_id = $1 AND enabled = true",
+        )
+        .bind(tenant_id)
+        .fetch_all(db)
+        .await
+        {
+            for (id, events_json) in rows {
+                let mut targets: Vec<String> = Vec::new();
+                if let Some(items) = events_json.as_array() {
+                    for item in items {
+                        if let Some(name) = item.as_str() {
+                            match name {
+                                "message.opened" => targets.push("opened".to_string()),
+                                "message.clicked" => targets.push("clicked".to_string()),
+                                "*" => {
+                                    targets.push("opened".to_string());
+                                    targets.push("clicked".to_string());
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                wanted_events.insert(id, targets);
+            }
+        }
+        for event in tenant_events {
+            let (event_id, _tenant, event_type, message_id, recipient) = event;
+            for (webhook_id,) in &webhooks {
+                let targets = wanted_events.get(webhook_id);
+                let subscribed = targets.is_some_and(|t| t.iter().any(|v| v == event_type));
+                if !subscribed {
+                    continue;
+                }
+                let queue_id = format!(
+                    "whj_{}",
+                    Uuid::new_v5(&NAMESPACE, format!("{event_id}:{webhook_id}").as_bytes())
+                        .simple()
+                );
+                let payload = serde_json::json!({
+                    "id": format!("evt_{event_id}"),
+                    "type": format!("message.{event_type}"),
+                    "tenantId": event.1,
+                    "timestamp": chrono::Utc::now().to_rfc3339(),
+                    "data": {
+                        "message_id": message_id,
+                        "recipient": recipient,
+                    },
+                });
+                sqlx::query(&format!(
+                    "INSERT INTO {table} \
+                     (id, webhook_id, tenant_id, event_type, payload, status, attempt, created_at) \
+                     VALUES ($1, $2, $3, $4, $5, 'pending', 1, NOW()) \
+                     ON CONFLICT (id) DO NOTHING"
+                ))
+                .bind(&queue_id)
+                .bind(webhook_id)
+                .bind(&event.1)
+                .bind(format!("message.{event_type}"))
+                .bind(&payload)
+                .execute(db)
+                .await
+                .expect("legacy enqueue");
+            }
+        }
+    }
+}
+
+/// The comparable shape of a queue row (payload timestamps are wall-clock and
+/// legitimately differ between two runs/tenants).
+#[derive(Debug, PartialEq, Eq, sqlx::FromRow)]
+struct QueueRowShape {
+    id: String,
+    webhook_id: String,
+    tenant_id: String,
+    event_type: String,
+    status: String,
+    attempt: i32,
+    payload_id: String,
+    payload_type: String,
+    payload_tenant: String,
+    payload_message_id: Option<String>,
+    payload_recipient: Option<String>,
+}
+
+async fn queue_row_shapes(db: &PgPool, table: &str) -> Vec<QueueRowShape> {
+    sqlx::query_as(&format!(
+        "SELECT id, webhook_id, tenant_id, event_type, status, attempt, \
+                payload->>'id' AS payload_id, payload->>'type' AS payload_type, \
+                payload->>'tenantId' AS payload_tenant, \
+                payload->'data'->>'message_id' AS payload_message_id, \
+                payload->'data'->>'recipient' AS payload_recipient \
+         FROM {table} ORDER BY id"
+    ))
+    .fetch_all(db)
+    .await
+    .expect("queue rows")
+}
+
+/// P3 item 6 — equivalence: 3 events × 2 webhooks produce EXACTLY the rows the
+/// pre-fix per-(event×webhook) insert path produced (deterministic ids,
+/// event names, payload shape, status/attempt), and the redundant second
+/// subscription query is gone. `ON CONFLICT DO NOTHING` still holds: running
+/// the same batch twice leaves the row count at 6.
+#[tokio::test]
+async fn webhook_queue_bulk_insert_matches_the_legacy_payload_rows() {
+    let Some(db) = canonical_pool("whq_bulk_equiv").await else {
+        eprintln!("skipping: set TEST_DATABASE_URL");
+        return;
+    };
+    let tenant = unique("whqbulk");
+    // Two webhooks: one subscribed to opened+clicked, one subscribed to
+    // clicked only (so fan-out is not the full cross product).
+    sqlx::query(
+        "INSERT INTO webhooks (id, tenant_id, url, secret, events, enabled)
+         VALUES ($1, $3, 'https://hooks.test/a', 's', '[\"message.opened\",\"message.clicked\"]'::jsonb, true),
+                ($2, $3, 'https://hooks.test/b', 's', '[\"message.clicked\"]'::jsonb, true)",
+    )
+    .bind(format!("wh_{}", &Uuid::new_v4().simple().to_string()[..20]))
+    .bind(format!("wh_{}", &Uuid::new_v4().simple().to_string()[..20]))
+    .bind(&tenant)
+    .execute(&db)
+    .await
+    .expect("seed webhooks");
+
+    let events: Vec<DeliverableEvent> = vec![
+        (
+            Uuid::new_v4().to_string(),
+            tenant.clone(),
+            "opened".to_string(),
+            Some(Uuid::new_v4().to_string()),
+            Some("rcpt@example.test".to_string()),
+        ),
+        (
+            Uuid::new_v4().to_string(),
+            tenant.clone(),
+            "opened".to_string(),
+            Some(Uuid::new_v4().to_string()),
+            Some("rcpt@example.test".to_string()),
+        ),
+        (
+            Uuid::new_v4().to_string(),
+            tenant.clone(),
+            "clicked".to_string(),
+            Some(Uuid::new_v4().to_string()),
+            Some("rcpt@example.test".to_string()),
+        ),
+    ];
+
+    // Legacy arm: the old statements against a LIKE-copy of the queue table
+    // (same PK, so its ON CONFLICT semantics are the production ones).
+    sqlx::query("CREATE TABLE legacy_whq (LIKE webhook_queue INCLUDING ALL)")
+        .execute(&db)
+        .await
+        .expect("legacy copy");
+    install_webhook_queue_insert_probe(&db, "legacy_whq").await;
+    install_webhook_queue_insert_probe(&db, "webhook_queue").await;
+    reset_webhook_insert_probe(&db, "legacy_whq").await;
+    reset_webhook_insert_probe(&db, "webhook_queue").await;
+    legacy_enqueue_tracking_event_webhooks(&db, &events, "legacy_whq").await;
+    let legacy_statements = webhook_insert_statements(&db, "legacy_whq").await;
+
+    // New arm.
+    enqueue_tracking_event_webhooks(&db, &events).await;
+    let new_statements = webhook_insert_statements(&db, "webhook_queue").await;
+
+    let legacy_rows = queue_row_shapes(&db, "legacy_whq").await;
+    let new_rows = queue_row_shapes(&db, "webhook_queue").await;
+    assert_eq!(
+        legacy_rows.len(),
+        4,
+        "2 opened events × 1 webhook + 1 clicked × 2"
+    );
+    assert_eq!(
+        new_rows, legacy_rows,
+        "the bulk insert must produce exactly the legacy rows"
+    );
+
+    // ON CONFLICT DO NOTHING: a redelivered batch does not duplicate.
+    enqueue_tracking_event_webhooks(&db, &events).await;
+    assert_eq!(queue_row_shapes(&db, "webhook_queue").await.len(), 4);
+
+    // Bound: the new path issues ONE INSERT per tenant (legacy: one per row).
+    assert_eq!(
+        legacy_statements, 4,
+        "the legacy path issued an INSERT per (event × webhook)"
+    );
+    assert_eq!(
+        new_statements, 1,
+        "the bulk path issues one INSERT for the whole tenant batch"
+    );
+
+    let _ = ();
+}

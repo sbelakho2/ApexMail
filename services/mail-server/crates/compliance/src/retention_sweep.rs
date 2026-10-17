@@ -66,6 +66,28 @@ const DELETE_BATCH_ROWS: i64 = 5_000;
 /// behind (or block) production writes.
 const LOCK_TIMEOUT: &str = "5s";
 
+/// Key type of a sweep target's primary key. The two canonical stores differ
+/// (`events.id` is `VARCHAR(64)`, `messages.id` is `UUID`), and the keyset
+/// delete must compare the key with its own type to use the PK index — a
+/// `::text` cast would defeat it (this is exactly the mistake fixed in the
+/// legal archive).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdKeyType {
+    Text,
+    Uuid,
+}
+
+impl IdKeyType {
+    /// The keyset predicate fragment for a bound key value: `id > $n` for a
+    /// text key, `id > $n::uuid` for a UUID key.
+    fn keyset_predicate(self, param: usize) -> String {
+        match self {
+            IdKeyType::Text => format!("id > ${param}"),
+            IdKeyType::Uuid => format!("id > ${param}::uuid"),
+        }
+    }
+}
+
 /// One event store the sweep purges, mapped to its registry categories.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SweepTarget {
@@ -75,6 +97,8 @@ pub struct SweepTarget {
     pub table: &'static str,
     /// Timestamp column the retention window is measured against.
     pub timestamp_column: &'static str,
+    /// Primary-key type, used by the keyset delete (see [`IdKeyType`]).
+    pub id_key: IdKeyType,
     /// Registry category ids governing this store's retention.
     pub category_ids: &'static [&'static str],
 }
@@ -102,6 +126,8 @@ pub fn sweep_targets() -> Vec<SweepTarget> {
             store: "events",
             table: "events",
             timestamp_column: "timestamp",
+            // events.id VARCHAR(64) PRIMARY KEY (migration 075).
+            id_key: IdKeyType::Text,
             // One table holds sent/delivered/bounce/open/click rows; the
             // minimum of the mapped categories' defaults is applied.
             category_ids: &["RET-007", "RET-009", "RET-010"],
@@ -110,6 +136,8 @@ pub fn sweep_targets() -> Vec<SweepTarget> {
             store: "messages",
             table: "messages",
             timestamp_column: "created_at",
+            // messages.id UUID PRIMARY KEY (migration 052).
+            id_key: IdKeyType::Uuid,
             // Message body + subject line content (RET-001/RET-002).
             category_ids: &["RET-001", "RET-002"],
         },
@@ -647,14 +675,15 @@ impl RetentionSweeper {
 
         // Considered + held-skip counts (reporting only; derived from the
         // DEFAULT cutoff — the shortest honest denominator).
-        let considered: i64 = match sqlx::query_scalar(&format!(
-            "SELECT COUNT(*) FROM {table}
-             WHERE {ts} < $1 OR tenant_id = ANY($2)",
-        ))
-        .bind(default_cutoff)
-        .bind(&zero_ids)
-        .fetch_one(&self.db)
-        .await
+        //
+        // PERF (audit P3): the pre-fix count used ONE predicate
+        // `{ts} < $1 OR tenant_id = ANY($2)` — an OR across two columns that
+        // no index can serve, so the COUNT scanned the whole store. The two
+        // terms are now counted as disjoint, single-column predicates that
+        // each use their own index (see `considered_count`).
+        let considered: i64 = match self
+            .considered_count(table, ts, default_cutoff, &zero_ids)
+            .await
         {
             Ok(c) => c,
             Err(e) if is_missing_store(&e) => {
@@ -684,7 +713,7 @@ impl RetentionSweeper {
         if !zero_ids.is_empty() {
             let predicate = format!("{ts} < $1 AND tenant_id = ANY($2)");
             match self
-                .batched_delete(table, &predicate, Some(now), Some(&zero_ids))
+                .batched_delete(table, target.id_key, &predicate, Some(now), Some(&zero_ids))
                 .await
             {
                 Ok(n) => deleted += n,
@@ -730,7 +759,7 @@ impl RetentionSweeper {
                     None => (format!("{ts} < $1"), None),
                 };
                 match self
-                    .batched_delete(table, &predicate, Some(cutoff), bind_ids)
+                    .batched_delete(table, target.id_key, &predicate, Some(cutoff), bind_ids)
                     .await
                 {
                     Ok(n) => deleted += n,
@@ -780,42 +809,117 @@ impl RetentionSweeper {
         }
     }
 
+    /// Count the rows the DEFAULT-cutoff group considers: past that cutoff OR
+    /// belonging to a zero-retention tenant. PERF (audit P3): the two terms
+    /// are disjoint and single-column, so each one can use its own index:
+    ///
+    /// - `{ts} < cutoff` → the timestamp index;
+    /// - `tenant_id = ANY(zero) AND {ts} >= cutoff` → the tenant index.
+    ///
+    /// The second term keeps `{ts} IS NULL` rows (a NULL timestamp is not past
+    /// the cutoff, but the old OR still matched it through the tenant arm).
+    /// Their union is exactly the old `{ts} < $1 OR tenant_id = ANY($2)`
+    /// predicate, which no single index could serve.
+    async fn considered_count(
+        &self,
+        table: &str,
+        ts: &str,
+        cutoff: DateTime<Utc>,
+        zero_ids: &[String],
+    ) -> Result<i64, sqlx::Error> {
+        let past_cutoff: i64 =
+            sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table} WHERE {ts} < $1"))
+                .bind(cutoff)
+                .fetch_one(&self.db)
+                .await?;
+        if zero_ids.is_empty() {
+            return Ok(past_cutoff);
+        }
+        let zero_retention_past_or_undated: i64 = sqlx::query_scalar(&format!(
+            "SELECT COUNT(*) FROM {table}
+             WHERE tenant_id = ANY($1) AND ({ts} IS NULL OR {ts} >= $2)"
+        ))
+        .bind(zero_ids)
+        .bind(cutoff)
+        .fetch_one(&self.db)
+        .await?;
+        Ok(past_cutoff + zero_retention_past_or_undated)
+    }
+
     /// F11: batched DELETE loop. Each batch runs in its own transaction with
     /// `SET LOCAL lock_timeout`, selects at most [`DELETE_BATCH_ROWS`] rows
-    /// by ctid and deletes exactly those. Returns the accumulated deleted-row
-    /// count (the authoritative count — no separate COUNT query).
+    /// and deletes exactly those. Returns the accumulated deleted-row count
+    /// (the authoritative count — no separate COUNT query).
+    ///
+    /// P3: the selection is a KEYSET walk (`id > last ORDER BY id LIMIT n`)
+    /// instead of the pre-fix `ctid IN (SELECT ctid … LIMIT n)`. Re-probing
+    /// `ctid` from the start of the predicate on every pass is O(N²/B) probes
+    /// (each pass re-reads everything the earlier passes saw, by a different
+    /// physical order), while the keyset walks the primary key forward once:
+    /// pass k only ever looks at ids greater than the last id it deleted, so
+    /// the work per pass is bounded by the batch, not by the rows already
+    /// removed. Ordering by the key also makes every pass's id range strictly
+    /// disjoint from the previous one (pinned by the >2-batch test).
     async fn batched_delete(
         &self,
         table: &str,
+        id_key: IdKeyType,
         predicate: &str,
         cutoff: Option<DateTime<Utc>>,
         tenant_ids: Option<&[String]>,
     ) -> Result<i64, sqlx::Error> {
         let uses_tenants = tenant_ids.is_some();
         let mut deleted: i64 = 0;
+        let mut last_key: Option<String> = None;
         loop {
             let mut tx = self.db.begin().await?;
             sqlx::query(&format!("SET LOCAL lock_timeout = '{LOCK_TIMEOUT}'"))
                 .execute(&mut *tx)
                 .await?;
-            // The LIMIT placeholder's ordinal follows the bound parameters:
-            // $3 when a tenant-id array is bound as $2, $2 otherwise. A fixed
-            // `LIMIT $3` leaves the tenant-less variant with an unbound
-            // parameter, failing EVERY batch in tenant-less deployments.
-            let limit_param = if uses_tenants { "$3" } else { "$2" };
+            // Placeholder ordinals follow the bound parameters: the cutoff is
+            // $1, the tenant array (when present) is $2, then the optional
+            // keyset value, then LIMIT — contiguous, because the extended
+            // protocol's parameter count is the HIGHEST referenced ordinal (a
+            // gap would demand an unbound parameter and fail every batch). A
+            // fixed `LIMIT $3` leaves the tenant-less variant unbound, failing
+            // EVERY batch in tenant-less deployments (same trap as before).
+            let next_param = if uses_tenants { 3 } else { 2 };
+            let (keyset, limit_param) = match &last_key {
+                Some(_) => (
+                    format!(" AND {}", id_key.keyset_predicate(next_param)),
+                    next_param + 1,
+                ),
+                None => (String::new(), next_param),
+            };
+            // One statement per pass: the DELETE itself returns the keys it
+            // removed, so the next pass's lower bound is free (no second
+            // SELECT, no ctid re-probe).
             let sql = format!(
-                "DELETE FROM {table} WHERE ctid IN (
-                   SELECT ctid FROM {table} WHERE {predicate} LIMIT {limit_param}
-                 )"
+                "DELETE FROM {table} WHERE id IN (
+                   SELECT id FROM {table}
+                   WHERE {predicate}{keyset}
+                   ORDER BY id
+                   LIMIT ${limit_param}
+                 )
+                 RETURNING id::text"
             );
-            let mut q = sqlx::query(&sql).bind(cutoff);
+            let mut q = sqlx::query_scalar::<_, String>(&sql).bind(cutoff);
             if uses_tenants {
                 q = q.bind(tenant_ids);
             }
+            if let Some(key) = &last_key {
+                q = q.bind(key);
+            }
             q = q.bind(DELETE_BATCH_ROWS);
-            let rows = q.execute(&mut *tx).await?.rows_affected() as i64;
+            let returned: Vec<String> = q.fetch_all(&mut *tx).await?;
             tx.commit().await?;
+            let rows = returned.len() as i64;
             deleted += rows;
+            // Advance the keyset to the highest key this pass deleted; a pass
+            // that deletes fewer than the batch size has exhausted the store.
+            if let Some(max_key) = returned.into_iter().max() {
+                last_key = Some(max_key);
+            }
             if rows < DELETE_BATCH_ROWS {
                 break;
             }
@@ -1038,6 +1142,7 @@ mod tests {
             store: "events",
             table: "events",
             timestamp_column: "timestamp",
+            id_key: IdKeyType::Text,
             category_ids: &["RET-009", "RET-010"],
         };
         assert_eq!(target.retention_days(&registry), Some(14));
@@ -1123,6 +1228,7 @@ mod tests {
             store: "events",
             table: "events",
             timestamp_column: "timestamp",
+            id_key: IdKeyType::Text,
             category_ids: &["RET-007"],
         }
     }
@@ -1177,6 +1283,7 @@ mod tests {
             store: "events",
             table: "events",
             timestamp_column: "timestamp",
+            id_key: IdKeyType::Text,
             category_ids: &["RET-007"],
         };
         assert_eq!(target.retention_days(&empty), None);

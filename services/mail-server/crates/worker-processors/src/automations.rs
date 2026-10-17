@@ -666,6 +666,38 @@ struct RuleRow {
     created_at: DateTime<Utc>,
 }
 
+/// P1: one skipped-run row, collected in memory while the event's rules are
+/// evaluated and persisted with a single multi-row insert per event (see
+/// [`AutomationExecutor::record_skipped_runs`]).
+#[derive(Debug)]
+struct SkippedRunRecord {
+    automation_id: Uuid,
+    automation_name: String,
+    trigger_kind: String,
+    skip_reason: String,
+}
+
+impl SkippedRunRecord {
+    /// `skip_reason` and `detail` compose into the recorded text exactly like
+    /// the pre-batching per-row insert (`"{skip_reason}: {detail}"`); the
+    /// trigger kind falls back to `<missing>` when the rule carries none.
+    fn new(rule: &RuleRow, skip_reason: &str, detail: &str) -> Self {
+        let trigger_kind = rule
+            .trigger_config
+            .as_ref()
+            .and_then(|trigger| trigger.get("type"))
+            .and_then(Value::as_str)
+            .unwrap_or("<missing>")
+            .to_string();
+        Self {
+            automation_id: rule.id,
+            automation_name: rule.name.clone(),
+            trigger_kind,
+            skip_reason: format!("{skip_reason}: {detail}"),
+        }
+    }
+}
+
 /// Existing per-action state of a resumed run.
 #[derive(Debug, sqlx::FromRow)]
 struct ExistingAction {
@@ -697,6 +729,11 @@ pub struct TickReport {
     pub runs_failed: u64,
     pub actions_enqueued: u64,
     pub events_pruned: u64,
+    /// P1: enabled rules materialized into memory this tick. Rules are loaded
+    /// ONCE per tenant per tick (the process-event path reuses the load), so
+    /// this counter is O(rules) rather than O(events × rules) — it is the
+    /// observable seam the batching test asserts on.
+    pub rules_loaded: u64,
 }
 
 impl TickReport {
@@ -712,6 +749,7 @@ impl TickReport {
         self.runs_failed += other.runs_failed;
         self.actions_enqueued += other.actions_enqueued;
         self.events_pruned += other.events_pruned;
+        self.rules_loaded += other.rules_loaded;
     }
 }
 
@@ -917,8 +955,29 @@ impl AutomationExecutor {
             ..TickReport::default()
         };
 
+        // P1: load each tenant's enabled rules ONCE per tick and reuse the
+        // load for every event of that tenant. The old shape re-read every
+        // rule page per event, so a batch of E events against K rules paid
+        // O(E × K) row materializations (and O(E × pages) round trips).
+        //
+        // Snapshot semantics (honest scope): a rule enabled/disabled/edited
+        // concurrently is observed from the NEXT tick for the rest of this
+        // tenant's events. Nothing enforces "rules cannot change mid-tick" —
+        // the old re-read did not give an atomic view either; it only made
+        // the window smaller at O(E × pages) cost. Durable once-per-tick
+        // snapshotting is the deliberate trade.
+        let mut rules_cache: HashMap<String, Arc<Vec<RuleRow>>> = HashMap::new();
         for event in due {
-            let outcome = self.process_event(&event).await?;
+            let rules = match rules_cache.get(&event.tenant_id) {
+                Some(cached) => Arc::clone(cached),
+                None => {
+                    let loaded = Arc::new(self.enabled_rules(&event.tenant_id).await?);
+                    report.rules_loaded += loaded.len() as u64;
+                    rules_cache.insert(event.tenant_id.clone(), Arc::clone(&loaded));
+                    loaded
+                }
+            };
+            let outcome = self.process_event(&event, &rules).await?;
             report.merge(outcome);
             if let Err(error) = self.settle_event(&event, &outcome).await {
                 tracing::error!(
@@ -970,7 +1029,11 @@ impl AutomationExecutor {
 
     // -- Event processing --------------------------------------------------
 
-    async fn process_event(&self, event: &DueEvent) -> Result<TickReport, AutomationError> {
+    async fn process_event(
+        &self,
+        event: &DueEvent,
+        rules: &[RuleRow],
+    ) -> Result<TickReport, AutomationError> {
         let mut report = TickReport::default();
 
         let Some(kind) = AutomationEventKind::parse(&event.event_type) else {
@@ -986,16 +1049,16 @@ impl AutomationExecutor {
         let ctx = self.load_context(event, kind).await?;
 
         let mut retryable_error: Option<String> = None;
-        let mut cursor: Option<(DateTime<Utc>, Uuid)> = None;
-        loop {
-            let rules = self.enabled_rules_page(&event.tenant_id, cursor).await?;
-            let page_len = rules.len();
-            if page_len == 0 {
-                break;
-            }
-            cursor = rules.last().map(|rule| (rule.created_at, rule.id));
-
-            for rule in &rules {
+        // P1: skipped-run rows are collected in memory and persisted with ONE
+        // chunked multi-row insert per event (same `ON CONFLICT DO NOTHING`
+        // idempotency), instead of one INSERT per (event × rule) round trip.
+        let mut skipped_runs: Vec<SkippedRunRecord> = Vec::new();
+        // F-audit P2: `execute_rule(...)?` / `record_unsupported_trigger(...)?`
+        // used to short-circuit the loop, losing the buffered skip rows of the
+        // rules processed BEFORE the failure. Run the loop as one fallible
+        // unit so the error path can flush the buffer first.
+        let rules_result: Result<(), AutomationError> = async {
+            for rule in rules {
                 match resolve_trigger(rule.trigger_config.as_ref().unwrap_or(&Value::Null)) {
                     TriggerResolution::Unsupported { kind, reason } => {
                         self.record_unsupported_trigger(rule, event, &kind, &reason)
@@ -1003,50 +1066,38 @@ impl AutomationExecutor {
                     }
                     TriggerResolution::Supported(spec) if spec.event == kind => {
                         let Some(ctx) = ctx.as_ref() else {
-                            self.record_skipped_run(
+                            skipped_runs.push(SkippedRunRecord::new(
                                 rule,
-                                event,
-                                kind,
                                 "trigger_entity_missing",
                                 "the event's contact no longer exists",
-                            )
-                            .await?;
+                            ));
                             report.runs_skipped += 1;
                             continue;
                         };
                         if !trigger_filter_matches(&spec, ctx, kind) {
-                            self.record_skipped_run(
+                            skipped_runs.push(SkippedRunRecord::new(
                                 rule,
-                                event,
-                                kind,
                                 "trigger_filter_not_met",
                                 "the event does not satisfy the trigger filters",
-                            )
-                            .await?;
+                            ));
                             report.runs_skipped += 1;
                             continue;
                         }
                         match evaluate_conditions(rule.conditions.as_ref(), ctx) {
                             ConditionVerdict::Unsupported(reason) => {
-                                self.record_skipped_run(
+                                skipped_runs.push(SkippedRunRecord::new(
                                     rule,
-                                    event,
-                                    kind,
                                     "unsupported_condition",
                                     &reason,
-                                )
-                                .await?;
+                                ));
                                 report.runs_skipped += 1;
                             }
                             ConditionVerdict::NotMet(reason) => {
-                                self.record_skipped_run(
+                                skipped_runs.push(SkippedRunRecord::new(
                                     rule,
-                                    event,
-                                    kind,
                                     "condition_not_met",
                                     &reason,
-                                )
-                                .await?;
+                                ));
                                 report.runs_skipped += 1;
                             }
                             ConditionVerdict::Met => {
@@ -1064,10 +1115,29 @@ impl AutomationExecutor {
                     }
                 }
             }
+            Ok(())
+        }
+        .await;
 
-            if page_len < RULES_PAGE_SIZE as usize {
-                break;
+        if let Err(error) = rules_result {
+            // Flush the counts earned by the rules that did run (batched,
+            // exactly like the success path) and then propagate the original
+            // failure. A flush failure is logged, never allowed to mask it.
+            if !skipped_runs.is_empty() {
+                if let Err(flush_error) = self.record_skipped_runs(event, kind, &skipped_runs).await
+                {
+                    tracing::error!(
+                        error = %flush_error,
+                        tenant_id = %event.tenant_id,
+                        "failed to persist buffered automation skip audit rows while handling a rule error"
+                    );
+                }
             }
+            return Err(error);
+        }
+
+        if !skipped_runs.is_empty() {
+            self.record_skipped_runs(event, kind, &skipped_runs).await?;
         }
 
         if retryable_error.is_some() {
@@ -1164,37 +1234,49 @@ impl AutomationExecutor {
         Ok(Some(ctx))
     }
 
-    async fn enabled_rules_page(
-        &self,
-        tenant_id: &str,
-        cursor: Option<(DateTime<Utc>, Uuid)>,
-    ) -> Result<Vec<RuleRow>, AutomationError> {
-        match cursor {
-            Some((created_at, id)) => sqlx::query_as::<_, RuleRow>(
-                "SELECT id, name, trigger_config, conditions, actions, created_at \
-                 FROM automations \
-                 WHERE tenant_id = $1 AND status = 'enabled' \
-                   AND (created_at, id) > ($2, $3) \
-                 ORDER BY created_at, id LIMIT $4",
-            )
-            .bind(tenant_id)
-            .bind(created_at)
-            .bind(id)
-            .bind(RULES_PAGE_SIZE)
-            .fetch_all(&self.db)
-            .await
-            .map_err(|error| AutomationError::Database(error.to_string())),
-            None => sqlx::query_as::<_, RuleRow>(
-                "SELECT id, name, trigger_config, conditions, actions, created_at \
-                 FROM automations \
-                 WHERE tenant_id = $1 AND status = 'enabled' \
-                 ORDER BY created_at, id LIMIT $2",
-            )
-            .bind(tenant_id)
-            .bind(RULES_PAGE_SIZE)
-            .fetch_all(&self.db)
-            .await
-            .map_err(|error| AutomationError::Database(error.to_string())),
+    /// P1: every enabled rule of the tenant, paged through `RULES_PAGE_SIZE`
+    /// rows (a bounded statement size) but materialized ONCE per tick by the
+    /// caller's per-tenant cache — no longer re-read per event.
+    async fn enabled_rules(&self, tenant_id: &str) -> Result<Vec<RuleRow>, AutomationError> {
+        let mut rules: Vec<RuleRow> = Vec::new();
+        let mut cursor: Option<(DateTime<Utc>, Uuid)> = None;
+        loop {
+            let page = match cursor {
+                Some((created_at, id)) => {
+                    sqlx::query_as::<_, RuleRow>(
+                        "SELECT id, name, trigger_config, conditions, actions, created_at \
+                     FROM automations \
+                     WHERE tenant_id = $1 AND status = 'enabled' \
+                       AND (created_at, id) > ($2, $3) \
+                     ORDER BY created_at, id LIMIT $4",
+                    )
+                    .bind(tenant_id)
+                    .bind(created_at)
+                    .bind(id)
+                    .bind(RULES_PAGE_SIZE)
+                    .fetch_all(&self.db)
+                    .await
+                }
+                None => {
+                    sqlx::query_as::<_, RuleRow>(
+                        "SELECT id, name, trigger_config, conditions, actions, created_at \
+                     FROM automations \
+                     WHERE tenant_id = $1 AND status = 'enabled' \
+                     ORDER BY created_at, id LIMIT $2",
+                    )
+                    .bind(tenant_id)
+                    .bind(RULES_PAGE_SIZE)
+                    .fetch_all(&self.db)
+                    .await
+                }
+            }
+            .map_err(|error| AutomationError::Database(error.to_string()))?;
+            let page_len = page.len();
+            cursor = page.last().map(|rule| (rule.created_at, rule.id));
+            rules.extend(page);
+            if page_len < RULES_PAGE_SIZE as usize {
+                return Ok(rules);
+            }
         }
     }
 
@@ -1429,35 +1511,55 @@ impl AutomationExecutor {
         Ok((report, None))
     }
 
-    async fn record_skipped_run(
+    /// P1: persist one event's collected skip records with ONE multi-row
+    /// INSERT (the `ON CONFLICT (tenant_id, automation_id,
+    /// trigger_event_key) DO NOTHING` idempotency is preserved exactly — a
+    /// replayed event conflict-skips every row it already wrote). The old
+    /// shape issued one INSERT per (event × rule).
+    async fn record_skipped_runs(
         &self,
-        rule: &RuleRow,
         event: &DueEvent,
         kind: AutomationEventKind,
-        skip_reason: &str,
-        detail: &str,
+        records: &[SkippedRunRecord],
     ) -> Result<(), AutomationError> {
-        let trigger_kind = rule
-            .trigger_config
-            .as_ref()
-            .and_then(|trigger| trigger.get("type"))
-            .and_then(Value::as_str)
-            .unwrap_or("<missing>");
         sqlx::query(
             "INSERT INTO automation_runs \
-             (automation_id, automation_name, tenant_id, trigger_kind, trigger_event_type, \
-              trigger_event_key, source_event_id, status, skip_reason, finished_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, 'skipped', $8, NOW()) \
+                 (automation_id, automation_name, tenant_id, trigger_kind, trigger_event_type, \
+                  trigger_event_key, source_event_id, status, skip_reason, finished_at) \
+             SELECT u.automation_id, u.automation_name, $1, u.trigger_kind, $2, $3, $4, \
+                    'skipped', u.skip_reason, NOW() \
+             FROM UNNEST($5::uuid[], $6::text[], $7::text[], $8::text[]) \
+                  AS u(automation_id, automation_name, trigger_kind, skip_reason) \
              ON CONFLICT (tenant_id, automation_id, trigger_event_key) DO NOTHING",
         )
-        .bind(rule.id)
-        .bind(&rule.name)
         .bind(&event.tenant_id)
-        .bind(trigger_kind)
         .bind(kind.as_str())
         .bind(&event.event_key)
         .bind(event.id)
-        .bind(format!("{skip_reason}: {detail}"))
+        .bind(
+            records
+                .iter()
+                .map(|record| record.automation_id)
+                .collect::<Vec<_>>(),
+        )
+        .bind(
+            records
+                .iter()
+                .map(|record| record.automation_name.clone())
+                .collect::<Vec<_>>(),
+        )
+        .bind(
+            records
+                .iter()
+                .map(|record| record.trigger_kind.clone())
+                .collect::<Vec<_>>(),
+        )
+        .bind(
+            records
+                .iter()
+                .map(|record| record.skip_reason.clone())
+                .collect::<Vec<_>>(),
+        )
         .execute(&self.db)
         .await
         .map_err(|error| AutomationError::Database(error.to_string()))?;
@@ -2982,6 +3084,7 @@ mod tests {
             runs_failed: 7,
             actions_enqueued: 8,
             events_pruned: 9,
+            rules_loaded: 10,
         });
         assert_eq!(total.events_claimed, 3);
         assert_eq!(total.events_processed, 1);
@@ -2994,6 +3097,7 @@ mod tests {
         assert_eq!(total.runs_failed, 7);
         assert_eq!(total.actions_enqueued, 8);
         assert_eq!(total.events_pruned, 9);
+        assert_eq!(total.rules_loaded, 10);
     }
 
     #[test]
@@ -3546,6 +3650,129 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .starts_with("condition_not_met:"));
+    }
+
+    /// F-audit P2 (skip-audit loss): `execute_rule(...)?` used to return
+    /// BEFORE the buffered skip rows were persisted, so a rule failing after a
+    /// skipping rule silently discarded the skipping rule's audit row. The
+    /// error path must flush the buffer first (still as one batched INSERT).
+    ///
+    /// Fail-before: the forced failure aborts `process_event` before
+    /// `record_skipped_runs`, leaving zero `automation_runs` rows for rule A.
+    #[tokio::test]
+    async fn a_failing_rule_still_persists_earlier_skip_audit_rows() {
+        let Some(pool) =
+            fresh_pool("automations_skip_flush_on_error", "sa_lib_auto_skipflush").await
+        else {
+            return;
+        };
+        let tenant = fresh_tenant("auto-skipfl");
+        insert_tenant(&pool, &tenant).await;
+        let domain = insert_domain(&pool, &tenant).await;
+        let template = insert_template(&pool, &tenant).await;
+        let exec = executor(&pool, Arc::new(FakeAdmission::new()));
+
+        // Rule A: supported trigger, condition NOT met → buffered skip row.
+        let skip_rule = insert_automation(
+            &pool,
+            &tenant,
+            "Skipping rule",
+            json!({ "type": "event", "event": "contact.created" }),
+            json!({ "all": [{ "field": "status", "operator": "equals", "value": "unsubscribed" }] }),
+            send_email_action(&format!("sales@{domain}"), &template),
+        )
+        .await;
+        // Rule B: runs (its get_or_create_run INSERT is forced to fail).
+        let failing_rule = insert_automation(
+            &pool,
+            &tenant,
+            "Failing rule",
+            json!({ "type": "event", "event": "contact.created" }),
+            Value::Null,
+            send_email_action(&format!("sales@{domain}"), &template),
+        )
+        .await;
+
+        // Rules execute in (created_at, id) order: pin A before B.
+        for (id, offset) in [(skip_rule, "2 minutes"), (failing_rule, "1 minute")] {
+            sqlx::query("UPDATE automations SET created_at = NOW() - $2::interval WHERE id = $1")
+                .bind(id)
+                .bind(offset)
+                .execute(&pool)
+                .await
+                .expect("pin rule order");
+        }
+
+        // Force rule B's execute_rule to fail with a DB error — the exact
+        // `?` path the audit loss came from.
+        let failing_uuid = failing_rule.to_string();
+        sqlx::query(&format!(
+            "CREATE OR REPLACE FUNCTION test_fail_automation_run() RETURNS trigger AS $fn$ \
+             BEGIN \
+                 IF NEW.automation_id = '{failing_uuid}'::uuid THEN \
+                     RAISE EXCEPTION 'forced automation run failure'; \
+                 END IF; \
+                 RETURN NEW; \
+             END; \
+             $fn$ LANGUAGE plpgsql"
+        ))
+        .execute(&pool)
+        .await
+        .expect("create failure trigger function");
+        sqlx::query(
+            "CREATE TRIGGER test_fail_automation_run BEFORE INSERT ON automation_runs \
+             FOR EACH ROW EXECUTE FUNCTION test_fail_automation_run()",
+        )
+        .execute(&pool)
+        .await
+        .expect("create failure trigger");
+
+        // The contacts trigger enqueues the contact.created event (the same
+        // producer the platform uses; an explicit ingest would be a duplicate).
+        let _contact = insert_contact(&pool, &tenant, "ada@example.com", &[]).await;
+        let pending: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM automation_trigger_events WHERE tenant_id = $1",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("pending event count");
+        assert_eq!(pending, 1, "the contact trigger enqueued the event");
+
+        let error = exec
+            .tick()
+            .await
+            .expect_err("rule B's forced failure must abort the tick");
+        assert!(
+            matches!(error, AutomationError::Database(_)),
+            "the original database failure must propagate: {error:?}"
+        );
+
+        // Rule A's buffered skip audit row was flushed BEFORE the error.
+        let rows: Vec<(Uuid, String, Option<String>)> = sqlx::query_as(
+            "SELECT automation_id, status, skip_reason FROM automation_runs \
+             WHERE tenant_id = $1",
+        )
+        .bind(&tenant)
+        .fetch_all(&pool)
+        .await
+        .expect("automation run rows");
+        assert_eq!(
+            rows.len(),
+            1,
+            "rule A's skip audit row must survive rule B's failure: {rows:?}"
+        );
+        assert_eq!(rows[0].0, skip_rule);
+        assert_eq!(rows[0].1, "skipped");
+        assert!(
+            rows[0]
+                .2
+                .as_deref()
+                .unwrap_or_default()
+                .starts_with("condition_not_met:"),
+            "{:?}",
+            rows[0].2
+        );
     }
 
     /// A quota refusal defers the whole event; a later tick with quota

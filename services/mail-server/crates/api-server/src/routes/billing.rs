@@ -564,7 +564,7 @@ struct UsageAlertThresholdDto {
     last_triggered_at: Option<chrono::DateTime<Utc>>,
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(sqlx::FromRow, Clone)]
 struct UsageAlertThresholdRow {
     id: String,
     tenant_id: String,
@@ -3015,12 +3015,44 @@ async fn estimate_overage_cost(
     })))
 }
 
+/// Thresholds written per `POST /v1/billing/alerts` statement.
+///
+/// The handler used to accept an unbounded client-supplied list and issue one
+/// INSERT per entry. There is no count cap; the (deduplicated) list is written
+/// in chunks of this size so each statement stays far below PostgreSQL's
+/// 65,535-parameter ceiling (4 binds per row).
+const USAGE_ALERT_UPSERT_CHUNK: usize = 5_000;
+
+/// The single multi-row upsert behind [`configure_usage_alerts`].
+///
+/// `(metric_type, threshold_percent, notification_channel)` arrays are unnest
+/// into one INSERT ... ON CONFLICT (tenant_id, metric_type, threshold_percent)
+/// DO UPDATE, so N thresholds cost ONE statement. `gen_random_uuid()` only
+/// materialises for genuinely new rows; a conflicting row keeps its id.
+const USAGE_ALERT_UPSERT_SQL: &str = r#"
+    INSERT INTO usage_alert_configs (
+        id, tenant_id, metric_type, threshold_percent, notification_channel, enabled
+    )
+    SELECT gen_random_uuid(), $1, t.metric_type, t.threshold_percent, t.notification_channel, true
+    FROM unnest($2::text[], $3::int[], $4::text[])
+         AS t(metric_type, threshold_percent, notification_channel)
+    ON CONFLICT (tenant_id, metric_type, threshold_percent)
+    DO UPDATE SET notification_channel = EXCLUDED.notification_channel,
+                  enabled = true,
+                  updated_at = NOW()
+    RETURNING id::text, tenant_id, metric_type, threshold_percent, notification_channel, enabled, last_triggered_at
+"#;
+
 async fn configure_usage_alerts(
     State(state): State<AppState>,
     auth: AuthUser,
     Json(body): Json<UsageAlertThresholdsBody>,
 ) -> Result<Response, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["billing:write"])?;
+    // No threshold-count cap: the whole list is validated, deduplicated and
+    // written in bounded chunks (below). The old handler issued one INSERT
+    // per entry; a large list must stay ONE round trip per chunk, not a
+    // rejection.
     if body.thresholds.is_empty() {
         return Ok((
             StatusCode::BAD_REQUEST,
@@ -3029,8 +3061,11 @@ async fn configure_usage_alerts(
             .into_response());
     }
 
-    let mut created = Vec::with_capacity(body.thresholds.len());
-    for threshold in body.thresholds {
+    // Validate the WHOLE list before writing anything. The old loop validated
+    // and inserted interleaved, so a bad entry at position N left entries
+    // 1..N-1 persisted without a transaction; all-or-nothing is the contract
+    // the response shape (a full list, or a 400) implies.
+    for threshold in &body.thresholds {
         if !validate_usage_alert_metric(&threshold.metric_type) {
             return Ok((
                 StatusCode::BAD_REQUEST,
@@ -3052,28 +3087,73 @@ async fn configure_usage_alerts(
             )
                 .into_response());
         }
-
-        let row = sqlx::query_as::<_, UsageAlertThresholdRow>(
-            r#"
-            INSERT INTO usage_alert_configs (
-                id, tenant_id, metric_type, threshold_percent, notification_channel, enabled
-            ) VALUES (
-                gen_random_uuid(), $1, $2, $3, $4, true
-            )
-            ON CONFLICT (tenant_id, metric_type, threshold_percent)
-            DO UPDATE SET notification_channel = $4, enabled = true, updated_at = NOW()
-            RETURNING id::text, tenant_id, metric_type, threshold_percent, notification_channel, enabled, last_triggered_at
-            "#,
-        )
-        .bind(&auth.tenant_id)
-        .bind(&threshold.metric_type)
-        .bind(threshold.threshold_percent)
-        .bind(&threshold.notification_channel)
-        .fetch_one(&state.db)
-        .await?;
-
-        created.push(UsageAlertThresholdDto::from(row));
     }
+
+    // One statement can touch each (tenant, metric, percent) row only ONCE
+    // (`ON CONFLICT ... DO UPDATE cannot affect row a second time`), while the
+    // old sequential upserts applied duplicates in order. Deduplicate by the
+    // conflict key keeping the LAST occurrence — exactly the state the
+    // sequential statements converged to. The map makes this O(n) (the old
+    // `position()` scan was O(n²) and unbounded once the cap was removed).
+    let mut last_index: std::collections::HashMap<(String, i32), usize> =
+        std::collections::HashMap::with_capacity(body.thresholds.len());
+    for (idx, threshold) in body.thresholds.iter().enumerate() {
+        last_index.insert(
+            (threshold.metric_type.clone(), threshold.threshold_percent),
+            idx,
+        );
+    }
+    let mut write_order: Vec<usize> = last_index.into_values().collect();
+    // Deterministic statement order: input order of the surviving entries.
+    write_order.sort_unstable();
+
+    let mut rows: Vec<UsageAlertThresholdRow> = Vec::with_capacity(write_order.len());
+    for chunk in write_order.chunks(USAGE_ALERT_UPSERT_CHUNK) {
+        let metric_types: Vec<String> = chunk
+            .iter()
+            .map(|idx| body.thresholds[*idx].metric_type.clone())
+            .collect();
+        let percents: Vec<i32> = chunk
+            .iter()
+            .map(|idx| body.thresholds[*idx].threshold_percent)
+            .collect();
+        let channels: Vec<String> = chunk
+            .iter()
+            .map(|idx| body.thresholds[*idx].notification_channel.clone())
+            .collect();
+        rows.extend(
+            sqlx::query_as::<_, UsageAlertThresholdRow>(USAGE_ALERT_UPSERT_SQL)
+                .bind(&auth.tenant_id)
+                .bind(&metric_types)
+                .bind(&percents)
+                .bind(&channels)
+                .fetch_all(&state.db)
+                .await?,
+        );
+    }
+
+    // Response equivalence with the per-row loop: it returned one DTO per
+    // INPUT entry, in input order, each reflecting that entry's channel and
+    // the row identity/timestamp the row had after its statement. Duplicate
+    // entries collapse onto the SAME row, so several entries can share one
+    // returned row (the old loop returned the same id for each of them too).
+    let by_key: std::collections::HashMap<(&str, i32), &UsageAlertThresholdRow> = rows
+        .iter()
+        .map(|row| ((row.metric_type.as_str(), row.threshold_percent), row))
+        .collect();
+
+    let created: Vec<UsageAlertThresholdDto> = body
+        .thresholds
+        .iter()
+        .filter_map(|threshold| {
+            by_key
+                .get(&(threshold.metric_type.as_str(), threshold.threshold_percent))
+                .map(|row| UsageAlertThresholdDto {
+                    notification_channel: threshold.notification_channel.clone(),
+                    ..UsageAlertThresholdDto::from((*row).clone())
+                })
+        })
+        .collect();
 
     Ok((
         StatusCode::CREATED,
@@ -5290,6 +5370,7 @@ mod tests {
             csrf_secret: "test-csrf-secret-1234567890abcd".into(),
             control_plane_api_key: None,
             sales_autopilot_base_url: "http://localhost:3010".into(),
+            sales_discovery_run_budget_secs: 120,
             internal_service_token: None,
             pdf_renderer_auth_token: None,
             template_renderer_auth_token: None,
@@ -7189,6 +7270,201 @@ mod adversarial_tests {
                 .await
                 .unwrap();
         assert_eq!(count, 4);
+    }
+
+    // ── usage alerts: request cap + one-statement upsert ────────
+
+    /// The client-supplied threshold list is capped: the handler used to
+    /// accept an unbounded list and INSERT per entry, so one request could pin
+    /// a connection for thousands of round trips.
+    #[tokio::test]
+    async fn usage_alert_lists_above_the_old_cap_are_accepted_and_written() {
+        let Some(pool) = pool_for("alerts_cap").await else {
+            return;
+        };
+        seed_plan(
+            &pool,
+            "advcap",
+            0,
+            0,
+            1000,
+            1000,
+            &tenant_features(),
+            None,
+            None,
+            true,
+        )
+        .await;
+        let (tenant, write_key) = tenant_with_key(&pool, "advcap", &["billing:write"]).await;
+        let env = env_for(pool.clone(), write_key).await;
+
+        // The old hard cap was 25. There is no count cap now: the same list
+        // size and a larger one are both accepted and written in full.
+        for (metric, count) in [("emails", 25usize), ("api_calls", 30usize)] {
+            let thresholds: Vec<serde_json::Value> = (1..=count)
+                .map(|i| {
+                    json!({
+                        "metricType": metric,
+                        "thresholdPercent": i,
+                        "notificationChannel": "email",
+                    })
+                })
+                .collect();
+            let (status, body) = post_json(
+                &env,
+                "/v1/billing/alerts",
+                &json!({ "thresholds": thresholds }).to_string(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{body}");
+            assert_eq!(body["data"].as_array().map(Vec::len), Some(count));
+        }
+
+        let api_call_rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM usage_alert_configs WHERE tenant_id = $1 AND metric_type = 'api_calls'",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            api_call_rows, 30,
+            "every threshold above the old cap is written"
+        );
+    }
+
+    /// Statement-count proof + row equivalence for the batched upsert.
+    ///
+    /// The old handler issued one INSERT ... ON CONFLICT per threshold (N
+    /// statements, N round trips). The new one issues exactly ONE multi-row
+    /// UPSERT (verified with a FOR EACH STATEMENT trigger on
+    /// `usage_alert_configs`), and the rows it lands are the same rows the
+    /// sequential upserts converged to — including a duplicate key, which the
+    /// old loop resolved last-wins.
+    #[tokio::test]
+    async fn usage_alert_batch_is_one_upsert_statement_and_matches_sequential_upserts() {
+        let Some(pool) = pool_for("alerts_single_stmt").await else {
+            return;
+        };
+        seed_plan(
+            &pool,
+            "advone",
+            0,
+            0,
+            1000,
+            1000,
+            &tenant_features(),
+            None,
+            None,
+            true,
+        )
+        .await;
+        let (tenant, write_key) = tenant_with_key(&pool, "advone", &["billing:write"]).await;
+        let env = env_for(pool.clone(), write_key).await;
+
+        // Pre-existing row: the batch must UPDATE it (channel + enabled),
+        // never duplicate it.
+        post_json(
+            &env,
+            "/v1/billing/alerts",
+            r#"{"thresholds":[{"metricType":"storage","thresholdPercent":90,"notificationChannel":"email"}]}"#,
+        )
+        .await;
+        sqlx::query("UPDATE usage_alert_configs SET enabled = false WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("disable pre-existing row");
+        let pre_existing_id: String = sqlx::query_scalar(
+            "SELECT id::text FROM usage_alert_configs WHERE tenant_id = $1 AND metric_type = 'storage'",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("pre-existing id");
+
+        crate::test_db::install_statement_counters(&pool, &["usage_alert_configs"]).await;
+
+        // 5 entries — one duplicate key — so a sequential loop would issue 5
+        // INSERT statements and end with the LAST duplicate's channel.
+        let batch = r#"{"thresholds":[
+            {"metricType":"emails","thresholdPercent":10,"notificationChannel":"email"},
+            {"metricType":"emails","thresholdPercent":20,"notificationChannel":"both"},
+            {"metricType":"emails","thresholdPercent":10,"notificationChannel":"webhook"},
+            {"metricType":"api_calls","thresholdPercent":30,"notificationChannel":"email"},
+            {"metricType":"storage","thresholdPercent":90,"notificationChannel":"both"}
+        ]}"#;
+
+        crate::test_db::reset_statement_counts(&pool).await;
+        let (status, body) = post_json(&env, "/v1/billing/alerts", batch).await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+
+        // ONE statement for the whole batch. The statement trigger counts
+        // statements, not rows: Postgres surfaces the single
+        // INSERT ... ON CONFLICT statement as ONE INSERT firing plus (because
+        // the conflict arm takes the update path) at most ONE UPDATE firing.
+        // The old per-threshold loop would have produced 5 INSERT firings.
+        let insert_statements =
+            crate::test_db::statement_count(&pool, "usage_alert_configs", "INSERT").await;
+        let update_statements =
+            crate::test_db::statement_count(&pool, "usage_alert_configs", "UPDATE").await;
+        assert_eq!(
+            insert_statements, 1,
+            "the batch must be a single multi-row upsert (got {insert_statements} INSERT firings)"
+        );
+        assert!(
+            update_statements <= 1,
+            "the conflict arm must belong to that same statement (got {update_statements} UPDATE firings)"
+        );
+
+        // Response equivalence: one entry per INPUT row, in input order, each
+        // carrying its own channel and the row identity it resolved to.
+        let data = body["data"].as_array().expect("data array");
+        assert_eq!(data.len(), 5);
+        assert_eq!(data[0]["metricType"], "emails");
+        assert_eq!(data[0]["thresholdPercent"], 10);
+        assert_eq!(data[0]["notificationChannel"], "email");
+        assert_eq!(data[2]["notificationChannel"], "webhook");
+        assert_eq!(data[0]["id"], data[2]["id"], "duplicates share one row");
+        assert_eq!(data[4]["id"], pre_existing_id.as_str());
+        assert!(data.iter().all(|row| row["isEnabled"] == true));
+
+        // Row equivalence: 3 distinct keys, last-wins channel for the dup, and
+        // the pre-existing row updated in place (same id, re-enabled).
+        let rows: Vec<(String, i32, String, bool, String)> = sqlx::query_as(
+            "SELECT metric_type, threshold_percent, notification_channel, enabled, id::text
+             FROM usage_alert_configs WHERE tenant_id = $1
+             ORDER BY metric_type, threshold_percent",
+        )
+        .bind(&tenant)
+        .fetch_all(&pool)
+        .await
+        .expect("load usage alert rows");
+
+        let summary: Vec<(String, i32, String, bool)> = rows
+            .iter()
+            .map(|(metric, percent, channel, enabled, _)| {
+                (metric.clone(), *percent, channel.clone(), *enabled)
+            })
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                ("api_calls".into(), 30, "email".into(), true),
+                // The duplicate key collapsed to the LAST entry's channel.
+                ("emails".into(), 10, "webhook".into(), true),
+                ("emails".into(), 20, "both".into(), true),
+                ("storage".into(), 90, "both".into(), true),
+            ]
+        );
+        assert_ne!(rows[0].4, rows[1].4, "distinct keys get distinct ids");
+        assert_ne!(rows[1].4, rows[2].4);
+        assert_eq!(
+            rows[3].4, pre_existing_id,
+            "the conflicting row keeps its identity"
+        );
+
+        pool.close().await;
     }
 
     // ── direct plan transition / cancellation refusal ───────────
