@@ -45,9 +45,13 @@ from .config import Config, REPO_ROOT
 SCRATCH_MARKER = ".dogfood-v2-scratch"
 RSYNC_EXCLUDES = (
     ".git", "services/mail-server/target", "node_modules", ".venv", "output",
-    "reports", ".playwright-cli", "data", ".kilo", "ci/runs", "*.rdb",
+    "reports", ".playwright-cli", ".kilo", "ci/runs", "*.rdb",
     "tools/dogfood-v2/out",
 )
+# NOTE: `data` is deliberately NOT excluded. The scratch copy must compile the
+# product tree, and include_str! inputs live under crate `data/` dirs
+# (e.g. billing-service/data/us_sales_tax.json). Excluding every dir named
+# `data` broke the mutant build instead of trimming mutable state.
 from .context import Context
 from .dataplane import PsqlDataPlane
 from .httpc import HttpClient
@@ -71,8 +75,9 @@ def _git(*args: str, cwd: Path) -> subprocess.CompletedProcess:
 def ensure_scratch_tree(cfg: Config, log=None) -> Path:
     """A marker-tagged rsync copy of the working tree; created on first use."""
     scratch = cfg.mutation_worktree
-    if (scratch / SCRATCH_MARKER).exists():
-        return scratch
+    # Always refresh: a marker-tagged copy from an earlier campaign silently
+    # compiles an OLD tree (the stale scratch was pre-Adyen and failed the
+    # mutant build). One rsync per run is cheap against the build that follows.
     if scratch.exists():
         shutil.rmtree(scratch)
     if log:
