@@ -575,9 +575,10 @@ an HMAC-signed `notificationItems` body to
 #   REFUND / REFUND_FAILED         — refund reconciliation
 #   CHARGEBACK / CHARGEBACK_REVERSED — dispute reconciliation
 
-# Upgrade/downgrade scenarios are driven through the Checkout and billing
-# portal endpoints; direct local mutations are refused with
-# 409 CHECKOUT_REQUIRED / 409 BILLING_PORTAL_REQUIRED.
+# Upgrade/downgrade scenarios are driven through Checkout (direct local plan
+# mutation is refused with 409 CHECKOUT_REQUIRED). Cancellation is a local
+# state change: POST /cancel sets cancel_at_period_end (or cancels
+# immediately) and no further renewals are charged.
 
 # Past due + recovery
 #   AUTHORISATION (success false), then a successful AUTHORISATION

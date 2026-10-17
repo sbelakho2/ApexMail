@@ -46,7 +46,7 @@ The sales team will confirm the available deployment model, support terms, data-
 
 Enterprise access is created through the approved contractual process. For self-service plans, a selected plan is only activated after Adyen confirms billing and ApexMail processes the verified subscription webhook. A Checkout completion page alone does not grant an entitlement.
 
-Existing subscription changes and cancellations use the Adyen billing portal. Enterprise changes, renewals, and termination follow the signed contract.
+Existing subscription changes and cancellations are made from the billing settings page in the console. Enterprise changes, renewals, and termination follow the signed contract.
 
 ## Procurement Materials
 

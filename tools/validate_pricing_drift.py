@@ -979,9 +979,19 @@ def validate_entitlement_boundaries(errors: list[str]) -> None:
         '"shopperReference": customer_id,',
         '"reference": format!("checkout:{plan_name}:{interval_label}")',
         '"code": "CHECKOUT_REQUIRED"',
-        '"code": "BILLING_PORTAL_REQUIRED"',
+        # External audit 15 Oct, H1: cancellation is a local state change, not
+        # a portal redirect. The route must call the shared cancellation
+        # service and return a camelCase subscription payload.
+        "cancel_subscription(",
+        "subscription_mutation_payload",
+        "No active subscription to cancel",
     ):
         check(needle in billing, f"billing route is missing safety boundary {needle!r}", errors)
+    check(
+        "BILLING_PORTAL_REQUIRED" not in billing,
+        "billing route reintroduced the non-existent billing-portal refusal (audit 15 Oct H1)",
+        errors,
+    )
     for unsafe in ("UPDATE tenants SET plan = $1, updated_at = $2 WHERE id = $3", "Subscription cancelled immediately"):
         check(unsafe not in billing, f"billing route contains direct local mutation {unsafe!r}", errors)
 
@@ -1069,11 +1079,17 @@ def validate_lifecycle_docs(errors: list[str]) -> None:
     for needle in (
         "does not change tenant status or grant an entitlement",
         "Only verified `active` and `trialing` Adyen subscriptions grant",
-        "`409 BILLING_PORTAL_REQUIRED`",
+        "sets `cancel_at_period_end`",
+        "period-end sweep",
         "persists the monthly and yearly Adyen plan codes",
     ):
         check(needle in lifecycle, f"billing lifecycle doc is missing {needle!r}", errors)
     check("does not persist Adyen price columns" not in lifecycle, "billing lifecycle retains false plans-table claim", errors)
+    check(
+        "BILLING_PORTAL_REQUIRED" not in lifecycle,
+        "billing lifecycle still documents the removed portal refusal (audit 15 Oct H1)",
+        errors,
+    )
     for needle in (
         "The public Checkout endpoint accepts",
         "An `AUTHORISATION` notification is informational only",
@@ -1082,10 +1098,20 @@ def validate_lifecycle_docs(errors: list[str]) -> None:
         check(needle in adyen, f"Adyen contract is missing {needle!r}", errors)
     check(
         re.search(
-            r"direct\s+`/switch-plan`\s+and\s+`/cancel`\s+endpoints\s+return\s+a\s+conflict",
+            r"`/switch-plan`\s+endpoint\s+returns\s+`409\s+CHECKOUT_REQUIRED`",
             adyen,
         ) is not None,
-        "Adyen contract is missing the direct switch/cancel conflict boundary",
+        "Adyen contract is missing the checkout-gated switch-plan boundary",
+        errors,
+    )
+    check(
+        "`/cancel` sets `cancel_at_period_end`" in adyen,
+        "Adyen contract is missing the local cancellation boundary (audit 15 Oct H1)",
+        errors,
+    )
+    check(
+        "BILLING_PORTAL_REQUIRED" not in adyen,
+        "Adyen contract still documents the removed portal refusal (audit 15 Oct H1)",
         errors,
     )
     for stale in ("14-day free trial", "adyen.subscriptions.update", "Full access for 7 d grace period"):

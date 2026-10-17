@@ -436,6 +436,30 @@ validate_repo_gates() {
             python3 tools/generate_subprocessors.py --check
             python3 tools/generate_subprocessors.py --self-test
         '
+        # Processor-fact gate (external audit 15 Oct, H2): the Adyen switch
+        # carried Stripe's facts (US primary / India support / US storage) into
+        # the translated subprocessor pages, the DPA, the privacy policy, the
+        # data-locations page and the compliance mirrors. The register
+        # generator only owns the English public page + mirror, so this gate
+        # holds EVERY legal surface (all four languages) to the canonical
+        # fact: Adyen N.V., Netherlands (EU). --self-test proves the checker
+        # rejects the exact shipped regression and a missing EU fact.
+        ci_check "processor legal facts (Adyen = NL/EU, no Stripe facts)" bash -c '
+            set -eu
+            python3 tools/check_processor_facts.py
+            python3 tools/check_processor_facts.py --self-test
+        '
+        # Production checkout wiring (external audit 15 Oct, H3): the checkout
+        # client needs ADYEN_API_KEY / merchant account / live base URL, but
+        # api-server received none of them and the example env kept Stripe's
+        # sk_live_/whsec_ placeholders — paid checkout could never run in
+        # production. This gate pins the compose wiring + the env contract;
+        # --self-test proves it rejects each regression direction.
+        ci_check "production Adyen checkout wiring" bash -c '
+            set -eu
+            python3 tools/check_prod_billing_wiring.py
+            python3 tools/check_prod_billing_wiring.py --self-test
+        '
         # Published deliverability report (plan A4): the methodology page's
         # numbers are rendered from the committed ClickHouse artifact
         # (apps/marketing-zola/data/deliverability-report.json) by

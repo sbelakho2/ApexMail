@@ -1,0 +1,20 @@
+--- a/services/mail-server/crates/billing-service/src/subscriptions.rs
++++ b/services/mail-server/crates/billing-service/src/subscriptions.rs
+@@ -121,12 +121,17 @@
+     let Some(subscription_id) = subscription_id else {
+         tx.rollback().await.ok();
+         return Err(SubscriptionError::NotFound);
+     };
+ 
+     let now = Utc::now();
++    // MUTANT M23: report success without recording the period-end stop (the
++    // exact audit-15 H1 regression: a cancel that does not stop the renewal).
++    if !immediately {
++        return subscription_by_id(pool, subscription_id).await;
++    }
+     let (action, outcome) = if immediately {
+         sqlx::query(
+             "UPDATE adyen_subscriptions
+                 SET status = 'canceled',
+                     cancel_at_period_end = false,
+                     canceled_at = COALESCE(canceled_at, $2),

@@ -50,7 +50,7 @@ Die aktuelle Liste der autorisierten Unterauftragsverarbeiter wird im [ApexMail-
 | Amazon Web Services, Inc. | E-Mail-Zustelltransport, wenn aktiviert | Konfigurierte SES-Region | EU-Standardvertragsklauseln (AWS-DPA) |
 | Google LLC | Optionale OAuth-Authentifizierung | Global (US-Unternehmen, Datenverarbeitung gemäß OAuth-Konfiguration) | Standardvertragsklauseln |
 | GitHub, Inc. | Optionale OAuth-Authentifizierung | Global (US-Unternehmen) | Standardvertragsklauseln |
-| Adyen N.V. | Zahlungsabwicklung | US (primär), Indien (Support) | Standardvertragsklauseln |
+| Adyen N.V. | Zahlungsabwicklung | Niederlande (EU); Kartennetzwerke verarbeiten global gemäß dem Adyen-DPA | Verarbeitung innerhalb der EU (Adyen N.V., Amsterdam) |
 
 Self-gehostete Infrastruktur (ClickHouse, Redis) läuft auf Hetzner-Servern unter der operativen Kontrolle von ApexMail. Die Upstream-Open-Source-Herausgeber verarbeiten keine Kundendaten.
 

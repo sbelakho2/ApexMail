@@ -40,7 +40,7 @@ La configuration fournie cible des régions de l'EEE pour les données de messag
 |---|---|---|---|
 | Infrastructure de messagerie principale (messages, métadonnées de livraison, données de compte) | Centre de données UE — Allemagne | Centre de données UE — Finlande | EEE — aucun transfert vers un pays tiers |
 | Jetons d'authentification OAuth | Google LLC / GitHub, Inc. (entités américaines, CCT) | Géré par le fournisseur | États-Unis (CCT) |
-| Données de paiement et de facturation | Adyen N.V. (États-Unis, CCT) | Géré par le fournisseur (Inde pour le support) | États-Unis/Inde (CCT) |
+| Données de paiement et de facturation | Adyen N.V. (Pays-Bas, UE) | Géré par le fournisseur au sein de l'UE | EEE — pas de transfert vers des pays tiers (réseaux de cartes selon le DPA Adyen) |
 | Tickets de support | Centre de données UE — Allemagne | Centre de données UE — Finlande | EEE — aucun transfert vers un pays tiers |
 
 Nous ne transférons pas de données personnelles en dehors de l'EEE sans garanties appropriées (Clauses contractuelles types ou décision d'adéquation en vertu de l'Article 45).

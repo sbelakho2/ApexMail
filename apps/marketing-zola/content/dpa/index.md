@@ -50,7 +50,7 @@ The current authorised subprocessors are maintained in the [ApexMail Subprocesso
 | Amazon Web Services, Inc. | Email-delivery transport when enabled | Configured SES region | EU Standard Contractual Clauses (AWS DPA) |
 | Google LLC | Optional OAuth authentication | Global (US entity, data processed per OAuth config) | Standard Contractual Clauses |
 | GitHub, Inc. | Optional OAuth authentication | Global (US entity) | Standard Contractual Clauses |
-| Adyen N.V. | Payment processing | US (primary), India (support) | Standard Contractual Clauses |
+| Adyen N.V. | Payment processing | Netherlands (EU); card scheme networks process globally under the Adyen DPA | Intra-EEA processing (Adyen N.V., Amsterdam) |
 
 Self-hosted infrastructure (ClickHouse, Redis) runs on Hetzner servers under ApexMail's operational control. The upstream open-source publishers do not process customer data.
 

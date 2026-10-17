@@ -71,7 +71,11 @@ Content-Type: application/json
 }
 ```
 
-The portal is the supported path for subscription changes and cancellation.
+Adyen has no hosted billing portal: the response carries the console billing
+settings URL (`/settings/billing`) derived from the validated return URL.
+Payment-method management is arranged with the billing team. Cancellation
+is a local state change (`POST /cancel`), not a portal path (external audit
+15 Oct, H1).
 It requires an existing Adyen customer and an approved return URL.
 
 ### Retired direct-mutation endpoints
@@ -82,10 +86,23 @@ a local subscription or tenant plan:
 | Method | Endpoint | HTTP status | Code | Required action |
 |---|---|---:|---|---|
 | POST | `/switch-plan` | 409 | `CHECKOUT_REQUIRED` | Start supported Adyen Checkout and await webhook reconciliation |
-| POST | `/cancel` | 409 | `BILLING_PORTAL_REQUIRED` | Use the Adyen billing portal and await webhook reconciliation |
 
-Direct JSON requests cannot create, switch, cancel, or immediately downgrade a
-paid entitlement.
+Direct JSON requests cannot create or switch a paid entitlement. Cancellation
+is NOT gated: `POST /cancel` is a local state change (external audit 15 Oct,
+H1).
+
+### Cancellation
+
+`POST /cancel` requires `billing:write` and returns `200` with the updated
+subscription:
+
+- default (`cancelImmediately=false`): sets `cancelAtPeriodEnd`; access
+  continues until the end of the current billing period, then the
+  period-end sweep cancels the subscription and downgrades the tenant;
+- `cancelImmediately=true`: cancels now and downgrades the tenant now;
+- no active subscription: `404`; repeated calls are idempotent.
+
+No further renewals are charged after cancellation.
 
 ### Subscription and invoices
 

@@ -25,6 +25,6 @@ from . import resource          # noqa: F401  rate-limit proofs (last: spends bu
 
 __all__ = [
     "surfaces", "infra", "invariants", "auth", "authz", "cp", "console", "hostile",
-    "state", "errors", "mail", "money", "tracking", "bots", "marketing",
+    "state", "errors", "mail", "money", "audit15", "tracking", "bots", "marketing",
     "pipeline", "resource",
 ]

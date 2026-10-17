@@ -5566,8 +5566,8 @@ pub fn dedicated_ip_request_form_html() -> String {
 /// beside live billing rows.
 pub fn billing_action_form_html() -> String {
     "<div class=\"rounded-sm border border-surface-200 bg-card p-6 space-y-3\">\
-<p class=\"text-sm text-muted-foreground\">Plan changes and invoice downloads are completed through the billing portal. Submitting logs a request — it does not charge the account.</p>\
-<a href=\"/settings/billing/portal\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-primary px-4 py-2 text-sm font-semibold text-white\">Open billing portal</a>\
+<p class=\"text-sm text-muted-foreground\">Plan changes and invoice downloads are completed through the billing team. Submitting logs a request — it does not charge the account.</p>\
+<a href=\"/settings/billing\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-primary px-4 py-2 text-sm font-semibold text-white\">Manage billing</a>\
 </div>"
         .to_string()
 }
@@ -5647,6 +5647,14 @@ pub fn web_settings_billing_page() -> String {
 <form class=\"inline\" method=\"post\" action=\"/web/billing/portal\"><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all border border-surface-300 text-surface-700 hover:bg-surface-100 h-10 px-4 py-2\">Request portal access</button></form>\
 </div>\
 </div>\
+</div>\
+<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\">\
+<h3 class=\"text-lg font-bold mb-2\">Cancel subscription</h3>\
+<p class=\"text-sm text-muted-foreground\">Cancelling stops the next renewal charge. Access continues until the end of the current billing period; choose the immediate option to end access now. No refunds are issued for partial periods.</p>\
+<form class=\"mt-4 space-y-3\" method=\"post\" action=\"/web/billing/cancel\">\
+<label class=\"flex items-center gap-2 text-sm text-surface-700\"><input type=\"checkbox\" name=\"immediately\" value=\"true\" class=\"h-4 w-4\" />End access immediately instead of at period end</label>\
+<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all border border-surface-300 text-surface-700 hover:bg-surface-100 h-10 px-4 py-2\">Cancel subscription</button>\
+</form>\
 </div>\
 <div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-500 mb-6\">Usage This Month</h3>\
 {progress}\
@@ -7712,6 +7720,10 @@ mod tests {
         let billing = web_settings_billing_page();
         assert!(billing.contains("action=\"/web/billing/checkout\""));
         assert!(billing.contains("action=\"/web/billing/portal\""));
+        // External audit 15 Oct, H1: cancellation is a real form, not a
+        // request to a non-existent billing portal.
+        assert!(billing.contains("action=\"/web/billing/cancel\""));
+        assert!(billing.contains("name=\"immediately\""));
 
         let profile = web_settings_profile_page();
         assert!(profile.contains("action=\"/web/auth/change-password\""));
@@ -10724,8 +10736,8 @@ mod deferred_feature_view_tests {
         assert!(ips.contains("Request dedicated IP"));
 
         let billing = billing_action_form_html();
-        assert!(billing.contains("href=\"/settings/billing/portal\""));
-        assert!(billing.contains("Open billing portal"));
+        assert!(billing.contains("href=\"/settings/billing\""));
+        assert!(billing.contains("Manage billing"));
     }
 
     /// Row-delete confirmation forms are SIBLINGS of the bulk form and bind

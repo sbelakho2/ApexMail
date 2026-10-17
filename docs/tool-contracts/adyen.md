@@ -53,9 +53,12 @@ An `AUTHORISATION` notification is informational only. It does not grant an
 entitlement or reactivate a suspended tenant because a payment can succeed
 before the subscription reaches an entitled state.
 
-Existing subscription changes and cancellations use a Adyen billing portal
-session. The legacy direct `/switch-plan` and `/cancel` endpoints return a
-conflict response and never mutate local entitlement rows.
+Existing subscription changes are checkout-gated: the retained `/switch-plan`
+endpoint returns `409 CHECKOUT_REQUIRED` and never mutates local entitlement
+rows. Cancellation is a local state change (external audit 15 Oct, H1):
+`/cancel` sets `cancel_at_period_end` (or cancels immediately) because Adyen
+has no hosted billing portal and the Subscription model charges are
+merchant-initiated; every renewal path honours the flag.
 
 ## Entitlement reconciliation
 

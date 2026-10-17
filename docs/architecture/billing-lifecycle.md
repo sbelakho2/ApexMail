@@ -81,13 +81,23 @@ adds the tenant and resolved plan name to the Adyen Checkout session metadata.
 
 ### Cancellation
 
-`POST /cancel` is retained as a compatibility endpoint and always returns
-`409 BILLING_PORTAL_REQUIRED`. A cancellation must be initiated through a
-Adyen billing portal session, then reconciled from a verified Adyen webhook.
+`POST /cancel` is a LOCAL subscription state change (external audit 15 Oct,
+H1). ApexMail owns the subscription: Adyen's Subscription processing model is
+merchant-initiated and has no hosted billing portal, so the old
+portal-redirect refusal left customers unable to stop renewals.
 
-A reconciled cancellation marks the known Adyen subscription canceled and
-downgrades the matching tenant to `free` only after reconciliation confirms
-it.
+- `cancelImmediately=false` (default) sets `cancel_at_period_end` and
+  `canceled_at`; access continues until `billing_cycle_end`, when the
+  period-end sweep marks the subscription `canceled` and downgrades the tenant
+  to `free`.
+- `cancelImmediately=true` marks it `canceled` now and downgrades the tenant
+  immediately.
+- No active subscription answers `404`; a replay is idempotent and keeps the
+  original `canceled_at`.
+- Every renewal path (dunning retry / auto-pay) skips
+  `cancel_at_period_end` rows, so the next renewal charge never happens.
+- The console form `POST /web/billing/cancel` calls the same
+  `billing_service::subscriptions::cancel_subscription` service.
 
 ### Enterprise contracts
 

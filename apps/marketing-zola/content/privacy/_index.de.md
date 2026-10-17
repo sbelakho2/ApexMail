@@ -40,7 +40,7 @@ Die bereitgestellte Konfiguration zielt für Kern-E-Mail-Daten und Telemetriespe
 |---|---|---|---|
 | Kern-E-Mail-Infrastruktur (Nachrichten, Zustellmetadaten, Kontodaten) | EU-Rechenzentrum — Deutschland | EU-Rechenzentrum — Finnland | EWR — keine Drittlandübermittlung |
 | OAuth-Authentifizierungstoken | Google LLC / GitHub, Inc. (US-Unternehmen, SCCs) | Anbieter-verwaltet | US (SCCs) |
-| Zahlungs- und Abrechnungsdaten | Adyen N.V. (US, SCCs) | Anbieter-verwaltet (Indien für Support) | US/Indien (SCCs) |
+| Zahlungs- und Abrechnungsdaten | Adyen N.V. (Niederlande, EU) | Anbieter-verwaltet innerhalb der EU | EWR — keine Drittlandübermittlung (Kartennetzwerke gemäß Adyen-DPA) |
 | Support-Tickets | EU-Rechenzentrum — Deutschland | EU-Rechenzentrum — Finnland | EWR — keine Drittlandübermittlung |
 
 Wir übermitteln keine personenbezogenen Daten außerhalb des EWR ohne angemessene Garantien (Standardvertragsklauseln oder einen Angemessenheitsbeschluss gemäß Artikel 45).

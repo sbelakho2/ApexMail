@@ -694,6 +694,19 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
                 Ok(_) => {}
                 Err(e) => error!(error = %e, "Trial-expiry sweep failed"),
             }
+
+            // External audit 15 Oct, H1: a subscription canceled from the
+            // product keeps access until its period end, then this reconciler
+            // ends it and downgrades the tenant — the next renewal can never
+            // charge a canceled subscription.
+            match sweep_canceled_at_period_end(trial_state.as_ref()).await {
+                Ok(n) if n > 0 => info!(
+                    ended_subscriptions = n,
+                    "Canceled-at-period-end sweep ended subscriptions"
+                ),
+                Ok(_) => {}
+                Err(e) => error!(error = %e, "Canceled-at-period-end sweep failed"),
+            }
         }
     });
 
@@ -1092,6 +1105,75 @@ async fn perform_month_end_closing(state: &AppState) -> Result<bool, String> {
     );
 
     Ok(true)
+}
+
+/// Apply subscriptions canceled for period end once the period has actually
+/// ended (external audit 15 Oct, H1).
+///
+/// `subscriptions::cancel_subscription(..., immediately = false)` records the
+/// period-end stop and an audit row; this reconciler is what makes the stop
+/// durable when the cycle ends: status → canceled, tenant → free, and an
+/// audit entry. Idempotent (the `cancel_at_period_end = true` predicate is
+/// cleared in the same statement), and the period lock is skipped, so a
+/// concurrent maintenance pass cannot double-count.
+async fn sweep_canceled_at_period_end(state: &AppState) -> Result<u64, String> {
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|e| format!("Failed to begin canceled-subscription sweep transaction: {e}"))?;
+
+    let due: Vec<(uuid::Uuid, String)> = sqlx::query_as(
+        r#"
+        SELECT s.id, s.tenant_id
+        FROM adyen_subscriptions s
+        WHERE s.cancel_at_period_end = true
+          AND s.status IN ('active', 'trialing', 'past_due', 'unpaid')
+          AND s.billing_cycle_end IS NOT NULL
+          AND s.billing_cycle_end <= NOW()
+        FOR UPDATE SKIP LOCKED
+        "#,
+    )
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|e| format!("Failed to query subscriptions to end: {e}"))?;
+
+    for (subscription_id, tenant_id) in &due {
+        sqlx::query(
+            "UPDATE adyen_subscriptions
+                SET status = 'canceled',
+                    cancel_at_period_end = false,
+                    updated_at = NOW()
+              WHERE id = $1",
+        )
+        .bind(subscription_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Failed to end subscription {subscription_id}: {e}"))?;
+        sqlx::query(
+            "UPDATE tenants SET plan = 'free', updated_at = NOW()
+              WHERE id = $1 AND plan <> 'free'",
+        )
+        .bind(tenant_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Failed to downgrade tenant {tenant_id}: {e}"))?;
+        append_audit_log(
+            &mut tx,
+            tenant_id,
+            "billing.subscription_ended_at_period_end",
+            "subscription",
+            Some(&subscription_id.to_string()),
+            serde_json::json!({ "effective": "period_end" }),
+            Utc::now(),
+        )
+        .await?;
+    }
+
+    tx.commit()
+        .await
+        .map_err(|e| format!("Failed to commit canceled-subscription sweep: {e}"))?;
+    Ok(due.len() as u64)
 }
 
 /// Downgrade tenants whose trialing subscription ended without a terminal
@@ -1946,6 +2028,9 @@ async fn process_scheduled_retries(
           AND d.next_retry_at <= NOW()
           AND d.status IN ('warning', 'soft_suspended')
           AND s.status IN ('past_due', 'unpaid')
+          -- External audit 15 Oct, H1: a subscription canceled for period end
+          -- must never be charged again, even if a dunning retry is queued.
+          AND s.cancel_at_period_end = false
         ORDER BY d.next_retry_at ASC
         LIMIT 50
         "#,
@@ -7005,6 +7090,153 @@ mod coverage_adversarial {
         .await
         .expect("subscription");
     }
+
+    // External audit 15 Oct, H1: a subscription canceled for period end must
+    // never be charged by the dunning/auto-pay sweep, even when a retry is
+    // queued and an invoice is open.
+    env_test!(scheduled_retries_skip_canceled_at_period_end, |env| {
+        let mock = Mock::default();
+        mock.route(
+            "/payments",
+            200,
+            r#"{"pspReference":"psp_should_not_happen","resultCode":"Authorised"}"#,
+        );
+        let base = spawn_mock(mock.clone()).await;
+        let guard = ENV_LOCK.lock().await;
+        let previous = (
+            std::env::var("AUTO_PAY_OPEN_INVOICES").ok(),
+            std::env::var("ADYEN_API_KEY").ok(),
+            std::env::var("ADYEN_API_BASE_URL").ok(),
+            std::env::var("ADYEN_MERCHANT_ACCOUNT").ok(),
+        );
+        std::env::set_var("AUTO_PAY_OPEN_INVOICES", "true");
+        std::env::set_var("ADYEN_API_KEY", "AQEohONJaaPk33yRwggDP5DPc2s");
+        std::env::set_var("ADYEN_API_BASE_URL", &base);
+        std::env::set_var("ADYEN_MERCHANT_ACCOUNT", "ApexMailTestECOM");
+
+        let tenant = "mtcov_retry_canceled";
+        seed_retry_candidate(env, tenant, "warning", "past_due").await;
+        sqlx::query(
+            "UPDATE adyen_subscriptions
+                SET cancel_at_period_end = true,
+                    canceled_at = NOW(),
+                    adyen_recurring_detail_reference = 'tok_retry_canceled'
+              WHERE tenant_id = $1",
+        )
+        .bind(tenant)
+        .execute(&env.pool)
+        .await
+        .expect("canceled subscription");
+        let invoice_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO invoices (id, tenant_id, amount, currency, status, invoice_number,
+                                   subtotal, vat_total, total, issued_at, due_at,
+                                   period_start, period_end, created_at, updated_at)
+             VALUES ($1, $2, 2500, 'EUR', 'pending', $3, 2500, 0, 2500,
+                     NOW(), NOW(), NOW(), NOW(), NOW(), NOW())",
+        )
+        .bind(invoice_id)
+        .bind(tenant)
+        .bind(format!("MTCOV-{}", invoice_id.simple()))
+        .execute(&env.pool)
+        .await
+        .expect("open invoice");
+
+        let result = process_scheduled_retries(&env.state, &Client::new())
+            .await
+            .expect("retries");
+        assert_eq!(
+            result.attempted, 0,
+            "a canceled subscription is never retried"
+        );
+        assert_eq!(
+            mock.call_count("/payments"),
+            0,
+            "no provider charge may be attempted after cancellation"
+        );
+
+        match previous {
+            (Some(v), _, _, _) => std::env::set_var("AUTO_PAY_OPEN_INVOICES", v),
+            _ => std::env::remove_var("AUTO_PAY_OPEN_INVOICES"),
+        }
+        drop(guard);
+    });
+
+    // External audit 15 Oct, H1: the period-end reconciler ends a canceled
+    // subscription once its cycle has actually ended and downgrades the
+    // tenant; a future period end is untouched and a replay is a no-op.
+    env_test!(
+        canceled_at_period_end_sweep_ends_due_and_is_idempotent,
+        |env| {
+            let now_tenant = "mtcov_cancel_now";
+            let future_tenant = "mtcov_cancel_future";
+            seed_tenant(env, now_tenant, "growth", "active").await;
+            seed_tenant(env, future_tenant, "growth", "active").await;
+            for (tenant, due) in [(now_tenant, true), (future_tenant, false)] {
+                sqlx::query(
+                    "INSERT INTO adyen_subscriptions
+                     (tenant_id, adyen_subscription_id, plan, status,
+                      billing_cycle_start, billing_cycle_end,
+                      cancel_at_period_end, canceled_at, adyen_shopper_reference)
+                 VALUES ($1, $2, 'growth', 'active',
+                         NOW() - INTERVAL '30 days',
+                         CASE WHEN $3 THEN NOW() - INTERVAL '1 hour'
+                              ELSE NOW() + INTERVAL '10 days' END,
+                         true, NOW(), $1)",
+                )
+                .bind(tenant)
+                .bind(format!("psp_{tenant}"))
+                .bind(due)
+                .execute(&env.pool)
+                .await
+                .expect("canceled subscription");
+            }
+
+            let ended = sweep_canceled_at_period_end(&env.state)
+                .await
+                .expect("sweep");
+            assert_eq!(ended, 1, "only the ended cycle is reconciled");
+            let (status, cancel_at_period_end): (String, bool) = sqlx::query_as(
+                "SELECT status, cancel_at_period_end FROM adyen_subscriptions WHERE tenant_id = $1",
+            )
+            .bind(now_tenant)
+            .fetch_one(&env.pool)
+            .await
+            .unwrap();
+            assert_eq!(status, "canceled");
+            assert!(!cancel_at_period_end);
+            let (plan,): (String,) = sqlx::query_as("SELECT plan FROM tenants WHERE id = $1")
+                .bind(now_tenant)
+                .fetch_one(&env.pool)
+                .await
+                .unwrap();
+            assert_eq!(plan, "free");
+            let audits: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM audit_logs
+              WHERE tenant_id = $1 AND action = 'billing.subscription_ended_at_period_end'",
+            )
+            .bind(now_tenant)
+            .fetch_one(&env.pool)
+            .await
+            .unwrap();
+            assert_eq!(audits, 1, "the ending is audit-chained");
+
+            let future_status: String =
+                sqlx::query_scalar("SELECT status FROM adyen_subscriptions WHERE tenant_id = $1")
+                    .bind(future_tenant)
+                    .fetch_one(&env.pool)
+                    .await
+                    .unwrap();
+            assert_eq!(future_status, "active", "a future period end is untouched");
+            assert_eq!(
+                sweep_canceled_at_period_end(&env.state)
+                    .await
+                    .expect("replay"),
+                0,
+                "replay is a no-op"
+            );
+        }
+    );
 
     env_test!(scheduled_retries_reschedule_after_adyen_failure, |env| {
         let mock = Mock::default();

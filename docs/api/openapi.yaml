@@ -6168,7 +6168,7 @@ paths:
   /billing/portal:
     post:
       operationId: createBillingPortalSession
-      summary: Create a Adyen billing portal session
+      summary: Return the console billing settings URL (Adyen has no hosted portal)
       tags:
         - Billing
       parameters:
@@ -6192,7 +6192,7 @@ paths:
               $ref: '#/components/schemas/BillingPortalSessionRequest'
       responses:
         '200':
-          description: Billing portal session created.
+          description: Console billing settings URL returned for payment-method management.
           content:
             application/json:
               schema:
@@ -6206,7 +6206,7 @@ paths:
         '401':
           $ref: '#/components/responses/AuthenticationError'
         '500':
-          description: Billing portal session creation failed.
+          description: Billing settings URL resolution failed.
           content:
             application/json:
               schema:

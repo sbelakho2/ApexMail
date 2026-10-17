@@ -1456,7 +1456,7 @@ async fn switch_plan(
 }
 
 async fn cancel_subscription_request(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Query(q): Query<TenantIdQuery>,
     Extension(scope): Extension<TenantAuthScope>,
     Json(body): Json<LegacyCancelBody>,
@@ -1464,18 +1464,40 @@ async fn cancel_subscription_request(
     if let Err(response) = check_tenant_access(&scope, &q.tenant_id) {
         return Ok(response);
     }
-    let _ = (body.reason, body.feedback, body.cancel_immediately);
+    let _ = (body.reason, body.feedback);
 
-    tracing::warn!(
-        tenant_id = %q.tenant_id,
-        "rejected direct internal subscription cancellation; Adyen lifecycle is required"
-    );
-
-    Ok(error_response(
-        StatusCode::CONFLICT,
-        ErrorCode::Conflict,
-        "Direct cancellation is disabled. Use the Adyen billing portal and wait for the verified Adyen webhook before subscription access changes.",
-    ))
+    // External audit 15 Oct, H1: cancellation is a local subscription state
+    // change shared with the public API. It stops the next renewal charge;
+    // the old refusal pointed at a non-existent Adyen billing portal.
+    match subscriptions::cancel_subscription(&state.db, &q.tenant_id, body.cancel_immediately).await
+    {
+        Ok(subscription) => Ok(Json(serde_json::json!({
+            "subscription": subscription,
+            "message": if body.cancel_immediately {
+                "Subscription ended immediately; no further renewals will be charged."
+            } else {
+                "Subscription cancels at the end of the current billing period; no further renewals will be charged."
+            },
+        }))
+        .into_response()),
+        Err(subscriptions::SubscriptionError::NotFound) => Ok(error_response(
+            StatusCode::NOT_FOUND,
+            ErrorCode::NotFound,
+            "No active subscription to cancel",
+        )),
+        Err(error) => {
+            tracing::error!(
+                tenant_id = %q.tenant_id,
+                error = %error,
+                "internal subscription cancellation failed"
+            );
+            Ok(error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorCode::InternalError,
+                "Subscription cancellation failed",
+            ))
+        }
+    }
 }
 
 #[derive(Deserialize)]

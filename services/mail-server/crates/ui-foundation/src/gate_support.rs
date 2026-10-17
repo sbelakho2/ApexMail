@@ -364,6 +364,7 @@ pub(crate) const REGISTERED_BROWSER_POST_ROUTES: &[&str] = &[
     "/web/team/invite",
     "/web/billing/checkout",
     "/web/billing/portal",
+    "/web/billing/cancel",
     "/web/contacts",
     // Deferred-feature 3: the contact editor's PRG twin (single-contact
     // name/status edit).

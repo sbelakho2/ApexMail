@@ -204,6 +204,15 @@
         "p.inv.fixture_scoping"
       ],
       "description": "Contact creation binds the system tenant instead of the session tenant: fixture rows lose their tenant scope"
+    },
+    {
+      "id": "M23-money-cancellation-noop",
+      "family": "money",
+      "patch": "M23-money-cancellation-noop.patch",
+      "probes": [
+        "p.money.cancellation_self_service"
+      ],
+      "description": "Period-end cancellation reports success without recording cancel_at_period_end: the next renewal keeps charging (audit-15 H1 regression)"
     }
   ]
 }

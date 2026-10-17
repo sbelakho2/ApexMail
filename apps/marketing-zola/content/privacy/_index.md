@@ -40,7 +40,7 @@ The supplied configuration targets EEA regions for core email-service data and t
 |---|---|---|---|
 | Core email infrastructure (messages, delivery metadata, account data) | EU data centre — Germany | EU data centre — Finland | EEA — no third-country transfer |
 | OAuth authentication tokens | Google LLC / GitHub, Inc. (US entities, SCCs) | Provider-managed | US (SCCs) |
-| Payment and billing records | Adyen N.V. (US, SCCs) | Provider-managed (India for support) | US/India (SCCs) |
+| Payment and billing records | Adyen N.V. (Netherlands, EU) | Provider-managed within the EU | EEA — no third-country transfer (card scheme networks under the Adyen DPA) |
 | Support tickets | EU data centre — Germany | EU data centre — Finland | EEA — no third-country transfer |
 
 We do not transfer personal data outside the EEA without adequate safeguards (Standard Contractual Clauses or an adequacy decision under Article 45).

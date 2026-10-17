@@ -49,7 +49,7 @@ Las tarifas se facturan mensual o anualmente según su elección. Los precios pu
 
 ### 7.1 Renovación automática
 
-Las suscripciones se renuevan automáticamente al final de cada período de facturación, a menos que se cancelen antes de la fecha de renovación. Los cambios y las cancelaciones de autoservicio se realizan mediante el portal de facturación de Adyen. La cancelación surte efecto conforme al evento de facturación de Adyen confirmado; no se emiten reembolsos por períodos parciales.
+Las suscripciones se renuevan automáticamente al final de cada período de facturación, a menos que se cancelen antes de la fecha de renovación. Puede cambiar o cancelar su suscripción desde la página de facturación del panel; la cancelación detiene el siguiente cargo de renovación y surte efecto al final del período de facturación actual (o de inmediato si así lo elige). No se emiten reembolsos por períodos parciales.
 
 ### 7.2 Cambios de precio
 

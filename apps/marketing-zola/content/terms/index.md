@@ -49,7 +49,7 @@ Fees are billed monthly or annually as selected. Published prices are in EUR (eu
 
 ### 7.1 Automatic Renewal
 
-Subscriptions auto-renew at the end of each billing period unless cancelled before the renewal date. Self-service changes and cancellations are made through the Adyen billing portal. Cancellation takes effect only as confirmed by the applicable Adyen billing event; no refunds are issued for partial periods.
+Subscriptions auto-renew at the end of each billing period unless cancelled before the renewal date. You can change or cancel your subscription from the billing settings page in the console; a cancellation stops the next renewal charge and takes effect at the end of the current billing period (or immediately if you choose so). No refunds are issued for partial periods.
 
 ### 7.2 Price Changes
 

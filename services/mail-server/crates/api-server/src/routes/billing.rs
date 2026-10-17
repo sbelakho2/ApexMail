@@ -3373,9 +3373,10 @@ async fn create_portal_session(
         return Ok(billing_operation_failed_response());
     }
 
-    // Adyen has no hosted billing portal: payment-method management is a
-    // console page (Drop-in against the shopper's stored tokens). Return the
-    // console URL derived from the caller's own validated return URL.
+    // Adyen has no hosted billing portal: payment-method management and
+    // cancellation live in the console. Return the real billing settings page
+    // (the old `/web/billing/portal` target is a POST-only form route, so a
+    // GET on it could never render — audit 15 Oct, H1).
     let mut console_url = match url::Url::parse(&body.return_url) {
         Ok(url) => url,
         Err(_) => {
@@ -3386,7 +3387,7 @@ async fn create_portal_session(
                 .into_response())
         }
     };
-    console_url.set_path("/web/billing/portal");
+    console_url.set_path("/settings/billing");
     console_url.set_query(None);
     console_url.set_fragment(None);
     let session = AdyenPortalSessionResponse {
@@ -3481,35 +3482,76 @@ async fn switch_plan(
     Ok(checkout_required_response())
 }
 
-fn billing_portal_required_response() -> Response {
-    (
-        StatusCode::CONFLICT,
-        Json(serde_json::json!({
-            "error": "Direct cancellation is disabled. Create a Adyen billing portal session and wait for the verified Adyen webhook before subscription access changes.",
-            "code": "BILLING_PORTAL_REQUIRED",
-        })),
-    )
-        .into_response()
-}
-
 async fn cancel_subscription_request(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     auth: AuthUser,
     Json(body): Json<LegacyCancelBody>,
 ) -> Result<Response, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["billing:write"])?;
-    let _ = (body.reason, body.feedback, body.cancel_immediately);
+    let _ = (body.reason, body.feedback);
 
-    // Cancellation must be executed by Adyen (normally through the billing
-    // portal) and then reconciled from a verified webhook. Updating the local
-    // subscription record here can leave ApexMail and Adyen in different
-    // states and may revoke access without a confirmed cancellation.
-    tracing::warn!(
-        tenant_id = %auth.tenant_id,
-        "rejected direct subscription cancellation; Adyen billing portal and verified webhooks are required"
-    );
+    // External audit 15 Oct, H1: cancellation is a LOCAL subscription state
+    // change. ApexMail owns the subscription (Adyen's Subscription model is
+    // merchant-initiated; there is no provider-hosted billing portal), so the
+    // next renewal path reads `cancel_at_period_end` and stops charging. The
+    // old refusal sent customers to a portal that does not exist.
+    match billing_service::subscriptions::cancel_subscription(
+        &state.db,
+        &auth.tenant_id,
+        body.cancel_immediately,
+    )
+    .await
+    {
+        Ok(subscription) => {
+            let message = if body.cancel_immediately {
+                "Your subscription ended immediately. No further renewals will be charged."
+            } else {
+                "Your subscription is canceled at the end of the current billing period. \
+                 No further renewals will be charged."
+            };
+            Ok(billing_success_response(serde_json::json!({
+                "subscription": subscription_mutation_payload(&subscription),
+                "message": message,
+            })))
+        }
+        Err(billing_service::subscriptions::SubscriptionError::NotFound) => Ok((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "No active subscription to cancel",
+            })),
+        )
+            .into_response()),
+        Err(error) => {
+            tracing::error!(
+                tenant_id = %auth.tenant_id,
+                error = %error,
+                "subscription cancellation failed"
+            );
+            Ok(billing_operation_failed_response())
+        }
+    }
+}
 
-    Ok(billing_portal_required_response())
+/// The public API's subscription shape is camelCase (matching
+/// GET /v1/billing/subscription); `billing_service::types::Subscription`
+/// serializes snake_case for internal consumers, so map it explicitly here.
+fn subscription_mutation_payload(
+    subscription: &billing_service::types::Subscription,
+) -> serde_json::Value {
+    serde_json::json!({
+        "id": subscription.id,
+        "tenantId": subscription.tenant_id,
+        "planName": subscription.plan_name,
+        "status": serde_json::to_value(subscription.status).unwrap_or_default(),
+        "billingInterval": serde_json::to_value(subscription.billing_interval).unwrap_or_default(),
+        "currentPeriodStart": subscription.current_period_start,
+        "currentPeriodEnd": subscription.current_period_end,
+        "adyenSubscriptionId": subscription.adyen_subscription_id,
+        "adyenShopperReference": subscription.adyen_shopper_reference,
+        "cancelAtPeriodEnd": subscription.cancel_at_period_end,
+        "createdAt": subscription.created_at,
+        "updatedAt": subscription.updated_at,
+    })
 }
 
 async fn get_subscription(
@@ -5593,17 +5635,10 @@ mod tests {
             .contains("verified Adyen webhook"));
     }
 
-    #[tokio::test]
-    async fn direct_subscription_cancellation_requires_billing_portal() {
-        let (status, body) = response_json(billing_portal_required_response()).await;
-
-        assert_eq!(status, StatusCode::CONFLICT);
-        assert_eq!(body["code"], "BILLING_PORTAL_REQUIRED");
-        assert!(body["error"]
-            .as_str()
-            .expect("error should be a string")
-            .contains("Adyen billing portal"));
-    }
+    // External audit 15 Oct, H1: cancellation is NOT checkout-gated any more.
+    // The old `billing_portal_required_response` (and its test) was removed
+    // with the refusal; the DB-backed adversarial test below exercises the
+    // real state change.
 
     #[test]
     fn billing_routes_realtime_period_label_follows_enforced_key_shape() {
@@ -7509,8 +7544,7 @@ mod adversarial_tests {
         .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
 
-        // Writable key gets the deterministic migration signal, with NO
-        // subscription row written.
+        // Writable key: plan changes stay checkout-gated (no local write).
         let (status, body) = post_json(
             &env,
             "/v1/billing/switch-plan",
@@ -7519,21 +7553,104 @@ mod adversarial_tests {
         .await;
         assert_eq!(status, StatusCode::CONFLICT, "{body}");
         assert_eq!(body["error"]["code"], "CHECKOUT_REQUIRED");
+
+        // Cancellation (external audit 15 Oct, H1) is a LOCAL state change:
+        // with no subscription it is a coherent 404, never the old portal
+        // refusal.
         let (status, body) = post_json(
             &env,
             "/v1/billing/cancel",
             r#"{"reason":"reason","feedback":"feedback","cancelImmediately":true}"#,
         )
         .await;
-        assert_eq!(status, StatusCode::CONFLICT, "{body}");
-        assert_eq!(body["error"]["code"], "BILLING_PORTAL_REQUIRED");
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("No active subscription"),
+            "{body}"
+        );
         let subscriptions: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM adyen_subscriptions WHERE tenant_id = $1")
                 .bind(&tenant)
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert_eq!(subscriptions, 0, "no local subscription may be created");
+        assert_eq!(subscriptions, 0, "a refused cancel creates no subscription");
+
+        // Seed the provider-confirmed subscription the webhook path writes,
+        // then cancel at period end.
+        sqlx::query(
+            "INSERT INTO adyen_subscriptions
+                 (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
+                  billing_cycle_end, adyen_shopper_reference)
+             VALUES ($1, 'psp_advgate_cancel', 'advgate', 'active', NOW(),
+                     NOW() + INTERVAL '30 days', $1)",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("seed subscription");
+        let (status, body) = post_json(
+            &env,
+            "/v1/billing/cancel",
+            r#"{"reason":"reason","feedback":"feedback","cancelImmediately":false}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            body["data"]["subscription"]["cancelAtPeriodEnd"], true,
+            "{body}"
+        );
+        let (sub_status, cancel_at_period_end, canceled_at): (String, bool, Option<String>) =
+            sqlx::query_as(
+                "SELECT status, cancel_at_period_end, canceled_at::text
+                   FROM adyen_subscriptions WHERE tenant_id = $1",
+            )
+            .bind(&tenant)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(sub_status, "active", "access continues until period end");
+        assert!(cancel_at_period_end);
+        assert!(
+            canceled_at.is_some(),
+            "the cancellation instant is recorded"
+        );
+
+        // Replay is idempotent (same canceled_at).
+        let (status, _) = post_json(
+            &env,
+            "/v1/billing/cancel",
+            r#"{"reason":"again","cancelImmediately":false}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (replay_canceled_at,): (Option<String>,) = sqlx::query_as(
+            "SELECT canceled_at::text FROM adyen_subscriptions WHERE tenant_id = $1",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(replay_canceled_at, canceled_at, "replay keeps the instant");
+
+        // An immediate cancellation ends it now and downgrades the tenant.
+        let (status, body) = post_json(
+            &env,
+            "/v1/billing/cancel",
+            r#"{"reason":"now","cancelImmediately":true}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["subscription"]["status"], "canceled", "{body}");
+        let (tenant_plan,): (String,) = sqlx::query_as("SELECT plan FROM tenants WHERE id = $1")
+            .bind(&tenant)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(tenant_plan, "free", "immediate cancel downgrades now");
 
         // Unknown fields are refused (deny_unknown_fields) — 422, no write.
         let (status, _) = post_json(
@@ -8361,7 +8478,8 @@ mod adversarial_tests {
             );
         }
 
-        // Portal: our own console page (Adyen has no hosted portal) — the
+        // Portal: the console billing settings page (Adyen has no hosted
+        // portal; audit 15 Oct H1 also removed the POST-only target) — the
         // shopper must exist, and no provider call is made.
         let portal_body = json!({"returnUrl": valid_url}).to_string();
         let checkout_calls_before_portal = mock.lock().unwrap().checkout_calls;
@@ -8369,7 +8487,7 @@ mod adversarial_tests {
         assert_eq!(status, StatusCode::OK, "{body_resp}");
         assert_eq!(
             body_resp["data"]["url"],
-            "https://app.apexmail.ee/web/billing/portal"
+            "https://app.apexmail.ee/settings/billing"
         );
         assert_eq!(
             mock.lock().unwrap().checkout_calls,
@@ -8410,8 +8528,8 @@ mod adversarial_tests {
             mock.lock().unwrap().observed,
         );
         assert_eq!(
-            body_resp["data"]["url"], "https://app.apexmail.ee/web/billing/portal",
-            "the portal is our own console page — Adyen has no hosted portal"
+            body_resp["data"]["url"], "https://app.apexmail.ee/settings/billing",
+            "the portal target is the console billing settings page — Adyen has no hosted portal"
         );
         assert_eq!(
             mock.lock().unwrap().checkout_calls,

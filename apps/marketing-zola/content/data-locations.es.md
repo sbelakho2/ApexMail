@@ -22,7 +22,7 @@ Las entradas de Dedicated Tenant y BYOC que aparecen a continuación describen u
 | 5 | Archivos adjuntos | Centro de datos de la UE — Alemania | Centro de datos de la UE — Finlandia | EEE (sin transferencia a terceros países) | Tratamiento intra-EEE; no se aplican las reglas de transferencia del capítulo V del RGPD |
 | 6 | Eventos y registros (entrega, apertura, clic, rebote) | Centro de datos de la UE — Alemania | Centro de datos de la UE — Finlandia | EEE (sin transferencia a terceros países) | Tratamiento intra-EEE; no se aplican las reglas de transferencia del capítulo V del RGPD |
 | 7 | Autenticación (tokens OAuth, secretos MFA) | Centro de datos de la UE — Alemania; Google LLC / GitHub, Inc. (OAuth) | Gestionado por el proveedor | EEE (principal); EE. UU. para proveedores OAuth | CCT (proveedores OAuth) |
-| 8 | Facturación (facturas, transacciones, tokens de pago) | Centro de datos de la UE — Alemania; Adyen N.V. (EE. UU.) | Gestionado por el proveedor (India para soporte de Adyen) | EEE (ApexMail); EE. UU./India (Adyen) | CCT (Adyen) |
+| 8 | Facturación (facturas, transacciones, tokens de pago) | Centro de datos de la UE — Alemania; Adyen N.V. (Países Bajos, UE) | Gestionado por el proveedor dentro de la UE | EEE (ApexMail y Adyen); redes de tarjetas según el DPA de Adyen | Tratamiento intra-EEE (Adyen N.V., Ámsterdam) |
 | 9 | Tickets de soporte | Centro de datos de la UE — Alemania | Centro de datos de la UE — Finlandia | EEE (sin transferencia a terceros países) | Tratamiento intra-EEE; no se aplican las reglas de transferencia del capítulo V del RGPD |
 | 10 | Analítica (métricas de entrega agregadas, interacción) | Centro de datos de la UE — Alemania | Centro de datos de la UE — Finlandia | EEE (sin transferencia a terceros países) | Tratamiento intra-EEE; no se aplican las reglas de transferencia del capítulo V del RGPD |
 | 11 | Registros de seguridad (pistas de auditoría, registros de acceso) | Centro de datos de la UE — Alemania | Centro de datos de la UE — Finlandia | EEE (sin transferencia a terceros países) | Tratamiento intra-EEE; no se aplican las reglas de transferencia del capítulo V del RGPD |
@@ -35,7 +35,7 @@ Las entradas de Dedicated Tenant y BYOC que aparecen a continuación describen u
 | Hetzner Online GmbH | Infraestructura principal (computación, almacenamiento, red) | Alemania y Finlandia (UE) | Tratamiento intra-EEE; no se aplican las reglas de transferencia del capítulo V del RGPD |
 | Amazon Web Services, Inc. (AWS S3) | Almacenamiento de objetos de telemetría cuando está habilitado | Región S3 configurada (predeterminada: `eu-central-1`) | Tratamiento intra-EEE y la garantía de transferencia aplicable |
 | Amazon Web Services, Inc. (AWS SES) | Transporte de entrega de correo cuando está habilitado | Región SES configurada | Tratamiento intra-EEE y la garantía de transferencia aplicable |
-| Adyen N.V. | Procesamiento de pagos | EE. UU. (principal), India (soporte) | Cláusulas Contractuales Tipo de la UE |
+| Adyen N.V. | Procesamiento de pagos | Países Bajos (UE); las redes de tarjetas procesan globalmente según el DPA de Adyen | Tratamiento intra-UE (Adyen N.V., Ámsterdam) |
 | Google LLC | Autenticación OAuth opcional | EE. UU. | Cláusulas Contractuales Tipo de la UE |
 | GitHub, Inc. | Autenticación OAuth opcional | EE. UU. | Cláusulas Contractuales Tipo de la UE |
 

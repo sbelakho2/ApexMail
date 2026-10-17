@@ -49,7 +49,7 @@ Gebühren werden monatlich oder jährlich gemäß dem gewählten Tarif abgerechn
 
 ### 7.1 Automatische Verlängerung
 
-Abonnements verlängern sich automatisch am Ende jedes Abrechnungszeitraums, sofern sie nicht vor dem Verlängerungsdatum gekündigt werden. Selbstbedienungsänderungen und Kündigungen erfolgen über das Adyen-Billing-Portal. Die Kündigung wird gemäß dem bestätigten Adyen-Abrechnungsereignis wirksam; für Teilzeiträume werden keine Rückerstattungen gewährt.
+Abonnements verlängern sich automatisch am Ende jedes Abrechnungszeitraums, sofern sie nicht vor dem Verlängerungsdatum gekündigt werden. Änderungen und Kündigungen sind auf der Abrechnungsseite im Kundenbereich möglich; eine Kündigung stoppt die nächste Verlängerungszahlung und wird am Ende des laufenden Abrechnungszeitraums wirksam (oder sofort, wenn Sie dies wählen). Für Teilzeiträume werden keine Rückerstattungen gewährt.
 
 ### 7.2 Preisänderungen
 

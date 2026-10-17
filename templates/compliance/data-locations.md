@@ -42,7 +42,7 @@ the active deployment before relying on a location for compliance purposes.
 | Data Category | Storage Location |
 |---|---|
 | Account information (names, emails, company) | Database, EU/EEA (Hetzner) |
-| Billing records (invoices, transactions) | Database, EU/EEA (Hetzner); Adyen (EU + US, per SCCs) |
+| Billing records (invoices, transactions) | Database, EU/EEA (Hetzner); Adyen N.V. (Netherlands, EU) |
 | Payment card details | Not stored by ApexMail — processed by Adyen |
 | API keys (hashed) | Database, EU/EEA (Hetzner) |
 | Audit logs | Database, EU/EEA (Hetzner) + log storage |
@@ -88,7 +88,7 @@ Data transfers outside the EEA are limited to:
 
 | Third Country | Purpose | Subprocessor | Transfer Safeguard |
 |---|---|---|---|
-| United States | Payment processing (tokenized card data and transaction metadata) | Adyen N.V. | EU Standard Contractual Clauses (SCCs) |
+| Netherlands (EU) | Payment processing (tokenized card data and transaction metadata) | Adyen N.V. | Intra-EEA processing (Adyen N.V., Amsterdam); card scheme networks under the Adyen DPA |
 | United States | CRM (prospect and customer communications) | HubSpot, Inc. | EU Standard Contractual Clauses (SCCs) |
 
 Email content, recipient data, and event data use the active deployment's configured providers and regions. The supplied configuration defaults core service and telemetry storage to EEA regions, but a deployment override or enabled provider can change that result. Confirm active locations and apply the appropriate transfer safeguard, including SCCs where required.

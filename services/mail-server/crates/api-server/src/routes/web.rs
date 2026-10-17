@@ -326,6 +326,9 @@ pub fn authenticated_router(state: AppState) -> Router<AppState> {
         .route("/web/team/invite", post(form_team_invite))
         .route("/web/billing/checkout", post(form_billing_checkout))
         .route("/web/billing/portal", post(form_billing_portal))
+        // External audit 15 Oct, H1: the console's own cancellation action.
+        // The old portal form only noted a request while renewals continued.
+        .route("/web/billing/cancel", post(form_billing_cancel))
         .route("/web/contacts", post(form_contact_create))
         // Deferred-feature 3: single-contact edit (name/status) — the PRG
         // twin the contacts list page's Edit links post to.
@@ -5142,6 +5145,65 @@ async fn form_billing_portal(
         "/settings/billing",
         &state.config,
     )
+}
+
+/// POST /web/billing/cancel — the console's self-service cancellation
+/// (external audit 15 Oct, H1). This is the REAL state change: it stops the
+/// next renewal charge (period end by default, immediately when the form's
+/// checkbox is set) and never directs the customer to a portal that does not
+/// exist.
+async fn form_billing_cancel(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<AuthUser>,
+    headers: HeaderMap,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
+        return redirect_error(message, "/settings/billing", &state.config);
+    }
+    let immediately = {
+        let value = field(&form, "immediately");
+        value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("on") || value == "1"
+    };
+
+    match billing_service::subscriptions::cancel_subscription(
+        &state.db,
+        &user.tenant_id,
+        immediately,
+    )
+    .await
+    {
+        Ok(subscription) => {
+            let message = if immediately {
+                "Your subscription ended immediately. No further renewals will be charged."
+                    .to_string()
+            } else {
+                format!(
+                    "Your subscription is canceled at the end of the current billing period \
+                     ({}). No further renewals will be charged.",
+                    subscription.current_period_end.format("%Y-%m-%d")
+                )
+            };
+            redirect_success(&message, "/settings/billing", &state.config)
+        }
+        Err(billing_service::subscriptions::SubscriptionError::NotFound) => redirect_error(
+            "There is no active subscription to cancel.",
+            "/settings/billing",
+            &state.config,
+        ),
+        Err(error) => {
+            tracing::error!(
+                tenant_id = %user.tenant_id,
+                error = %error,
+                "console subscription cancellation failed"
+            );
+            redirect_error(
+                "Could not cancel the subscription — nothing was changed. Try again or contact support.",
+                "/settings/billing",
+                &state.config,
+            )
+        }
+    }
 }
 
 // ─── Resource create/update handlers ─────────────────────────────
@@ -17987,6 +18049,68 @@ mod coverage_handler_tests {
         // states the noted request instead.
         assert!(flash_text(&response, &app.config)
             .contains("Your request for billing portal access was noted"));
+
+        // External audit 15 Oct, H1: the console cancel form is the REAL
+        // state change (period end by default, immediate when chosen) — it
+        // never asks the customer to use a portal that does not exist.
+        sqlx::query(
+            "INSERT INTO adyen_subscriptions
+                 (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
+                  billing_cycle_end, adyen_shopper_reference)
+             VALUES ($1, 'psp_web_cancel', 'growth', 'active', NOW(),
+                     NOW() + INTERVAL '30 days', $1)",
+        )
+        .bind(&user.tenant_id)
+        .execute(&app.db)
+        .await
+        .expect("seed web cancellation subscription");
+        let (headers, form) = signed_form(&app.config, &[]);
+        let response = form_billing_cancel(
+            State(app.clone()),
+            axum::Extension(user.clone()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert!(
+            flash_text(&response, &app.config)
+                .contains("canceled at the end of the current billing period"),
+            "got: {}",
+            flash_text(&response, &app.config)
+        );
+        let (period_end_cancel, sub_status): (bool, String) = sqlx::query_as(
+            "SELECT cancel_at_period_end, status FROM adyen_subscriptions WHERE tenant_id = $1",
+        )
+        .bind(&user.tenant_id)
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+        assert!(period_end_cancel);
+        assert_eq!(sub_status, "active", "access continues until period end");
+
+        let (headers, form) = signed_form(&app.config, &[("immediately", "true")]);
+        let response = form_billing_cancel(
+            State(app.clone()),
+            axum::Extension(user.clone()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert!(
+            flash_text(&response, &app.config).contains("ended immediately"),
+            "got: {}",
+            flash_text(&response, &app.config)
+        );
+        let (sub_status, tenant_plan): (String, String) = sqlx::query_as(
+            "SELECT s.status, t.plan FROM adyen_subscriptions s
+               JOIN tenants t ON t.id = s.tenant_id WHERE s.tenant_id = $1",
+        )
+        .bind(&user.tenant_id)
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+        assert_eq!(sub_status, "canceled");
+        assert_eq!(tenant_plan, "free");
     }
 
     // ── Batch-2 P0-A/P0-B: the list editor and detail are data-backed ──

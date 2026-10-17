@@ -2677,7 +2677,9 @@ db_test!(
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(json["error"]["code"], "CONFLICT");
 
-        let (status, _) = call(
+        // External audit 15 Oct, H1: cancellation is a LOCAL state change, not
+        // a checkout/portal refusal. With no subscription it is a coherent 404.
+        let (status, json) = call(
             &app,
             authed("POST", &format!("/cancel?tenant_id={tenant}"))
                 .header("content-type", "application/json")
@@ -2685,7 +2687,14 @@ db_test!(
                 .expect("request"),
         )
         .await;
-        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(
+            json["error"]["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("No active subscription"),
+            "{json}"
+        );
 
         // Unknown body field → 4xx.
         let (status, _) = call(
