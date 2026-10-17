@@ -81,23 +81,19 @@ adds the tenant and resolved plan name to the Adyen Checkout session metadata.
 
 ### Cancellation
 
-`POST /cancel` is a LOCAL subscription state change (external audit 15 Oct,
-H1). ApexMail owns the subscription: Adyen's Subscription processing model is
-merchant-initiated and has no hosted billing portal, so the old
-portal-redirect refusal left customers unable to stop renewals.
+`POST /cancel` is a local subscription state change. ApexMail owns the
+subscription. Adyen has no hosted billing portal, and its Subscription charges
+are merchant-initiated.
 
-- `cancelImmediately=false` (default) sets `cancel_at_period_end` and
-  `canceled_at`; access continues until `billing_cycle_end`, when the
-  period-end sweep marks the subscription `canceled` and downgrades the tenant
-  to `free`.
-- `cancelImmediately=true` marks it `canceled` now and downgrades the tenant
-  immediately.
-- No active subscription answers `404`; a replay is idempotent and keeps the
+- A period-end cancel sets `cancel_at_period_end` and `canceled_at`. Access
+  continues to `billing_cycle_end`. The period-end sweep then marks the row
+  `canceled` and downgrades the tenant to `free`.
+- An immediate cancel marks the row `canceled` now and downgrades the tenant
+  now.
+- With no active subscription the route answers `404`. A replay keeps the
   original `canceled_at`.
-- Every renewal path (dunning retry / auto-pay) skips
-  `cancel_at_period_end` rows, so the next renewal charge never happens.
-- The console form `POST /web/billing/cancel` calls the same
-  `billing_service::subscriptions::cancel_subscription` service.
+- Renewal paths skip `cancel_at_period_end` rows, so no next charge happens.
+- The console form `POST /web/billing/cancel` calls the same service.
 
 ### Enterprise contracts
 
@@ -119,10 +115,10 @@ truth for charge and credit calculations.
 
 The current implementation:
 
-- calculates total days in the active billing period
-- calculates remaining days from `Utc::now()` to `current_period_end`
-- selects monthly or yearly plan price based on the subscription interval
-- uses integer cent arithmetic across the full current billing-period price
+- calculates total days in the active billing period.
+- calculates remaining days from `Utc::now()` to `current_period_end`.
+- selects monthly or yearly plan price based on the subscription interval.
+- uses integer cent arithmetic across the full current billing-period price.
 - computes credit for unused time on the old plan and charge for remaining time on the new plan
 - rounds both amounts to the nearest cent with integer math
 

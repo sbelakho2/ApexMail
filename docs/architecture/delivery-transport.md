@@ -61,10 +61,10 @@ durable action worker.
   `dispatcher::send_idempotency_key`, `src/dispatcher.rs:839-895`). The legacy
   `sacmp:{campaign}:{recipient}` key remains only for the single-touch campaign
   surface.
-- The queued rows carry typed provenance columns — `sales_decision_id`,
-  `sales_sender_identity_id`, `sales_step_execution_id`, `sales_enrollment_id`
-  — on both `messages` and `email_queue` (migration 202; inserts at
-  `src/dispatcher.rs:962-992`).
+- The queued rows carry typed provenance columns on both `messages` and
+  `email_queue` (migration 202). The columns are `sales_decision_id`,
+  `sales_sender_identity_id`, `sales_step_execution_id` and
+  `sales_enrollment_id` (inserts at `src/dispatcher.rs:962-992`).
 
 ### Autonomy modes
 
@@ -87,10 +87,10 @@ a tenant with no row fails closed to `disabled`
 
 Approval does not bypass the hard gates. An awaiting decision parks the action
 in the `awaiting_approval` state
-(`src/actions.rs:194-197`, `src/actions.rs:212`); `sales_decisions.review_status`
-is the authoritative approval signal (`src/decision_engine.rs:108-118`), and
+(`src/actions.rs:194-197`, `src/actions.rs:212`). `sales_decisions.review_status`
+is the authoritative approval signal (`src/decision_engine.rs:108-118`).
 `decision_engine::revalidate_execution` re-runs every hard gate immediately
-before the external effect, so an unsubscribe, a human reply, a legal-policy
+before the external effect. An unsubscribe, a human reply, a legal-policy
 change or a newly quarantined sender still stops an approved send
 (`src/decision_engine.rs:1-13`, `src/decision_engine.rs:737`; consumed by the
 worker at `src/sequence_worker.rs:2166-2226`).

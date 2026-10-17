@@ -1,7 +1,7 @@
 # Billing API
 
 **Base path:** `/v1/billing`  
-**Authentication:** tenant API/session authentication  
+Authentication: tenant API/session authentication  
 **Scopes:** `billing:read` for reads and `billing:write` for billing actions
 
 The plan catalog and entitlement lifecycle are described in
@@ -87,22 +87,20 @@ a local subscription or tenant plan:
 |---|---|---:|---|---|
 | POST | `/switch-plan` | 409 | `CHECKOUT_REQUIRED` | Start supported Adyen Checkout and await webhook reconciliation |
 
-Direct JSON requests cannot create or switch a paid entitlement. Cancellation
-is NOT gated: `POST /cancel` is a local state change (external audit 15 Oct,
-H1).
+Direct JSON requests cannot create or switch a paid entitlement.
+`POST /cancel` is not checkout-gated.
 
 ### Cancellation
 
-`POST /cancel` requires `billing:write` and returns `200` with the updated
-subscription:
+`POST /cancel` requires `billing:write`. It returns `200` with the updated
+subscription.
 
-- default (`cancelImmediately=false`): sets `cancelAtPeriodEnd`; access
-  continues until the end of the current billing period, then the
-  period-end sweep cancels the subscription and downgrades the tenant;
-- `cancelImmediately=true`: cancels now and downgrades the tenant now;
-- no active subscription: `404`; repeated calls are idempotent.
+- Default (`cancelImmediately=false`): sets `cancelAtPeriodEnd`. Access
+  continues to the period end, then the sweep cancels and downgrades.
+- `cancelImmediately=true`: cancels now and downgrades now.
+- No active subscription: `404`. Replays are idempotent.
 
-No further renewals are charged after cancellation.
+No further renewals are charged.
 
 ### Subscription and invoices
 

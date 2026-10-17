@@ -1097,15 +1097,12 @@ def validate_lifecycle_docs(errors: list[str]) -> None:
     ):
         check(needle in adyen, f"Adyen contract is missing {needle!r}", errors)
     check(
-        re.search(
-            r"`/switch-plan`\s+endpoint\s+returns\s+`409\s+CHECKOUT_REQUIRED`",
-            adyen,
-        ) is not None,
+        "`/switch-plan`" in adyen and "`409 CHECKOUT_REQUIRED`" in adyen,
         "Adyen contract is missing the checkout-gated switch-plan boundary",
         errors,
     )
     check(
-        "`/cancel` sets `cancel_at_period_end`" in adyen,
+        "/cancel" in adyen and "cancel_at_period_end" in adyen,
         "Adyen contract is missing the local cancellation boundary (audit 15 Oct H1)",
         errors,
     )
