@@ -70,7 +70,11 @@ use crate::routes::csrf::validate_csrf_token;
 // The shared transactional-email shell (R5's review §12.1 fix): the browser
 // verification/reset mails render through the SAME builder as their API
 // twins, so both surfaces are structurally identical.
-use crate::routes::system_sender::{render_transactional_email, EmailAction, TransactionalEmail};
+use crate::routes::system_sender::{
+    apply_email_template_override, branded_text_footer, load_entitled_email_branding,
+    render_transactional_email, render_transactional_email_with_branding, EmailAction,
+    EmailTemplateValues, TenantBranding, TransactionalEmail,
+};
 use crate::state::AppState;
 
 /// Public (pre-auth) form routes. Mounted inside the rate-limited public
@@ -2387,7 +2391,9 @@ pub(crate) async fn is_system_tenant(
         return Ok(true);
     }
     let exists = sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(SELECT 1 FROM tenants WHERE id::text = $1 AND slug = 'system')",
+        // Direct comparison: `id::text = $1` defeated the tenants PK index
+        // on every control-plane request.
+        "SELECT EXISTS(SELECT 1 FROM tenants WHERE id = $1 AND slug = 'system')",
     )
     .bind(tenant_id)
     .fetch_optional(&state.db)
@@ -3236,7 +3242,7 @@ async fn form_forgot_password(
         }
     };
 
-    if let Some((user_id, _tenant_id)) = user {
+    if let Some((user_id, tenant_id)) = user {
         let token = apexmail_lib::id::generate_verification_token();
         let expires = Utc::now() + chrono::Duration::hours(1);
         let token_hash = crate::routes::helpers::hash_token(&token);
@@ -3267,6 +3273,11 @@ async fn form_forgot_password(
                 urlencode(&token),
                 urlencode(&email),
             );
+            // Branding is read in the SAME transaction as the token update
+            // and the queue insert: the mail sees the config the tenant had
+            // at issuance time.
+            let branding =
+                load_entitled_email_branding(&state.db, &mut tx, &tenant_id, "password_reset").await;
             // Audit F9: same HTML escaping of the interpolated address as
             // the signup verification body. R5 (review §12.1): the browser
             // reset shell is the twin of `forgot_password::forgot_password`
@@ -3275,27 +3286,68 @@ async fn form_forgot_password(
             // consumes `?token=&email=`, the API twin emits
             // `/reset-password/{token}`).
             let email_html = html_escape_text(&email);
-            let html_body = render_transactional_email(&TransactionalEmail {
-                document_title: "Reset your password — ApexMail",
-                heading: "Reset Your Password",
-                body_html: &format!(
-                    "<p>We received a request to reset the password for <strong>{email_html}</strong>.</p>\n\
-                     <p style=\"font-size:13px;color:#71717a\">This link expires in 1 hour. If you didn't request a password reset, you can safely ignore this email.</p>\n"
-                ),
-                actions: &[EmailAction {
-                    label: "Reset Password",
-                    url: &reset_link,
-                    secondary: false,
-                }],
-                footer_link: true,
-            });
-            let text_body = format!(
-                "Reset Your Password\n\nWe received a request to reset the password for {email}.\n\nReset your password by visiting: {reset_link}\n\nThis link expires in 1 hour. If you didn't request a password reset, you can safely ignore this email.\n\n© 2026 ApexMail — https://apexmail.ee"
+            let company = branding
+                .as_ref()
+                .map(TenantBranding::company_name)
+                .unwrap_or("ApexMail");
+            let document_title = format!("Reset your password — {company}");
+            let body_html = format!(
+                "<p>We received a request to reset the password for <strong>{email_html}</strong>.</p>\n\
+                 <p style=\"font-size:13px;color:#71717a\">This link expires in 1 hour. If you didn't request a password reset, you can safely ignore this email.</p>\n"
+            );
+            let html_body = render_transactional_email_with_branding(
+                &TransactionalEmail {
+                    document_title: &document_title,
+                    heading: "Reset Your Password",
+                    body_html: &body_html,
+                    actions: &[EmailAction {
+                        label: "Reset Password",
+                        url: &reset_link,
+                        secondary: false,
+                    }],
+                    footer_link: true,
+                },
+                branding.as_ref(),
+            );
+            let text_footer = branding
+                .as_ref()
+                .map(branded_text_footer)
+                .unwrap_or_else(|| "© 2026 ApexMail — https://apexmail.ee".to_string());
+            let default_text = format!(
+                "Reset Your Password\n\nWe received a request to reset the password for {email}.\n\nReset your password by visiting: {reset_link}\n\nThis link expires in 1 hour. If you didn't request a password reset, you can safely ignore this email.\n\n{text_footer}"
+            );
+            let default_subject = if branding.is_some() {
+                format!("Reset your {company} password")
+            } else {
+                // Stock copy is preserved exactly when the tenant is not
+                // entitled.
+                "Reset your ApexMail password".to_string()
+            };
+            let values = EmailTemplateValues {
+                company_name: company,
+                email: &email,
+                setup_link: &reset_link,
+                support_email: branding
+                    .as_ref()
+                    .map(TenantBranding::support_email)
+                    .unwrap_or(""),
+                support_url: branding
+                    .as_ref()
+                    .map(TenantBranding::support_url)
+                    .unwrap_or(""),
+                ..EmailTemplateValues::default()
+            };
+            let (subject, html_body, text_body) = apply_email_template_override(
+                branding.as_ref(),
+                default_subject,
+                html_body,
+                default_text,
+                &values,
             );
             crate::routes::system_sender::queue_system_email_in_transaction(
                 &mut tx,
                 &email,
-                "Reset your ApexMail password",
+                &subject,
                 &html_body,
                 &text_body,
                 vec!["system".into(), "password-reset".into()],
@@ -3454,8 +3506,8 @@ async fn form_resend_verification(
     // addresses that resolve. The error is logged and counted
     // (`apexmail_web_resend_verification_storage_failures`) and folded into
     // the neutral response, never into the "absent account" path.
-    let user: Option<(String,)> = match sqlx::query_as(
-        "SELECT id::text FROM users
+    let user: Option<(String, String)> = match sqlx::query_as(
+        "SELECT id::text, tenant_id::text FROM users
          WHERE LOWER(email) = LOWER($1) AND email_verified = false AND status = 'active'
          LIMIT 1",
     )
@@ -3474,7 +3526,7 @@ async fn form_resend_verification(
         }
     };
 
-    if let Some((user_id,)) = user {
+    if let Some((user_id, tenant_id)) = user {
         let token = uuid::Uuid::new_v4().to_string();
         let token_hash = crate::routes::helpers::hash_token(&token);
         let expires = Utc::now() + chrono::Duration::hours(24);
@@ -3513,27 +3565,74 @@ async fn form_resend_verification(
                 urlencode(&token)
             );
             let email_html = html_escape_text(&email);
-            let html_body = render_transactional_email(&TransactionalEmail {
-                document_title: "Verify your email — ApexMail",
-                heading: "Verify Your ApexMail Account",
-                body_html: &format!(
-                    "<p>Finish setting up <strong>{email_html}</strong> by confirming this email address.</p>\n\
-                     <p style=\"font-size:13px;color:#71717a\">This link expires in 24 hours. If you didn't create this account, you can safely ignore this email.</p>\n"
-                ),
-                actions: &[EmailAction {
-                    label: "Verify email",
-                    url: &verification_link,
-                    secondary: false,
-                }],
-                footer_link: true,
-            });
-            let text_body = format!(
-                "Verify Your ApexMail Account\n\nConfirm {email} by visiting: {verification_link}\n\nThis link expires in 24 hours. If you didn't create this account, you can safely ignore this email.\n\n© 2026 ApexMail — https://apexmail.ee"
+            // Branding is read in the SAME transaction as the token update
+            // and queue insert.
+            let branding =
+                load_entitled_email_branding(&state.db, &mut tx, &tenant_id, "email_verification")
+                    .await;
+            let company = branding
+                .as_ref()
+                .map(TenantBranding::company_name)
+                .unwrap_or("ApexMail");
+            let document_title = format!("Verify your email — {company}");
+            let heading = format!("Verify Your {company} Account");
+            let body_html = format!(
+                "<p>Finish setting up <strong>{email_html}</strong> by confirming this email address.</p>\n\
+                 <p style=\"font-size:13px;color:#71717a\">This link expires in 24 hours. If you didn't create this account, you can safely ignore this email.</p>\n"
+            );
+            let html_body = render_transactional_email_with_branding(
+                &TransactionalEmail {
+                    document_title: &document_title,
+                    heading: &heading,
+                    body_html: &body_html,
+                    actions: &[EmailAction {
+                        label: "Verify email",
+                        url: &verification_link,
+                        secondary: false,
+                    }],
+                    footer_link: true,
+                },
+                branding.as_ref(),
+            );
+            let text_footer = branding
+                .as_ref()
+                .map(branded_text_footer)
+                .unwrap_or_else(|| "© 2026 ApexMail — https://apexmail.ee".to_string());
+            let default_text = format!(
+                "Verify Your {company} Account\n\nConfirm {email} by visiting: {verification_link}\n\nThis link expires in 24 hours. If you didn't create this account, you can safely ignore this email.\n\n{text_footer}"
+            );
+            let default_subject = if branding.is_some() {
+                format!("Verify your {company} account")
+            } else {
+                // Stock copy is preserved exactly when the tenant is not
+                // entitled.
+                "Verify your ApexMail account".to_string()
+            };
+            let values = EmailTemplateValues {
+                company_name: company,
+                email: &email,
+                verification_link: &verification_link,
+                support_email: branding
+                    .as_ref()
+                    .map(TenantBranding::support_email)
+                    .unwrap_or(""),
+                support_url: branding
+                    .as_ref()
+                    .map(TenantBranding::support_url)
+                    .unwrap_or(""),
+                ..EmailTemplateValues::default()
+            };
+            let (subject, html_body, text_body) = apply_email_template_override(
+                branding.as_ref(),
+                default_subject,
+                html_body,
+                default_text,
+                &values,
             );
             crate::routes::system_sender::queue_system_email_in_transaction(
                 &mut tx,
                 &email,
-                "Verify your ApexMail account",
+                &subject,
                 &html_body,
                 &text_body,
                 vec!["system".into(), "verification".into()],
@@ -4742,6 +4841,7 @@ async fn enqueue_team_invite_email(
     role: &str,
     verification_token: &str,
     password_setup_token: &str,
+    branding: Option<&TenantBranding>,
 ) -> Result<(), crate::error::ApiError> {
     let verification_link = format!(
         "{}/verify-email?token={}&email={}",
@@ -4760,37 +4860,71 @@ async fn enqueue_team_invite_email(
     let safe_email = html_escape_text(email);
     let safe_workspace = html_escape_text(workspace);
     let safe_role = html_escape_text(role);
-    let html_body = render_transactional_email(&TransactionalEmail {
-        document_title: "You have been invited — ApexMail",
-        heading: "Your ApexMail Invitation",
-        body_html: &format!(
-            "<p>You have been invited to join the <strong>{safe_workspace}</strong> workspace on ApexMail as {safe_role}.</p>\n\
-             <p><strong>1. Set your password</strong></p>\n\
-             <p style=\"font-size:13px;color:#71717a\">This link expires in 1 hour. If it expires, request a new one from the sign-in page.</p>\n\
-             <p><strong>2. Confirm this email address</strong></p>\n\
-             <p style=\"font-size:13px;color:#71717a\">This link expires in 24 hours. The invitation was sent to <strong>{safe_email}</strong>.</p>\n"
-        ),
-        actions: &[
-            EmailAction {
-                label: "Set password",
-                url: &setup_link,
-                secondary: false,
-            },
-            EmailAction {
-                label: "Verify email",
-                url: &verification_link,
-                secondary: true,
-            },
-        ],
-        footer_link: true,
-    });
-    let text_body = format!(
-        "Your ApexMail Invitation\n\nYou have been invited to join the {workspace} workspace on ApexMail as {role}.\n\n1. Set your password (expires in 1 hour): {setup_link}\n2. Confirm this email address (expires in 24 hours): {verification_link}\n\nIf you weren't expecting this invitation, you can safely ignore this email.\n\nApexMail — https://apexmail.ee"
+    // White-label copy: the company name replaces the ApexMail product name
+    // in subject, heading, body and footer. No branding keeps the exact
+    // original copy.
+    let company = branding
+        .map(TenantBranding::company_name)
+        .unwrap_or("ApexMail");
+    let company_html = html_escape_text(company);
+    let document_title = format!("You have been invited — {company}");
+    let heading = format!("Your {company} Invitation");
+    let default_subject = if branding.is_some() {
+        format!("You have been invited to the {company} workspace")
+    } else {
+        // Stock copy is preserved exactly when the tenant is not entitled.
+        "You have been invited to an ApexMail workspace".to_string()
+    };
+    let body_html = format!(
+        "<p>You have been invited to join the <strong>{safe_workspace}</strong> workspace on {company_html} as {safe_role}.</p>\n\
+         <p><strong>1. Set your password</strong></p>\n\
+         <p style=\"font-size:13px;color:#71717a\">This link expires in 1 hour. If it expires, request a new one from the sign-in page.</p>\n\
+         <p><strong>2. Confirm this email address</strong></p>\n\
+         <p style=\"font-size:13px;color:#71717a\">This link expires in 24 hours. The invitation was sent to <strong>{safe_email}</strong>.</p>\n"
     );
+    let html_body = render_transactional_email_with_branding(
+        &TransactionalEmail {
+            document_title: &document_title,
+            heading: &heading,
+            body_html: &body_html,
+            actions: &[
+                EmailAction {
+                    label: "Set password",
+                    url: &setup_link,
+                    secondary: false,
+                },
+                EmailAction {
+                    label: "Verify email",
+                    url: &verification_link,
+                    secondary: true,
+                },
+            ],
+            footer_link: true,
+        },
+        branding,
+    );
+    let text_footer = branding
+        .map(branded_text_footer)
+        .unwrap_or_else(|| "ApexMail — https://apexmail.ee".to_string());
+    let default_text = format!(
+        "Your {company} Invitation\n\nYou have been invited to join the {workspace} workspace on {company} as {role}.\n\n1. Set your password (expires in 1 hour): {setup_link}\n2. Confirm this email address (expires in 24 hours): {verification_link}\n\nIf you weren't expecting this invitation, you can safely ignore this email.\n\n{text_footer}"
+    );
+    let values = EmailTemplateValues {
+        company_name: company,
+        workspace,
+        role,
+        email,
+        setup_link: &setup_link,
+        verification_link: &verification_link,
+        support_email: branding.map(TenantBranding::support_email).unwrap_or(""),
+        support_url: branding.map(TenantBranding::support_url).unwrap_or(""),
+    };
+    let (subject, html_body, text_body) =
+        apply_email_template_override(branding, default_subject, html_body, default_text, &values);
     crate::routes::system_sender::queue_system_email_in_transaction(
         tx,
         email,
-        "You have been invited to an ApexMail workspace",
+        &subject,
         &html_body,
         &text_body,
         vec!["system".into(), "team-invite".into()],
@@ -5004,6 +5138,31 @@ async fn form_team_invite(
             let _ = tx.rollback().await;
             return Err(InviteFailure::Internal(error));
         }
+        // White-label branding is read INSIDE this transaction (same tx that
+        // writes the invitation), so the invited row and its mail see one
+        // consistent config. The entitlement check reuses the snapshot
+        // resolved above (the billing authority), never a naive plan join.
+        let branding = if crate::routes::system_sender::snapshot_grants_white_label(&entitlement) {
+            match crate::routes::system_sender::load_email_branding(
+                &mut tx,
+                &user.tenant_id,
+                "invitation",
+            )
+            .await
+            {
+                Ok(branding) => branding,
+                Err(error) => {
+                    tracing::warn!(
+                        tenant_id = %user.tenant_id,
+                        error = %error,
+                        "team invite white-label config lookup failed; using stock copy"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
         // The mail is queued in the SAME transaction: a queue failure rolls
         // the invitation back, so the flash can never claim a delivery that
         // did not happen.
@@ -5015,6 +5174,7 @@ async fn form_team_invite(
             &role,
             &verification_token,
             &setup_token,
+            branding.as_ref(),
         )
         .await
         {
@@ -9300,7 +9460,7 @@ async fn form_admin_operator_create(
         // users.id is a UUID column (migration 052) — bind a UUID, not a text
         // nanoid (the insert would fail with invalid uuid syntax).
         .bind(operator_id)
-        .bind(system_tenant)
+        .bind(&system_tenant)
         .bind(&email)
         .bind(if name.is_empty() { None } else { Some(name) })
         .bind(json!({
@@ -9313,12 +9473,19 @@ async fn form_admin_operator_create(
         }))
         .execute(&mut *tx)
         .await?;
+        // Branding for the operator's tenant is read in this same
+        // transaction; the system tenant has no row, so the default operator
+        // copy is unchanged unless it is explicitly branded.
+        let branding =
+            load_entitled_email_branding(&state.db, &mut tx, &system_tenant, "operator_invitation")
+                .await;
         crate::routes::auth::enqueue_operator_invite_email(
             &mut tx,
             &state.config.base_url,
             &email,
             &verification_token,
             &setup_token,
+            branding.as_ref(),
         )
         .await?;
         tx.commit().await?;
@@ -30775,5 +30942,425 @@ mod tracking_domain_panel_tests {
         let html = tracking_domain_panel_html(&hostile, "csrf-token");
         assert!(!html.contains("<script>"), "{html}");
         assert!(html.contains("&lt;script&gt;"), "{html}");
+    }
+}
+
+// ── White-label branding: platform notification mail ──────────────────
+//
+// Behavioral coverage of the consumer end of `ent_whitelabel_config` /
+// `ent_whitelabel_email_templates`: the invitation mail is queued through
+// the REAL builder + queue pipeline against the canonical migrated schema,
+// with the branding row read in the caller's transaction.
+#[cfg(test)]
+mod white_label_branding_tests {
+    use super::*;
+
+    const DKIM_KEY_ENV: &str = apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV;
+
+    async fn seed_whitelabel_tenant(pool: &sqlx::PgPool, white_label: bool) -> String {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let tenant = format!("wl-{}", &suffix[..16]);
+        let plan_name = format!("wlp-{}", &suffix[16..30]);
+        let mut features = serde_json::to_value(billing_service::types::PlanFeatures::default())
+            .expect("default PlanFeatures serializes");
+        features["white_label"] = serde_json::json!(white_label);
+        features["max_team_members"] = serde_json::json!(100);
+        sqlx::query(
+            "INSERT INTO plans (id, name, display_name, description, price_monthly, \
+             price_yearly, email_limit, api_call_limit, features, is_active, sort_order, \
+             created_at, updated_at) \
+             VALUES ('pln_' || substr(replace(gen_random_uuid()::text, '-', ''), 1, 22), \
+             $1, 'White Label Mail Test', 'fixture', 0, 0, 1000000, 1000000, $2, true, 999, \
+             NOW(), NOW())",
+        )
+        .bind(&plan_name)
+        .bind(&features)
+        .execute(pool)
+        .await
+        .expect("seed white-label plan");
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, settings, metadata, \
+             created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, 'active', '{}'::jsonb, '{}'::jsonb, NOW(), NOW())",
+        )
+        .bind(&tenant)
+        .bind(format!("White Label Mail {tenant}"))
+        .bind(format!("wl-mail-{tenant}"))
+        .bind(&plan_name)
+        .execute(pool)
+        .await
+        .expect("seed white-label tenant");
+        tenant
+    }
+
+    async fn seed_whitelabel_config(
+        pool: &sqlx::PgPool,
+        tenant: &str,
+        company_name: &str,
+        footer_text: &str,
+        support_email: &str,
+        support_url: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO ent_whitelabel_config (tenant_id, company_name, footer_text, \
+             support_email, support_url, created_at, updated_at) \
+             VALUES ($1,$2,$3,$4,$5,NOW(),NOW())",
+        )
+        .bind(tenant)
+        .bind(company_name)
+        .bind(footer_text)
+        .bind(support_email)
+        .bind(support_url)
+        .execute(pool)
+        .await
+        .expect("seed white-label config");
+    }
+
+    /// Seed the system sender with valid DKIM material (same contract as the
+    /// other canonical-mail fixtures; caller holds `DKIM_ENV_MUTEX`).
+    async fn seed_system_sender(pool: &sqlx::PgPool) {
+        std::env::set_var(
+            DKIM_KEY_ENV,
+            "3f7a1c9e2b5d48f01a6c3e792d4b8f15a0c6e3917d2f4b8a5c1e7309d4f2b6a8",
+        );
+        let key_pair = apexmail_lib::dkim::generate_dkim_keypair().expect("dkim keypair");
+        let aad = apexmail_lib::dkim::dkim_private_key_aad(
+            crate::routes::system_sender::SYSTEM_TENANT_ID,
+            crate::routes::system_sender::SYSTEM_DOMAIN_ID,
+        );
+        let encrypted =
+            apexmail_lib::dkim::encrypt_dkim_private_key(&key_pair.private_key_pem, &aad)
+                .expect("encrypt dkim key");
+        let public_key =
+            apexmail_lib::dkim::public_key_base64_from_private_key_pem(&key_pair.private_key_pem)
+                .expect("derive dkim public key");
+        sqlx::query(
+            "INSERT INTO domains (id, tenant_id, name, status, verified, ses_verified, \
+             dkim_enabled, dkim_selector, dkim_public_key, dkim_private_key) \
+             VALUES ($1, $2, $3, 'verified', true, true, true, 'testsel', $4, $5) \
+             ON CONFLICT (id) DO UPDATE \
+               SET status = 'verified', verified = true, ses_verified = true, \
+                   dkim_enabled = true, dkim_selector = 'testsel', \
+                   dkim_public_key = EXCLUDED.dkim_public_key, \
+                   dkim_private_key = EXCLUDED.dkim_private_key",
+        )
+        .bind(
+            Uuid::parse_str(crate::routes::system_sender::SYSTEM_DOMAIN_ID)
+                .expect("system domain id is a uuid"),
+        )
+        .bind(crate::routes::system_sender::SYSTEM_TENANT_ID)
+        .bind(crate::routes::system_sender::SYSTEM_DOMAIN)
+        .bind(&public_key)
+        .bind(&encrypted)
+        .execute(pool)
+        .await
+        .expect("seed system sender");
+    }
+
+    async fn queued_invitation(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        email: &str,
+    ) -> (String, String, String) {
+        sqlx::query_as("SELECT subject, html, text FROM email_queue WHERE $1 = ANY(to_addresses)")
+            .bind(email)
+            .fetch_one(&mut **tx)
+            .await
+            .expect("the invitation must be queued")
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn white_label_team_invite_uses_brand_and_no_apexmail() {
+        let Some(pool) = crate::test_db::canonical_pool("wl_invite_brand").await else {
+            eprintln!(
+                "skipping white_label_team_invite_uses_brand_and_no_apexmail: no TEST_DATABASE_URL"
+            );
+            return;
+        };
+        let _env_guard = crate::test_db::DKIM_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let previous_key = std::env::var(DKIM_KEY_ENV).ok();
+        seed_system_sender(&pool).await;
+
+        let tenant = seed_whitelabel_tenant(&pool, true).await;
+        seed_whitelabel_config(
+            &pool,
+            &tenant,
+            "Acme Corp",
+            "Acme support: help@acme.test",
+            "help@acme.test",
+            "https://acme.test/help",
+        )
+        .await;
+
+        let email = format!("invite-{}@example.com", Uuid::new_v4().simple());
+        let mut tx = pool.begin().await.expect("transaction");
+        let branding = crate::routes::system_sender::load_entitled_email_branding(
+            &pool,
+            &mut tx,
+            &tenant,
+            "invitation",
+        )
+        .await;
+        assert!(
+            branding.is_some(),
+            "an entitled tenant with a config row is branded"
+        );
+        enqueue_team_invite_email(
+            &mut tx,
+            "https://app.acme.test",
+            &email,
+            "Acme Workspace",
+            "member",
+            "verification-token",
+            "setup-token",
+            branding.as_ref(),
+        )
+        .await
+        .expect("the invitation mail queues");
+        let (subject, html, text) = queued_invitation(&mut tx, &email).await;
+        tx.rollback().await.expect("rollback keeps the DB clean");
+        if let Some(previous) = previous_key {
+            std::env::set_var(DKIM_KEY_ENV, previous);
+        } else {
+            std::env::remove_var(DKIM_KEY_ENV);
+        }
+
+        assert!(!subject.contains("ApexMail"), "subject was {subject}");
+        assert!(subject.contains("Acme Corp"), "subject was {subject}");
+        assert!(!html.contains("ApexMail"), "html was {html}");
+        assert!(html.contains("Acme Corp"), "html was {html}");
+        assert!(html.contains("Acme support: help@acme.test"), "{html}");
+        assert!(html.contains("mailto:help@acme.test"), "{html}");
+        assert!(html.contains("https://acme.test/help"), "{html}");
+        assert!(
+            !html.contains("apexmail.ee"),
+            "the hardcoded ApexMail footer must be replaced: {html}"
+        );
+        assert!(!text.contains("ApexMail"), "text was {text}");
+        assert!(text.contains("Acme Corp"), "text was {text}");
+        assert!(text.contains("help@acme.test"), "text was {text}");
+        assert!(text.contains("https://acme.test/help"), "text was {text}");
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn white_label_custom_invitation_template_substitutes_and_escapes() {
+        let Some(pool) = crate::test_db::canonical_pool("wl_invite_template").await else {
+            eprintln!(
+                "skipping white_label_custom_invitation_template_substitutes_and_escapes: no TEST_DATABASE_URL"
+            );
+            return;
+        };
+        let _env_guard = crate::test_db::DKIM_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let previous_key = std::env::var(DKIM_KEY_ENV).ok();
+        seed_system_sender(&pool).await;
+
+        let tenant = seed_whitelabel_tenant(&pool, true).await;
+        seed_whitelabel_config(
+            &pool,
+            &tenant,
+            "Acme & <Co>",
+            "Acme footer",
+            "help@acme.test",
+            "https://acme.test/help",
+        )
+        .await;
+        sqlx::query(
+            "INSERT INTO ent_whitelabel_email_templates \
+             (tenant_id, template_type, subject_template, html_template, text_template) \
+             VALUES ($1, 'invitation', $2, $3, $4)",
+        )
+        .bind(&tenant)
+        .bind("Join {{company_name}} at {{workspace}}")
+        .bind(
+            "<p>{{company_name}}|{{workspace}}|{{role}}|{{email}}|{{setup_link}}|\
+             {{verification_link}}|{{support_email}}|{{support_url}}|{{unknown}}</p>",
+        )
+        .bind(
+            "{{company_name}}|{{workspace}}|{{role}}|{{email}}|{{setup_link}}|\
+             {{verification_link}}|{{support_email}}|{{support_url}}|{{unknown}}",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed custom invitation template");
+
+        let email = format!("invite-{}@example.com", Uuid::new_v4().simple());
+        let mut tx = pool.begin().await.expect("transaction");
+        let branding = crate::routes::system_sender::load_entitled_email_branding(
+            &pool,
+            &mut tx,
+            &tenant,
+            "invitation",
+        )
+        .await
+        .expect("the tenant is entitled and configured");
+        enqueue_team_invite_email(
+            &mut tx,
+            "https://app.acme.test",
+            &email,
+            "Acme Workspace",
+            "admin",
+            "verification-token",
+            "setup-token",
+            Some(&branding),
+        )
+        .await
+        .expect("the invitation mail queues");
+        let (subject, html, text) = queued_invitation(&mut tx, &email).await;
+        tx.rollback().await.expect("rollback keeps the DB clean");
+        if let Some(previous) = previous_key {
+            std::env::set_var(DKIM_KEY_ENV, previous);
+        } else {
+            std::env::remove_var(DKIM_KEY_ENV);
+        }
+
+        // Subject/plain text substitute raw values; HTML escapes them.
+        assert_eq!(subject, "Join Acme & <Co> at Acme Workspace");
+        assert!(
+            html.contains("Acme &amp; &lt;Co&gt;"),
+            "HTML values must be escaped: {html}"
+        );
+        assert!(
+            !html.contains("Acme & <Co>"),
+            "the raw hostile company value must not appear in HTML: {html}"
+        );
+        assert!(
+            text.contains("Acme & <Co>"),
+            "plain text keeps the raw value: {text}"
+        );
+        assert!(html.contains("Acme Workspace"), "{html}");
+        assert!(html.contains("admin"), "{html}");
+        assert!(html.contains(&email), "{html}");
+        assert!(html.contains("setup-token"), "{html}");
+        assert!(html.contains("verification-token"), "{html}");
+        assert!(html.contains("help@acme.test"), "{html}");
+        assert!(html.contains("https://acme.test/help"), "{html}");
+        // Unknown placeholders stay literal; known ones are gone.
+        assert!(html.contains("{{unknown}}"), "{html}");
+        assert!(text.contains("{{unknown}}"), "{text}");
+        for placeholder in [
+            "{{company_name}}",
+            "{{workspace}}",
+            "{{role}}",
+            "{{email}}",
+            "{{setup_link}}",
+            "{{verification_link}}",
+            "{{support_email}}",
+            "{{support_url}}",
+        ] {
+            assert!(
+                !html.contains(placeholder),
+                "placeholder {placeholder} was not substituted: {html}"
+            );
+            assert!(
+                !text.contains(placeholder),
+                "placeholder {placeholder} was not substituted: {text}"
+            );
+        }
+    }
+
+    /// Drive the REAL invitation handler: its entitlement decision must read
+    /// the resolved `white_label` grant (a `ContractualOnly` field that
+    /// `has_feature` hides) and its config read must happen inside the
+    /// invitation transaction.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn white_label_team_invite_handler_brands_and_queues_the_mail() {
+        let Some(pool) = crate::test_db::canonical_pool("wl_invite_handler").await else {
+            eprintln!(
+                "skipping white_label_team_invite_handler_brands_and_queues_the_mail: no TEST_DATABASE_URL"
+            );
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let _env_guard = crate::test_db::DKIM_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let previous_key = std::env::var(DKIM_KEY_ENV).ok();
+        seed_system_sender(&pool).await;
+
+        let tenant = seed_whitelabel_tenant(&pool, true).await;
+        seed_whitelabel_config(
+            &pool,
+            &tenant,
+            "Acme Corp",
+            "Acme support",
+            "help@acme.test",
+            "https://acme.test/help",
+        )
+        .await;
+        let admin_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status, \
+             created_at, updated_at) \
+             VALUES ($1, $2, $3, 'Inviting Admin', 'x', 'admin', 'active', NOW(), NOW())",
+        )
+        .bind(admin_id)
+        .bind(&tenant)
+        .bind(format!("admin-{}@acme.test", admin_id.simple()))
+        .execute(&pool)
+        .await
+        .expect("seed inviting admin");
+
+        let invitee = format!("invitee-{}@example.com", Uuid::new_v4().simple());
+        let csrf_token = ui_foundation::csrf::generate_csrf_token(&state.config.csrf_secret);
+        let form: HashMap<String, String> = [
+            ("userName".to_string(), invitee.clone()),
+            ("role".to_string(), "member".to_string()),
+            ("_csrf".to_string(), csrf_token.clone()),
+        ]
+        .into_iter()
+        .collect();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            format!("csrf_token={csrf_token}")
+                .parse()
+                .expect("csrf cookie header"),
+        );
+        let response = form_team_invite(
+            State(state.clone()),
+            axum::Extension(AuthUser {
+                tenant_id: tenant.clone(),
+                user_id: Some(admin_id.to_string()),
+                api_key_id: None,
+                session_id: None,
+                scopes: vec!["*".into()],
+            }),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::SEE_OTHER,
+            "the invitation PRG-redirects on success"
+        );
+
+        let (subject, html, text): (String, String, String) = sqlx::query_as(
+            "SELECT subject, html, text FROM email_queue WHERE $1 = ANY(to_addresses)",
+        )
+        .bind(&invitee)
+        .fetch_one(&pool)
+        .await
+        .expect("the handler must queue the invitation mail");
+        if let Some(previous) = previous_key {
+            std::env::set_var(DKIM_KEY_ENV, previous);
+        } else {
+            std::env::remove_var(DKIM_KEY_ENV);
+        }
+
+        assert!(!subject.contains("ApexMail"), "subject was {subject}");
+        assert!(subject.contains("Acme Corp"), "subject was {subject}");
+        assert!(!html.contains("ApexMail"), "html was {html}");
+        assert!(!html.contains("apexmail.ee"), "html was {html}");
+        assert!(html.contains("Acme Corp"), "html was {html}");
+        assert!(html.contains("Acme support"), "html was {html}");
+        assert!(html.contains("mailto:help@acme.test"), "html was {html}");
+        assert!(!text.contains("ApexMail"), "text was {text}");
     }
 }

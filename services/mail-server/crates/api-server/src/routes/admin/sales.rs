@@ -6,6 +6,7 @@
 //! service; campaign listings proxy its enrollment read model (falling back to
 //! the canonical `sales_enrollments` rows when the service is unconfigured).
 
+use std::collections::HashSet;
 use std::time::Duration;
 
 use super::super::helpers::table_exists;
@@ -648,8 +649,9 @@ pub(crate) async fn apply_lead_status_in_tx(
     // Dedupe while preserving order so a repeated id is one lead, not a
     // phantom "missing row".
     let mut unique: Vec<String> = Vec::with_capacity(ids.len());
+    let mut unique_seen: HashSet<&str> = HashSet::with_capacity(ids.len());
     for id in ids {
-        if !unique.iter().any(|existing| existing == id) {
+        if unique_seen.insert(id.as_str()) {
             unique.push(id.clone());
         }
     }
@@ -926,8 +928,9 @@ async fn apply_lead_update(
     // Dedupe while preserving order: a repeated id is one lead, not a
     // phantom "missing row" in the preflight below.
     let mut ids: Vec<String> = Vec::with_capacity(requested.len());
+    let mut ids_seen: HashSet<String> = HashSet::with_capacity(requested.len());
     for id in requested {
-        if !ids.contains(&id) {
+        if ids_seen.insert(id.clone()) {
             ids.push(id);
         }
     }
@@ -974,9 +977,10 @@ async fn apply_lead_update(
     .fetch_all(&mut *tx)
     .await?;
     if found.len() != ids.len() {
+        let found_set: HashSet<&str> = found.iter().map(String::as_str).collect();
         let missing = ids
             .iter()
-            .find(|id| !found.contains(id))
+            .find(|id| !found_set.contains(id.as_str()))
             .cloned()
             .unwrap_or_default();
         return Err(ApiError::Validation(vec![format!(
@@ -1179,9 +1183,10 @@ async fn enrich_leads(
     let mut results = Vec::new();
     let mut skipped = Vec::new();
     let base_url = sales_autopilot_base_url(&state);
+    let row_ids: HashSet<&str> = rows.iter().map(|(id, _, _)| id.as_str()).collect();
 
     for requested_id in &body.lead_ids {
-        if rows.iter().all(|(id, _, _)| id != requested_id) {
+        if !row_ids.contains(requested_id.as_str()) {
             skipped.push(serde_json::json!({
                 "leadId": requested_id,
                 "reason": "lead not found"

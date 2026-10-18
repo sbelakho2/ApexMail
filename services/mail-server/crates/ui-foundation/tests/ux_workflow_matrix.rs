@@ -30,6 +30,7 @@ fn shell() -> String {
         toast_surface: None,
         current_path: "/dashboard",
         csrf_token: "tok",
+        branding: None,
     }
     .render_html()
 }

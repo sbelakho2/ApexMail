@@ -37,6 +37,9 @@ const COST_MARGIN_CRITICAL_THRESHOLD: f64 = 10.0;
 const SLA_AVAILABILITY_TARGET: f64 = 99.9;
 const KMD_GENERATION_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60); // Every 6 hours
 const INVOICE_ARCHIVE_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60); // Daily
+/// `cleanup_outbound_throttle_decisions` retention (migration 066's
+/// documented default).
+const OUTBOUND_THROTTLE_RETENTION_DAYS: i32 = 90;
 /// Derived-usage sweep starts 90 minutes past the hour after startup: late
 /// enough for the day to be firmly closed and other daily jobs to settle,
 /// soon enough to land before the reconciliation report is read.
@@ -163,6 +166,28 @@ pub async fn sweep_us_tax_nexus_once(
         );
     }
     Ok(result)
+}
+
+/// Enforce the documented retention of `outbound_throttle_decisions`
+/// (migration 066). A missing table/function is harmless (the SQL function
+/// returns 0); any other failure is logged and retried on the next run.
+async fn run_throttle_retention(db: &PgPool) {
+    match sqlx::query_scalar::<_, i64>("SELECT cleanup_outbound_throttle_decisions($1)")
+        .bind(OUTBOUND_THROTTLE_RETENTION_DAYS)
+        .fetch_one(db)
+        .await
+    {
+        Ok(deleted) if deleted > 0 => info!(
+            deleted,
+            retention_days = OUTBOUND_THROTTLE_RETENTION_DAYS,
+            "pruned old outbound throttle decisions"
+        ),
+        Ok(_) => {}
+        Err(error) => error!(
+            error = %error,
+            "failed to prune outbound throttle decisions"
+        ),
+    }
 }
 
 pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
@@ -643,6 +668,31 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
                 Ok(_) => {}
                 Err(e) => error!(error = %e, "invoice archival failed"),
             }
+        }
+    });
+
+    // ── Provider throttle audit retention (daily) ──────────────
+    // `cleanup_outbound_throttle_decisions` (migration 066) had no caller
+    // after the throttle writer returned, so the decision table grew
+    // unbounded. The re-wired provider throttle writes deferrals again; this
+    // daily sweep enforces its documented 90-day retention. The SQL function
+    // itself returns 0 when the table does not exist, so an older schema is
+    // harmless.
+    let throttle_retention_state = state.clone();
+    tokio::spawn(async move {
+        // Run once on startup too: a process restarted more often than the
+        // daily interval must still enforce retention.
+        run_throttle_retention(&throttle_retention_state.db).await;
+
+        let mut interval = interval_at(
+            Instant::now() + task_interval(DAILY_TASK_INTERVAL),
+            task_interval(DAILY_TASK_INTERVAL),
+        );
+        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+        loop {
+            interval.tick().await;
+            run_throttle_retention(&throttle_retention_state.db).await;
         }
     });
 

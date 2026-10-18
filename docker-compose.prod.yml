@@ -524,6 +524,12 @@ services:
       AWS_SECRET_ACCESS_KEY: ""
       AWS_SECRET_ACCESS_KEY_FILE: /run/secrets/aws_secret_access_key
       SES_CONFIGURATION_SET: ${SES_CONFIGURATION_SET:-}
+      # SES account deliverability monitor thresholds (percent). See
+      # docs/tool-contracts/ses.md; the monitor alerts on state transitions.
+      SES_BOUNCE_RATE_WARN_PCT: ${SES_BOUNCE_RATE_WARN_PCT:-5}
+      SES_BOUNCE_RATE_CRITICAL_PCT: ${SES_BOUNCE_RATE_CRITICAL_PCT:-10}
+      SES_COMPLAINT_RATE_WARN_PCT: ${SES_COMPLAINT_RATE_WARN_PCT:-0.1}
+      SES_COMPLAINT_RATE_CRITICAL_PCT: ${SES_COMPLAINT_RATE_CRITICAL_PCT:-0.5}
       PLACEMENT_ENCRYPTION_SECRET: ${PLACEMENT_ENCRYPTION_SECRET:?PLACEMENT_ENCRYPTION_SECRET is required in production}
       # Bank is Wise; IBAN/BIC/phone are OPTIONAL — renderers omit the
       # field entirely when unset instead of printing a placeholder on a

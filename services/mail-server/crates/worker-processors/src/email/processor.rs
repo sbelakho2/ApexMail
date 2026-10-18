@@ -3707,6 +3707,22 @@ impl EmailProcessor {
                     return Ok(());
                 }
 
+                // The provider reputation/override throttle deferred this
+                // send BEFORE any external effect (deterministic per send
+                // unit). Requeue it — no attempt consumed, never
+                // dead-lettered — and re-evaluate on a later claim.
+                if matches!(e, ProcessorError::Throttled(_)) {
+                    info!(
+                        job_id = %job.id,
+                        recipient = %job.to,
+                        route = %route,
+                        reason = %e,
+                        "provider throttle deferred the send — requeueing without consuming an attempt"
+                    );
+                    self.requeue_job(job, "provider_throttled").await?;
+                    return Ok(());
+                }
+
                 self.smtp_circuit_breaker.record_failure();
 
                 // F-21: classify by the structured SMTP reply code when the
@@ -5938,6 +5954,19 @@ fn logical_message_id(job: &EmailJob) -> Option<String> {
     Some(format!("<{id}@{domain}>"))
 }
 
+/// Process-local cache of VERIFIED, decrypted per-domain DKIM configs.
+///
+/// The decrypt + public-key derivation is RSA work that was repeated for
+/// every recipient copy of every campaign (1M-email send = 1M AES decrypts
+/// and PEM parses of the same key). The key INCLUDES the encrypted private
+/// key and the public key, so a rotation can never reuse the previous
+/// config; the bounded map is cleared rather than grown without limit.
+type DkimCacheKey = (String, String, String, String);
+static DKIM_CONFIG_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<DkimCacheKey, DkimConfig>>,
+> = std::sync::OnceLock::new();
+const DKIM_CONFIG_CACHE_MAX: usize = 512;
+
 fn smtp_dkim_config_for_domain(domain: &Domain) -> ProcessorResult<DkimConfig> {
     let selector = domain
         .dkim_selector
@@ -5963,11 +5992,33 @@ fn smtp_dkim_config_for_domain(domain: &Domain) -> ProcessorResult<DkimConfig> {
         ));
     }
 
-    Ok(DkimConfig {
+    let config = DkimConfig {
         selector: selector.to_string(),
         domain: domain.domain.clone(),
         private_key,
-    })
+    };
+    // Cache only a VERIFIED config; the identity includes both key
+    // versions, so a rotation misses instead of signing with the old key.
+    let cache_key = (
+        domain.id.clone(),
+        config.selector.clone(),
+        public_key.to_string(),
+        encrypted_private_key.to_string(),
+    );
+    let cache =
+        DKIM_CONFIG_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    if let Ok(map) = cache.lock() {
+        if let Some(hit) = map.get(&cache_key) {
+            return Ok(hit.clone());
+        }
+    }
+    if let Ok(mut map) = cache.lock() {
+        if map.len() >= DKIM_CONFIG_CACHE_MAX {
+            map.clear();
+        }
+        map.insert(cache_key, config.clone());
+    }
+    Ok(config)
 }
 
 use base64::Engine;
@@ -13667,6 +13718,7 @@ mod end_to_end_db_tests {
         TransportSoftBounce,
         TransportHardBounce,
         RateLimited,
+        Throttled,
     }
 
     struct ExtraTransport {
@@ -13711,6 +13763,9 @@ mod end_to_end_db_tests {
                 ExtraMode::RateLimited => {
                     Err(ProcessorError::RateLimited("throttled by provider".into()))
                 }
+                ExtraMode::Throttled => Err(ProcessorError::Throttled(
+                    "google throttle 100% (source=override)".into(),
+                )),
             }
         }
         async fn close(&self) -> ProcessorResult<()> {
@@ -13795,6 +13850,57 @@ mod end_to_end_db_tests {
         assert_eq!(
             reason.as_deref(),
             Some("circuit_open"),
+            "deferral reason recorded: {reason:?}"
+        );
+        pool.close().await;
+        Ok(())
+    }
+
+    /// A provider throttle deferral requeues the claimed row WITHOUT
+    /// consuming an attempt or dead-lettering it; the reason is recorded.
+    #[tokio::test]
+    async fn provider_throttle_defers_row_without_consuming_an_attempt(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = e2e_pool("e2e_provider_throttle").await else { return Ok(()) };
+        let fixture = seed(&pool, "throttle").await;
+        let transport = Arc::new(ExtraTransport {
+            mode: ExtraMode::Throttled,
+            calls: AtomicUsize::new(0),
+        });
+        let mut config = EmailConfig {
+            base: crate::common::ProcessorConfig {
+                name: "e2e".into(),
+                max_retries: 3,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        config.tracking.enabled = false;
+        config.tracking.secret_key = None;
+        config.ses.max_send_rate = 0;
+        let hybrid = HybridTransport::new(Some(transport.clone() as Arc<dyn EmailTransport>), None);
+        let processor = EmailProcessor::with_transport(pool.clone(), e2e_redis(), config, hybrid)
+            .await
+            .expect("processor");
+
+        let jobs = processor.fetch_jobs(10).await.expect("claim");
+        let job = jobs.into_iter().next().expect("one job");
+        processor
+            .process_job(job)
+            .await
+            .expect("a throttle deferral is not a failure");
+        assert_eq!(
+            transport.calls.load(Ordering::SeqCst),
+            1,
+            "the transport was consulted exactly once"
+        );
+
+        let (status, reason) = row_deferral(&pool, fixture.queue_id).await;
+        assert_eq!(status, "pending", "the row stays retryable: {status}");
+        assert_eq!(
+            reason.as_deref(),
+            Some("provider_throttled"),
             "deferral reason recorded: {reason:?}"
         );
         pool.close().await;

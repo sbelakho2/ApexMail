@@ -86,10 +86,47 @@ pub struct RouteData {
     /// email, REAL plan label). `None` (or a `None` `plan_label`) renders no
     /// plan label — the shell never fabricates one.
     pub session_identity: Option<SessionIdentity>,
+    /// Tenant white-label branding for the WEB console. Populated only after
+    /// the api-server resolves the tenant's plan entitlement (`white_label`)
+    /// and finds a config row; `None` renders the stock ApexMail chrome.
+    pub branding: Option<BrandingView>,
     /// Active impersonation session for this request, when the request
     /// carries a verified impersonation cookie. The shells render its banner
     /// (the only in-UI terminate affordance).
     pub impersonation: Option<ImpersonationView>,
+}
+
+/// Owned white-label branding threaded from the api-server into the web
+/// shell/root layout. Same fields as `ent_whitelabel_config` (the ones the
+/// console consumes); empty strings mean "not configured".
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BrandingView {
+    pub company_name: String,
+    pub logo_url: String,
+    pub favicon_url: String,
+    pub primary_color: String,
+    pub secondary_color: String,
+    pub custom_css: String,
+    pub footer_text: String,
+    pub support_email: String,
+    pub support_url: String,
+}
+
+impl BrandingView {
+    /// Borrow the owned view as the shell's borrowed `Branding`.
+    pub fn as_branding(&self) -> crate::shell::Branding<'_> {
+        crate::shell::Branding {
+            company_name: &self.company_name,
+            logo_url: &self.logo_url,
+            favicon_url: &self.favicon_url,
+            primary_color: &self.primary_color,
+            secondary_color: &self.secondary_color,
+            custom_css: &self.custom_css,
+            footer_text: &self.footer_text,
+            support_email: &self.support_email,
+            support_url: &self.support_url,
+        }
+    }
 }
 
 /// Owned session identity threaded from the api-server into the console
@@ -1327,6 +1364,12 @@ pub fn render_route_with_form_fields_and_csrf(
     // render no plan label and no banner.
     let session_identity = data.and_then(|data| data.session_identity.as_ref());
     let impersonation = data.and_then(|data| data.impersonation.as_ref());
+    // White-label branding is a WEB-console concern only: the ApexMail
+    // operator control plane and the marketing shell stay ApexMail.
+    let branding_view = data
+        .filter(|_| surface == "web")
+        .and_then(|data| data.branding.as_ref());
+    let branding = branding_view.map(BrandingView::as_branding);
     let user_context = session_identity.map(|identity| crate::shell::UserContext {
         display_name: &identity.display_name,
         email: &identity.email,
@@ -1342,20 +1385,28 @@ pub fn render_route_with_form_fields_and_csrf(
     let html = match surface {
         "web" => {
             let inner = render_inner(surface, path, query, csrf_secret, data, &csrf_token)?;
-            let title = route_document_title(surface, path);
+            let title = route_document_title_with_branding(
+                surface,
+                path,
+                branding_view.map(|view| view.company_name.as_str()),
+            );
 
             match path {
                 "/login" | "/signup" | "/forgot-password" | "/reset-password" | "/verify-email"
-                | "/" | "/not-found" => leptos_views::web_root_layout(&inner, &title),
-                _ => leptos_views::web_root_layout(
-                    &leptos_views::web_dashboard_layout_with_session(
+                | "/" | "/not-found" => {
+                    leptos_views::web_root_layout_with_branding(&inner, &title, branding.as_ref())
+                }
+                _ => leptos_views::web_root_layout_with_branding(
+                    &leptos_views::web_dashboard_layout_with_branding(
                         &inner,
                         path,
                         &csrf_token,
                         user_context.as_ref(),
                         impersonation_banner.clone(),
+                        branding.clone(),
                     ),
                     &title,
+                    branding.as_ref(),
                 ),
             }
         }
@@ -2239,11 +2290,27 @@ fn extract_query_param(link: &str, key: &str) -> Option<String> {
 /// (with detail/edit pattern fallbacks) and the control-plane route context
 /// for CP paths (which already covers the /cp aliases).
 pub fn route_document_title(surface: &str, path: &str) -> String {
+    route_document_title_with_branding(surface, path, None)
+}
+
+/// [`route_document_title`] with the tenant's white-label company name as the
+/// suffix. An absent/blank company name keeps the stock `— ApexMail` suffix.
+/// The page name itself is never replaced (a route called "ApexMail" on an
+/// unknown path keeps its page name and only the suffix changes).
+pub fn route_document_title_with_branding(
+    surface: &str,
+    path: &str,
+    company_name: Option<&str>,
+) -> String {
     let page = match surface {
         "control-plane" => control_plane_route_context(path).0,
         _ => web_route_page_name(path),
     };
-    format!("{page} — ApexMail")
+    let suffix = company_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or("ApexMail");
+    format!("{page} — {suffix}")
 }
 
 /// The page name for a web-surface path: the manifest route name, or a

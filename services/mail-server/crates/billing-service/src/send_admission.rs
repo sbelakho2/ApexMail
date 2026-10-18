@@ -254,6 +254,27 @@ pub trait SendAdmissionBackend: Send + Sync + 'static {
     ) -> Result<SendDecision, String> {
         Ok(SendDecision::Allowed)
     }
+
+    /// Batch form of [`Self::consent_decision`], keyed by the canonical
+    /// (lowercased) address. The default loops the single-recipient method so
+    /// in-memory/test backends keep their contract; the production backend
+    /// overrides it with two queries for the whole set.
+    async fn consent_decisions(
+        &self,
+        tenant_id: &str,
+        emails: &[String],
+        is_transactional: bool,
+    ) -> Result<std::collections::HashMap<String, SendDecision>, String> {
+        let mut decisions = std::collections::HashMap::with_capacity(emails.len());
+        for email in emails {
+            decisions.insert(
+                email.clone(),
+                self.consent_decision(tenant_id, email, is_transactional)
+                    .await?,
+            );
+        }
+        Ok(decisions)
+    }
 }
 
 /// Production backend over the canonical billing storage.
@@ -332,6 +353,64 @@ impl SendAdmissionBackend for PostgresAdmissionBackend {
         ConsentEnforcer::new(self.db.clone())
             .check_send_allowed_with_transactional(tenant_id, email, &[], is_transactional, &[], "")
             .await
+    }
+
+    /// Two queries for the whole recipient set: one suppression probe over
+    /// both canonical stores (with the reason text) and one batched consent
+    /// fact read. The previous per-recipient path issued 3-4 queries per
+    /// address; a 1,000-recipient batch could open ~4,000 round trips.
+    async fn consent_decisions(
+        &self,
+        tenant_id: &str,
+        emails: &[String],
+        is_transactional: bool,
+    ) -> Result<std::collections::HashMap<String, SendDecision>, String> {
+        use std::collections::HashMap;
+
+        if emails.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let lowered: Vec<String> = emails
+            .iter()
+            .map(|email| email.trim().to_lowercase())
+            .collect();
+
+        let suppressed: Vec<(String, String)> = sqlx::query_as(
+            "SELECT lower(email), reason FROM suppressions \
+             WHERE tenant_id = $1 AND lower(email) = ANY($2) \
+             UNION ALL \
+             SELECT lower(email), reason FROM suppression_list \
+             WHERE tenant_id = $1 AND lower(email) = ANY($2)",
+        )
+        .bind(tenant_id)
+        .bind(&lowered)
+        .fetch_all(&self.db)
+        .await
+        .map_err(|e| format!("suppression lookup failed: {e}"))?;
+        let suppressed: HashMap<String, String> = suppressed.into_iter().collect();
+
+        // Transactional/service mail bypasses the marketing-consent gate on
+        // the legitimate-interest path (frameworks is empty here, so the
+        // bypass always applies) — but suppression still blocks it.
+        let mut decisions = if is_transactional {
+            let mut map = HashMap::with_capacity(lowered.len());
+            for email in &lowered {
+                map.insert(email.clone(), SendDecision::Allowed);
+            }
+            map
+        } else {
+            ConsentEnforcer::new(self.db.clone())
+                .batch_marketing_decisions(tenant_id, &lowered)
+                .await?
+        };
+
+        for (email, reason) in suppressed {
+            decisions.insert(
+                email,
+                SendDecision::Blocked(format!("recipient is in suppression list: {reason}")),
+            );
+        }
+        Ok(decisions)
     }
 }
 
@@ -528,19 +607,36 @@ impl SendAdmissionService {
             return Ok(());
         }
 
-        for recipient in recipients {
-            let email = canonical_recipient(recipient);
-            match self
-                .backend
-                .consent_decision(tenant_id, &email, false)
-                .await
-            {
-                Ok(SendDecision::Allowed) => {}
-                Ok(SendDecision::Blocked(reason))
-                | Ok(SendDecision::RequiresConfirmation(reason)) => {
-                    return Err(SendAdmissionError::ConsentRefused { email, reason });
+        // One batched probe for the whole recipient set (see the backend's
+        // consent_decisions): the loop below only re-walks the decisions in
+        // recipient order so the first refusal still names the first
+        // offending address deterministically.
+        let canonical: Vec<String> = recipients
+            .iter()
+            .map(|recipient| canonical_recipient(recipient))
+            .collect();
+        let decisions = self
+            .backend
+            .consent_decisions(tenant_id, &canonical, false)
+            .await
+            .map_err(SendAdmissionError::ConsentUnavailable)?;
+        for email in canonical {
+            match decisions.get(&email) {
+                Some(SendDecision::Allowed) => {}
+                Some(SendDecision::Blocked(reason))
+                | Some(SendDecision::RequiresConfirmation(reason)) => {
+                    return Err(SendAdmissionError::ConsentRefused {
+                        email,
+                        reason: reason.clone(),
+                    });
                 }
-                Err(error) => return Err(SendAdmissionError::ConsentUnavailable(error)),
+                // A backend that returned no decision for a requested address
+                // must fail closed: silence is not consent.
+                None => {
+                    return Err(SendAdmissionError::ConsentUnavailable(format!(
+                        "no consent decision returned for {email}"
+                    )));
+                }
             }
         }
         Ok(())

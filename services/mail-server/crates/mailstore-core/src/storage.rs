@@ -6,7 +6,7 @@
 use anyhow::{anyhow, Result};
 use base64::Engine;
 use sqlx::{PgPool, Row};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tracing::{debug, info};
 use uuid::Uuid;
 
@@ -707,6 +707,7 @@ impl MessageStorage {
         // Mailboxes whose counters must be refreshed, in first-touch order
         // (dedup collapses write no row and touch no counter).
         let mut touched_mailboxes: Vec<Uuid> = Vec::new();
+        let mut touched_seen: HashSet<Uuid> = HashSet::new();
         // Per-account in-batch deltas (not yet written to the counters) —
         // used both for the quota checks of later inserts and, summed, for the
         // single usage UPDATE at the end.
@@ -714,7 +715,7 @@ impl MessageStorage {
         for message in messages {
             let (id, uid, inserted) = self.insert_message_tx(&mut tx, message, &pending).await?;
             if inserted {
-                if !touched_mailboxes.contains(&message.mailbox_id) {
+                if touched_seen.insert(message.mailbox_id) {
                     touched_mailboxes.push(message.mailbox_id);
                 }
                 pending.add(message.account_id, message.raw_size);
@@ -1693,11 +1694,12 @@ impl MessageStorage {
         // Same failure contract as the per-message loop: a missing id aborts
         // the whole batch (nothing partial).
         let mut old_mailbox_ids: Vec<Uuid> = Vec::new();
+        let mut old_mailbox_seen: HashSet<Uuid> = HashSet::new();
         for id in message_ids {
             let Some(old_mailbox_id) = mailbox_by_id.get(id) else {
                 return Err(anyhow!("Message {} not found", id));
             };
-            if !old_mailbox_ids.contains(old_mailbox_id) {
+            if old_mailbox_seen.insert(*old_mailbox_id) {
                 old_mailbox_ids.push(*old_mailbox_id);
             }
         }

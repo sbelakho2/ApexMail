@@ -418,6 +418,89 @@ impl ConsentEnforcer {
         Ok(SendDecision::Allowed)
     }
 
+    /// Batch form of the send-time MARKETING decision (performance audit
+    /// 2026-10-18): the send-admission gate called the single-recipient path
+    /// once per recipient, i.e. 3-4 queries each — a 1000-recipient batch
+    /// could issue ~4,000 round trips inside one request. This runs TWO
+    /// queries for the whole set and applies the SAME precedence as
+    /// [`Self::check_send_allowed_with_transactional`] with no frameworks
+    /// (the send-admission caller's contract): revoked → blocked; pending
+    /// double opt-in → confirmation; expired → confirmation; no active
+    /// marketing consent → blocked. Suppression is handled by the caller's
+    /// batch suppression probe (it needs the reason text).
+    ///
+    /// The consent store failing returns Err: the caller fails CLOSED.
+    pub async fn batch_marketing_decisions(
+        &self,
+        tenant_id: &str,
+        emails: &[String],
+    ) -> Result<std::collections::HashMap<String, SendDecision>, String> {
+        use std::collections::{HashMap, HashSet};
+
+        let mut outcome: HashMap<String, SendDecision> = HashMap::with_capacity(emails.len());
+        if emails.is_empty() {
+            return Ok(outcome);
+        }
+        let lowered: Vec<String> = emails
+            .iter()
+            .map(|email| email.trim().to_lowercase())
+            .collect();
+
+        // Newest marketing record per address (DISTINCT ON). A record with
+        // granted=false is a revocation; granted=true is active until it
+        // expires.
+        let rows: Vec<(String, bool, Option<DateTime<Utc>>)> = sqlx::query_as(
+            "SELECT DISTINCT ON (lower(email)) lower(email), granted, expires_at \
+             FROM consent_records \
+             WHERE tenant_id = $1 AND lower(email) = ANY($2) AND consent_type = 'marketing' \
+             ORDER BY lower(email), granted_at DESC NULLS LAST",
+        )
+        .bind(tenant_id)
+        .bind(&lowered)
+        .fetch_all(&self.db)
+        .await
+        .map_err(|e| format!("consent lookup failed: {e}"))?;
+        let mut consent: HashMap<String, (bool, Option<DateTime<Utc>>)> =
+            HashMap::with_capacity(rows.len());
+        for (email, granted, expires_at) in rows {
+            consent.insert(email, (granted, expires_at));
+        }
+
+        let pending: Vec<(String,)> = sqlx::query_as(
+            "SELECT DISTINCT lower(email) FROM double_opt_in_tokens \
+             WHERE tenant_id = $1 AND lower(email) = ANY($2) AND expires_at > NOW()",
+        )
+        .bind(tenant_id)
+        .bind(&lowered)
+        .fetch_all(&self.db)
+        .await
+        .map_err(|e| format!("double_opt_in lookup failed: {e}"))?;
+        let pending: HashSet<String> = pending.into_iter().map(|(email,)| email).collect();
+
+        for email in &lowered {
+            let record = consent.get(email);
+            let decision = match record {
+                Some((false, _)) => SendDecision::Blocked(
+                    "marketing consent revoked — recipient has opted out".into(),
+                ),
+                _ if pending.contains(email) => SendDecision::RequiresConfirmation(
+                    "double opt-in pending — consent not yet confirmed".into(),
+                ),
+                Some((true, Some(expires))) if *expires < Utc::now() => {
+                    SendDecision::RequiresConfirmation(
+                        "marketing consent has expired — re-confirmation required".into(),
+                    )
+                }
+                Some((true, None)) | Some((true, Some(_))) => SendDecision::Allowed,
+                None => SendDecision::Blocked(
+                    "no marketing consent on file — recipient must opt in".into(),
+                ),
+            };
+            outcome.insert(email.clone(), decision);
+        }
+        Ok(outcome)
+    }
+
     async fn check_suppression(
         &self,
         tenant_id: &str,
@@ -615,6 +698,111 @@ pub fn transactional_keyword_hint(tags: &[String], subject: &str) -> Option<&'st
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The batch probe (used by send admission for whole recipient sets) must
+    /// produce EXACTLY the single-recipient decision for every consent state:
+    /// active, revoked, expired, pending double opt-in, and no record.
+    #[tokio::test]
+    async fn batch_marketing_decisions_match_the_single_recipient_path() {
+        let Some(pool) =
+            crate::test_support::canonical_pool("consent_batch_parity", "consent_batch_parity")
+                .await
+        else {
+            eprintln!("skipping: set TEST_DATABASE_URL");
+            return;
+        };
+        let tenant = crate::test_support::unique_tenant();
+        sqlx::query("INSERT INTO tenants (id, name, slug, plan) VALUES ($1, 'n', $1, 'free')")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("seed tenant");
+
+        let cases = [
+            ("active@batch.test", true, None),
+            ("revoked@batch.test", false, None),
+            ("expired@batch.test", true, Some(-86_400i64)),
+        ];
+        for (email, granted, expires_offset) in cases {
+            sqlx::query(
+                "INSERT INTO consent_records
+                     (id, tenant_id, subscriber_id, email, consent_type, granted,
+                      granted_at, source, expires_at)
+                 VALUES ($1, $2, $1, $3, 'marketing', $4, NOW(), 'form',
+                         CASE WHEN $5::bigint IS NULL THEN NULL
+                              ELSE NOW() + make_interval(secs => $5) END)",
+            )
+            .bind(format!("cr_{}", uuid::Uuid::new_v4().simple()))
+            .bind(&tenant)
+            .bind(email)
+            .bind(granted)
+            .bind(expires_offset)
+            .execute(&pool)
+            .await
+            .expect("seed consent");
+        }
+        // Pending double opt-in for an otherwise-active address.
+        sqlx::query(
+            "INSERT INTO double_opt_in_tokens
+                 (tenant_id, subscriber_id, consent_type, email, token_hash, expires_at)
+             VALUES ($1, 'sub-pending', 'marketing', 'pending@batch.test', $2, NOW() + INTERVAL '1 hour')",
+        )
+        .bind(&tenant)
+        .bind(format!("th_{}", uuid::Uuid::new_v4().simple()))
+        .execute(&pool)
+        .await
+        .expect("seed doi");
+        sqlx::query(
+            "INSERT INTO consent_records
+                 (id, tenant_id, subscriber_id, email, consent_type, granted, granted_at, source)
+             VALUES ($1, $2, 'sub-pending', 'pending@batch.test', 'marketing', true, NOW(), 'form')",
+        )
+        .bind(format!("cr_{}", uuid::Uuid::new_v4().simple()))
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("seed pending consent");
+
+        let emails = vec![
+            "active@batch.test".to_string(),
+            "revoked@batch.test".to_string(),
+            "expired@batch.test".to_string(),
+            "pending@batch.test".to_string(),
+            "none@batch.test".to_string(),
+        ];
+        let enforcer = ConsentEnforcer::new(pool.clone());
+        let batch = enforcer
+            .batch_marketing_decisions(&tenant, &emails)
+            .await
+            .expect("batch decisions");
+        for email in &emails {
+            let single = enforcer
+                .check_send_allowed_with_transactional(&tenant, email, &[], false, &[], "")
+                .await
+                .expect("single decision");
+            let batched = batch.get(email).expect("batch covers every address");
+            match (&single, batched) {
+                (SendDecision::Allowed, SendDecision::Allowed) => {}
+                (SendDecision::Blocked(a), SendDecision::Blocked(b))
+                | (SendDecision::RequiresConfirmation(a), SendDecision::RequiresConfirmation(b)) => {
+                    assert_eq!(a, b, "reason drift for {email}");
+                }
+                (a, b) => panic!("decision drift for {email}: single={a:?} batch={b:?}"),
+            }
+        }
+        // The expected shape, pinned so a future precedence change is caught.
+        assert!(batch["active@batch.test"].is_allowed());
+        assert!(batch["revoked@batch.test"].is_blocked());
+        assert!(matches!(
+            batch["expired@batch.test"],
+            SendDecision::RequiresConfirmation(_)
+        ));
+        assert!(matches!(
+            batch["pending@batch.test"],
+            SendDecision::RequiresConfirmation(_)
+        ));
+        assert!(batch["none@batch.test"].is_blocked());
+    }
 
     #[test]
     fn test_send_decision_is_allowed() {

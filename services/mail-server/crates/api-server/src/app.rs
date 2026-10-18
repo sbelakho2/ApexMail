@@ -650,6 +650,10 @@ pub fn build_app(state: AppState) -> Router {
         .nest("/v1/admin/inbox", routes::admin::inbox::router())
         .nest("/v1/admin/calendar", routes::admin::calendar::router())
         .nest("/v1/admin/warmup", routes::admin::warmup::router())
+        .nest(
+            "/v1/admin/deliverability/throttle-overrides",
+            routes::admin::deliverability::router(),
+        )
         .nest("/v1/admin/content", routes::admin::content::router())
         // P0: ApexMail's sales brain is OWNER-ONLY — a system admin or a
         // machine credential is not the owner. The gate is structural (a
@@ -2083,6 +2087,11 @@ async fn render_ui_response_with_state(
         if matches!(surface, "web" | "control-plane") {
             if let Some(user) = browser_user.as_ref() {
                 data.session_identity = load_shell_session_identity(state, user).await;
+                // Branding is a WEB-console surface only; the operator
+                // control plane stays ApexMail.
+                if surface == "web" {
+                    data.branding = load_web_branding(state, &user.tenant_id).await;
+                }
             }
             data.impersonation = routes::web::active_impersonation_view(headers, &state.config);
         }
@@ -2259,6 +2268,56 @@ async fn load_shell_session_identity(
         email,
         plan_label,
     })
+}
+
+impl From<crate::routes::system_sender::TenantBranding>
+    for ui_foundation::axum_router::BrandingView
+{
+    fn from(branding: crate::routes::system_sender::TenantBranding) -> Self {
+        fn value(field: Option<String>) -> String {
+            field.unwrap_or_default()
+        }
+        Self {
+            company_name: value(branding.company_name),
+            logo_url: value(branding.logo_url),
+            favicon_url: value(branding.favicon_url),
+            primary_color: value(branding.primary_color),
+            secondary_color: value(branding.secondary_color),
+            custom_css: value(branding.custom_css),
+            footer_text: value(branding.footer_text),
+            support_email: value(branding.support_email),
+            support_url: value(branding.support_url),
+        }
+    }
+}
+
+/// The WEB console's white-label branding for this request.
+///
+/// Resolution is entitlement-first, using the billing authority
+/// (`get_entitlement_snapshot` — override-aware plan precedence and tenant
+/// feature flags) rather than a naive plan join: branding applies only when
+/// the resolved plan grants `white_label`. The config row is then read in ONE
+/// query. Every failure is logged and degrades to `None` (stock ApexMail
+/// chrome) — branding must never fail a page.
+async fn load_web_branding(
+    state: &AppState,
+    tenant_id: &str,
+) -> Option<ui_foundation::axum_router::BrandingView> {
+    if !crate::routes::system_sender::tenant_has_white_label(&state.db, tenant_id).await {
+        return None;
+    }
+    match crate::routes::system_sender::load_tenant_branding(&state.db, tenant_id).await {
+        Ok(Some(branding)) => Some(branding.into()),
+        Ok(None) => None,
+        Err(error) => {
+            tracing::warn!(
+                tenant_id,
+                error = %error,
+                "white-label config lookup failed; rendering stock ApexMail chrome"
+            );
+            None
+        }
+    }
 }
 
 /// "Pro Plan — 150K / mo" (unlimited plans carry no numeric limit).
@@ -7500,6 +7559,277 @@ mod tests {
             StatusCode::SERVICE_UNAVAILABLE,
             "an unconfigured secret is server misconfiguration: retryable 503"
         );
+    }
+
+    // ── White-label branding: console consumption ─────────────────────
+    //
+    // These run against the canonical migrated schema: the tenant's plan row
+    // is the entitlement authority (the loader delegates to
+    // `get_entitlement_snapshot`), and `ent_whitelabel_config` is the row the
+    // console consumes. Rendering goes through the REAL route renderer.
+
+    /// Seed a tenant on an active plan whose features grant (or deny)
+    /// `white_label`. Returns the tenant id.
+    async fn seed_branding_tenant(db: &sqlx::PgPool, white_label: bool) -> String {
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let tenant = format!("wl-{}", &suffix[..16]);
+        let plan_name = format!("wlp-{}", &suffix[16..30]);
+        let mut features = serde_json::to_value(billing_service::types::PlanFeatures::default())
+            .expect("default PlanFeatures serializes");
+        features["white_label"] = serde_json::json!(white_label);
+        sqlx::query(
+            "INSERT INTO plans (id, name, display_name, description, price_monthly, \
+             price_yearly, email_limit, api_call_limit, features, is_active, sort_order, \
+             created_at, updated_at) \
+             VALUES ('pln_' || substr(replace(gen_random_uuid()::text, '-', ''), 1, 22), \
+             $1, 'White Label Test', 'fixture', 0, 0, 1000000, 1000000, $2, true, 999, NOW(), NOW())",
+        )
+        .bind(&plan_name)
+        .bind(&features)
+        .execute(db)
+        .await
+        .expect("seed white-label test plan");
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, settings, metadata, \
+             created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, 'active', '{}'::jsonb, '{}'::jsonb, NOW(), NOW())",
+        )
+        .bind(&tenant)
+        .bind(format!("White Label {tenant}"))
+        .bind(format!("wl-slug-{tenant}"))
+        .bind(&plan_name)
+        .execute(db)
+        .await
+        .expect("seed white-label tenant");
+        tenant
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn seed_branding_config(
+        db: &sqlx::PgPool,
+        tenant: &str,
+        company_name: Option<&str>,
+        logo_url: Option<&str>,
+        favicon_url: Option<&str>,
+        primary_color: Option<&str>,
+        secondary_color: Option<&str>,
+        custom_css: Option<&str>,
+        footer_text: Option<&str>,
+        support_email: Option<&str>,
+        support_url: Option<&str>,
+    ) {
+        sqlx::query(
+            "INSERT INTO ent_whitelabel_config (tenant_id, company_name, logo_url, \
+             favicon_url, primary_color, secondary_color, custom_css, footer_text, \
+             support_email, support_url, created_at, updated_at) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW(),NOW())",
+        )
+        .bind(tenant)
+        .bind(company_name)
+        .bind(logo_url)
+        .bind(favicon_url)
+        .bind(primary_color)
+        .bind(secondary_color)
+        .bind(custom_css)
+        .bind(footer_text)
+        .bind(support_email)
+        .bind(support_url)
+        .execute(db)
+        .await
+        .expect("seed white-label config");
+    }
+
+    /// Render `/dashboard` through the real web route renderer with the
+    /// given RouteData branding.
+    fn render_branded_console(
+        branding: Option<ui_foundation::axum_router::BrandingView>,
+    ) -> String {
+        let data = ui_foundation::axum_router::RouteData {
+            branding,
+            ..Default::default()
+        };
+        // A FIXED CSRF token keeps the rendered document byte-stable, so the
+        // non-entitled test can compare it exactly against another render.
+        ui_foundation::axum_router::render_route_with_form_fields_and_csrf(
+            "web",
+            "/dashboard",
+            None,
+            Some("white-label-test-csrf-secret"),
+            &[],
+            Some(&data),
+            None,
+            Some("fixed-white-label-csrf-token"),
+        )
+        .expect("the dashboard route renders")
+        .0
+    }
+
+    #[tokio::test]
+    async fn white_label_console_renders_tenant_branding_when_entitled() {
+        let Some(pool) = crate::test_db::canonical_pool("wl_console_entitled").await else {
+            eprintln!("skipping white_label_console_renders_tenant_branding_when_entitled: no TEST_DATABASE_URL");
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let tenant = seed_branding_tenant(&pool, true).await;
+        seed_branding_config(
+            &pool,
+            &tenant,
+            Some("Acme Corp"),
+            Some("https://cdn.acme.test/logo.png"),
+            Some("https://cdn.acme.test/favicon.png"),
+            Some("#123456"),
+            Some("#abc"),
+            // A style-closing sequence must never survive into the document.
+            Some("body{background:#fff}</style><script>alert(1)</script>"),
+            Some("Need help? Contact Acme support."),
+            Some("support@acme.test"),
+            Some("https://acme.test/help"),
+        )
+        .await;
+
+        let branding = load_web_branding(&state, &tenant)
+            .await
+            .expect("an entitled tenant with a config row is branded");
+        let html = render_branded_console(Some(branding));
+
+        assert!(html.contains("Acme Corp"), "{html}");
+        assert!(
+            html.contains("https://cdn.acme.test/logo.png"),
+            "the logo must replace the wordmark: {html}"
+        );
+        assert!(
+            html.contains("<title>Dashboard — Acme Corp</title>"),
+            "the title suffix must be the company name: {html}"
+        );
+        assert!(
+            html.contains("href=\"https://cdn.acme.test/favicon.png\""),
+            "the configured favicon must be used: {html}"
+        );
+        assert!(
+            html.contains("&lt;link rel")
+                || html.contains("<link rel=\"icon\" href=\"https://cdn.acme.test/favicon.png\">"),
+            "{html}"
+        );
+        assert!(
+            html.contains("Need help? Contact Acme support."),
+            "the footer text must render: {html}"
+        );
+        assert!(html.contains("mailto:support@acme.test"), "{html}");
+        assert!(
+            html.contains("href=\"https://acme.test/help\""),
+            "a safe support URL must render: {html}"
+        );
+        assert!(html.contains("--brand-primary:#123456"), "{html}");
+        assert!(html.contains("--brand-secondary:#abc"), "{html}");
+        assert!(html.contains("body{background:#fff}"), "{html}");
+        // The custom CSS `<` was replaced with the CSS escape: the injected
+        // `</style>` cannot close the element and no script tag exists.
+        assert!(html.contains("\\3c /style>"), "{html}");
+        assert!(!html.contains("<script"), "{html}");
+        assert_eq!(
+            html.matches("</style>").count(),
+            1,
+            "exactly the legitimate style close: {html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn white_label_console_ignores_config_without_entitlement() {
+        let Some(pool) = crate::test_db::canonical_pool("wl_console_free").await else {
+            eprintln!("skipping white_label_console_ignores_config_without_entitlement: no TEST_DATABASE_URL");
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        // Same config as the entitled case, but the resolved plan (free)
+        // does NOT grant white_label.
+        let tenant = seed_branding_tenant(&pool, false).await;
+        seed_branding_config(
+            &pool,
+            &tenant,
+            Some("Leaky Brand"),
+            Some("https://cdn.acme.test/logo.png"),
+            Some("https://cdn.acme.test/favicon.png"),
+            Some("#123456"),
+            Some("#abc"),
+            Some("body{background:#000}"),
+            Some("Leaky footer"),
+            Some("support@leaky.test"),
+            Some("https://leaky.test"),
+        )
+        .await;
+
+        assert!(
+            load_web_branding(&state, &tenant).await.is_none(),
+            "a plan without white_label must never yield branding"
+        );
+        let html = render_branded_console(None);
+        let stock = render_branded_console(None);
+        assert_eq!(html, stock, "non-entitled output is the stock document");
+        assert!(html.contains("ApexMail"), "{html}");
+        for leak in [
+            "Leaky Brand",
+            "Leaky footer",
+            "https://cdn.acme.test",
+            "support@leaky.test",
+            "#123456",
+            "body{background:#000}",
+            "data-whitelabel",
+        ] {
+            assert!(!html.contains(leak), "config leaked {leak:?}: {html}");
+        }
+        assert!(
+            !html.contains("<style"),
+            "no branding style element may render: {html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn white_label_console_hostile_values_are_escaped_or_ignored() {
+        let Some(pool) = crate::test_db::canonical_pool("wl_console_hostile").await else {
+            eprintln!("skipping white_label_console_hostile_values_are_escaped_or_ignored: no TEST_DATABASE_URL");
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let tenant = seed_branding_tenant(&pool, true).await;
+        seed_branding_config(
+            &pool,
+            &tenant,
+            Some("A</span><script>alert(1)</script>"),
+            None,
+            None,
+            Some("not-a-color"),
+            Some("#12"),
+            Some("</style><script>alert(1)</script>"),
+            Some("Footer <b>copy</b>"),
+            Some("support@acme.test"),
+            Some("javascript:alert(1)"),
+        )
+        .await;
+
+        let branding = load_web_branding(&state, &tenant)
+            .await
+            .expect("tenant is entitled");
+        let html = render_branded_console(Some(branding));
+
+        assert!(!html.contains("<script"), "{html}");
+        assert!(!html.contains("javascript:"), "{html}");
+        assert!(
+            html.contains("A&lt;/span&gt;&lt;script&gt;alert(1)&lt;/script&gt;"),
+            "the hostile company name must be escaped: {html}"
+        );
+        assert!(
+            html.contains("Footer &lt;b&gt;copy&lt;/b&gt;"),
+            "the footer text must be escaped: {html}"
+        );
+        assert_eq!(
+            html.matches("</style>").count(),
+            1,
+            "custom CSS cannot close the style element: {html}"
+        );
+        // Invalid colors are ignored: no variables are emitted for them.
+        assert!(!html.contains("--brand-primary"), "{html}");
+        assert!(!html.contains("--brand-secondary"), "{html}");
     }
 }
 // Build cache invalidation: 1785670948

@@ -477,10 +477,17 @@ async fn run(
     resolver: Arc<dyn MxResolver>,
     shutdown: impl std::future::Future<Output = ()>,
 ) -> Result<()> {
-    let relay = Arc::new(Relay::new(
+    // The daemon owns a Postgres pool by construction: install the
+    // reputation/override throttle at the relay's effect boundary. The
+    // in-process worker path installs its own instance (same engine, same
+    // audit table) — see `worker-processors/src/email/outbound_mta.rs`.
+    let throttle = Arc::new(outbound_mta::throttle::ProviderThrottle::new(pool.clone()));
+    let relay = Arc::new(Relay::with_warmup_gate_and_throttle(
         Arc::clone(&ledger),
         resolver,
         config.relay.clone(),
+        outbound_mta::warmup::WarmupGate::none(),
+        Some(throttle),
     ));
     let counters = Arc::new(Counters::default());
 

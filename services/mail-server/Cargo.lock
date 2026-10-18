@@ -6076,6 +6076,7 @@ dependencies = [
  "deadpool-redis",
  "mail-common",
  "migrator",
+ "moka",
  "outbound-mta",
  "redis",
  "rustls 0.23.46",

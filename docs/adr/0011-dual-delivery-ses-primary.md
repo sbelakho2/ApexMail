@@ -126,7 +126,7 @@ This amendment clarifies that **dedicated IPs are always provisioned via Hetzner
 ### Implementation Details
 
 - `DedicatedIpProvider` manages Hetzner floating IPs (create, assign, rDNS, release).
-- `transport_routing_cache` table is maintained by a PostgreSQL trigger.
+- ~~`transport_routing_cache` table is maintained by a PostgreSQL trigger.~~ Superseded by migration 268: the cache table and its trigger were removed; route selection reads `dedicated_ips` directly.
 - `TransportRouter` reads the cache (30s refresh) and routes per-message.
 - Warmup schedule: 60 days (canonical [`mail_common::warmup`](../../services/mail-server/crates/mail-common/src/warmup.rs)); a full daily cap defers the row, it does not overflow to SES. `DedicatedIpProvider::tick_warmup()` exists but nothing in this tree schedules it (see [warmup-schedule.md](../operations/warmup-schedule.md)).
 

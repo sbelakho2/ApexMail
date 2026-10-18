@@ -27,8 +27,10 @@ use crate::middleware::auth::{
 use crate::middleware::rate_limiter::{extract_public_client_ip, INCR_EXPIRE_LUA};
 use crate::routes::csrf::validate_form_csrf;
 use crate::routes::system_sender::{
-    ensure_system_sender_ready, queue_system_email, queue_system_email_in_transaction,
-    render_transactional_email, EmailAction, TransactionalEmail,
+    apply_email_template_override, branded_text_footer, ensure_system_sender_ready,
+    queue_system_email, queue_system_email_in_transaction, render_transactional_email,
+    render_transactional_email_with_branding, EmailAction, EmailTemplateValues, TenantBranding,
+    TransactionalEmail,
 };
 use crate::state::AppState;
 
@@ -1839,33 +1841,74 @@ pub(crate) async fn enqueue_verification_email(
     email: &str,
     token: &str,
 ) -> Result<(), ApiError> {
+    enqueue_verification_email_with_branding(tx, base_url, email, token, None).await
+}
+
+/// [`enqueue_verification_email`] with tenant white-label branding and the
+/// tenant's `email_verification` template override. `None` renders the exact
+/// stock copy.
+pub(crate) async fn enqueue_verification_email_with_branding(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    base_url: &str,
+    email: &str,
+    token: &str,
+    branding: Option<&TenantBranding>,
+) -> Result<(), ApiError> {
     // F5: the link targets the path-param JSON route. The bare
     // `/verify-email` root path only understands `?token=` (browser page
     // routed in app.rs), so a path-style link there would 404.
     let verification_link = build_action_link(base_url, "/v1/auth/verify-email", email, token);
     let safe_email = html_escape(email);
-    let html_body = render_transactional_email(&TransactionalEmail {
-        document_title: "Verify your email — ApexMail",
-        heading: "Verify Your ApexMail Account",
-        body_html: &format!(
-            "<p>Finish setting up <strong>{safe_email}</strong> by confirming this email address.</p>\n\
-             <p style=\"font-size:13px;color:#71717a\">This link expires in 24 hours. If you didn't create this account, you can safely ignore this email.</p>\n"
-        ),
-        actions: &[EmailAction {
-            label: "Verify email",
-            url: &verification_link,
-            secondary: false,
-        }],
-        footer_link: true,
-    });
-    let text_body = format!(
-        "Verify Your ApexMail Account\n\nConfirm {email} by visiting: {verification_link}\n\nThis link expires in 24 hours. If you didn't create this account, you can safely ignore this email.\n\n© 2026 ApexMail — https://apexmail.ee",
+    let company = branding
+        .map(TenantBranding::company_name)
+        .unwrap_or("ApexMail");
+    let document_title = format!("Verify your email — {company}");
+    let heading = format!("Verify Your {company} Account");
+    let body_html = format!(
+        "<p>Finish setting up <strong>{safe_email}</strong> by confirming this email address.</p>\n\
+         <p style=\"font-size:13px;color:#71717a\">This link expires in 24 hours. If you didn't create this account, you can safely ignore this email.</p>\n"
     );
+    let html_body = render_transactional_email_with_branding(
+        &TransactionalEmail {
+            document_title: &document_title,
+            heading: &heading,
+            body_html: &body_html,
+            actions: &[EmailAction {
+                label: "Verify email",
+                url: &verification_link,
+                secondary: false,
+            }],
+            footer_link: true,
+        },
+        branding,
+    );
+    let text_footer = branding
+        .map(branded_text_footer)
+        .unwrap_or_else(|| "© 2026 ApexMail — https://apexmail.ee".to_string());
+    let default_text = format!(
+        "Verify Your {company} Account\n\nConfirm {email} by visiting: {verification_link}\n\nThis link expires in 24 hours. If you didn't create this account, you can safely ignore this email.\n\n{text_footer}"
+    );
+    let default_subject = if branding.is_some() {
+        format!("Verify your {company} account")
+    } else {
+        // Stock copy is preserved exactly when the tenant is not entitled.
+        "Verify your ApexMail account".to_string()
+    };
+    let values = EmailTemplateValues {
+        company_name: company,
+        email,
+        verification_link: &verification_link,
+        support_email: branding.map(TenantBranding::support_email).unwrap_or(""),
+        support_url: branding.map(TenantBranding::support_url).unwrap_or(""),
+        ..EmailTemplateValues::default()
+    };
+    let (subject, html_body, text_body) =
+        apply_email_template_override(branding, default_subject, html_body, default_text, &values);
 
     queue_system_email_in_transaction(
         tx,
         email,
-        "Verify your ApexMail account",
+        &subject,
         &html_body,
         &text_body,
         vec!["system".into(), "verification".into()],
@@ -1888,6 +1931,7 @@ pub(crate) async fn enqueue_operator_invite_email(
     email: &str,
     verification_token: &str,
     password_setup_token: &str,
+    branding: Option<&TenantBranding>,
 ) -> Result<(), ApiError> {
     let verification_link =
         build_action_link(base_url, "/v1/auth/verify-email", email, verification_token);
@@ -1898,38 +1942,84 @@ pub(crate) async fn enqueue_operator_invite_email(
         urlencode_component(email),
     );
     let safe_email = html_escape(email);
-    let html_body = render_transactional_email(&TransactionalEmail {
-        document_title: "You have been invited — ApexMail",
-        heading: "Your ApexMail Operator Invitation",
-        body_html: &format!(
+    let company = branding
+        .map(TenantBranding::company_name)
+        .unwrap_or("ApexMail");
+    let company_html = html_escape(company);
+    let document_title = format!("You have been invited — {company}");
+    let heading = format!("Your {company} Operator Invitation");
+    let body_html = if branding.is_some() {
+        format!(
+            "<p>A {company_html} operator invited <strong>{safe_email}</strong> to the control plane. Two steps complete the account:</p>\n\
+             <p><strong>1. Set your password</strong></p>\n\
+             <p style=\"font-size:13px;color:#71717a\">This link expires in 1 hour. If it expires, request a new one from the sign-in page.</p>\n\
+             <p><strong>2. Confirm this email address</strong></p>\n\
+             <p style=\"font-size:13px;color:#71717a\">Control-plane access also requires MFA enrollment at first sign-in.</p>\n"
+        )
+    } else {
+        // Stock copy is preserved exactly when the tenant is not entitled.
+        format!(
             "<p>An ApexMail operator invited <strong>{safe_email}</strong> to the control plane. Two steps complete the account:</p>\n\
              <p><strong>1. Set your password</strong></p>\n\
              <p style=\"font-size:13px;color:#71717a\">This link expires in 1 hour. If it expires, request a new one from the sign-in page.</p>\n\
              <p><strong>2. Confirm this email address</strong></p>\n\
              <p style=\"font-size:13px;color:#71717a\">Control-plane access also requires MFA enrollment at first sign-in.</p>\n"
-        ),
-        actions: &[
-            EmailAction {
-                label: "Set password",
-                url: &setup_link,
-                secondary: false,
-            },
-            EmailAction {
-                label: "Verify email",
-                url: &verification_link,
-                secondary: true,
-            },
-        ],
-        footer_link: true,
-    });
-    let text_body = format!(
-        "Your ApexMail Operator Invitation\n\nAn ApexMail operator invited {email} to the control plane.\n\n1. Set your password (expires in 1 hour): {setup_link}\n2. Confirm this email address (expires in 24 hours): {verification_link}\n\nControl-plane access also requires MFA enrollment at first sign-in.\n\nApexMail \u{2014} https://apexmail.ee"
+        )
+    };
+    let html_body = render_transactional_email_with_branding(
+        &TransactionalEmail {
+            document_title: &document_title,
+            heading: &heading,
+            body_html: &body_html,
+            actions: &[
+                EmailAction {
+                    label: "Set password",
+                    url: &setup_link,
+                    secondary: false,
+                },
+                EmailAction {
+                    label: "Verify email",
+                    url: &verification_link,
+                    secondary: true,
+                },
+            ],
+            footer_link: true,
+        },
+        branding,
     );
+    let text_footer = branding
+        .map(branded_text_footer)
+        .unwrap_or_else(|| "ApexMail — https://apexmail.ee".to_string());
+    let default_text = if branding.is_some() {
+        format!(
+            "Your {company} Operator Invitation\n\nA {company} operator invited {email} to the control plane.\n\n1. Set your password (expires in 1 hour): {setup_link}\n2. Confirm this email address (expires in 24 hours): {verification_link}\n\nControl-plane access also requires MFA enrollment at first sign-in.\n\n{text_footer}"
+        )
+    } else {
+        format!(
+            "Your ApexMail Operator Invitation\n\nAn ApexMail operator invited {email} to the control plane.\n\n1. Set your password (expires in 1 hour): {setup_link}\n2. Confirm this email address (expires in 24 hours): {verification_link}\n\nControl-plane access also requires MFA enrollment at first sign-in.\n\n{text_footer}"
+        )
+    };
+    let default_subject = if branding.is_some() {
+        format!("You have been invited to the {company} control plane")
+    } else {
+        "You have been invited to the ApexMail control plane".to_string()
+    };
+    let values = EmailTemplateValues {
+        company_name: company,
+        email,
+        setup_link: &setup_link,
+        verification_link: &verification_link,
+        support_email: branding.map(TenantBranding::support_email).unwrap_or(""),
+        support_url: branding.map(TenantBranding::support_url).unwrap_or(""),
+        ..EmailTemplateValues::default()
+    };
+    let (subject, html_body, text_body) =
+        apply_email_template_override(branding, default_subject, html_body, default_text, &values);
 
     queue_system_email_in_transaction(
         tx,
         email,
-        "You have been invited to the ApexMail control plane",
+        &subject,
         &html_body,
         &text_body,
         vec!["system".into(), "operator-invite".into()],

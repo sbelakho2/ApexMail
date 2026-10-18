@@ -139,15 +139,23 @@ impl OutboundMtaTransport {
         let resolver = DnsMxResolver::new().map_err(|error| {
             ProcessorError::Config(format!("outbound MTA MX resolver unavailable: {error}"))
         })?;
-        let relay = match redis {
-            Some(redis) => {
-                let gate = outbound_mta::warmup::WarmupGate::new(std::sync::Arc::new(
-                    outbound_mta::warmup::RedisWarmupGate::new(redis.clone()),
-                ));
-                Relay::with_warmup_gate(ledger, Arc::new(resolver), config, gate)
-            }
-            None => Relay::new(ledger, Arc::new(resolver), config),
+        let warmup = match redis {
+            Some(redis) => outbound_mta::warmup::WarmupGate::new(std::sync::Arc::new(
+                outbound_mta::warmup::RedisWarmupGate::new(redis.clone()),
+            )),
+            None => outbound_mta::warmup::WarmupGate::none(),
         };
+        // The worker owns the Postgres pool: install the same provider
+        // throttle engine the daemon uses, so an in-process relay submission
+        // is gated at the effect boundary too (deferral = durable retry).
+        let throttle = Arc::new(outbound_mta::throttle::ProviderThrottle::new(pool.clone()));
+        let relay = Relay::with_warmup_gate_and_throttle(
+            ledger,
+            Arc::new(resolver),
+            config,
+            warmup,
+            Some(throttle),
+        );
         Ok(Self::new(Arc::new(relay)))
     }
 

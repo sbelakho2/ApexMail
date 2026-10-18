@@ -115,6 +115,148 @@ pub struct UserContext<'a> {
     pub plan_label: &'a str,
 }
 
+/// Tenant white-label branding for the WEB console (surface `"web"` only —
+/// the ApexMail operator control plane always stays ApexMail).
+///
+/// Callers pass `None` unless the tenant's resolved plan grants the
+/// `white_label` entitlement. `None` renders the stock chrome byte-for-byte;
+/// an empty field inside `Some` is treated as "not configured" and likewise
+/// renders the stock value for that specific slot.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Branding<'a> {
+    pub company_name: &'a str,
+    pub logo_url: &'a str,
+    pub favicon_url: &'a str,
+    pub primary_color: &'a str,
+    pub secondary_color: &'a str,
+    pub custom_css: &'a str,
+    pub footer_text: &'a str,
+    pub support_email: &'a str,
+    pub support_url: &'a str,
+}
+
+impl<'a> Branding<'a> {
+    /// The configured company name, or `ApexMail` when the tenant did not set
+    /// one. This is the value used as the product-name replacement in the
+    /// document title and platform mail.
+    pub fn company_name_or_default(&self) -> &str {
+        let name = self.company_name.trim();
+        if name.is_empty() {
+            "ApexMail"
+        } else {
+            name
+        }
+    }
+
+    /// The `<style>` block for the document `<head>`: validated color
+    /// variables plus the sanitized custom CSS. `None` when the tenant
+    /// configured neither — an entitled tenant with no styling must not emit
+    /// an empty style element.
+    pub fn style_element(&self) -> Option<String> {
+        let mut css = String::new();
+        if let Some(primary) = validated_hex_color(self.primary_color) {
+            css.push_str(&format!(":root{{--brand-primary:{primary};}}"));
+        }
+        if let Some(secondary) = validated_hex_color(self.secondary_color) {
+            css.push_str(&format!(":root{{--brand-secondary:{secondary};}}"));
+        }
+        let custom = sanitize_embedded_css(self.custom_css);
+        if !custom.trim().is_empty() {
+            css.push_str(&custom);
+        }
+        if css.is_empty() {
+            None
+        } else {
+            Some(format!("<style data-whitelabel>{css}</style>"))
+        }
+    }
+
+    /// The favicon URL the root layout should use: `favicon_url`, else
+    /// `logo_url`, else `None` (the stock data-URL favicon).
+    pub fn favicon_href(&self) -> Option<&str> {
+        let favicon = self.favicon_url.trim();
+        if !favicon.is_empty() {
+            return Some(favicon);
+        }
+        let logo = self.logo_url.trim();
+        if !logo.is_empty() {
+            return Some(logo);
+        }
+        None
+    }
+
+    /// ONE console footer, or `None` when the tenant configured no footer
+    /// text and no safe support link. Every value is escaped; a support URL
+    /// renders only for http(s)/mailto schemes.
+    pub fn footer_element(&self) -> Option<String> {
+        let footer_text = self.footer_text.trim();
+        let support_email = self.support_email.trim();
+        let support_url = self.support_url.trim();
+        let email_link = !support_email.is_empty();
+        let url_link = is_safe_link_url(support_url);
+        if footer_text.is_empty() && !email_link && !url_link {
+            return None;
+        }
+
+        let mut parts = Vec::new();
+        if !footer_text.is_empty() {
+            parts.push(format!("<p>{}</p>", html_escape(footer_text)));
+        }
+        let mut links = Vec::new();
+        if email_link {
+            let escaped = html_escape(support_email);
+            links.push(format!(
+                "<a class=\"underline hover:text-surface-950\" href=\"mailto:{escaped}\">{escaped}</a>"
+            ));
+        }
+        if url_link {
+            let escaped = html_escape(support_url);
+            links.push(format!(
+                "<a class=\"underline hover:text-surface-950\" href=\"{escaped}\">{escaped}</a>"
+            ));
+        }
+        if !links.is_empty() {
+            parts.push(format!("<p>{}</p>", links.join(" &middot; ")));
+        }
+
+        Some(format!(
+            "<footer class=\"mt-10 border-t border-surface-200/60 pt-6 text-xs text-surface-500\" data-whitelabel-footer>{}</footer>",
+            parts.join("")
+        ))
+    }
+}
+
+/// Strict color validation for white-label CSS variables: only full hex
+/// colors (`#RGB`, `#RRGGBB`, `#RRGGBBAA`). Anything else is ignored rather
+/// than interpolated into the stylesheet.
+fn validated_hex_color(value: &str) -> Option<&str> {
+    let value = value.trim();
+    let hex = value.strip_prefix('#')?;
+    if !matches!(hex.len(), 3 | 6 | 8) {
+        return None;
+    }
+    if hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        Some(value)
+    } else {
+        None
+    }
+}
+
+/// Make tenant CSS safe to embed in a `<style>` element: a literal `<` can
+/// never begin `</style>`, so every occurrence is emitted as the CSS escape
+/// `\3c ` and NUL bytes are removed. The console CSP is `script-src 'none'`,
+/// so an injected stylesheet is the only surface to defend.
+fn sanitize_embedded_css(css: &str) -> String {
+    css.replace('\0', "").replace('<', "\\3c ")
+}
+
+/// Only http(s) and mailto links may render as support links. A hostile
+/// `javascript:` (or any other scheme) is ignored entirely.
+fn is_safe_link_url(url: &str) -> bool {
+    let lower = url.trim().to_ascii_lowercase();
+    lower.starts_with("https://") || lower.starts_with("http://") || lower.starts_with("mailto:")
+}
+
 /// Session identity for the shell header, derived server-side from the
 /// authenticated session (display name, email, plan label). The avatar
 /// fallback is computed from the display name's initials.
@@ -272,6 +414,9 @@ pub struct WebDashboardShell<'a> {
     /// CSRF token for the sign-out form (native POST; injected by the
     /// axum_router render pass).
     pub csrf_token: &'a str,
+    /// Tenant white-label branding. `None` renders the stock ApexMail
+    /// wordmark/footer (byte-identical to the pre-branding shell).
+    pub branding: Option<Branding<'a>>,
 }
 
 impl<'a> WebDashboardShell<'a> {
@@ -291,7 +436,15 @@ impl<'a> WebDashboardShell<'a> {
             .as_ref()
             .map(ToastSurface::render_html)
             .unwrap_or_default();
-        let sidebar_content = render_web_sidebar(self.current_path, self.csrf_token);
+        let sidebar_content =
+            render_web_sidebar(self.current_path, self.csrf_token, self.branding.as_ref());
+        // White-label footer: exactly one, inside <main> after the page
+        // content, and only when the tenant configured something to show.
+        let branding_footer = self
+            .branding
+            .as_ref()
+            .and_then(Branding::footer_element)
+            .unwrap_or_default();
         // Zero-JS mobile navigation: a <details> disclosure. It is keyboard
         // operable, focusable, and needs no script to open or close.
         let menu_icon = shell_icon("menu", "h-5 w-5");
@@ -315,6 +468,7 @@ impl<'a> WebDashboardShell<'a> {
                 <main class=\"apex-console-main relative p-6 lg:p-10 flex-1\" id=\"app-main\">\
                     <div class=\"max-w-7xl mx-auto\">\
                         {child_html}\
+                        {branding_footer}\
                     </div>\
                 </main>\
             </div>\
@@ -646,7 +800,11 @@ fn render_sidebar_content(
     )
 }
 
-fn render_web_sidebar(current_path: &str, csrf_token: &str) -> String {
+fn render_web_sidebar(
+    current_path: &str,
+    csrf_token: &str,
+    branding: Option<&Branding<'_>>,
+) -> String {
     // Task-oriented IA (design report item 4): every routed page is
     // reachable from the nav — Reports, Inbox Placement, Events, and
     // Dedicated IPs were previously rendered-but-unreachable orphans.
@@ -699,15 +857,45 @@ fn render_web_sidebar(current_path: &str, csrf_token: &str) -> String {
         render_section("Account", &account_items),
     );
 
+    let wordmark = render_web_wordmark(branding);
+
     format!(
         "<div class=\"apex-console-sidebar flex flex-col h-full bg-card text-surface-900 border-r border-surface-200/60 transition-all w-64\">\
          <div class=\"p-6 mb-4\"><div class=\"flex items-center gap-2\">\
-         <span class=\"apex-sidebar-brand text-xl font-bold tracking-tighter transition-all hover:opacity-80\"><span class=\"text-brand-600\">Apex</span><span class=\"text-surface-950\">Mail</span></span></div></div>\
+         {wordmark}</div></div>\
          <nav class=\"flex-1 overflow-y-auto\" data-sidebar=\"primary\" aria-label=\"Primary sidebar navigation\">{content}</nav>\
          <div class=\"p-4 border-t border-surface-100\"><form method=\"POST\" action=\"/web/auth/logout\"><input type=\"hidden\" name=\"_csrf\" value=\"{csrf_token}\" /><button type=\"submit\" class=\"flex w-full items-center gap-3 px-4 py-2 text-sm font-semibold rounded-[8px_8px_7px_7px] text-surface-500 hover:text-surface-950 hover:bg-surface-50 transition-colors\"><span>Sign Out</span></button></form></div></div>",
         content = content,
         csrf_token = html_escape(csrf_token),
+        wordmark = wordmark,
     )
+}
+
+/// The web sidebar wordmark: tenant logo when configured, else the tenant
+/// company name, else the stock ApexMail split-color wordmark. Everything is
+/// escaped; an entitled tenant without a company name and logo renders the
+/// stock markup exactly.
+fn render_web_wordmark(branding: Option<&Branding<'_>>) -> String {
+    const STOCK: &str = "<span class=\"apex-sidebar-brand text-xl font-bold tracking-tighter transition-all hover:opacity-80\"><span class=\"text-brand-600\">Apex</span><span class=\"text-surface-950\">Mail</span></span>";
+
+    let Some(branding) = branding else {
+        return STOCK.to_string();
+    };
+    let logo = branding.logo_url.trim();
+    if !logo.is_empty() {
+        return format!(
+            "<img src=\"{src}\" alt=\"{alt}\" class=\"h-8 w-auto\" data-whitelabel-logo>",
+            src = html_escape(logo),
+            alt = html_escape(branding.company_name_or_default()),
+        );
+    }
+    if !branding.company_name.trim().is_empty() {
+        return format!(
+            "<span class=\"apex-sidebar-brand text-xl font-bold tracking-tighter transition-all hover:opacity-80\" data-whitelabel-company>{}</span>",
+            html_escape(branding.company_name.trim())
+        );
+    }
+    STOCK.to_string()
 }
 
 /// Overlay the AUTHENTICATED CP operator role onto an already-rendered
@@ -1132,6 +1320,7 @@ mod tests {
             }),
             current_path: "/dashboard",
             csrf_token: "",
+            branding: None,
         }
         .render_html();
         let control = ControlPlaneShell {
@@ -1370,6 +1559,7 @@ mod tests {
             toast_surface: None,
             current_path: "/dashboard",
             csrf_token: "",
+            branding: None,
         }
         .render_html();
 
@@ -1416,6 +1606,7 @@ mod tests {
             toast_surface: None,
             current_path: "/dashboard",
             csrf_token: "",
+            branding: None,
         }
     }
 
@@ -1579,7 +1770,7 @@ mod tests {
     /// one click from the nav.
     #[test]
     fn web_sidebar_regroup_reaches_every_routed_page() {
-        let html = render_web_sidebar("/dashboard", "");
+        let html = render_web_sidebar("/dashboard", "", None);
         for group in ["Overview", "Send", "Measure", "Configure", "Account"] {
             assert!(html.contains(group), "sidebar group {group} missing");
         }
@@ -1700,14 +1891,14 @@ mod deferred_shell_tests {
 
     #[test]
     fn web_sidebar_lists_suppressions_under_configure() {
-        let sidebar = render_web_sidebar("/dashboard", "tok");
+        let sidebar = render_web_sidebar("/dashboard", "tok", None);
         assert!(
             sidebar.contains("href=\"/settings/suppressions\""),
             "the suppressions page must be reachable from the primary nav"
         );
         assert!(sidebar.contains("Suppressions"));
         // The active-state highlighting matches the path prefix.
-        let active = render_web_sidebar("/settings/suppressions", "tok");
+        let active = render_web_sidebar("/settings/suppressions", "tok", None);
         assert!(active.contains("aria-current=\"page\""));
     }
 
@@ -1730,6 +1921,7 @@ mod deferred_shell_tests {
             toast_surface: None,
             current_path: "/dashboard",
             csrf_token: "tok",
+            branding: None,
         }
         .render_html();
         assert!(web.contains("text-brand-600\">Apex"), "{web}");
@@ -1750,5 +1942,180 @@ mod deferred_shell_tests {
         .render_html();
         assert!(cp.contains("text-brand-600\">Apex"), "{cp}");
         assert!(cp.contains("text-surface-950\">Mail"), "{cp}");
+    }
+
+    // ── White-label branding ─────────────────────────────────────
+
+    fn branded_shell(branding: Branding<'_>) -> String {
+        WebDashboardShell {
+            sidebar_collapsed: false,
+            mobile_menu_open: false,
+            child_html: "<section>Dashboard</section>",
+            header: ShellHeader {
+                search_query: "",
+                unread_count: 0,
+                avatar_fallback: "AM",
+                user_context: None,
+                mobile_menu_open: false,
+            },
+            impersonation_banner: None,
+            toast_surface: None,
+            current_path: "/dashboard",
+            csrf_token: "tok",
+            branding: Some(branding),
+        }
+        .render_html()
+    }
+
+    #[test]
+    fn branded_web_shell_renders_company_wordmark_and_one_footer() {
+        let company = Branding {
+            company_name: "Acme Corp",
+            footer_text: "Need help?",
+            support_email: "support@acme.test",
+            support_url: "https://acme.test/help",
+            ..Branding::default()
+        };
+        let html = branded_shell(company);
+        assert!(html.contains(">Acme Corp</span>"), "{html}");
+        assert!(html.contains("data-whitelabel-footer"), "{html}");
+        assert_eq!(html.matches("data-whitelabel-footer").count(), 1, "{html}");
+        assert!(html.contains("mailto:support@acme.test"), "{html}");
+        assert!(html.contains("href=\"https://acme.test/help\""), "{html}");
+        assert!(html.contains("Need help?"), "{html}");
+        // The stock split-color wordmark is replaced, not duplicated.
+        assert!(!html.contains("text-brand-600\">Apex"), "{html}");
+    }
+
+    #[test]
+    fn branded_logo_replaces_the_wordmark_and_alt_is_escaped() {
+        let html = branded_shell(Branding {
+            company_name: "Acme <Corp>",
+            logo_url: "https://cdn.acme.test/logo.png?x=1&y=2",
+            ..Branding::default()
+        });
+        assert!(
+            html.contains(
+                "<img src=\"https://cdn.acme.test/logo.png?x=1&amp;y=2\" \
+                 alt=\"Acme &lt;Corp&gt;\" class=\"h-8 w-auto\" data-whitelabel-logo>"
+            ),
+            "{html}"
+        );
+        assert!(!html.contains("text-brand-600\">Apex"), "{html}");
+    }
+
+    #[test]
+    fn branded_custom_css_cannot_close_the_style_element() {
+        let branding = Branding {
+            primary_color: "#123456",
+            secondary_color: "#abc",
+            custom_css: "body{color:#111}</style><script>alert(1)</script>",
+            ..Branding::default()
+        };
+        let style = branding.style_element().expect("configured style block");
+        assert!(style.contains("--brand-primary:#123456"), "{style}");
+        assert!(style.contains("--brand-secondary:#abc"), "{style}");
+        assert!(style.contains("\\3c /style>"), "{style}");
+        assert!(!style.contains("<script"), "{style}");
+        assert_eq!(style.matches("</style>").count(), 1, "{style}");
+    }
+
+    #[test]
+    fn branding_invalid_colors_are_ignored() {
+        let branding = Branding {
+            primary_color: "red; background:url(javascript:alert(1))",
+            secondary_color: "#12345",
+            ..Branding::default()
+        };
+        assert_eq!(branding.style_element(), None);
+    }
+
+    #[test]
+    fn branding_footer_ignores_non_http_support_urls() {
+        let branding = Branding {
+            footer_text: "Help",
+            support_url: "javascript:alert(1)",
+            ..Branding::default()
+        };
+        let footer = branding.footer_element().expect("footer text renders");
+        assert!(!footer.contains("javascript:"), "{footer}");
+        assert!(!footer.contains("<a "), "{footer}");
+    }
+
+    #[test]
+    fn non_branded_sidebar_and_root_layout_are_unchanged() {
+        let sidebar = render_web_sidebar("/dashboard", "tok", None);
+        assert!(
+            sidebar.contains(
+                "<span class=\"text-brand-600\">Apex</span><span class=\"text-surface-950\">Mail</span>"
+            ),
+            "{sidebar}"
+        );
+        assert!(!sidebar.contains("data-whitelabel"), "{sidebar}");
+
+        let child = "<main id=\"app-main\"></main>";
+        assert_eq!(
+            crate::leptos_views::web_root_layout(child, "Dashboard — ApexMail"),
+            crate::leptos_views::web_root_layout_with_branding(child, "Dashboard — ApexMail", None),
+        );
+    }
+
+    #[test]
+    fn root_layout_favicon_prefers_favicon_then_logo_then_data_url() {
+        let child = "<main id=\"app-main\"></main>";
+        let favicon = crate::leptos_views::web_root_layout_with_branding(
+            child,
+            "T",
+            Some(&Branding {
+                favicon_url: "https://cdn.acme.test/favicon.ico",
+                logo_url: "https://cdn.acme.test/logo.png",
+                ..Branding::default()
+            }),
+        );
+        assert!(
+            favicon.contains("<link rel=\"icon\" href=\"https://cdn.acme.test/favicon.ico\">"),
+            "{favicon}"
+        );
+        let logo = crate::leptos_views::web_root_layout_with_branding(
+            child,
+            "T",
+            Some(&Branding {
+                logo_url: "https://cdn.acme.test/logo.png",
+                ..Branding::default()
+            }),
+        );
+        assert!(
+            logo.contains("<link rel=\"icon\" href=\"https://cdn.acme.test/logo.png\">"),
+            "{logo}"
+        );
+        let stock = crate::leptos_views::web_root_layout_with_branding(child, "T", None);
+        assert!(
+            stock.contains(&crate::leptos_views::favicon_data_url()),
+            "{stock}"
+        );
+    }
+
+    #[test]
+    fn route_title_suffix_uses_the_brand_company_name() {
+        assert_eq!(
+            crate::axum_router::route_document_title_with_branding(
+                "web",
+                "/dashboard",
+                Some("Acme Corp")
+            ),
+            "Dashboard — Acme Corp"
+        );
+        assert_eq!(
+            crate::axum_router::route_document_title_with_branding("web", "/dashboard", None),
+            "Dashboard — ApexMail"
+        );
+        assert_eq!(
+            crate::axum_router::route_document_title_with_branding(
+                "web",
+                "/dashboard",
+                Some("   ")
+            ),
+            "Dashboard — ApexMail"
+        );
     }
 }

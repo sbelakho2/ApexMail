@@ -332,17 +332,19 @@ impl CampaignExecutor {
         .collect();
 
         let mut report = TickReport::default();
+        // One webhook lookup + one multi-row insert for the whole tick: the
+        // per-campaign helper did (1 + W) statements for every due campaign.
+        let mut lifecycle_events: Vec<CampaignWebhookEvent> = Vec::new();
         for campaign in &due {
             let inserted = self.expand_audience(campaign).await?;
             if campaign.ab_config.is_some() {
                 self.split_ab_recipients(campaign.id, campaign.ab_config.as_ref())
                     .await?;
             }
-            enqueue_campaign_event_webhooks(
-                &self.db,
-                &campaign.tenant_id,
-                "campaign.started",
-                serde_json::json!({
+            lifecycle_events.push(CampaignWebhookEvent {
+                tenant_id: campaign.tenant_id.clone(),
+                event_type: "campaign.started".to_string(),
+                payload: serde_json::json!({
                     "id": format!("evt_{}", Uuid::new_v4().simple()),
                     "type": "campaign.started",
                     "tenantId": campaign.tenant_id,
@@ -353,8 +355,7 @@ impl CampaignExecutor {
                         "ab_test": campaign.ab_config.is_some(),
                     },
                 }),
-            )
-            .await;
+            });
             tracing::info!(
                 campaign_id = %campaign.id,
                 tenant_id = %campaign.tenant_id,
@@ -363,6 +364,7 @@ impl CampaignExecutor {
             );
             report.campaigns_started += 1;
         }
+        enqueue_campaign_event_webhooks_batch(&self.db, &lifecycle_events).await;
         Ok(report)
     }
 
@@ -594,16 +596,16 @@ impl CampaignExecutor {
             .execute(&self.db)
             .await?;
 
+            let mut winner_events: Vec<CampaignWebhookEvent> = Vec::new();
             for decision in decisions {
                 let promoted = promoted_by_campaign
                     .get(&decision.campaign_id)
                     .copied()
                     .unwrap_or(0);
-                enqueue_campaign_event_webhooks(
-                    &self.db,
-                    &decision.tenant_id,
-                    "campaign.ab_winner_selected",
-                    serde_json::json!({
+                winner_events.push(CampaignWebhookEvent {
+                    tenant_id: decision.tenant_id.clone(),
+                    event_type: "campaign.ab_winner_selected".to_string(),
+                    payload: serde_json::json!({
                         "id": format!("evt_{}", Uuid::new_v4().simple()),
                         "type": "campaign.ab_winner_selected",
                         "tenantId": decision.tenant_id,
@@ -618,8 +620,7 @@ impl CampaignExecutor {
                             "holdout_promoted": promoted,
                         },
                     }),
-                )
-                .await;
+                });
                 tracing::info!(
                     campaign_id = %decision.campaign_id,
                     winner_arm = decision.winner,
@@ -629,6 +630,7 @@ impl CampaignExecutor {
                 );
                 report.campaigns_started += 1;
             }
+            enqueue_campaign_event_webhooks_batch(&self.db, &winner_events).await;
         }
         Ok(report)
     }
@@ -1800,52 +1802,6 @@ fn uuid_array(value: &serde_json::Value) -> Vec<Uuid> {
                 .collect()
         })
         .unwrap_or_default()
-}
-
-/// Enqueue one lifecycle event for every active webhook of the tenant
-/// subscribed to it. Delivery (retries, circuit breaker, SSRF guard) is the
-/// worker webhook processor's job — the campaign consumer only enqueues, the
-/// same division the automation executor uses.
-async fn enqueue_campaign_event_webhooks(
-    pool: &sqlx::PgPool,
-    tenant_id: &str,
-    event_type: &str,
-    payload: serde_json::Value,
-) {
-    let webhook_ids: Vec<String> = match sqlx::query_scalar(
-        "SELECT id FROM webhooks \
-         WHERE tenant_id = $1 AND enabled = true \
-           AND (events ? $2 OR events ? '*')",
-    )
-    .bind(tenant_id)
-    .bind(event_type)
-    .fetch_all(pool)
-    .await
-    {
-        Ok(ids) => ids,
-        Err(error) => {
-            tracing::warn!(error = %error, event_type, "campaign webhook subscription lookup failed");
-            return;
-        }
-    };
-    for webhook_id in webhook_ids {
-        let queue_id = format!("whj_{}", Uuid::new_v4().simple());
-        if let Err(error) = sqlx::query(
-            "INSERT INTO webhook_queue \
-             (id, webhook_id, tenant_id, event_type, payload, status, attempt, created_at) \
-             VALUES ($1, $2, $3, $4, $5, 'pending', 1, NOW())",
-        )
-        .bind(&queue_id)
-        .bind(&webhook_id)
-        .bind(tenant_id)
-        .bind(event_type)
-        .bind(&payload)
-        .execute(pool)
-        .await
-        {
-            tracing::warn!(error = %error, event_type, webhook_id, "campaign webhook enqueue failed");
-        }
-    }
 }
 
 /// One lifecycle event ready for webhook fan-out.

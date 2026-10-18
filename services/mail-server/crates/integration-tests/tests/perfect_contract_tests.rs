@@ -292,6 +292,7 @@ fn brand_lockup_is_two_tone_across_auth_surfaces() {
         toast_surface: None,
         current_path: "/dashboard",
         csrf_token: "tok",
+        branding: None,
     }
     .render_html();
     assert!(shell.contains("text-brand-600\">Apex"), "{shell}");

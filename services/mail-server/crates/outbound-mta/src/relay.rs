@@ -341,6 +341,10 @@ pub struct Relay {
     /// never bypass the IP's daily cap. Absent = a caller-side authority
     /// owns admission.
     warmup: crate::warmup::WarmupGate,
+    /// Per-provider reputation/override throttle at the same effect boundary
+    /// (see [`crate::throttle`]). Absent in embedded tests that own no
+    /// Postgres pool.
+    throttle: Option<Arc<crate::throttle::ProviderThrottle>>,
 }
 
 impl Relay {
@@ -361,6 +365,20 @@ impl Relay {
         config: RelayConfig,
         warmup: crate::warmup::WarmupGate,
     ) -> Self {
+        Self::with_warmup_gate_and_throttle(ledger, resolver, config, warmup, None)
+    }
+
+    /// [`Self::with_warmup_gate`] plus the provider throttle. Production
+    /// callers with a Postgres pool install a [`throttle::ProviderThrottle`]
+    /// so every claim — inline or daemon retry — passes the reputation gate
+    /// before a connection is opened.
+    pub fn with_warmup_gate_and_throttle(
+        ledger: Arc<dyn RelayLedger>,
+        resolver: Arc<dyn MxResolver>,
+        config: RelayConfig,
+        warmup: crate::warmup::WarmupGate,
+        throttle: Option<Arc<crate::throttle::ProviderThrottle>>,
+    ) -> Self {
         let dsn = DsnGenerator::new(config.reporting_mta.clone());
         Self {
             ledger,
@@ -368,6 +386,7 @@ impl Relay {
             config,
             dsn,
             warmup,
+            throttle,
         }
     }
 
@@ -554,6 +573,59 @@ impl Relay {
                 reason,
                 dsn_send_units: dsn_units,
             });
+        }
+
+        // ── Provider reputation/operator throttle (see crate::throttle) ────
+        // BEFORE any connection is opened and beside the warmup admission
+        // gate: every claimed row — inline or daemon retry — passes the
+        // deterministic reputation/override gate. A throttled row is
+        // REQUEUED with the bounded throttle window; it is never marked
+        // permanent and never consumes a permanent attempt. One submission
+        // may address several providers, so each distinct provider is
+        // evaluated (with its own stable roll) and any deferral parks the
+        // whole unit.
+        if let Some(throttle) = &self.throttle {
+            let sender_domain = crate::throttle::sender_domain(row.envelope_from.as_deref());
+            let mut providers: Vec<(&'static str, String)> = Vec::new();
+            for recipient in &row.recipients {
+                let Some((_, domain)) = recipient.rsplit_once('@') else {
+                    continue;
+                };
+                let Some(provider) = crate::throttle::classify_provider(domain) else {
+                    continue;
+                };
+                if !providers.iter().any(|(known, _)| *known == provider) {
+                    providers.push((provider, domain.trim_end_matches('.').to_ascii_lowercase()));
+                }
+            }
+            for (provider, recipient_domain) in &providers {
+                // Key the roll by provider so independent recipient providers
+                // get independent (but still retry-stable) decisions.
+                let decision_key = format!("{}:{}", row.send_unit, provider);
+                if let crate::throttle::ThrottleDecision::Defer { reason, .. } = throttle
+                    .decide(
+                        &decision_key,
+                        sender_domain.as_deref(),
+                        recipient_domain,
+                        row.tenant_id.as_deref(),
+                        row.requested_source_ip,
+                    )
+                    .await
+                {
+                    let next_attempt_at = Utc::now()
+                        + chrono::Duration::from_std(crate::throttle::THROTTLE_RETRY_DELAY)
+                            .unwrap_or_else(|_| chrono::Duration::minutes(5));
+                    self.ledger
+                        .record_retry(&row.send_unit, attempt, next_attempt_at, &reason)
+                        .await?;
+                    return Err(RelayError::RetryScheduled {
+                        send_unit: row.send_unit,
+                        attempt,
+                        next_attempt_at,
+                        reason,
+                    });
+                }
+            }
         }
 
         // ── Warmup admission at the SMTP-effect boundary (P0) ──────────────

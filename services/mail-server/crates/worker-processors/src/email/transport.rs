@@ -1069,12 +1069,32 @@ pub(crate) fn build_raw_mime(email: &PreparedEmail) -> Vec<u8> {
 pub struct SesTransport {
     client: SesClient,
     config: SesConfig,
+    /// Per-provider reputation/operator throttle (shared `outbound-mta`
+    /// engine). Absent in tests and in the dedicated SALES account transport,
+    /// which does not ride the customer account's reputation.
+    throttle: Option<Arc<outbound_mta::throttle::ProviderThrottle>>,
 }
 
 impl SesTransport {
     /// Create from an already-initialized SES client.
     pub fn new(client: SesClient, config: SesConfig) -> Self {
-        Self { client, config }
+        Self {
+            client,
+            config,
+            throttle: None,
+        }
+    }
+
+    /// Install the provider throttle at the SES send boundary. Production
+    /// construction (`create_transport_from_config_with_db_and_redis`) always
+    /// passes the worker's pool, so every SES send is gated before the API
+    /// call.
+    pub fn with_throttle(
+        mut self,
+        throttle: Option<Arc<outbound_mta::throttle::ProviderThrottle>>,
+    ) -> Self {
+        self.throttle = throttle;
+        self
     }
 
     /// Create from AWS SDK config (loads credentials from environment / IAM role).
@@ -1088,6 +1108,7 @@ impl SesTransport {
         Ok(Self {
             client,
             config: ses_config,
+            throttle: None,
         })
     }
 
@@ -1129,6 +1150,7 @@ impl SesTransport {
         Ok(Self {
             client,
             config: ses_config,
+            throttle: None,
         })
     }
 
@@ -1220,6 +1242,27 @@ impl EmailTransport for SesTransport {
                 "dedicated delivery route cannot be carried by the SES shared-pool transport"
                     .into(),
             ));
+        }
+
+        // ── Provider reputation/operator throttle ──────────────────────
+        // BEFORE the SES API call: the decision is deterministic per send
+        // unit, so a retried job gets the same verdict while the throttle
+        // state is unchanged. A deferral is a RETRYABLE `Throttled` error the
+        // processor requeues without consuming an attempt or dead-lettering.
+        if let Some(throttle) = &self.throttle {
+            let tenant_id = email.verp.as_ref().map(|verp| verp.tenant_id.as_str());
+            if let outbound_mta::throttle::ThrottleDecision::Defer { reason, .. } = throttle
+                .decide(
+                    &email.send_unit,
+                    outbound_mta::throttle::sender_domain(Some(&email.from)).as_deref(),
+                    &email.to,
+                    tenant_id,
+                    None,
+                )
+                .await
+            {
+                return Err(ProcessorError::Throttled(reason));
+            }
         }
 
         let raw_mime = Self::build_raw_mime(email);
@@ -1600,7 +1643,16 @@ pub async fn create_transport_from_config_with_db_and_redis(
         Arc::new(SmtpTransport::new(config.smtp.clone()))
     } else {
         info!(region = %config.ses.region, "Initialising SES shared-pool transport");
-        Arc::new(SesTransport::from_env(config.ses.clone()).await?)
+        // Install the provider throttle at the SES send boundary whenever the
+        // worker owns a Postgres pool (production). The engine caches lookups
+        // for 60 s and writes deferral audit rows best-effort.
+        let throttle =
+            db.map(|pool| Arc::new(outbound_mta::throttle::ProviderThrottle::new(pool.clone())));
+        Arc::new(
+            SesTransport::from_env(config.ses.clone())
+                .await?
+                .with_throttle(throttle),
+        )
     };
 
     // Prefer the in-process outbound MTA: it is the only dedicated backend
@@ -3708,6 +3760,48 @@ mod wire_and_ses_tests {
         assert!(
             !error.to_string().is_empty(),
             "the typed error carries the modeled disposition"
+        );
+    }
+
+    /// A provider throttle deferral is decided BEFORE the SES API call: the
+    /// transport returns the retryable `Throttled` variant and never attempts
+    /// the network (the client points at a dead endpoint).
+    #[tokio::test]
+    async fn ses_provider_throttle_defers_before_the_api_call() {
+        let Some(pool) = migrator::test_support::fresh_canonical_pool(
+            "ses_transport_throttle",
+            "ses_transport_throttle",
+        )
+        .await
+        .expect("provision test db") else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run the DB-backed test");
+            return;
+        };
+        sqlx::query(
+            "INSERT INTO outbound_provider_throttle_overrides
+               (tenant_id, provider, throttle_pct, reason)
+             VALUES (NULL, 'google', 100, 'transport throttle test')",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert override");
+
+        let throttle = Arc::new(outbound_mta::throttle::ProviderThrottle::new(pool.clone()));
+        let transport = ses_client_at(1).await.with_throttle(Some(throttle));
+        let mut email = test_email_for_ses();
+        email.to = "recipient@gmail.com".into();
+
+        let error = transport
+            .send(&email, &DeliveryRoute::SesShared)
+            .await
+            .expect_err("a 100% throttle must defer before the API call");
+        assert!(
+            matches!(error, ProcessorError::Throttled(_)),
+            "the deferral is a dedicated retryable variant, got {error:?}"
+        );
+        assert!(
+            error.to_string().contains("throttle 100%"),
+            "the reason names the throttle: {error}"
         );
     }
 }

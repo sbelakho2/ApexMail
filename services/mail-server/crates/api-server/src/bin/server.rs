@@ -103,12 +103,38 @@ async fn run(config: Config) -> anyhow::Result<()> {
         .await;
     let ses_client = aws_sdk_sesv2::Client::new(&aws_config);
     let ses_provider = SesIpProvider::new(
-        ses_client,
+        ses_client.clone(),
         db.clone(),
         config.ses_ip_pool_prefix.clone(),
         config.aws_region.clone(),
     );
     tracing::info!(region = %config.aws_region, "AWS SES client initialized (shared-pool sending only)");
+
+    // ── SES account/domain deliverability monitor ───────────
+    // The audit found `ses_account_metrics` / `ses_domain_stats` had no
+    // writer. Run the monitor only when this deployment actually sends
+    // through SES; ticks are hourly with bounded jitter, and every failure
+    // is logged and retried on the next tick (never fatal).
+    let _ses_monitor = if api_server::config::Config::ses_transport_enabled() {
+        let thresholds = api_server::ses_monitor::Thresholds::from_env();
+        tracing::info!(
+            bounce_warn_pct = thresholds.bounce_rate_warn_pct,
+            bounce_critical_pct = thresholds.bounce_rate_critical_pct,
+            complaint_warn_pct = thresholds.complaint_rate_warn_pct,
+            complaint_critical_pct = thresholds.complaint_rate_critical_pct,
+            "SES deliverability monitor started (hourly, jittered)"
+        );
+        Some(api_server::ses_monitor::spawn(
+            db.clone(),
+            ses_client,
+            config.aws_region.clone(),
+            thresholds,
+            api_server::ses_monitor::MonitorConfig::default(),
+        ))
+    } else {
+        tracing::info!("SES deliverability monitor disabled (EMAIL_TRANSPORT_TYPE=smtp)");
+        None
+    };
 
     // ── Hetzner dedicated IP provider ───────────────────────
     let ip_provider = DedicatedIpProvider::from_env(db.clone());

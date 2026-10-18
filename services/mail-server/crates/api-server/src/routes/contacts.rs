@@ -338,7 +338,7 @@ async fn list_contacts(
             "SELECT id, email, name, COALESCE(tags, '[]'::jsonb) AS tags, metadata, status, created_at, updated_at
              FROM contacts WHERE tenant_id = $1
                AND (created_at < $2::timestamp OR (created_at = $2::timestamp AND id < $3))
-               AND ($4::jsonb IS NULL OR COALESCE(tags, '[]'::jsonb) @> $4::jsonb)
+               AND ($4::jsonb IS NULL OR tags @> $4::jsonb)
              ORDER BY created_at DESC, id DESC LIMIT $5",
         )
         .bind(&auth.tenant_id)
@@ -354,7 +354,7 @@ async fn list_contacts(
         sqlx::query_as::<_, ContactRow>(
             "SELECT id, email, name, COALESCE(tags, '[]'::jsonb) AS tags, metadata, status, created_at, updated_at
              FROM contacts WHERE tenant_id = $1
-               AND ($2::jsonb IS NULL OR COALESCE(tags, '[]'::jsonb) @> $2::jsonb)
+               AND ($2::jsonb IS NULL OR tags @> $2::jsonb)
              ORDER BY created_at DESC, id DESC LIMIT $3 OFFSET $4",
         )
         .bind(&auth.tenant_id)

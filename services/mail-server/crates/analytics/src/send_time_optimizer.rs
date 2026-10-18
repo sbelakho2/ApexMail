@@ -33,7 +33,15 @@ pub struct SendTimeOptimizer {
     /// HMAC-SHA256 key for salted email hashing (O-11.5).
     /// Empty string disables HMAC (falls back to bare SHA-256).
     hmac_key: String,
+    /// In-process tenant-offset memo (offset, fetched-at). The campaign send
+    /// path asks for the SAME tenant's offset once per recipient; without
+    /// this every recipient paid a `tenants` round trip. 60 s TTL keeps a
+    /// settings change visible within a tick window.
+    tenant_offsets: std::sync::Mutex<std::collections::HashMap<String, (i32, std::time::Instant)>>,
 }
+
+/// How long a tenant's resolved UTC offset is reused in-process.
+const TENANT_OFFSET_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 
 impl SendTimeOptimizer {
     pub fn new(pool: sqlx::PgPool, redis: deadpool_redis::Pool) -> Self {
@@ -41,6 +49,7 @@ impl SendTimeOptimizer {
             pool,
             redis: Some(redis),
             hmac_key: String::new(),
+            tenant_offsets: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -54,6 +63,7 @@ impl SendTimeOptimizer {
             pool,
             redis: Some(redis),
             hmac_key,
+            tenant_offsets: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -64,6 +74,7 @@ impl SendTimeOptimizer {
             pool,
             redis: None,
             hmac_key: String::new(),
+            tenant_offsets: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -142,14 +153,25 @@ impl SendTimeOptimizer {
     /// or absent keys default to 0 (UTC), never an error:the optimizer must
     /// still produce a window.
     async fn tenant_utc_offset_minutes(&self, tenant_id: &str) -> anyhow::Result<i32> {
+        if let Ok(cache) = self.tenant_offsets.lock() {
+            if let Some((offset, fetched_at)) = cache.get(tenant_id) {
+                if fetched_at.elapsed() < TENANT_OFFSET_TTL {
+                    return Ok(*offset);
+                }
+            }
+        }
         let settings: Option<(serde_json::Value,)> =
             sqlx::query_as("SELECT settings FROM tenants WHERE id = $1")
                 .bind(tenant_id)
                 .fetch_optional(&self.pool)
                 .await?;
-        Ok(settings
+        let offset = settings
             .map(|(s,)| utc_offset_minutes_from_settings(&s))
-            .unwrap_or(0))
+            .unwrap_or(0);
+        if let Ok(mut cache) = self.tenant_offsets.lock() {
+            cache.insert(tenant_id.to_string(), (offset, std::time::Instant::now()));
+        }
+        Ok(offset)
     }
 
     /// Build recipient profile from engagement data.

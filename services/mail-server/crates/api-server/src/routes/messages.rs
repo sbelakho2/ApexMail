@@ -2674,6 +2674,22 @@ pub(crate) async fn send_batch(
     let mut committed_quota_reservations: Vec<QuotaReservation> =
         Vec::with_capacity(body.messages.len());
 
+    // Perf P3: load every DISTINCT template once and run ONE suppression
+    // probe over the union of the batch's recipients BEFORE opening the
+    // write transaction. They use the pool (another connection), so running
+    // them under `tx` pinned a second connection and held the batch tx idle
+    // in transaction across both reads. They are pure reads: nothing below
+    // depends on the transaction for them.
+    let preloaded_templates = preload_batch_templates(&state.db, &auth.tenant_id, &body.messages)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "failed to preload batch templates");
+            ApiError::Internal("template store error".into())
+        })?;
+    let suppressed_recipients =
+        preload_batch_suppressed_recipients(&state.db, &auth.tenant_id, &body.messages).await?;
+    let renderer = TemplateRenderer::new(state.db.clone(), send_template_renderer_config());
+
     let mut tx = state.db.begin().await.map_err(|e| {
         tracing::error!(error = %e, "failed to begin batch transaction");
         ApiError::Internal("database error".into())
@@ -2744,19 +2760,6 @@ pub(crate) async fn send_batch(
             tracing::error!(error = %e, "failed to resolve batch sender domains");
             ApiError::Internal("database error".into())
         })?;
-
-    // Perf P3: load every DISTINCT template once and run ONE suppression
-    // probe over the union of the batch's recipients. Both are pure reads
-    // done before the item loop; the previous code repeated each per item.
-    let preloaded_templates = preload_batch_templates(&state.db, &auth.tenant_id, &body.messages)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "failed to preload batch templates");
-            ApiError::Internal("template store error".into())
-        })?;
-    let suppressed_recipients =
-        preload_batch_suppressed_recipients(&state.db, &auth.tenant_id, &body.messages).await?;
-    let renderer = TemplateRenderer::new(state.db.clone(), send_template_renderer_config());
 
     for (i, msg) in body.messages.iter().enumerate() {
         // F23: forbidden/invalid values are validated BEFORE this item's
@@ -3043,13 +3046,40 @@ pub(crate) async fn send_batch(
         record_tenant_message_circuit_success(&state, &auth.tenant_id).await;
 
         // Audit every accepted item (the response's queued rows carry the
-        // persisted message ids).
-        for result in &response.results {
-            if result.status == "queued" {
-                if let Some(id) = result.id.as_deref() {
-                    audit_message_accepted(&state, &auth, id, 1, None).await;
-                }
-            }
+        // persisted message ids) in ONE transaction: the per-message writer
+        // did a commit and a chain-head round trip per item.
+        let audit_entries: Vec<crate::audit_log::AuditLogEntry<'_>> = response
+            .results
+            .iter()
+            .filter(|result| result.status == "queued")
+            .filter_map(|result| result.id.as_deref())
+            .map(|id| crate::audit_log::AuditLogEntry {
+                resource_id: Some(id),
+                details: serde_json::json!({
+                    "recipients": 1,
+                    "template_id": Option::<&str>::None,
+                }),
+            })
+            .collect();
+        if let Err(error) = crate::audit_log::insert_audit_logs_batch_with_env(
+            &state.db,
+            state.config.environment.is_production(),
+            Some(&auth.tenant_id),
+            auth.user_id.as_deref(),
+            "message.accepted",
+            "message",
+            &audit_entries,
+            None,
+            None,
+        )
+        .await
+        {
+            tracing::warn!(
+                tenant_id = %auth.tenant_id,
+                accepted = audit_entries.len(),
+                error = %error,
+                "failed to write the batch message.accepted audit rows"
+            );
         }
     } else {
         // Nothing accepted: drop the transaction (and with it the in-flight

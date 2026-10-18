@@ -32,6 +32,7 @@ pub mod content;
 pub mod crm_leads;
 pub mod cross_tenant;
 pub mod dashboard;
+pub mod deliverability;
 pub mod delivery_analytics;
 pub mod domains;
 pub mod features;

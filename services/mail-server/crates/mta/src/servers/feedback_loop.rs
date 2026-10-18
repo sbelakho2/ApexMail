@@ -1000,14 +1000,22 @@ impl FeedbackLoopServer {
         &self,
         message_id: &str,
     ) -> anyhow::Result<Option<(String, String)>> {
+        // Typed comparisons keep the PK (id) and message_id index usable:
+        // the previous `id::text = $1 OR message_id::text = $1` cast both
+        // sides to text, forcing a full scan of every email_queue partition
+        // for every inbound complaint — an attacker-supplied report chooses
+        // the message-id string. A malformed reference is simply unknown.
+        let Ok(id) = uuid::Uuid::parse_str(message_id.trim()) else {
+            return Ok(None);
+        };
         let row: Option<(String, String)> = sqlx::query_as(
             r#"SELECT COALESCE(tenant_id, '') AS tenant_id,
                       COALESCE(to_addresses[1], "to", '') AS recipient
                FROM email_queue
-               WHERE id::text = $1 OR message_id::text = $1
+               WHERE id = $1 OR message_id = $1
                LIMIT 1"#,
         )
-        .bind(message_id)
+        .bind(id)
         .fetch_optional(&self.pool)
         .await?;
 

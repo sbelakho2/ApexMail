@@ -67,7 +67,7 @@ determinant.
 
 ### Routing cache
 
-The `transport_routing_cache` table is maintained by a PostgreSQL trigger
+Historically, a `transport_routing_cache` table was maintained by a PostgreSQL trigger (removed in migration 268; routes are read from `dedicated_ips`)
 (`trg_update_transport_routing`) that fires on every `INSERT`, `UPDATE`, or
 `DELETE` on the `dedicated_ips` table. The router reads this cache (refreshed
 every 30 seconds in-memory) so routing decisions are O(1).
@@ -89,7 +89,7 @@ When a tenant upgrades to a plan with dedicated IPs or purchases an add-on:
    - Assigns it to an MTA server
    - Sets reverse DNS to `mail.<tenant_primary_domain>`
    - Inserts a `dedicated_ips` row with `status = 'warming'`
-4. **DB trigger** updates `transport_routing_cache`
+4. **DB trigger** updated `transport_routing_cache` (removed in migration 268)
 5. **TransportRouter** picks up the change on next cache refresh
 6. **All tenant email** now routes via self-hosted SMTP automatically
 
@@ -130,7 +130,7 @@ interpolation — **has no periodic caller**; an operator must invoke it
 
 ### 3. Steady state
 
-Once warmed, the IP handles all tenant traffic. `ip_daily_usage` tracks
+Once warmed, the IP handles all tenant traffic. Redis warmup counters track
 volume, bounces, and complaints per IP per day.
 
 ### 4. Release
@@ -156,16 +156,16 @@ When a tenant downgrades or releases an IP:
 
 ### Hetzner + self-hosted SMTP (dedicated path)
 
-- **DKIM**: Self-signed keys stored in `self_hosted_dkim_keys` table
+- **DKIM**: Keys stored encrypted in `domains.dkim_private_key`
 - **Bounces/complaints**: Parsed from SMTP responses → `self_hosted_bounces` table
 - **FBL**: ARF feedback loops → `self_hosted_complaints` table
-- **Reputation**: Monitored via `ip_daily_usage` + internal alerting
+- **Reputation**: Monitored via postmaster reputation summaries + internal alerting
 - **IP management**: Hetzner Cloud API (floating IPs, rDNS, server assignment)
 - **Send limits**: Enforced by the worker's warmup admission (`select_binding_warmup_ip` / `check_warmup_limit` in `worker-processors/src/email/processor.rs`) against the canonical `mail_common::warmup` schedule
 
 ### Transport Router
 
-- Reads `transport_routing_cache` (updated by trigger)
+- Read `transport_routing_cache` (trigger-maintained; removed in migration 268)
 - Both SES and SMTP transports are **always** initialized
 - Routing decision is per-message, based solely on dedicated IP presence
 - Cache refresh: every 30s in-memory, instant invalidation available
@@ -186,12 +186,12 @@ When a tenant downgrades or releases an IP:
 | Table | Purpose |
 |-------|---------|
 | `dedicated_ips` | Hetzner floating IPs assigned to tenants |
-| `transport_routing_cache` | Precomputed routing decisions (trigger-maintained) |
-| `hetzner_mta_servers` | Available MTA servers for IP assignment |
+| ~~`transport_routing_cache`~~ | Removed in migration 268 (no reader) |
+| ~~`hetzner_mta_servers`~~ | Removed in migration 268 (env config is live) |
 | `self_hosted_bounces` | Bounce events from self-hosted SMTP |
 | `self_hosted_complaints` | FBL complaint events from self-hosted SMTP |
-| `self_hosted_dkim_keys` | DKIM signing keys for self-hosted path |
-| `ip_daily_usage` | Per-IP daily send/bounce/complaint counts |
+| ~~`self_hosted_dkim_keys`~~ | Removed in migration 268 (`domains.dkim_private_key`) |
+| ~~`ip_daily_usage`~~ | Removed in migration 268 (Redis warmup counters) |
 | `self_hosted_send_stats` | Aggregate send statistics per tenant per IP |
 
 ### Key columns on `dedicated_ips`

@@ -189,7 +189,7 @@ Adyen webhook (plan change)
 ```
 
 The `trg_update_transport_routing` trigger (migration 021) maintains
-`transport_routing_cache` on every `dedicated_ips` change. No **shipping**
+`transport_routing_cache` on every `dedicated_ips` change (table and trigger removed in migration 268). No **shipping**
 worker consumes that cache today: transport selection is a deployment-level
 `EMAIL_TRANSPORT_TYPE` choice (`ses` default; `smtp` relay). Allocating an IP
 does **not** silently switch a tenant's mail to SMTP — see
@@ -233,7 +233,7 @@ Once warmed (`status='active'`):
 - DNSBL monitoring: no live implementation. The sweep was removed with the
   retired outbound delivery package; blocklisting must be checked manually.
 
-`ip_daily_usage` exists in the schema but is not written or read by any
+`ip_daily_usage` existed in the schema but was not written or read by any
 shipping code path today — do not treat it as a live per-IP ledger.
 
 #### 4. Release
@@ -273,9 +273,9 @@ transport decision (`EMAIL_TRANSPORT_TYPE`), not an automatic trigger.
 | Table | Purpose |
 |-------|---------|
 | `dedicated_ips` | Hetzner floating IPs assigned to tenants |
-| `hetzner_mta_servers` | Available MTA servers for IP assignment |
-| `transport_routing_cache` | Precomputed routing decisions (trigger-maintained; no shipping worker reads it — see above) |
-| `ip_daily_usage` | Schema placeholder for per-IP daily counts; not written or read by any code path today |
+| ~~`hetzner_mta_servers`~~ | Removed in migration 268 (env config is live) |
+| ~~`transport_routing_cache`~~ | Removed in migration 268 (no reader) |
+| ~~`ip_daily_usage`~~ | Removed in migration 268 (Redis warmup counters are live) |
 
 ### Key Columns on `dedicated_ips`
 

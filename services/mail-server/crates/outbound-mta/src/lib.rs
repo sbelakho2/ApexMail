@@ -49,6 +49,7 @@ pub mod response;
 pub mod retry;
 pub mod smtp;
 pub mod source_ip;
+pub mod throttle;
 pub mod tls;
 pub mod warmup;
 

@@ -28,6 +28,388 @@ struct SystemSenderRow {
     dkim_private_key: Option<String>,
 }
 
+// ---------------------------------------------------------------------------
+// White-label branding (console + platform notification mail)
+// ---------------------------------------------------------------------------
+
+/// Owned white-label configuration consumed by platform mail. Loaded from
+/// `ent_whitelabel_config` (and, for the mail builders, the tenant's
+/// `ent_whitelabel_email_templates` row through the SAME transaction).
+///
+/// The caller may only construct this after the tenant's resolved plan grants
+/// `white_label`; when it is `None` every renderer keeps the stock ApexMail
+/// copy byte-for-byte.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct TenantBranding {
+    pub company_name: Option<String>,
+    pub logo_url: Option<String>,
+    pub favicon_url: Option<String>,
+    pub primary_color: Option<String>,
+    pub secondary_color: Option<String>,
+    pub custom_css: Option<String>,
+    pub footer_text: Option<String>,
+    pub support_email: Option<String>,
+    pub support_url: Option<String>,
+    /// The tenant's override row for the mail type being rendered.
+    pub template: Option<EmailTemplateOverride>,
+}
+
+/// One `ent_whitelabel_email_templates` row (all fields optional: the CRUD
+/// upsert keeps the stored value when a field is omitted).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct EmailTemplateOverride {
+    pub subject_template: Option<String>,
+    pub html_template: Option<String>,
+    pub text_template: Option<String>,
+}
+
+impl TenantBranding {
+    /// The configured company name, or the ApexMail product name when the
+    /// tenant did not set one. This is the value that replaces "ApexMail" in
+    /// platform subject/heading/body/footer copy.
+    pub fn company_name(&self) -> &str {
+        self.company_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .unwrap_or("ApexMail")
+    }
+
+    pub fn support_email(&self) -> &str {
+        self.support_email.as_deref().map(str::trim).unwrap_or("")
+    }
+
+    pub fn support_url(&self) -> &str {
+        self.support_url.as_deref().map(str::trim).unwrap_or("")
+    }
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+struct BrandingConfigDbRow {
+    company_name: Option<String>,
+    logo_url: Option<String>,
+    favicon_url: Option<String>,
+    primary_color: Option<String>,
+    secondary_color: Option<String>,
+    custom_css: Option<String>,
+    footer_text: Option<String>,
+    support_email: Option<String>,
+    support_url: Option<String>,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+struct BrandingTemplateDbRow {
+    subject_template: Option<String>,
+    html_template: Option<String>,
+    text_template: Option<String>,
+}
+
+impl From<BrandingConfigDbRow> for TenantBranding {
+    fn from(row: BrandingConfigDbRow) -> Self {
+        Self {
+            company_name: row.company_name,
+            logo_url: row.logo_url,
+            favicon_url: row.favicon_url,
+            primary_color: row.primary_color,
+            secondary_color: row.secondary_color,
+            custom_css: row.custom_css,
+            footer_text: row.footer_text,
+            support_email: row.support_email,
+            support_url: row.support_url,
+            template: None,
+        }
+    }
+}
+
+/// Whether the tenant's override-aware resolved plan grants `white_label`.
+///
+/// Delegates to the billing authority (`get_entitlement_snapshot`) rather
+/// than re-deriving plan precedence. Lookup/storage failures are logged and
+/// degrade to `false` (stock branding) — branding must never fail a page or
+/// a mail.
+/// In-process cache for the render-path entitlement probe: the console
+/// renders once per page view and the snapshot loader costs three queries.
+/// 60 s TTL bounds staleness after a plan change; tests use unique tenants.
+static WHITE_LABEL_GRANT_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, (bool, std::time::Instant)>>,
+> = std::sync::OnceLock::new();
+const WHITE_LABEL_GRANT_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+const WHITE_LABEL_GRANT_CACHE_MAX: usize = 4096;
+
+pub(crate) async fn tenant_has_white_label(db: &PgPool, tenant_id: &str) -> bool {
+    let cache = WHITE_LABEL_GRANT_CACHE
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    if let Ok(map) = cache.lock() {
+        if let Some((granted, fetched_at)) = map.get(tenant_id) {
+            if fetched_at.elapsed() < WHITE_LABEL_GRANT_TTL {
+                return *granted;
+            }
+        }
+    }
+    let granted = match billing_service::plans::get_entitlement_snapshot(db, tenant_id).await {
+        Ok(Some(snapshot)) => snapshot_grants_white_label(&snapshot),
+        Ok(None) => false,
+        Err(error) => {
+            tracing::warn!(
+                tenant_id,
+                error = %error,
+                "white-label entitlement lookup failed; using stock ApexMail branding"
+            );
+            // Do not cache a failure as a denial: the next render retries.
+            return false;
+        }
+    };
+    if let Ok(mut map) = cache.lock() {
+        if map.len() >= WHITE_LABEL_GRANT_CACHE_MAX {
+            map.clear();
+        }
+        map.insert(tenant_id.to_string(), (granted, std::time::Instant::now()));
+    }
+    granted
+}
+
+/// Read the RESOLVED `white_label` grant out of an entitlement snapshot.
+///
+/// `EntitlementSnapshot::has_feature` deliberately reports `false` for
+/// non-`RuntimeEnforced` capabilities: `white_label` is classified
+/// `ContractualOnly` (a renderer/contract concern, not a request-path gate),
+/// so request handlers must not branch on it. The renderer is exactly the
+/// consumer that applies the contract, and the snapshot has already resolved
+/// the plan (override-aware) and recorded the raw grant. Reading it from the
+/// snapshot's serialized `granted` map reuses the billing authority instead
+/// of re-deriving plan precedence here.
+pub(crate) fn snapshot_grants_white_label(
+    snapshot: &billing_entitlements::EntitlementSnapshot,
+) -> bool {
+    serde_json::to_value(snapshot)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("granted")
+                .and_then(|granted| granted.get("white_label"))
+                .cloned()
+        })
+        .and_then(|granted| granted.as_bool())
+        .unwrap_or(false)
+}
+
+/// Load the tenant's white-label config row. One query; no template row.
+/// Returns `None` when the tenant has no config row.
+pub(crate) async fn load_tenant_branding<'e, E>(
+    executor: E,
+    tenant_id: &str,
+) -> Result<Option<TenantBranding>, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
+    let row: Option<BrandingConfigDbRow> = sqlx::query_as(
+        "SELECT company_name, logo_url, favicon_url, primary_color, secondary_color, \
+                custom_css, footer_text, support_email, support_url \
+         FROM ent_whitelabel_config WHERE tenant_id = $1",
+    )
+    .bind(tenant_id)
+    .fetch_optional(executor)
+    .await?;
+    Ok(row.map(Into::into))
+}
+
+/// Load the tenant's config row plus the email-template override for
+/// `template_type`, both through the caller's transaction connection (the
+/// invitation handler must read config in the same tx that writes the
+/// invitation) so the row and the mail see one consistent snapshot.
+///
+/// Template types used by the platform builders: `invitation` (team invite),
+/// `operator_invitation`, `password_reset`, `email_verification`.
+///
+/// The two tables are independent: a tenant may configure a template without
+/// a config row (or vice versa). `None` is returned only when neither exists.
+pub(crate) async fn load_email_branding(
+    executor: &mut sqlx::PgConnection,
+    tenant_id: &str,
+    template_type: &str,
+) -> Result<Option<TenantBranding>, sqlx::Error> {
+    let config: Option<BrandingConfigDbRow> = sqlx::query_as(
+        "SELECT company_name, logo_url, favicon_url, primary_color, secondary_color, \
+                custom_css, footer_text, support_email, support_url \
+         FROM ent_whitelabel_config WHERE tenant_id = $1",
+    )
+    .bind(tenant_id)
+    .fetch_optional(&mut *executor)
+    .await?;
+    let template: Option<BrandingTemplateDbRow> = sqlx::query_as(
+        "SELECT subject_template, html_template, text_template \
+         FROM ent_whitelabel_email_templates \
+         WHERE tenant_id = $1 AND template_type = $2",
+    )
+    .bind(tenant_id)
+    .bind(template_type)
+    .fetch_optional(&mut *executor)
+    .await?;
+
+    let template = template.and_then(|row| {
+        if row.subject_template.is_some()
+            || row.html_template.is_some()
+            || row.text_template.is_some()
+        {
+            Some(EmailTemplateOverride {
+                subject_template: row.subject_template,
+                html_template: row.html_template,
+                text_template: row.text_template,
+            })
+        } else {
+            None
+        }
+    });
+
+    match (config, template) {
+        (None, None) => Ok(None),
+        (config, template) => {
+            let mut branding = config.map(TenantBranding::from).unwrap_or_default();
+            branding.template = template;
+            Ok(Some(branding))
+        }
+    }
+}
+
+/// Entitlement-gated, transaction-consistent branding loader for the
+/// platform-mail builders: `None` unless the plan grants `white_label` and a
+/// branding row (config and/or template) exists. Errors degrade to `None`
+/// after logging.
+pub(crate) async fn load_entitled_email_branding(
+    db: &PgPool,
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    tenant_id: &str,
+    template_type: &str,
+) -> Option<TenantBranding> {
+    if !tenant_has_white_label(db, tenant_id).await {
+        return None;
+    }
+    match load_email_branding(tx, tenant_id, template_type).await {
+        Ok(branding) => branding,
+        Err(error) => {
+            tracing::warn!(
+                tenant_id,
+                template_type,
+                error = %error,
+                "white-label config lookup failed; sending stock ApexMail copy"
+            );
+            None
+        }
+    }
+}
+
+/// Values a tenant's custom email template may interpolate. Every value is
+/// HTML-escaped when substituted into `html_template` and plain when
+/// substituted into `text_template`/`subject_template`; unknown placeholders
+/// (e.g. `{{unknown}}`) stay literal.
+///
+/// Documented placeholders: `{{company_name}}`, `{{workspace}}`, `{{role}}`,
+/// `{{email}}`, `{{setup_link}}`, `{{verification_link}}`,
+/// `{{support_email}}`, `{{support_url}}`.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct EmailTemplateValues<'a> {
+    pub company_name: &'a str,
+    pub workspace: &'a str,
+    pub role: &'a str,
+    pub email: &'a str,
+    pub setup_link: &'a str,
+    pub verification_link: &'a str,
+    pub support_email: &'a str,
+    pub support_url: &'a str,
+}
+
+impl<'a> EmailTemplateValues<'a> {
+    fn entries(&self) -> [(&'static str, &'a str); 8] {
+        [
+            ("company_name", self.company_name),
+            ("workspace", self.workspace),
+            ("role", self.role),
+            ("email", self.email),
+            ("setup_link", self.setup_link),
+            ("verification_link", self.verification_link),
+            ("support_email", self.support_email),
+            ("support_url", self.support_url),
+        ]
+    }
+}
+
+/// Single-pass `{{placeholder}}` substitution. Unknown placeholders are
+/// emitted verbatim; substituted values are never re-scanned, so a value
+/// containing `{{email}}` cannot trigger recursive expansion.
+fn render_placeholders(
+    template: &str,
+    values: &EmailTemplateValues<'_>,
+    html_escape_values: bool,
+) -> String {
+    let entries = values.entries();
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(start) = rest.find("{{") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let Some(end) = after.find("}}") else {
+            out.push_str(&rest[start..]);
+            rest = "";
+            break;
+        };
+        let key = &after[..end];
+        if let Some((_, value)) = entries.iter().find(|(name, _)| *name == key) {
+            if html_escape_values {
+                out.push_str(&crate::routes::helpers::html_escape(value));
+            } else {
+                out.push_str(value);
+            }
+        } else {
+            out.push_str(&rest[start..start + 2 + end + 2]);
+        }
+        rest = &after[end + 2..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Apply a tenant template override (when present) to the default copy.
+/// Fields are independent: a NULL/blank template field keeps the default.
+/// Subject values are plain text and CR/LF are folded to spaces so a
+/// configured workspace/company name cannot inject a header.
+pub(crate) fn apply_email_template_override(
+    branding: Option<&TenantBranding>,
+    default_subject: String,
+    default_html: String,
+    default_text: String,
+    values: &EmailTemplateValues<'_>,
+) -> (String, String, String) {
+    let Some(template) = branding.and_then(|branding| branding.template.as_ref()) else {
+        return (default_subject, default_html, default_text);
+    };
+    let subject = match template
+        .subject_template
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(template) => render_placeholders(template, values, false).replace(['\r', '\n'], " "),
+        None => default_subject,
+    };
+    let html = match template
+        .html_template
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        Some(template) => render_placeholders(template, values, true),
+        None => default_html,
+    };
+    let text = match template
+        .text_template
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        Some(template) => render_placeholders(template, values, false),
+        None => default_text,
+    };
+    (subject, html, text)
+}
+
 fn not_ready_error() -> ApiError {
     ApiError::ServiceUnavailable(
         "system email delivery is unavailable because the ApexMail sender domain is not ready"
@@ -156,6 +538,20 @@ pub(crate) struct TransactionalEmail<'a> {
 /// `<h2>` heading, the caller's body, each action as a button plus its URL
 /// in visible text, and the legal footer.
 pub(crate) fn render_transactional_email(email: &TransactionalEmail<'_>) -> String {
+    render_transactional_email_with_branding(email, None)
+}
+
+/// [`render_transactional_email`] with tenant white-label branding.
+///
+/// `branding: None` is byte-identical to the stock shell. With branding, the
+/// footer line becomes `footer_text` / support links (or `© 2026 {company}`)
+/// and no ApexMail product or apexmail.ee link is emitted. The heading/body
+/// are still caller-owned and pre-escaped; callers substitute the company
+/// name into their default copy.
+pub(crate) fn render_transactional_email_with_branding(
+    email: &TransactionalEmail<'_>,
+    branding: Option<&TenantBranding>,
+) -> String {
     use crate::routes::helpers::html_escape;
 
     let mut actions_html = String::new();
@@ -173,10 +569,16 @@ pub(crate) fn render_transactional_email(email: &TransactionalEmail<'_>) -> Stri
         ));
     }
 
-    let footer = if email.footer_link {
-        "&copy; 2026 ApexMail &middot; <a href=\"https://apexmail.ee\" style=\"color:#999;text-decoration:none\">apexmail.ee</a>"
-    } else {
-        "&copy; 2026 ApexMail"
+    let footer = match branding {
+        Some(branding) => render_branded_email_footer(branding, email.footer_link),
+        None => {
+            if email.footer_link {
+                "&copy; 2026 ApexMail &middot; <a href=\"https://apexmail.ee\" style=\"color:#999;text-decoration:none\">apexmail.ee</a>"
+            } else {
+                "&copy; 2026 ApexMail"
+            }
+            .to_string()
+        }
     };
 
     format!(
@@ -193,6 +595,68 @@ pub(crate) fn render_transactional_email(email: &TransactionalEmail<'_>) -> Stri
         actions = actions_html,
         footer = footer,
     )
+}
+
+/// The branded footer line shared by all platform mail: `footer_text` when
+/// set, otherwise the company copyright; support links render only when
+/// `footer_link` is set and the values are non-empty / scheme-safe.
+fn render_branded_email_footer(branding: &TenantBranding, footer_link: bool) -> String {
+    use crate::routes::helpers::html_escape;
+
+    let footer_text = branding
+        .footer_text
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty());
+    let mut parts = vec![match footer_text {
+        Some(text) => html_escape(text),
+        None => format!("&copy; 2026 {}", html_escape(branding.company_name())),
+    }];
+    if footer_link {
+        let support_email = branding.support_email();
+        if !support_email.is_empty() {
+            let escaped = html_escape(support_email);
+            parts.push(format!(
+                "<a href=\"mailto:{escaped}\" style=\"color:#999;text-decoration:none\">{escaped}</a>"
+            ));
+        }
+        let support_url = branding.support_url();
+        if is_safe_support_url(support_url) {
+            let escaped = html_escape(support_url);
+            parts.push(format!(
+                "<a href=\"{escaped}\" style=\"color:#999;text-decoration:none\">{escaped}</a>"
+            ));
+        }
+    }
+    parts.join(" &middot; ")
+}
+
+/// http(s)/mailto only — mirrors the console footer rule so a hostile
+/// `javascript:` support URL is never rendered in mail either.
+fn is_safe_support_url(url: &str) -> bool {
+    let lower = url.trim().to_ascii_lowercase();
+    lower.starts_with("https://") || lower.starts_with("http://") || lower.starts_with("mailto:")
+}
+
+/// The branded plain-text footer line for tenant notification mail:
+/// `footer_text` (else the company copyright) plus support email/URL.
+/// Callers use their existing literal when `branding` is `None`.
+pub(crate) fn branded_text_footer(branding: &TenantBranding) -> String {
+    let footer_text = branding
+        .footer_text
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("© 2026 {}", branding.company_name()));
+    let mut parts = vec![footer_text];
+    if !branding.support_email().is_empty() {
+        parts.push(branding.support_email().to_string());
+    }
+    if is_safe_support_url(branding.support_url()) {
+        parts.push(branding.support_url().to_string());
+    }
+    parts.join(" · ")
 }
 
 /// Refuse an empty presentation: a queued message with no HTML or no text

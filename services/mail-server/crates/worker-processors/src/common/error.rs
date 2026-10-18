@@ -122,6 +122,16 @@ pub enum ProcessorError {
     #[error("relay delivery pending: {0}")]
     RelayDeliveryPending(String),
 
+    /// The provider reputation/operator throttle DEFERRED this send.
+    ///
+    /// Determined before any API/SMTP effect, deterministically per send
+    /// unit. The processor must requeue the queue row (bounded retry delay,
+    /// no attempt consumed, never dead-lettered) and let a later claim
+    /// re-evaluate the throttle — it must never be treated as a bounce or
+    /// permanent failure.
+    #[error("provider throttled: {0}")]
+    Throttled(String),
+
     /// DKIM signing error.
     #[error("dkim error: {0}")]
     Dkim(String),

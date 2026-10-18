@@ -105,6 +105,7 @@ mod ui_xss {
             },
             impersonation_banner: None,
             toast_surface: None,
+            branding: None,
         }
         .render_html();
         // child_html is trusted content and must be injected as-is

@@ -16,6 +16,7 @@ pub mod middleware;
 pub mod presentation;
 pub mod resilience;
 pub mod routes;
+pub mod ses_monitor;
 pub mod ses_provider;
 pub mod state;
 pub mod threat_feeds;

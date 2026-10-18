@@ -79,6 +79,32 @@ pub fn favicon_data_url() -> String {
 /// `browser_html_response`), so no script tags are rendered here. Dark
 /// mode comes purely from the stylesheet's `prefers-color-scheme` rules.
 pub fn web_root_layout(child_html: &str, title: &str) -> String {
+    web_root_layout_with_branding(child_html, title, None)
+}
+
+/// [`web_root_layout`] with the tenant's white-label branding: a branded
+/// favicon (when configured) and the single branding `<style>` block in
+/// `<head>` (validated color variables + sanitized custom CSS).
+///
+/// `None` renders the stock document byte-for-byte — no style element, no
+/// empty `<img>`, the original data-URL favicon.
+pub fn web_root_layout_with_branding(
+    child_html: &str,
+    title: &str,
+    branding: Option<&Branding<'_>>,
+) -> String {
+    let favicon_link = match branding.and_then(Branding::favicon_href) {
+        Some(href) => format!(
+            "<link rel=\"icon\" href=\"{}\">",
+            crate::shell::html_escape(href)
+        ),
+        None => favicon_link_html(),
+    };
+    // Only emit the style element when the tenant actually configured a
+    // color or custom CSS; otherwise the head stays byte-identical.
+    let branding_style = branding
+        .and_then(Branding::style_element)
+        .unwrap_or_default();
     format!(
         "<!DOCTYPE html>\
 <html lang=\"en\" class=\"{html_classes}\">\
@@ -86,6 +112,7 @@ pub fn web_root_layout(child_html: &str, title: &str) -> String {
 <meta name=\"description\" content=\"Modern email infrastructure for developers\">\
 {favicon_link}\
 <link rel=\"stylesheet\" href=\"{globals_css}\" data-globals-css>\
+{branding_style}\
 </head>\
     <body class=\"{body_classes} min-h-screen bg-background\"><a href=\"#app-main\" class=\"sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded-sm focus:bg-card focus:px-4 focus:py-2 focus:text-sm focus:font-bold focus:text-surface-950 focus:border focus:border-surface-950\">Skip to content</a>{child_html}\
 </body>\
@@ -93,8 +120,9 @@ pub fn web_root_layout(child_html: &str, title: &str) -> String {
         html_classes = WEB_ROOT_HTML_CLASSES,
         body_classes = WEB_ROOT_BODY_CLASSES,
         title = html_escape(title),
-        favicon_link = favicon_link_html(),
+        favicon_link = favicon_link,
         globals_css = crate::globals_css_url(),
+        branding_style = branding_style,
         child_html = child_html,
     )
 }
@@ -348,6 +376,30 @@ pub fn web_dashboard_layout_with_session(
     user_context: Option<&crate::shell::UserContext<'_>>,
     impersonation_banner: Option<crate::shell::ImpersonationBanner<'_>>,
 ) -> String {
+    web_dashboard_layout_with_branding(
+        child_html,
+        current_path,
+        csrf_token,
+        user_context,
+        impersonation_banner,
+        None,
+    )
+}
+
+/// [`web_dashboard_layout_with_session`] plus tenant white-label branding.
+///
+/// `branding: None` renders the stock ApexMail shell byte-for-byte (every
+/// existing caller goes through this path). Branding reaches the view only
+/// after the api-server has proven the tenant's plan grants `white_label`.
+#[allow(clippy::too_many_arguments)]
+pub fn web_dashboard_layout_with_branding(
+    child_html: &str,
+    current_path: &str,
+    csrf_token: &str,
+    user_context: Option<&crate::shell::UserContext<'_>>,
+    impersonation_banner: Option<crate::shell::ImpersonationBanner<'_>>,
+    branding: Option<crate::shell::Branding<'_>>,
+) -> String {
     let avatar_fallback = user_context
         .map(|user| crate::shell::avatar_initials(user.display_name))
         .unwrap_or_else(|| "AM".to_string());
@@ -370,6 +422,7 @@ pub fn web_dashboard_layout_with_session(
         toast_surface: None,
         current_path,
         csrf_token,
+        branding,
     };
     shell.render_html()
 }

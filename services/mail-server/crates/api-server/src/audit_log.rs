@@ -178,6 +178,56 @@ pub async fn insert_audit_log_with_env(
     Ok(())
 }
 
+/// One entry in a batch audit append.
+pub struct AuditLogEntry<'a> {
+    pub resource_id: Option<&'a str>,
+    pub details: Value,
+}
+
+/// Append a batch of audit entries in ONE transaction.
+///
+/// The single-entry writer opens a transaction per call; the batch send path
+/// called it once per accepted message, so a 100-item batch did 100 commits
+/// and 100 chain-head round trips after the response was already determined.
+/// This keeps the SAME per-entry hash-chain semantics (entries are linked in
+/// slice order inside one transaction) while amortising the commit.
+#[allow(clippy::too_many_arguments)]
+pub async fn insert_audit_logs_batch_with_env(
+    db: &PgPool,
+    is_production: bool,
+    tenant_id: Option<&str>,
+    user_id: Option<&str>,
+    action: &str,
+    resource: &str,
+    entries: &[AuditLogEntry<'_>],
+    ip_address: Option<&str>,
+    user_agent: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+    let mut tx = db.begin().await?;
+    let timestamp = Utc::now();
+    for entry in entries {
+        insert_audit_log_in_tx_with_env(
+            &mut tx,
+            is_production,
+            tenant_id,
+            user_id,
+            action,
+            resource,
+            entry.resource_id,
+            entry.details.clone(),
+            ip_address,
+            user_agent,
+            timestamp,
+        )
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
 /// The single platform-wide audit chain. The current writer design links
 /// every entry into one global chain (the legacy selector had no tenant
 /// scope either); the column keeps the door open for per-tenant chains

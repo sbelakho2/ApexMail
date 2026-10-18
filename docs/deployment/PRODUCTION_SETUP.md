@@ -303,7 +303,7 @@ sequenceDiagram
     API->>Hetzner: POST /v1/floating_ips/{id}/actions/assign (to MTA server)
     API->>Hetzner: POST /v1/floating_ips/{id}/actions/change_dns_ptr (rDNS: mail.<domain>)
     API->>DB: INSERT dedicated_ips (status='warming')
-    Note over DB: Trigger updates transport_routing_cache
+    Note over DB: (Historical) trigger updated transport_routing_cache
     API-->>Adyen: 200 OK
 ```
 
@@ -313,7 +313,7 @@ The provisioning flow in detail:
 2. **Assign** it to the MTA server: `POST /v1/floating_ips/{id}/actions/assign`
 3. **Set rDNS** to `mail.<tenant_primary_domain>`: `POST /v1/floating_ips/{id}/actions/change_dns_ptr`
 4. **Insert** a row in the `dedicated_ips` table with `status='warming'`
-5. **DB trigger** [`trg_update_transport_routing`](../architecture/hybrid-email-infrastructure.md:163) updates `transport_routing_cache`
+5. **DB trigger** `trg_update_transport_routing` updated `transport_routing_cache` (both removed in migration 268; routes read `dedicated_ips`)
 6. Subsequent messages for this tenant route via **self-hosted SMTP with the dedicated IP**
 
 #### 3.5.2 Warmup (60-Day Schedule)
@@ -359,7 +359,7 @@ manually if the progress column matters.
 
 Once warmed (`status='active'`):
 - The IP handles **all tenant traffic** via [`SmtpTransport`](../../services/mail-server/crates/worker-processors/src/email/transport.rs:49)
-- `ip_daily_usage` tracks send volume, bounces, and complaints
+- Redis warmup counters track per-IP send volume; postmaster summaries track bounces/complaints
 - DNSBL monitoring runs every **15 minutes**
 - Alerts fire if the IP is blacklisted
 
@@ -370,7 +370,7 @@ When a tenant downgrades or manually releases an IP:
 1. `DELETE /v1/dedicated-ips/{ip_id}` is called
 2. [`DedicatedIpProvider::release_ip()`](../../services/mail-server/crates/api-server/src/ip_provider.rs:397) deletes the Hetzner floating IP: `DELETE /v1/floating_ips/{hetzner_id}`
 3. The `dedicated_ips` row is updated to `status='retired'`
-4. The DB trigger updates `transport_routing_cache`
+4. (Historical) the DB trigger updated `transport_routing_cache`; removed in migration 268
 5. If no remaining dedicated IPs, the tenant reverts to **SES shared pool**
 
 ### 3.6 SMTP MTA Deployment
@@ -761,7 +761,7 @@ All events are:
 |---------|-------------|------------|
 | Floating IP not assignable | IP already assigned to another server | Release the IP first, or check Hetzner Cloud console |
 | rDNS not updating | API token lacks write scope | Regenerate token with read/write permissions |
-| Tenant not routing via SMTP | `transport_routing_cache` stale | Cache refreshes every 30 seconds; or call [`invalidate_cache()`](../../services/mail-server/crates/worker-processors/src/email/transport_router.rs:202) |
+| Tenant not routing via SMTP | no active warming/active `dedicated_ips` row | Assign a dedicated IP; the worker selects the route from `dedicated_ips` on every send |
 | IP showing as blacklisted | DNSBL listing | Check DNSBL monitoring alerts; initiate delisting process |
 | Warmup label not progressing | `warmup_progress` bookkeeping has no periodic caller (graduation itself IS automatic via the worker reconciler) | `warmup_progress` is bookkeeping only; sending is gated by `warmup_started_at` and graduation to `active` runs hourly in the worker. Invoke `tick_warmup()` manually if the progress column matters |
 
@@ -769,7 +769,7 @@ All events are:
 
 | Symptom | Likely Cause | Resolution |
 |---------|-------------|------------|
-| Messages unexpectedly routed to SES | `transport_routing_cache` not updated after IP assignment | Check DB trigger `trg_update_transport_routing` is active; verify `transport_routing_cache` table has the tenant entry |
+| Messages unexpectedly routed to SES | no `dedicated_ips` row bound to the tenant | Verify the tenant's dedicated IP is `warming`/`active`; route selection reads `dedicated_ips` directly |
 | Messages unexpectedly routed to SMTP | Tenant incorrectly has active dedicated IP | Verify `dedicated_ips` table for the tenant; check if retired IPs are still in cache |
 | Upgrade/downgrade not triggering IP provision/release | Adyen webhook not firing | Check Adyen webhook logs; verify the Adyen webhook reaches `POST /v1/dedicated-ips` |
 
