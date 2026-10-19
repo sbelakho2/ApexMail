@@ -90,10 +90,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # other release assets below (the executor host is x86_64).
 # vendor repo packages track their bookworm repo security updates (see .hadolint.yaml)
 # hadolint ignore=DL3008
+# NATIVE ARCH (2026-10-19): the repo line was hardcoded to arch=amd64, which
+# made the image UNBUILDABLE on arm64 (and is why the published image had no
+# arm64 manifest). Resolve the arch from the base image at build time so the
+# same Dockerfile builds both.
 RUN install -m 0755 -d /etc/apt/keyrings \
     && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
     && chmod a+r /etc/apt/keyrings/docker.asc \
-    && echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable" \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable" \
         > /etc/apt/sources.list.d/docker.list \
     && apt-get update \
     && apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin \
@@ -135,20 +139,27 @@ RUN pip3 install --break-system-packages --no-cache-dir \
 # External audit 2026-10-02 item 1: the dead gitleaks URL made the committed
 # Dockerfile unbuildable from source (found by the first real build).
 ARG TARGETARCH
+# NATIVE ARCH (2026-10-19): trivy/hadolint/zola/go downloaded amd64 assets
+# unconditionally — the assert caught all four as absent on an arm64 build.
+# Every download now derives its arch from TARGETARCH exactly like gitleaks.
 RUN case "$TARGETARCH" in \
         amd64) GL_ARCH=x64 ;; \
         arm64) GL_ARCH=arm64 ;; \
         *)     GL_ARCH="$TARGETARCH" ;; \
     esac \
+    && case "$TARGETARCH" in \
+           arm64) TRIVY_ARCH=ARM64; HADOLINT_ARCH=arm64; ZOLA_TARGET=aarch64-unknown-linux-gnu; GO_ARCH=arm64 ;; \
+           *)     TRIVY_ARCH=64bit; HADOLINT_ARCH=x86_64; ZOLA_TARGET=x86_64-unknown-linux-gnu; GO_ARCH=amd64 ;; \
+       esac \
     && curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_${GL_ARCH}.tar.gz" \
         -o /tmp/gitleaks.tgz && tar xzf /tmp/gitleaks.tgz -C /usr/local/bin gitleaks && rm -f /tmp/gitleaks.tgz \
-    && curl -fsSL "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
+    && curl -fsSL "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-${TRIVY_ARCH}.tar.gz" \
         -o /tmp/trivy.tgz && tar xzf /tmp/trivy.tgz -C /usr/local/bin trivy && rm -f /tmp/trivy.tgz \
-    && curl -fsSL "https://github.com/hadolint/hadolint/releases/download/v${HADOLINT_VERSION}/hadolint-Linux-x86_64" \
+    && curl -fsSL "https://github.com/hadolint/hadolint/releases/download/v${HADOLINT_VERSION}/hadolint-Linux-${HADOLINT_ARCH}" \
         -o /usr/local/bin/hadolint && chmod +x /usr/local/bin/hadolint \
-    && curl -fsSL "https://github.com/getzola/zola/releases/download/v${ZOLA_VERSION}/zola-v${ZOLA_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
+    && curl -fsSL "https://github.com/getzola/zola/releases/download/v${ZOLA_VERSION}/zola-v${ZOLA_VERSION}-${ZOLA_TARGET}.tar.gz" \
         -o /tmp/zola.tgz && tar xzf /tmp/zola.tgz -C /usr/local/bin zola && rm -f /tmp/zola.tgz \
-    && curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" \
+    && curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${GO_ARCH}.tar.gz" \
         -o /tmp/go.tgz && tar xzf /tmp/go.tgz -C /usr/local && rm -f /tmp/go.tgz \
     && ln -s /usr/local/go/bin/go /usr/local/bin/go
 
@@ -176,13 +187,19 @@ RUN cargo install --locked cargo-nextest@${NEXTEST_VERSION}
 # coexist under ~/.cache/ms-playwright, so both installs are cheap after the
 # apt-deps layer the first one pulls.
 WORKDIR /tmp
+# PLAYWRIGHT_SKIP_BROWSER_GC (2026-10-19): playwright's install prunes browser
+# revisions it does not reference — the 1.62.1 install DELETED the 1.63.0
+# chromium (assert caught "only 1 chromium revision"). Both pins must coexist.
+ENV PLAYWRIGHT_SKIP_BROWSER_GC=1
 RUN npm init -y >/dev/null 2>&1 \
     && npm install "playwright@${PLAYWRIGHT_VERSION}" >/dev/null 2>&1 \
     && npx playwright install --with-deps chromium \
+    && echo "browsers after ${PLAYWRIGHT_VERSION}: $(ls ${HOME}/.cache/ms-playwright 2>/dev/null | tr '\n' ' ')" \
     && rm -rf /tmp/node_modules /tmp/package*.json \
     && npm init -y >/dev/null 2>&1 \
     && npm install "playwright@${PLAYWRIGHT_BROWSER_SUITE_VERSION}" >/dev/null 2>&1 \
     && npx playwright install chromium \
+    && echo "browsers after ${PLAYWRIGHT_BROWSER_SUITE_VERSION}: $(ls ${HOME}/.cache/ms-playwright 2>/dev/null | tr '\n' ' ')" \
     && rm -rf /tmp/node_modules /tmp/package*.json
 WORKDIR /
 

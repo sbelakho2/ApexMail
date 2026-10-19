@@ -683,14 +683,19 @@ ci_zola() {
     _z_ver=$(ci_zola_expected_version)
     [ -n "$_z_ver" ] || return 1
     if command -v zola >/dev/null 2>&1; then
-        if [ "$(zola --version 2>/dev/null | awk '{print $2}')" = "v$_z_ver" ]; then
+        # NATIVE-ARCH (2026-10-19): strip the leading 'v' before comparing —
+        # the aarch64 zola build prints "zola 0.22.1" while x86_64 prints
+        # "zola-v0.22.1", so the raw string comparison never matched on arm64
+        # and ci_zola reported "no pinned zola obtainable" with the binary
+        # present at the pin.
+        if [ "$(zola --version 2>/dev/null | awk '{print $2}' | tr -d 'v')" = "$_z_ver" ]; then
             command -v zola
             return 0
         fi
     fi
     _z_dir=${CI_ZOLA_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/apexmail-ci-zola}/v$_z_ver
     _z_bin=$_z_dir/zola
-    if [ -x "$_z_bin" ] && [ "$("$_z_bin" --version 2>/dev/null | awk '{print $2}')" = "v$_z_ver" ]; then
+    if [ -x "$_z_bin" ] && [ "$("$_z_bin" --version 2>/dev/null | awk '{print $2}' | tr -d 'v')" = "$_z_ver" ]; then
         echo "$_z_bin"
         return 0
     fi
