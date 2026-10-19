@@ -39,6 +39,7 @@ ARG LLVMCOV_VERSION=0.9.1
 ARG DENY_VERSION=0.20.2
 ARG MACHETE_VERSION=0.9.2
 ARG AUDIT_VERSION=0.22.2
+ARG VET_VERSION=0.10.2
 ARG SQLX_VERSION=0.9.0
 ARG GITLEAKS_VERSION=8.30.1
 ARG TRIVY_VERSION=0.74.0
@@ -176,6 +177,10 @@ RUN cargo install --locked cargo-machete@${MACHETE_VERSION}
 RUN cargo install --locked sqlx-cli@${SQLX_VERSION}
 RUN cargo install --locked cargo-deny@${DENY_VERSION}
 RUN cargo install --locked cargo-audit@${AUDIT_VERSION}
+# cargo-vet: the supply-chain gate (REQUIRED since 2026-09-28) — the first
+# arm64 live run failed closed on its absence because the recipe never
+# installed it and the assert never pinned it. Both fixed now.
+RUN cargo install --locked cargo-vet@${VET_VERSION}
 RUN cargo install --locked cargo-nextest@${NEXTEST_VERSION}
 
 # Playwright chromium for the contrast/layout pixel gates AND the browser

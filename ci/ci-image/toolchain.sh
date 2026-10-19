@@ -50,7 +50,7 @@ fail=0
 # without a version pin: docker/compose plugin, php, mvn, java, ruby, npm,
 # python3) are asserted below but intentionally not listed here.
 for _v in NEXTEST_VERSION LLVMCOV_VERSION DENY_VERSION MACHETE_VERSION \
-          AUDIT_VERSION SQLX_VERSION GITLEAKS_VERSION TRIVY_VERSION \
+          AUDIT_VERSION VET_VERSION SQLX_VERSION GITLEAKS_VERSION TRIVY_VERSION \
           SEMGREP_VERSION HADOLINT_VERSION PRE_COMMIT_VERSION \
           COMPOSER_VERSION ZOLA_VERSION NODE_MAJOR GO_VERSION PLAYWRIGHT_VERSION; do
     eval "_pin=\${$_v:-}"
@@ -117,6 +117,7 @@ assert cargo-llvm-cov 'cargo llvm-cov --version' "${LLVMCOV_VERSION:-}"
 assert cargo-deny     'cargo deny --version'     "${DENY_VERSION:-}"
 assert cargo-machete  'cargo machete --version'  "${MACHETE_VERSION:-}"
 assert cargo-audit    'cargo audit --version'    "${AUDIT_VERSION:-}"
+assert cargo-vet      'cargo vet --version'      "${VET_VERSION:-}"
 assert sqlx           'sqlx --version'           "${SQLX_VERSION:-}"
 
 # Security + supply chain (exact pins).
