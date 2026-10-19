@@ -366,6 +366,120 @@ impl SupportNotifier {
     }
 }
 
+/// One notification prepared for [`SupportNotifier::queue_emails_batch`] —
+/// the same inputs [`SupportNotifier::queue_email`] takes.
+pub(crate) struct QueuedSupportEmail {
+    pub(crate) tenant_id: Option<String>,
+    pub(crate) to_address: String,
+    pub(crate) subject: String,
+    pub(crate) body: String,
+    pub(crate) kind: &'static str,
+}
+
+/// Rows per multi-row INSERT in [`SupportNotifier::queue_emails_batch`].
+/// 12 parameters per row keeps each statement far under Postgres' 65535
+/// bind-parameter ceiling while amortising the round trip.
+const SUPPORT_EMAIL_BATCH_INSERT_ROWS: usize = 1000;
+
+impl SupportNotifier {
+    /// Batch variant of [`Self::queue_email`] (perf audit 2026-10-18,
+    /// finding 17): identical per-recipient validation, sanitization, row
+    /// shape and best-effort error policy, but ONE multi-row INSERT per
+    /// chunk instead of one INSERT per email. `queue_email`'s only side
+    /// effect is its INSERT, so batching cannot change observable behavior:
+    /// invalid recipients / empty subjects are skipped with the same warns,
+    /// and a failed insert logs the same degradation (a batch insert is
+    /// all-or-nothing per chunk where the per-row inserts failed per row —
+    /// every row in the batch is validated the same way beforehand, so a
+    /// partial failure is limited to infrastructure errors that fail the
+    /// whole sweep anyway).
+    async fn queue_emails_batch(&self, emails: Vec<QueuedSupportEmail>) {
+        if emails.is_empty() {
+            return;
+        }
+
+        // Per-item validation FIRST, exactly like queue_email: skip (with
+        // the same warns) instead of failing the batch.
+        let mut rows: Vec<(Option<String>, String, String, String, &'static str)> =
+            Vec::with_capacity(emails.len());
+        for email in emails {
+            let to_address = email.to_address.trim();
+            if !is_plausible_email(to_address) {
+                tracing::warn!(to = %sanitize_notification_text(to_address), kind = email.kind, "Skipping support notification with invalid recipient address");
+                continue;
+            }
+            let subject =
+                sanitize_notification_text(&email.subject.chars().take(200).collect::<String>());
+            if subject.is_empty() {
+                tracing::warn!(
+                    kind = email.kind,
+                    "Skipping support notification with empty subject"
+                );
+                continue;
+            }
+            let body: String = email.body.chars().take(10_000).collect();
+            rows.push((
+                email.tenant_id,
+                to_address.to_string(),
+                subject,
+                body,
+                email.kind,
+            ));
+        }
+        if rows.is_empty() {
+            return;
+        }
+
+        for chunk in rows.chunks(SUPPORT_EMAIL_BATCH_INSERT_ROWS) {
+            let mut builder = sqlx::QueryBuilder::new(
+                r#"INSERT INTO email_queue (
+                id, from_address, to_addresses, subject, text_body,
+                status, priority, tags, metadata, tenant_id, created_at, updated_at
+            ) "#,
+            );
+            builder.push_values(
+                chunk.iter(),
+                |mut b, (tenant_id, to_address, subject, body, kind)| {
+                    // Authoritative tenant attribution: the email_queue.tenant_id
+                    // column is UUID-typed and stays NULL for ULID-style tenants.
+                    let tenant_uuid = notification_tenant_uuid(tenant_id.as_deref());
+                    let metadata = serde_json::json!({
+                        "source": "enterprise-support",
+                        "kind": kind,
+                        "tenant": tenant_id,
+                    });
+                    // Bind order MUST match the column list above (the
+                    // per-row INSERT kept status/priority/tags as literals
+                    // between $5 and $6; here they are binds in place).
+                    b.push_bind(Uuid::new_v4())
+                        .push_bind(&self.from_address)
+                        .push_bind(vec![to_address.clone()])
+                        .push_bind(subject)
+                        .push_bind(body)
+                        .push_bind("pending")
+                        .push_bind(5_i32)
+                        .push_bind(vec!["support-notification".to_string()])
+                        .push_bind(metadata)
+                        .push_bind(tenant_uuid)
+                        .push_bind(Utc::now())
+                        .push_bind(Utc::now());
+                },
+            );
+            match builder.build().execute(&self.db).await {
+                Ok(_) => info!(count = chunk.len(), "Support notification queued"),
+                Err(error) if is_missing_relation_error(&error) => {
+                    log_missing_email_queue_once("queue_email");
+                    return;
+                }
+                Err(error) => {
+                    tracing::warn!(error = %error, "Failed to queue support notification — ticket operation unaffected");
+                    return;
+                }
+            }
+        }
+    }
+}
+
 /// Support Service:enterprise tickets, SLA tracking, agent assignment, escalation
 pub struct SupportService {
     db: PgPool,
@@ -1272,6 +1386,14 @@ impl SupportService {
     /// their tests can never drift apart. Every ticket the thresholds promote
     /// also triggers the assignee notification hook — an escalation nobody
     /// hears about is not an escalation.
+    ///
+    /// Set-based notification path (perf audit 2026-10-18, finding 17): the
+    /// escalation UPDATEs keep their per-priority shape (the cutoff is a rule
+    /// property), but assignee emails are resolved for the whole escalated
+    /// set in ONE query and the notifications are enqueued with ONE multi-row
+    /// INSERT per batch — never one agent lookup + one INSERT per ticket.
+    /// Skips are identical: a ticket without an assignee, or whose assignee
+    /// has no resolvable email row, notifies nobody, exactly as before.
     pub async fn auto_escalate(&self) -> Result<i64, String> {
         let now = Utc::now();
         let rules = auto_escalation_thresholds()
@@ -1285,6 +1407,8 @@ impl SupportService {
             .collect::<Vec<_>>();
 
         let mut escalated = 0i64;
+        // (the rule's priority, the escalated ticket) in sweep order.
+        let mut escalated_tickets: Vec<(&'static str, SupportTicket)> = Vec::new();
         for (priority, threshold) in rules {
             let cutoff = now - threshold;
             let rows = match sqlx::query_as::<_, SupportTicket>(
@@ -1305,33 +1429,58 @@ impl SupportService {
                 Err(error) => return Err(format!("Auto-escalate: {error}")),
             };
             escalated += rows.len() as i64;
+            escalated_tickets.extend(rows.into_iter().map(|ticket| (priority, ticket)));
+        }
 
-            for t in &rows {
-                if let Some(agent_id) = t.assigned_to {
-                    if let Ok(Some(agent_email)) = self.agent_email(agent_id).await {
-                        self.notifier
-                            .queue_email(
-                                Some(&t.tenant_id),
-                                &agent_email,
-                                &format!(
-                                    "[ApexMail Support] Ticket #{:?} auto-escalated ({} overdue)",
-                                    t.number, priority
-                                ),
-                                &format!(
-                                    "Ticket \"{}\" exceeded its {} escalation threshold and was auto-escalated to level {}.\nIt has been waiting since {}.",
-                                    sanitize_notification_text(&t.subject),
-                                    priority,
-                                    t.escalation_level,
-                                    t.created_at
-                                        .map(|ts| ts.to_rfc3339())
-                                        .unwrap_or_else(|| "n/a".into()),
-                                ),
-                                "ticket_auto_escalated_assignee",
-                            )
-                            .await;
-                    }
-                }
-            }
+        if !escalated_tickets.is_empty() {
+            // ONE query for every DISTINCT assignee in the escalated set.
+            let agent_ids: Vec<Uuid> = {
+                let mut seen = std::collections::HashSet::new();
+                escalated_tickets
+                    .iter()
+                    .filter_map(|(_, t)| t.assigned_to)
+                    .filter(|id| seen.insert(*id))
+                    .collect()
+            };
+            let agent_emails: std::collections::HashMap<Uuid, String> = if agent_ids.is_empty() {
+                std::collections::HashMap::new()
+            } else {
+                sqlx::query_as::<_, (Uuid, String)>(
+                    "SELECT id, email FROM ent_support_agents WHERE id = ANY($1)",
+                )
+                .bind(&agent_ids)
+                .fetch_all(&self.db)
+                .await
+                .map(|rows| rows.into_iter().collect())
+                .unwrap_or_default()
+            };
+
+            let notifications: Vec<QueuedSupportEmail> = escalated_tickets
+                .iter()
+                .filter_map(|(priority, t)| {
+                    let agent_id = t.assigned_to?;
+                    let agent_email = agent_emails.get(&agent_id)?;
+                    Some(QueuedSupportEmail {
+                        tenant_id: Some(t.tenant_id.clone()),
+                        to_address: agent_email.clone(),
+                        subject: format!(
+                            "[ApexMail Support] Ticket #{:?} auto-escalated ({} overdue)",
+                            t.number, priority
+                        ),
+                        body: format!(
+                            "Ticket \"{}\" exceeded its {} escalation threshold and was auto-escalated to level {}.\nIt has been waiting since {}.",
+                            sanitize_notification_text(&t.subject),
+                            priority,
+                            t.escalation_level,
+                            t.created_at
+                                .map(|ts| ts.to_rfc3339())
+                                .unwrap_or_else(|| "n/a".into()),
+                        ),
+                        kind: "ticket_auto_escalated_assignee",
+                    })
+                })
+                .collect();
+            self.notifier.queue_emails_batch(notifications).await;
         }
 
         if escalated > 0 {
@@ -1687,5 +1836,384 @@ mod tests {
         let json = serde_json::to_value(&t).unwrap();
         assert_eq!(json["priority"], "critical");
         assert_eq!(json["status"], "open");
+    }
+
+    // ── DB-backed auto-escalation batching + parity ───────────────────────
+    // Perf audit 2026-10-18 (finding 17): auto_escalate used to run one
+    // agent-email lookup and one notification INSERT per escalated ticket.
+    // The capture below pins the batched shape; the parity test pins
+    // identical escalations and identical notifications.
+
+    /// Thread-local SQL capture for the batching regression test (the pool
+    /// is rebuilt with `log_statements(Debug)`), the worker crate's pattern.
+    #[derive(Clone, Default)]
+    struct EscalationSqlCapture {
+        statements: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl EscalationSqlCapture {
+        fn count_starting_with(&self, prefix: &str) -> usize {
+            self.statements
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|statement| statement.trim_start().starts_with(prefix))
+                .count()
+        }
+
+        fn snapshot(&self) -> Vec<String> {
+            self.statements.lock().unwrap().clone()
+        }
+    }
+
+    struct EscalationSqlCaptureLayer(EscalationSqlCapture);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for EscalationSqlCaptureLayer {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _context: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if event.metadata().target() != "sqlx::query" {
+                return;
+            }
+            struct SummaryVisitor<'a>(&'a mut Option<String>);
+            impl tracing::field::Visit for SummaryVisitor<'_> {
+                fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                    if field.name() == "summary" {
+                        *self.0 = Some(value.to_string());
+                    }
+                }
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if field.name() == "summary" {
+                        *self.0 = Some(format!("{value:?}"));
+                    }
+                }
+            }
+            let mut summary = None;
+            event.record(&mut SummaryVisitor(&mut summary));
+            if let Some(summary) = summary {
+                self.0.statements.lock().unwrap().push(summary);
+            }
+        }
+    }
+
+    async fn escalation_logging_pool(pool: &PgPool) -> PgPool {
+        use sqlx::ConnectOptions;
+        sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .test_before_acquire(false)
+            .connect_with(
+                (*pool.connect_options())
+                    .clone()
+                    .log_statements(tracing::log::LevelFilter::Debug),
+            )
+            .await
+            .expect("logging pool over the escalation test database")
+    }
+
+    async fn seed_escalation_agent(pool: &PgPool, email: &str) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO ent_support_agents (id, user_id, name, email, available)
+             VALUES ($1, $2, $3, $4, true)",
+        )
+        .bind(id)
+        .bind(format!("usr-{email}"))
+        .bind(format!("Agent {email}"))
+        .bind(email)
+        .execute(pool)
+        .await
+        .expect("seed agent");
+        id
+    }
+
+    async fn seed_escalation_ticket(
+        pool: &PgPool,
+        tenant: &str,
+        priority: &str,
+        status: &str,
+        created_minutes_ago: i64,
+        assigned_to: Option<Uuid>,
+    ) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO ent_support_tickets
+                 (id, tenant_id, subject, description, category, priority, status,
+                  assigned_to, created_at, updated_at)
+             VALUES ($1, $2, 'escalation parity subject', 'parity description',
+                     'technical', $3, $4, $5,
+                     NOW() - ($6 || ' minutes')::interval, NOW())",
+        )
+        .bind(id)
+        .bind(tenant)
+        .bind(priority)
+        .bind(status)
+        .bind(assigned_to)
+        .bind(created_minutes_ago.to_string())
+        .execute(pool)
+        .await
+        .expect("seed ticket");
+        id
+    }
+
+    #[tokio::test]
+    async fn auto_escalate_notifications_match_the_per_ticket_path() {
+        let Some(pool) = migrator::test_support::fresh_canonical_pool(
+            "auto_escalate_notifications_match_the_per_ticket_path",
+            "auto_esc_parity",
+        )
+        .await
+        .expect("provision") else {
+            eprintln!("skipping: TEST_DATABASE_URL unset");
+            return;
+        };
+        let service = SupportService::new(pool.clone());
+
+        let agent_a = seed_escalation_agent(&pool, "agent-a@parity.test").await;
+        let agent_b = seed_escalation_agent(&pool, "agent-b@parity.test").await;
+
+        // Escalated: one per rule priority + an unassigned critical.
+        let t_critical = seed_escalation_ticket(
+            &pool,
+            "esc_par_tenant_1",
+            "critical",
+            "open",
+            240,
+            Some(agent_a),
+        )
+        .await;
+        let t_high = seed_escalation_ticket(
+            &pool,
+            "esc_par_tenant_2",
+            "high",
+            "open",
+            240,
+            Some(agent_b),
+        )
+        .await;
+        let t_medium = seed_escalation_ticket(
+            &pool,
+            "esc_par_tenant_1",
+            "medium",
+            "open",
+            240,
+            Some(agent_a),
+        )
+        .await;
+        let t_unassigned =
+            seed_escalation_ticket(&pool, "esc_par_tenant_3", "critical", "open", 240, None).await;
+        // Not escalated: fresh critical, aged low priority, aged resolved.
+        let t_fresh = seed_escalation_ticket(
+            &pool,
+            "esc_par_tenant_1",
+            "critical",
+            "open",
+            5,
+            Some(agent_a),
+        )
+        .await;
+        let t_low =
+            seed_escalation_ticket(&pool, "esc_par_tenant_2", "low", "open", 240, Some(agent_b))
+                .await;
+        let t_resolved = seed_escalation_ticket(
+            &pool,
+            "esc_par_tenant_2",
+            "critical",
+            "resolved",
+            240,
+            Some(agent_a),
+        )
+        .await;
+
+        let escalated = service.auto_escalate().await.expect("auto_escalate");
+        assert_eq!(
+            escalated, 4,
+            "critical + high + medium + unassigned critical"
+        );
+
+        for ticket_id in [&t_critical, &t_high, &t_medium, &t_unassigned] {
+            let (status, level, escalated_at): (String, i32, Option<DateTime<Utc>>) =
+                sqlx::query_as(
+                    "SELECT status, escalation_level, escalated_at
+                     FROM ent_support_tickets WHERE id = $1",
+                )
+                .bind(ticket_id)
+                .fetch_one(&pool)
+                .await
+                .expect("escalated ticket");
+            assert_eq!(status, "escalated");
+            assert_eq!(level, 1, "first promotion lands on level 1");
+            assert!(escalated_at.is_some(), "escalated_at is stamped");
+        }
+        for ticket_id in [&t_fresh, &t_low, &t_resolved] {
+            let (status, level): (String, i32) = sqlx::query_as(
+                "SELECT status, escalation_level FROM ent_support_tickets WHERE id = $1",
+            )
+            .bind(ticket_id)
+            .fetch_one(&pool)
+            .await
+            .expect("untouched ticket");
+            assert_eq!(level, 0, "the ticket must be untouched");
+            assert_eq!(
+                status,
+                if *ticket_id == t_resolved {
+                    "resolved"
+                } else {
+                    "open"
+                }
+            );
+        }
+
+        // NOTIFICATIONS: the same three emails the per-ticket loop queued —
+        // assignee-addressed, right kind/metadata; the unassigned escalation
+        // notifies nobody, exactly as before.
+        let notifications: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
+            "SELECT to_addresses[1], subject, metadata->>'kind', metadata->>'tenant'
+             FROM email_queue
+             WHERE tags @> ARRAY['support-notification']::text[]
+             ORDER BY to_addresses[1], subject",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("notifications");
+        assert_eq!(notifications.len(), 3, "exactly the assigned escalations");
+        // (recipient, escalation marker in the subject, kind, tenant)
+        let expected: Vec<(&str, &str, &str, &str)> = vec![
+            (
+                "agent-a@parity.test",
+                "(critical overdue)",
+                "ticket_auto_escalated_assignee",
+                "esc_par_tenant_1",
+            ),
+            (
+                "agent-a@parity.test",
+                "(medium overdue)",
+                "ticket_auto_escalated_assignee",
+                "esc_par_tenant_1",
+            ),
+            (
+                "agent-b@parity.test",
+                "(high overdue)",
+                "ticket_auto_escalated_assignee",
+                "esc_par_tenant_2",
+            ),
+        ];
+        for (actual, want) in notifications.iter().zip(&expected) {
+            assert_eq!(&actual.0, want.0, "the assignee address is resolved");
+            assert!(
+                actual.1.contains(want.1),
+                "the subject keeps its shape: {:?} vs {:?}",
+                actual.1,
+                want.1
+            );
+            assert_eq!(&actual.2, want.2, "the notification kind is unchanged");
+            assert_eq!(
+                actual.3.as_deref(),
+                Some(want.3),
+                "the metadata records the authoritative tenant"
+            );
+        }
+        // email_queue.tenant_id is UUID-typed; ULID-style tenants ride
+        // metadata instead (NULL column) — the row shape is unchanged.
+        let uuid_tenants: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM email_queue
+             WHERE tags @> ARRAY['support-notification']::text[] AND tenant_id IS NOT NULL",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("uuid tenant count");
+        assert_eq!(uuid_tenants, 0, "ULID tenants stay NULL in the UUID column");
+
+        // Replay: nothing matches, nothing is queued again.
+        let replay = service.auto_escalate().await.expect("replay");
+        assert_eq!(replay, 0, "escalation is not repeated");
+        let total: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM email_queue WHERE tags @> ARRAY['support-notification']::text[]",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("notification count");
+        assert_eq!(total, 3, "the replay queues nothing");
+
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn auto_escalate_resolves_assignees_and_enqueues_in_one_batch() {
+        let Some(pool) = migrator::test_support::fresh_canonical_pool(
+            "auto_escalate_resolves_assignees_and_enqueues_in_one_batch",
+            "auto_esc_batch",
+        )
+        .await
+        .expect("provision") else {
+            eprintln!("skipping: TEST_DATABASE_URL unset");
+            return;
+        };
+
+        let agent_a = seed_escalation_agent(&pool, "batch-a@parity.test").await;
+        let agent_b = seed_escalation_agent(&pool, "batch-b@parity.test").await;
+        for (tenant, priority, assigned) in [
+            ("esc_bat_tenant_a", "critical", Some(agent_a)),
+            ("esc_bat_tenant_b", "critical", Some(agent_b)),
+            ("esc_bat_tenant_c", "high", Some(agent_a)),
+            ("esc_bat_tenant_d", "medium", None),
+        ] {
+            seed_escalation_ticket(&pool, tenant, priority, "open", 240, assigned).await;
+        }
+
+        let logging = escalation_logging_pool(&pool).await;
+        let service = SupportService::new(logging.clone());
+        let capture = EscalationSqlCapture::default();
+        let capture_result = {
+            use tracing_subscriber::layer::SubscriberExt;
+            tracing::subscriber::set_default(
+                tracing_subscriber::registry().with(EscalationSqlCaptureLayer(capture.clone())),
+            )
+        };
+        let escalated = service.auto_escalate().await.expect("auto_escalate");
+        drop(capture_result);
+        eprintln!("sql capture [auto_escalate] {:?}", capture.snapshot());
+
+        assert_eq!(escalated, 4);
+        // The escalated set is ONE assignee-email query and ONE multi-row
+        // INSERT — never one lookup + one INSERT per ticket.
+        assert_eq!(
+            capture.count_starting_with("UPDATE ent_support_tickets"),
+            3,
+            "one escalation UPDATE per priority rule: {:?}",
+            capture.snapshot()
+        );
+        assert_eq!(
+            capture.count_starting_with("SELECT email FROM ent_support_agents"),
+            0,
+            "the per-ticket agent lookup must be gone: {:?}",
+            capture.snapshot()
+        );
+        assert_eq!(
+            capture.count_starting_with("SELECT id, email FROM"),
+            1,
+            "exactly ONE DISTINCT-assignee preload query: {:?}",
+            capture.snapshot()
+        );
+        assert_eq!(
+            capture.count_starting_with("INSERT INTO email_queue"),
+            1,
+            "ONE multi-row notification INSERT per batch: {:?}",
+            capture.snapshot()
+        );
+        let queued: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM email_queue WHERE tags @> ARRAY['support-notification']::text[]",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("queued");
+        assert_eq!(queued, 3, "all three assigned escalations are queued");
+
+        pool.close().await;
     }
 }

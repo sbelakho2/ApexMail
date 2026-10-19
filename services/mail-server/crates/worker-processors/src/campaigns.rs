@@ -20,17 +20,26 @@
 //!    `queued`), the campaign returns to `sending`, and the job completes.
 //!    Suppressed recipients are NEVER retried (compliance), and already-sent
 //!    recipients are never re-sent.
-//! 3. **Drain** — a bounded batch of `campaign_recipients` rows whose campaign
+//! 3. **Drain** — a bounded page of `campaign_recipients` rows whose campaign
 //!    is `sending`/`resending` is claimed under a lease (`FOR UPDATE SKIP
-//!    LOCKED` + stale-lease recovery). Per recipient the EXACT automations
-//!    send ladder runs: canonical suppression gate +
-//!    [`SendAdmissionService`](billing_service::send_admission::SendAdmissionService)
-//!    (the ONE admission gate, explicit `marketing` category, rollback on
-//!    failure), per-contact template render, one transaction writing `messages`
-//!    (`status 'queued'`, idempotency key `campaign:{campaign_id}:{contact_id}`)
-//!    plus `email_queue` (with `campaign_id`/`contact_id` back-references so
-//!    downstream events carry the campaign). A poison recipient is recorded
-//!    `failed` with its error — it never blocks the batch.
+//!    LOCKED` + stale-lease recovery) and sent as ONE PAGE (perf audit
+//!    2026-10-18, findings 6+8): per-tenant
+//!    [`SendAdmissionService::admit_batch`](billing_service::send_admission::SendAdmissionService::admit_batch)
+//!    (ONE suppression probe + ONE batched consent decision + ONE quota
+//!    reservation for the allowed count), ONE grouped send-time-optimization
+//!    profile read, ONE sender-domain resolution for the page's distinct
+//!    (tenant, sender-domain) pairs (`FOR SHARE`, held in the page
+//!    transaction), then ONE `messages` insert + ONE `email_queue` insert +
+//!    ONE recipient-mark `UPDATE ... FROM UNNEST` for the whole page.
+//!    Suppression and consent refusals stay PER-RECIPIENT terminal states
+//!    (same statuses/metadata as ever); the page's enqueue transaction is
+//!    ALL-OR-NOTHING — an insert failure rolls the page back (recipients stay
+//!    queued, quota compensated, attempts counted) where the per-recipient
+//!    ladder lost only that recipient's attempt; a refused batch falls back
+//!    to the untouched single-recipient ladder
+//!    ([`CampaignExecutor::send_to_recipient`]) preserving today's granular
+//!    behavior. Per-recipient idempotency keys keep the recovery
+//!    exactly-once.
 //! 4. **Converge** — a `sending`/`resending` campaign with no in-flight or
 //!    queued recipient rows left is finalized: `sent` when nothing failed,
 //!    `partial` otherwise, and `sent_count` is set from the real per-recipient
@@ -51,16 +60,18 @@
 //! lists, contacts, templates, suppression checks and the enqueue are all
 //! tenant-scoped. There is no cross-tenant read in this module.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chrono::Utc;
+use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use analytics::send_time_optimizer::SendTimeOptimizer;
+use analytics::send_time_optimizer::{BatchWindowRequest, SendTimeOptimizer};
 use apexmail_lib::email_headers::message_category;
 use billing_service::send_admission::{
-    AdmissionMeter, SendAdmissionError, SendAdmissionRequest, SendAdmissionService,
+    AdmissionMeter, BatchAdmissionOutcome, SendAdmission, SendAdmissionError, SendAdmissionRequest,
+    SendAdmissionService,
 };
 
 use crate::automations::TemplateContent;
@@ -170,6 +181,69 @@ struct ClaimedRecipient {
     /// A/B phase ('test' | 'winner' | 'holdout' | NULL) and arm index.
     phase: Option<String>,
     arm_index: Option<i32>,
+}
+
+/// One claimed recipient that passed the static gates (context present,
+/// sender address, renderable content) and the throttle budget, waiting for
+/// its STO schedule, admission and page insert.
+struct PageCandidate<'a> {
+    recipient: &'a ClaimedRecipient,
+    context: &'a CampaignSendContext,
+    /// Send-time-optimization window (filled by the page's grouped profile
+    /// read); `None` sends immediately.
+    scheduled_at: Option<chrono::DateTime<Utc>>,
+}
+
+/// One page mark — the exact `mark_recipient` contract, accumulated across
+/// the page and flushed with ONE `UPDATE ... FROM UNNEST`.
+struct RecipientMark {
+    id: Uuid,
+    status: &'static str,
+    error: &'static str,
+    message_id: Option<Uuid>,
+}
+
+impl RecipientMark {
+    fn new(id: Uuid, status: &'static str, error: &'static str, message_id: Option<Uuid>) -> Self {
+        Self {
+            id,
+            status,
+            error,
+            message_id,
+        }
+    }
+}
+
+/// One admitted recipient's send row: everything the page transaction inserts
+/// (the per-recipient ladder's transaction, batched).
+struct PageSendRow<'a> {
+    recipient: &'a ClaimedRecipient,
+    context: &'a CampaignSendContext,
+    scheduled_at: Option<chrono::DateTime<Utc>>,
+    /// Per-recipient idempotency key — the unchanged exactly-once contract
+    /// (`campaign:{campaign_id}:{contact_id}`).
+    idempotency_key: String,
+    rendered: RenderedCampaign,
+    metadata: serde_json::Value,
+    /// Generated in Rust (uuid v4) exactly as the per-recipient ladder does.
+    message_id: Uuid,
+    queue_id: Uuid,
+    /// The admission's validated, normalized category.
+    category: String,
+}
+
+/// The enqueue outcome of one page transaction.
+struct PageEnqueue {
+    /// (recipient id, message id) for rows whose message INSERT landed.
+    fresh: Vec<(Uuid, Uuid)>,
+    /// (recipient id, EXISTING message id) for rows that hit the
+    /// per-recipient idempotency conflict — a previous attempt's crash
+    /// window. No second queue row is written; the caller marks the
+    /// recipient sent against the existing message.
+    duplicates: Vec<(Uuid, Option<Uuid>)>,
+    /// Recipients whose sender domain did not resolve ready (marked failed —
+    /// the single-recipient skip condition, per recipient).
+    unready_domains: Vec<Uuid>,
 }
 
 /// One A/B arm's content: a template plus an optional subject override.
@@ -442,9 +516,13 @@ impl CampaignExecutor {
         .await?;
 
         let mut report = TickReport::default();
-        // P3: conclude every ready campaign first, then promote the whole
-        // batch with ONE `UPDATE ... FROM (VALUES/UNNEST ...)` statement —
-        // the legacy loop issued one promotion UPDATE per campaign.
+        // Set-based evaluation (perf audit findings 6+8): the legacy loop
+        // paid 4 queries PER candidate campaign (25/tick ≈ 100 round trips).
+        // Now the metric-parameterized statements run ONCE per DISTINCT
+        // metric (at most two per tick), the gates run ONCE for the batch,
+        // and the winner is selected IN MEMORY with the SAME guarded rule
+        // (`decide_winner`); the persisted winner fields and webhook
+        // payloads are byte-identical (the promotion block below).
         struct AbDecision {
             campaign_id: Uuid,
             tenant_id: String,
@@ -454,88 +532,198 @@ impl CampaignExecutor {
         }
         let mut decisions: Vec<AbDecision> = Vec::new();
 
-        for (campaign_id, tenant_id, config) in candidates {
-            let metric_event = match config.get("metric").and_then(|v| v.as_str()) {
+        let metric_of = |config: &serde_json::Value| -> &'static str {
+            match config.get("metric").and_then(|v| v.as_str()) {
                 Some("click") => "clicked",
                 _ => "opened",
-            };
-            let wait_minutes = config
-                .get("waitMinutes")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(60)
-                .clamp(5, 1440);
+            }
+        };
 
-            // Refresh trials/successes for every arm from the events stream
-            // (shared SQL; the API reads the same numbers read-only).
-            sqlx::query(apexmail_lib::ab_testing::AB_OUTCOMES_REFRESH_SQL)
-                .bind(campaign_id)
+        // Group the candidates by metric event, input order preserved. The
+        // wait-minutes gate is precomputed per campaign (same clamp).
+        let metric_by_campaign: HashMap<Uuid, &'static str> = candidates
+            .iter()
+            .map(|(id, _, config)| (*id, metric_of(config)))
+            .collect();
+        let mut metric_groups: Vec<(&'static str, Vec<Uuid>)> = Vec::new();
+        for (campaign_id, _, config) in &candidates {
+            let metric = metric_of(config);
+            match metric_groups.iter_mut().find(|(m, _)| *m == metric) {
+                Some((_, group)) => group.push(*campaign_id),
+                None => metric_groups.push((metric, vec![*campaign_id])),
+            }
+        }
+        let wait_by_campaign: HashMap<Uuid, i64> = candidates
+            .iter()
+            .map(|(id, _, config)| {
+                (
+                    *id,
+                    config
+                        .get("waitMinutes")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(60)
+                        .clamp(5, 1440),
+                )
+            })
+            .collect();
+
+        // 1. ONE grouped outcomes refresh per metric group — the set form of
+        //    apexmail_lib::ab_testing::AB_OUTCOMES_REFRESH_SQL: identical
+        //    per-arm counts (sent trials, DISTINCT metric events) and the
+        //    same `updated_at = a.updated_at` no-touch (that column is the
+        //    window clock the gate below reads). Every candidate is
+        //    refreshed BEFORE the gates, exactly like the legacy loop.
+        const GROUPED_OUTCOMES_REFRESH_SQL: &str = "\
+WITH per_arm AS ( \
+     SELECT cr.campaign_id, cr.arm_index AS arm, \
+            COUNT(*) FILTER (WHERE cr.status = 'sent') AS trials, \
+            COUNT(DISTINCT e.message_id) FILTER (WHERE e.event_type = $2) AS successes \
+     FROM campaign_recipients cr \
+     LEFT JOIN events e \
+       ON e.campaign_id = cr.campaign_id::text \
+      AND e.message_id = cr.message_id::text \
+     WHERE cr.campaign_id = ANY($1) \
+       AND cr.phase = 'test' \
+       AND cr.arm_index IS NOT NULL \
+     GROUP BY cr.campaign_id, cr.arm_index \
+) \
+UPDATE campaign_ab_arms a \
+SET trials = per_arm.trials, \
+    successes = COALESCE(per_arm.successes, 0), \
+    updated_at = a.updated_at \
+FROM per_arm \
+WHERE a.campaign_id = per_arm.campaign_id AND a.arm_index = per_arm.arm";
+        for (metric_event, group) in &metric_groups {
+            sqlx::query(GROUPED_OUTCOMES_REFRESH_SQL)
+                .bind(group)
                 .bind(metric_event)
                 .execute(&self.db)
                 .await?;
+        }
 
-            // The test phase must be fully drained, and the window must have
-            // elapsed since the split.
-            let test_in_flight: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM campaign_recipients \
-                 WHERE campaign_id = $1 AND phase = 'test' AND status IN ('queued', 'sending')",
-            )
-            .bind(campaign_id)
-            .fetch_one(&self.db)
-            .await?;
-            if test_in_flight > 0 {
+        // 2. ONE grouped gate query for the WHOLE batch: the drained test
+        //    sample and the elapsed window per campaign, in one round trip.
+        //    The test phase must be fully drained and the window must have
+        //    elapsed since the split — the legacy `continue` arms. A
+        //    campaign without arm rows (never in practice: the split
+        //    inserts arms with the phases) reads MIN(updated_at) = NULL;
+        //    COALESCE keeps the window NOT open, so the holdout keeps
+        //    waiting and the decision retries next tick instead of erroring
+        //    the tick.
+        let campaign_ids: Vec<Uuid> = candidates.iter().map(|(id, _, _)| *id).collect();
+        let wait_minutes: Vec<i32> = candidates
+            .iter()
+            .map(|(id, _, _)| wait_by_campaign[id] as i32)
+            .collect();
+        let gates: Vec<(Uuid, i64, bool)> = sqlx::query_as(
+            "SELECT v.id, \
+                    (SELECT COUNT(*) FROM campaign_recipients cr \
+                     WHERE cr.campaign_id = v.id \
+                       AND cr.phase = 'test' \
+                       AND cr.status IN ('queued', 'sending'))::bigint, \
+                    COALESCE( \
+                        NOW() >= (SELECT MIN(a.updated_at) FROM campaign_ab_arms a \
+                                  WHERE a.campaign_id = v.id) \
+                                + make_interval(mins => v.wait_minutes), \
+                        false \
+                    ) \
+             FROM UNNEST($1::uuid[], $2::int[]) AS v(id, wait_minutes)",
+        )
+        .bind(&campaign_ids)
+        .bind(&wait_minutes)
+        .fetch_all(&self.db)
+        .await?;
+        let ready: HashSet<Uuid> = gates
+            .into_iter()
+            .filter(|(_, in_flight, window_open)| *in_flight == 0 && *window_open)
+            .map(|(id, _, _)| id)
+            .collect();
+        if ready.is_empty() {
+            return Ok(report);
+        }
+
+        // 3. ONE grouped arms read per metric group for the READY campaigns,
+        //    then the decision IN MEMORY: rows arrive ORDER BY campaign_id,
+        //    arm_index, so each campaign's arm vector is ordered exactly
+        //    like the legacy single-campaign read fed `decide_winner` — the
+        //    same leader, the same z, the same refusals.
+        const GROUPED_OUTCOMES_SELECT_SQL: &str = "\
+SELECT a.campaign_id, a.arm_index, \
+       COALESCE(per_arm.trials, 0)::bigint, \
+       COALESCE(per_arm.successes, 0)::bigint \
+FROM campaign_ab_arms a \
+LEFT JOIN ( \
+    SELECT cr.campaign_id, cr.arm_index AS arm, \
+           COUNT(*) FILTER (WHERE cr.status = 'sent') AS trials, \
+           COUNT(DISTINCT e.message_id) FILTER (WHERE e.event_type = $2) AS successes \
+    FROM campaign_recipients cr \
+    LEFT JOIN events e \
+      ON e.campaign_id = cr.campaign_id::text \
+     AND e.message_id = cr.message_id::text \
+    WHERE cr.campaign_id = ANY($1) \
+      AND cr.phase = 'test' \
+      AND cr.arm_index IS NOT NULL \
+    GROUP BY cr.campaign_id, cr.arm_index \
+) per_arm ON per_arm.campaign_id = a.campaign_id AND per_arm.arm = a.arm_index \
+WHERE a.campaign_id = ANY($1) \
+ORDER BY a.campaign_id, a.arm_index";
+        for (metric_event, _) in &metric_groups {
+            let group_ids: Vec<Uuid> = candidates
+                .iter()
+                .filter(|(id, _, _)| ready.contains(id) && metric_by_campaign[id] == *metric_event)
+                .map(|(id, _, _)| *id)
+                .collect();
+            if group_ids.is_empty() {
                 continue;
             }
-            let window_open: bool = sqlx::query_scalar(
-                "SELECT NOW() >= (SELECT MIN(updated_at) FROM campaign_ab_arms WHERE campaign_id = $1) \
-                        + make_interval(mins => $2::int)",
-            )
-            .bind(campaign_id)
-            .bind(wait_minutes)
-            .fetch_one(&self.db)
-            .await?;
-            if !window_open {
-                continue;
-            }
-
-            // The documented, guarded rule — refused below the minimum
-            // per-arm sample or without a significant leader; the holdout
-            // then keeps waiting (the API surfaces the reason).
-            let outcomes: Vec<(i32, i64, i64)> =
-                sqlx::query_as(apexmail_lib::ab_testing::AB_OUTCOMES_SELECT_SQL)
-                    .bind(campaign_id)
-                    .bind(metric_event)
-                    .fetch_all(&self.db)
-                    .await?;
-            let arms: Vec<apexmail_lib::ab_testing::ArmOutcome> = outcomes
-                .into_iter()
-                .map(
-                    |(arm_index, trials, successes)| apexmail_lib::ab_testing::ArmOutcome {
+            let rows: Vec<(Uuid, i32, i64, i64)> = sqlx::query_as(GROUPED_OUTCOMES_SELECT_SQL)
+                .bind(&group_ids)
+                .bind(metric_event)
+                .fetch_all(&self.db)
+                .await?;
+            let mut arms_by_campaign: HashMap<Uuid, Vec<apexmail_lib::ab_testing::ArmOutcome>> =
+                HashMap::new();
+            for (campaign_id, arm_index, trials, successes) in rows {
+                arms_by_campaign.entry(campaign_id).or_default().push(
+                    apexmail_lib::ab_testing::ArmOutcome {
                         arm_index,
                         trials,
                         successes,
                     },
-                )
-                .collect();
-            let verdict = apexmail_lib::ab_testing::decide_winner(&arms);
-            let (winner, winner_z) = match verdict {
-                apexmail_lib::ab_testing::AbVerdict::Winner { arm_index, z, .. } => (arm_index, z),
-                apexmail_lib::ab_testing::AbVerdict::Refused { code, reason } => {
-                    tracing::info!(
-                        campaign_id = %campaign_id,
-                        reason_code = code,
-                        reason = %reason,
-                        "A/B winner refused; holdout stays held until a manual declaration"
-                    );
+                );
+            }
+            for campaign_id in group_ids {
+                let Some(arms) = arms_by_campaign.remove(&campaign_id) else {
                     continue;
-                }
-            };
-            decisions.push(AbDecision {
-                campaign_id,
-                tenant_id,
-                metric: metric_event.to_string(),
-                winner,
-                winner_z,
-            });
+                };
+                let verdict = apexmail_lib::ab_testing::decide_winner(&arms);
+                let (winner, winner_z) = match verdict {
+                    apexmail_lib::ab_testing::AbVerdict::Winner { arm_index, z, .. } => {
+                        (arm_index, z)
+                    }
+                    apexmail_lib::ab_testing::AbVerdict::Refused { code, reason } => {
+                        tracing::info!(
+                            campaign_id = %campaign_id,
+                            reason_code = code,
+                            reason = %reason,
+                            "A/B winner refused; holdout stays held until a manual declaration"
+                        );
+                        continue;
+                    }
+                };
+                let Some((_, tenant_id, _)) =
+                    candidates.iter().find(|(id, _, _)| *id == campaign_id)
+                else {
+                    continue;
+                };
+                decisions.push(AbDecision {
+                    campaign_id,
+                    tenant_id: tenant_id.clone(),
+                    metric: metric_event.to_string(),
+                    winner,
+                    winner_z,
+                });
+            }
         }
 
         if !decisions.is_empty() {
@@ -1172,121 +1360,417 @@ impl CampaignExecutor {
         }
 
         let mut report = TickReport::default();
+        let mut marks: Vec<RecipientMark> = Vec::new();
+        let mut requeues: Vec<Uuid> = Vec::new();
+
+        // Static per-recipient gates — the same outcomes the per-recipient
+        // ladder produced (vanish / no sender / no content / over budget),
+        // accumulated for the page's batched bookkeeping. The throttle
+        // budget still decrements in claim order, so the deferral suffix per
+        // campaign is identical.
+        let mut candidates: Vec<PageCandidate<'_>> = Vec::new();
         for recipient in &claimed {
             match contexts.get(&recipient.campaign_id) {
                 None => {
-                    self.mark_recipient(recipient.id, "failed", "campaign vanished mid-send", None)
-                        .await?;
+                    marks.push(RecipientMark::new(
+                        recipient.id,
+                        "failed",
+                        "campaign vanished mid-send",
+                        None,
+                    ));
                     report.recipients_failed += 1;
                 }
                 Some(context) if context.from_email.is_empty() => {
-                    self.mark_recipient(
+                    marks.push(RecipientMark::new(
                         recipient.id,
                         "failed",
                         "campaign has no sender address",
                         None,
-                    )
-                    .await?;
+                    ));
                     report.recipients_failed += 1;
                 }
                 Some(context) if !context.has_content_for(recipient) => {
-                    self.mark_recipient(
+                    marks.push(RecipientMark::new(
                         recipient.id,
                         "failed",
                         "campaign has no renderable content (template or html)",
                         None,
-                    )
-                    .await?;
+                    ));
                     report.recipients_failed += 1;
                 }
                 Some(context) => {
                     if let Some(remaining) = budgets.get_mut(&recipient.campaign_id) {
                         if *remaining <= 0 {
                             // Over the hourly budget: hand the claim back.
-                            self.requeue_recipient(recipient.id).await?;
+                            requeues.push(recipient.id);
                             report.recipients_deferred += 1;
                             continue;
                         }
                         *remaining -= 1;
                     }
-                    // `settings.sendTimeOptimization`: resolve this recipient's
-                    // next optimal window and delay the queue row until then.
-                    // A profile-read failure is transient infrastructure: the
-                    // recipient is requeued (the contract is "optimal hour",
-                    // not "immediately") rather than sent at a wrong time.
-                    let scheduled_at = match self.scheduled_send_at(recipient, context).await {
-                        Ok(scheduled_at) => scheduled_at,
-                        Err(error) => {
-                            tracing::warn!(
-                                campaign_id = %recipient.campaign_id,
-                                recipient = %recipient.id,
-                                error = %error,
-                                "send-time optimization failed; recipient requeued"
-                            );
-                            self.requeue_recipient(recipient.id).await?;
-                            report.recipients_deferred += 1;
-                            continue;
-                        }
-                    };
-                    let outcome = self
-                        .send_to_recipient(recipient, context, scheduled_at)
-                        .await?;
-                    report.merge(outcome);
+                    candidates.push(PageCandidate {
+                        recipient,
+                        context,
+                        scheduled_at: None,
+                    });
                 }
             }
         }
+
+        // Send-time optimization: ONE grouped profile read for the page
+        // (per-recipient failures defer exactly that recipient — the batch
+        // read defers the page's STO recipients together, the same
+        // "optimal hour, not immediately" contract).
+        self.resolve_sto_schedules(&mut candidates, &mut requeues, &mut report)
+            .await?;
+
+        // Admission: ONE admit_batch per tenant group (a page normally
+        // carries one tenant) — category validated once, one suppression
+        // probe, one batched consent decision, ONE quota reservation for the
+        // allowed count under the page's identity.
+        let mut grouped: Vec<(String, Vec<PageCandidate<'_>>)> = Vec::new();
+        let mut group_positions: HashMap<String, usize> = HashMap::new();
+        for candidate in candidates {
+            match group_positions.get(&candidate.recipient.tenant_id) {
+                Some(&position) => grouped[position].1.push(candidate),
+                None => {
+                    group_positions.insert(candidate.recipient.tenant_id.clone(), grouped.len());
+                    grouped.push((candidate.recipient.tenant_id.clone(), vec![candidate]));
+                }
+            }
+        }
+
+        let mut page_rows: Vec<PageSendRow<'_>> = Vec::new();
+        let mut reservations: Vec<SendAdmission> = Vec::new();
+        for (tenant_id, group) in grouped {
+            let emails: Vec<String> = group
+                .iter()
+                .map(|candidate| candidate.recipient.email.clone())
+                .collect();
+            let pairs: Vec<(Uuid, Uuid)> = group
+                .iter()
+                .map(|candidate| {
+                    (
+                        candidate.recipient.campaign_id,
+                        candidate.recipient.contact_id,
+                    )
+                })
+                .collect();
+            let page_key = page_idempotency_key(&tenant_id, &pairs);
+
+            let batch = self
+                .admission
+                .admit_batch(
+                    &tenant_id,
+                    &emails,
+                    Some(&page_key),
+                    Some(message_category::MARKETING),
+                )
+                .await;
+            let (outcomes, reservation, failure) = batch.into_parts();
+            if let Some(failure) = failure {
+                // The batch's infrastructure steps failed (probe / consent
+                // store / metering / plan gate). FALL BACK to the untouched
+                // per-recipient ladder for the whole group — today's exact
+                // granular behavior (a quota-refused page admits what fits
+                // and defers the rest; nothing was reserved by the failed
+                // batch). Nothing in the failed batch touched the world.
+                tracing::warn!(
+                    tenant_id = %tenant_id,
+                    recipients = group.len(),
+                    failure = %failure,
+                    "batch admission failed; falling back to the per-recipient ladder"
+                );
+                for candidate in group {
+                    let outcome = self
+                        .send_to_recipient(
+                            candidate.recipient,
+                            candidate.context,
+                            candidate.scheduled_at,
+                        )
+                        .await?;
+                    report.merge(outcome);
+                }
+                continue;
+            }
+
+            let quota_event_id = reservation
+                .as_ref()
+                .map(|admission| admission.event_id())
+                .expect("a non-empty allowed set always reserves");
+            let admitted_category = reservation
+                .as_ref()
+                .map(|admission| admission.category().to_string())
+                .expect("a non-empty allowed set always reserves");
+            if let Some(reservation) = reservation {
+                reservations.push(reservation);
+            }
+
+            // Walk the outcomes in group order — refusal parity: the same
+            // terminal statuses and metadata the per-recipient ladder lands.
+            for (candidate, outcome) in group.into_iter().zip(outcomes) {
+                match outcome {
+                    BatchAdmissionOutcome::Allowed => {
+                        // Render per contact ({{name}} / {{first_name}} /
+                        // {{email}}, HTML-escaped in the HTML part) and stage
+                        // the row for the page transaction.
+                        let idempotency_key = format!(
+                            "campaign:{}:{}",
+                            candidate.recipient.campaign_id, candidate.recipient.contact_id
+                        );
+                        let (template, subject_override, _) =
+                            candidate.context.content_for(candidate.recipient);
+                        let rendered = render_content(
+                            candidate.context,
+                            template,
+                            subject_override,
+                            &candidate.recipient.email,
+                        );
+                        let metadata = campaign_message_metadata(
+                            candidate.recipient,
+                            candidate.context,
+                            quota_event_id,
+                        );
+                        page_rows.push(PageSendRow {
+                            recipient: candidate.recipient,
+                            context: candidate.context,
+                            scheduled_at: candidate.scheduled_at,
+                            idempotency_key,
+                            rendered,
+                            metadata,
+                            message_id: Uuid::new_v4(),
+                            queue_id: Uuid::new_v4(),
+                            category: admitted_category.clone(),
+                        });
+                    }
+                    BatchAdmissionOutcome::Suppressed => {
+                        // Terminal: a suppressed recipient is never retried,
+                        // not even by a resend (the email processor
+                        // re-checks independently).
+                        marks.push(RecipientMark::new(
+                            candidate.recipient.id,
+                            "suppressed",
+                            "recipient is suppressed",
+                            None,
+                        ));
+                        report.recipients_suppressed += 1;
+                    }
+                    BatchAdmissionOutcome::ConsentRefused { reason } => {
+                        // F4 consent gate: a marketing recipient without an
+                        // active consent record is a TERMINAL refusal for
+                        // this recipient (retrying cannot create consent).
+                        tracing::info!(
+                            campaign_id = %candidate.recipient.campaign_id,
+                            email = %candidate.recipient.email,
+                            reason = %reason,
+                            "campaign recipient refused admission: marketing consent missing (terminal)"
+                        );
+                        marks.push(RecipientMark::new(
+                            candidate.recipient.id,
+                            "suppressed",
+                            "marketing consent required",
+                            None,
+                        ));
+                        report.recipients_suppressed += 1;
+                    }
+                    BatchAdmissionOutcome::Unchecked => {
+                        // Impossible without a failure (handled above);
+                        // defer rather than guess.
+                        requeues.push(candidate.recipient.id);
+                        report.recipients_deferred += 1;
+                    }
+                }
+            }
+        }
+
+        // ONE page transaction: the page's sender-domain gate (held with
+        // FOR SHARE in THIS transaction — the identical ready-conditions
+        // SQL), then the page's messages rows, then its email_queue rows.
+        //
+        // ALL-OR-NOTHING (loudly documented deviation): any insert failure
+        // rolls the WHOLE page back — recipients stay queued, quota is
+        // compensated, and every page recipient gets the same
+        // attempt-counted bookkeeping the per-recipient ladder applied to
+        // its failing recipient (`fail_recipient`'s contract). The
+        // per-recipient idempotency keys keep a replay exactly-once.
+        //
+        // Per-recipient refusals (suppression / consent) and static
+        // failures are NEVER swept into this: they are marked per recipient
+        // below regardless of the page's enqueue outcome.
+        let now = Utc::now();
+        if !page_rows.is_empty() {
+            match run_page_transaction(&self.db, &page_rows, now).await {
+                Ok(outcome) => {
+                    // The page's enqueue succeeded: the reservations stand.
+                    for admission in reservations.drain(..) {
+                        admission.commit();
+                    }
+                    for (recipient_id, message_id) in outcome.fresh {
+                        marks.push(RecipientMark::new(
+                            recipient_id,
+                            "sent",
+                            "",
+                            Some(message_id),
+                        ));
+                        report.recipients_sent += 1;
+                    }
+                    for (recipient_id, existing) in outcome.duplicates {
+                        // This (campaign, contact) already enqueued in a
+                        // previous attempt (the crash window between enqueue
+                        // and bookkeeping): mark sent against the EXISTING
+                        // message — no second queue row.
+                        marks.push(RecipientMark::new(recipient_id, "sent", "", existing));
+                        report.recipients_sent += 1;
+                    }
+                    for recipient_id in outcome.unready_domains {
+                        marks.push(RecipientMark::new(
+                            recipient_id,
+                            "failed",
+                            "sender domain not verified/DKIM-ready",
+                            None,
+                        ));
+                        report.recipients_failed += 1;
+                    }
+                }
+                Err(error) => {
+                    // The page rolled back: compensate every page
+                    // reservation, then the same per-recipient bookkeeping
+                    // today's enqueue-failure path applied to its recipient.
+                    for admission in &reservations {
+                        let _ = admission.rollback().await;
+                    }
+                    tracing::error!(
+                        recipients = page_rows.len(),
+                        error = %error,
+                        "campaign page enqueue failed; transaction rolled back (recipients stay queued, quota compensated)"
+                    );
+                    let (failed, deferred) = self
+                        .fail_recipients(
+                            &page_rows
+                                .iter()
+                                .map(|row| row.recipient.id)
+                                .collect::<Vec<_>>(),
+                            &format!("enqueue_failed: {error}"),
+                        )
+                        .await?;
+                    report.recipients_failed += failed;
+                    report.recipients_deferred += deferred;
+                }
+            }
+        } else {
+            // Defensive: reservations exist iff the page staged rows.
+            for admission in &reservations {
+                let _ = admission.rollback().await;
+            }
+        }
+
+        // Flush the page's accumulated bookkeeping — ONE requeue statement
+        // and ONE marks statement with mark_recipient's exact column
+        // contract.
+        if !requeues.is_empty() {
+            sqlx::query(
+                "UPDATE campaign_recipients \
+                 SET status = 'queued', updated_at = NOW() \
+                 WHERE id = ANY($1)",
+            )
+            .bind(&requeues)
+            .execute(&self.db)
+            .await?;
+        }
+        flush_recipient_marks(&self.db, &marks).await?;
         Ok(report)
     }
 
-    /// The per-recipient optimal send instant when `settings.sendTimeOptimization`
-    /// is on: the next occurrence (strictly in the future) of the recipient's
-    /// top engagement window in the campaign/tenant timezone. `None` means
-    /// "send as soon as possible" (STO off, no optimizer injected, or an
-    /// empty window list).
-    async fn scheduled_send_at(
+    /// The page's grouped send-time-optimization read: ONE
+    /// `optimal_windows_batch` call fills every STO candidate's schedule (the
+    /// per-recipient ladder paid one profile query + one offset lookup per
+    /// recipient). A profile-read failure is transient infrastructure: the
+    /// STO recipients are requeued (the contract is "optimal hour", not
+    /// "immediately") while the non-STO rest of the page proceeds — the same
+    /// arm the per-recipient ladder deferred with.
+    async fn resolve_sto_schedules<'a>(
         &self,
-        recipient: &ClaimedRecipient,
-        context: &CampaignSendContext,
-    ) -> Result<Option<chrono::DateTime<Utc>>, String> {
-        if !context.send_time_optimization {
-            return Ok(None);
+        candidates: &mut Vec<PageCandidate<'a>>,
+        requeues: &mut Vec<Uuid>,
+        report: &mut TickReport,
+    ) -> Result<(), CampaignError> {
+        if !candidates
+            .iter()
+            .any(|candidate| candidate.context.send_time_optimization)
+        {
+            return Ok(());
         }
         let Some(optimizer) = self.send_time.as_ref() else {
             // No optimizer injected (test harness / STO-capable deployment
             // without the engine): sending now is the honest fallback, and
             // it is logged rather than silent.
             tracing::warn!(
-                campaign_id = %recipient.campaign_id,
+                recipients = candidates.len(),
                 "settings.sendTimeOptimization is on but no optimizer is configured; sending immediately"
             );
-            return Ok(None);
+            return Ok(());
         };
 
-        // Tenant-scoped profile read (the engine filters events by
-        // tenant_id); the campaign's own timezone overrides the tenant's.
-        let result = optimizer
-            .get_optimal_window_for_tenant_with_offset(
-                &recipient.tenant_id,
-                &recipient.email,
-                context.sto_offset_minutes,
-            )
-            .await
-            .map_err(|error| format!("send-time profile read failed: {error}"))?;
-        let Some(window) = result.windows.first() else {
-            return Ok(None);
-        };
-        Ok(Some(analytics::send_time_optimizer::next_occurrence_utc(
-            Utc::now(),
-            window,
-            result.utc_offset_minutes,
-        )))
+        let sto_indices: Vec<usize> = candidates
+            .iter()
+            .enumerate()
+            .filter(|(_, candidate)| candidate.context.send_time_optimization)
+            .map(|(index, _)| index)
+            .collect();
+        let requests: Vec<BatchWindowRequest> = sto_indices
+            .iter()
+            .map(|&index| {
+                let candidate = &candidates[index];
+                BatchWindowRequest {
+                    tenant_id: candidate.recipient.tenant_id.clone(),
+                    email: candidate.recipient.email.clone(),
+                    utc_offset_minutes_override: candidate.context.sto_offset_minutes,
+                }
+            })
+            .collect();
+
+        match optimizer.optimal_windows_batch(&requests).await {
+            Ok(results) => {
+                for (&index, result) in sto_indices.iter().zip(&results) {
+                    candidates[index].scheduled_at = result.windows.first().map(|window| {
+                        analytics::send_time_optimizer::next_occurrence_utc(
+                            Utc::now(),
+                            window,
+                            result.utc_offset_minutes,
+                        )
+                    });
+                }
+                Ok(())
+            }
+            Err(error) => {
+                tracing::warn!(
+                    recipients = sto_indices.len(),
+                    error = %error,
+                    "send-time optimization failed; STO recipients requeued"
+                );
+                let sto_set: HashSet<usize> = sto_indices.into_iter().collect();
+                let mut survivors: Vec<PageCandidate<'a>> = Vec::new();
+                for (index, candidate) in candidates.drain(..).enumerate() {
+                    if sto_set.contains(&index) {
+                        requeues.push(candidate.recipient.id);
+                        report.recipients_deferred += 1;
+                    } else {
+                        survivors.push(candidate);
+                    }
+                }
+                *candidates = survivors;
+                Ok(())
+            }
+        }
     }
 
-    /// The send ladder for ONE recipient: admission (suppression + quota) →
-    /// render → one transaction writing `messages` + `email_queue`. Returns
-    /// the tick delta. `scheduled_at` (from
-    /// [`Self::scheduled_send_at`]) is the send-time-optimization window; the
-    /// email processor's claim only picks the row up when due.
+    /// The send ladder for ONE recipient (the batch-admission fallback):
+    /// admission (suppression + quota) → render → one transaction writing
+    /// `messages` + `email_queue`. Returns the tick delta. `scheduled_at`
+    /// (resolved for the whole page by [`Self::resolve_sto_schedules`] — the
+    /// batched form of the per-recipient optimal-window read) is the
+    /// send-time-optimization window; the email processor's claim only picks
+    /// the row up when due.
     async fn send_to_recipient(
         &self,
         recipient: &ClaimedRecipient,
@@ -1398,26 +1882,7 @@ impl CampaignExecutor {
         // display name, per-campaign tracking toggles, and the dedicated-IP
         // pool (`dedicated_ips.ses_pool_name`) for SES configuration-set
         // routing.
-        let mut metadata = serde_json::json!({
-            "source": "campaigns",
-            "campaign_id": recipient.campaign_id.to_string(),
-            "contact_id": recipient.contact_id.to_string(),
-            "quota_event_id": quota_event_id.to_string(),
-            "track_opens": context.track_opens,
-            "track_clicks": context.track_clicks,
-        });
-        if let Some(from_name) = context.from_name.as_deref() {
-            metadata["from_name"] = serde_json::Value::String(from_name.to_string());
-        }
-        if let Some(pool) = context.ip_pool.as_deref() {
-            metadata["ip_pool"] = serde_json::Value::String(pool.to_string());
-        }
-        if let Some(phase) = recipient.phase.as_deref() {
-            metadata["ab_phase"] = serde_json::Value::String(phase.to_string());
-        }
-        if let Some(arm) = recipient.arm_index {
-            metadata["ab_arm"] = serde_json::json!(arm);
-        }
+        let metadata = campaign_message_metadata(recipient, context, quota_event_id);
 
         let mut tx = match self.db.begin().await {
             Ok(tx) => tx,
@@ -1636,6 +2101,35 @@ impl CampaignExecutor {
                 ..TickReport::default()
             })
         }
+    }
+
+    /// The page-granular [`Self::fail_recipient`]: ONE attempt-increment
+    /// statement for every recipient of a failed page — the same SQL contract
+    /// (`attempts + 1`, `queued` under the cap, `failed` at it, bounded error
+    /// text). Returns `(recipients_failed, recipients_deferred)`.
+    async fn fail_recipients(
+        &self,
+        ids: &[Uuid],
+        error: &str,
+    ) -> Result<(u64, u64), CampaignError> {
+        let error = truncate_error(error);
+        let parked: Vec<(bool,)> = sqlx::query_as(
+            "UPDATE campaign_recipients cr \
+             SET attempts = cr.attempts + 1, \
+                 error = $2, \
+                 status = CASE WHEN cr.attempts + 1 >= $3 THEN 'failed' ELSE 'queued' END, \
+                 updated_at = NOW() \
+             FROM UNNEST($1::uuid[]) AS v(id) \
+             WHERE cr.id = v.id \
+             RETURNING cr.status = 'failed'",
+        )
+        .bind(ids)
+        .bind(&error)
+        .bind(MAX_RECIPIENT_ATTEMPTS)
+        .fetch_all(&self.db)
+        .await?;
+        let failed = parked.iter().filter(|(parked,)| *parked).count() as u64;
+        Ok((failed, (parked.len() as u64) - failed))
     }
 
     async fn mark_recipient(
@@ -2209,6 +2703,455 @@ fn sender_domain(from: &str) -> Option<String> {
         .filter(|domain| !domain.is_empty())
 }
 
+/// The `messages`/`email_queue` metadata for one campaign send — the
+/// per-message knobs the processor honors: source, campaign/contact
+/// back-references, the owning quota event, per-campaign tracking toggles,
+/// display name, dedicated-IP pool (`dedicated_ips.ses_pool_name`) for SES
+/// configuration-set routing, and the A/B phase/arm. Shared verbatim by the
+/// page path and the per-recipient fallback ladder.
+fn campaign_message_metadata(
+    recipient: &ClaimedRecipient,
+    context: &CampaignSendContext,
+    quota_event_id: Uuid,
+) -> serde_json::Value {
+    let mut metadata = serde_json::json!({
+        "source": "campaigns",
+        "campaign_id": recipient.campaign_id.to_string(),
+        "contact_id": recipient.contact_id.to_string(),
+        "quota_event_id": quota_event_id.to_string(),
+        "track_opens": context.track_opens,
+        "track_clicks": context.track_clicks,
+    });
+    if let Some(from_name) = context.from_name.as_deref() {
+        metadata["from_name"] = serde_json::Value::String(from_name.to_string());
+    }
+    if let Some(pool) = context.ip_pool.as_deref() {
+        metadata["ip_pool"] = serde_json::Value::String(pool.to_string());
+    }
+    if let Some(phase) = recipient.phase.as_deref() {
+        metadata["ab_phase"] = serde_json::Value::String(phase.to_string());
+    }
+    if let Some(arm) = recipient.arm_index {
+        metadata["ab_arm"] = serde_json::json!(arm);
+    }
+    metadata
+}
+
+/// The claimed page's idempotency identity for the ONE batched quota
+/// reservation: SHA-256 over the SORTED (campaign, contact) pairs of the
+/// page. Deterministic for a re-claim of the same page (crash recovery
+/// collapses onto the original reservation instead of double-charging — the
+/// F22 duplicate contract), independent of row order.
+pub(crate) fn page_idempotency_key(tenant_id: &str, pairs: &[(Uuid, Uuid)]) -> String {
+    let mut identities: Vec<String> = pairs
+        .iter()
+        .map(|(campaign_id, contact_id)| format!("{campaign_id}:{contact_id}"))
+        .collect();
+    identities.sort();
+    let digest = Sha256::digest(identities.join("|").as_bytes());
+    let fingerprint = Uuid::from_slice(&digest[..16])
+        .expect("the first 16 SHA-256 bytes are always a valid UUID");
+    format!("campaign-drain:{tenant_id}:page:{fingerprint}")
+}
+
+/// Rows per statement for the page's UNNEST inserts. The UNNEST shape keeps
+/// the BIND count constant (~16 per statement) regardless of page size; the
+/// cap only bounds a single statement's wire size, so even a hand-raised
+/// `drain_batch_size` stays far under PostgreSQL's 65,535 bind-parameter
+/// ceiling.
+const PAGE_INSERT_CHUNK: usize = 1000;
+
+/// Rows per statement for the page's marks flush (4 binds per row).
+const MARK_FLUSH_CHUNK: usize = 1000;
+
+/// The `messages` page insert: ONE multi-row statement (UNNEST arrays,
+/// chunked) — the per-recipient ladder's exact column list, with `status`
+/// pinned to `'queued'` as before. `ON CONFLICT (tenant_id, idempotency_key)
+/// DO NOTHING` keeps the per-recipient exactly-once contract; the returned
+/// keys separate freshly inserted rows from crash-window conflicts.
+const PAGE_MESSAGES_INSERT_SQL: &str = "\
+INSERT INTO messages \
+    (id, tenant_id, from_email, to_emails, cc_emails, bcc_emails, subject, \
+     html_body, text_body, status, tags, metadata, scheduled_at, created_at, \
+     idempotency_key, message_category) \
+SELECT r.id, r.tenant_id, r.from_email, r.to_emails, r.cc_emails, r.bcc_emails, r.subject, \
+       r.html_body, r.text_body, 'queued', r.tags, r.metadata, r.scheduled_at, r.created_at, \
+       r.idempotency_key, r.message_category \
+FROM UNNEST($1::uuid[], $2::text[], $3::text[], $4::jsonb[], $5::jsonb[], $6::jsonb[], \
+            $7::text[], $8::text[], $9::text[], $10::jsonb[], $11::jsonb[], \
+            $12::timestamptz[], $13::timestamptz[], $14::text[], $15::text[]) \
+     AS r(id, tenant_id, from_email, to_emails, cc_emails, bcc_emails, subject, html_body, \
+          text_body, tags, metadata, scheduled_at, created_at, idempotency_key, message_category) \
+ON CONFLICT (tenant_id, idempotency_key) DO NOTHING \
+RETURNING id, tenant_id, idempotency_key";
+
+/// The `email_queue` page insert: ONE multi-row statement (UNNEST arrays,
+/// chunked) for the freshly inserted messages only — the per-recipient
+/// ladder's exact column list, `priority 5` / `status 'pending'` pinned as
+/// before, `to_addresses` built from the scalar recipient (`ARRAY[r.rcpt]`;
+/// the alias avoids the reserved keyword `to`) and `tags` the constant
+/// `campaign`.
+const PAGE_QUEUE_INSERT_SQL: &str = "\
+INSERT INTO email_queue \
+    (id, message_id, tenant_id, domain_id, from_address, to_addresses, subject, \
+     \"from\", \"to\", html, text, tags, metadata, headers, scheduled_at, priority, \
+     status, created_at, updated_at, message_category, campaign_id, contact_id) \
+SELECT r.id, r.message_id, r.tenant_id, r.domain_id, r.from_address, ARRAY[r.rcpt], r.subject, \
+       r.from_address, r.rcpt, r.html, r.text, ARRAY['campaign']::text[], r.metadata, r.headers, \
+       r.scheduled_at, 5, 'pending', r.created_at, r.created_at, r.message_category, \
+       r.campaign_id, r.contact_id \
+FROM UNNEST($1::uuid[], $2::uuid[], $3::text[], $4::uuid[], $5::text[], $6::text[], $7::text[], \
+            $8::text[], $9::text[], $10::jsonb[], $11::jsonb[], $12::timestamptz[], \
+            $13::timestamptz[], $14::text[], $15::uuid[], $16::uuid[]) \
+     AS r(id, message_id, tenant_id, domain_id, from_address, rcpt, subject, html, text, \
+          metadata, headers, scheduled_at, created_at, message_category, campaign_id, contact_id)";
+
+/// One page enqueue transaction: sender-domain gate + messages rows +
+/// email_queue rows, committed together. On ANY failure the transaction is
+/// dropped (rolled back) and the error returned — the CALLER compensates the
+/// page's quota reservations and applies the attempt-counted bookkeeping.
+async fn run_page_transaction(
+    db: &sqlx::PgPool,
+    rows: &[PageSendRow<'_>],
+    now: chrono::DateTime<Utc>,
+) -> Result<PageEnqueue, sqlx::Error> {
+    let mut tx = db.begin().await?;
+    let outcome = enqueue_page(&mut tx, rows, now).await?;
+    tx.commit().await?;
+    Ok(outcome)
+}
+
+/// The page enqueue transaction body (runs inside the caller's transaction):
+///
+/// 1. ONE sender-domain resolution for the page's DISTINCT (tenant,
+///    sender-domain) pairs — the identical ready-conditions SQL the
+///    single-recipient ladder resolves (`resolve_sender_domain_id`), as a
+///    `FOR SHARE` CTE so the lock is held in the transaction that inserts.
+///    Recipients whose domain is missing/not-ready come back per recipient
+///    in [`PageEnqueue::unready_domains`].
+/// 2. ONE multi-row `messages` insert (`ON CONFLICT DO NOTHING` +
+///    `RETURNING`) — rows whose per-recipient idempotency key already has a
+///    message reuse the EXISTING message (crash-window recovery; no second
+///    queue row), exactly the single-recipient duplicate arm.
+/// 3. ONE multi-row `email_queue` insert for the freshly inserted messages.
+async fn enqueue_page(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    rows: &[PageSendRow<'_>],
+    now: chrono::DateTime<Utc>,
+) -> Result<PageEnqueue, sqlx::Error> {
+    let mut outcome = PageEnqueue {
+        fresh: Vec::new(),
+        duplicates: Vec::new(),
+        unready_domains: Vec::new(),
+    };
+
+    // -- 1. The page's DISTINCT (tenant, sender-domain) pairs, one FOR SHARE
+    //       statement — the same readiness conditions, same nullable outcome.
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    let mut seen_pairs: HashSet<(String, String)> = HashSet::new();
+    for row in rows {
+        if let Some(domain) = sender_domain(&row.context.from_email) {
+            let pair = (row.recipient.tenant_id.clone(), domain);
+            if seen_pairs.insert(pair.clone()) {
+                pairs.push(pair);
+            }
+        }
+    }
+    let mut domain_by_pair: HashMap<(String, String), Option<Uuid>> = HashMap::new();
+    if !pairs.is_empty() {
+        let tenants: Vec<String> = pairs.iter().map(|(tenant, _)| tenant.clone()).collect();
+        let domains: Vec<String> = pairs.iter().map(|(_, domain)| domain.clone()).collect();
+        let ses_enabled = apexmail_lib::transport::email_transport_is_ses(
+            std::env::var("EMAIL_TRANSPORT_TYPE").ok().as_deref(),
+        );
+        let resolved: Vec<(String, String, Option<String>)> = sqlx::query_as(
+            "WITH ready AS ( \
+                 SELECT tenant_id, name, id::text AS id \
+                 FROM domains \
+                 WHERE (tenant_id, name) IN ( \
+                     SELECT r.tenant_id, r.domain \
+                     FROM UNNEST($1::text[], $2::text[]) AS r(tenant_id, domain) \
+                 ) \
+                   AND status = 'verified' \
+                   AND dkim_enabled = true \
+                   AND dkim_selector IS NOT NULL AND dkim_public_key IS NOT NULL \
+                   AND dkim_private_key IS NOT NULL \
+                   AND dkim_private_key LIKE 'dkim:v1:%' \
+                   AND ($3::boolean = false OR ses_verified = true) \
+                 FOR SHARE \
+             ) \
+             SELECT r.tenant_id, r.domain, ready.id \
+             FROM UNNEST($1::text[], $2::text[]) AS r(tenant_id, domain) \
+             LEFT JOIN ready \
+               ON ready.tenant_id = r.tenant_id AND ready.name = r.domain",
+        )
+        .bind(&tenants)
+        .bind(&domains)
+        .bind(ses_enabled)
+        .fetch_all(&mut **tx)
+        .await?;
+        for (tenant_id, domain, id) in resolved {
+            let id = id.as_deref().and_then(|id| Uuid::parse_str(id).ok());
+            domain_by_pair.insert((tenant_id, domain), id);
+        }
+    }
+
+    let mut ready_rows: Vec<(&PageSendRow<'_>, Uuid)> = Vec::with_capacity(rows.len());
+    for row in rows {
+        let domain_id = sender_domain(&row.context.from_email)
+            .and_then(|domain| domain_by_pair.get(&(row.recipient.tenant_id.clone(), domain)))
+            .copied()
+            .flatten();
+        match domain_id {
+            Some(domain_id) => ready_rows.push((row, domain_id)),
+            None => outcome.unready_domains.push(row.recipient.id),
+        }
+    }
+
+    // -- 2. The page's messages rows: ONE multi-row insert per chunk;
+    //       RETURNING separates fresh inserts from idempotency conflicts.
+    let mut landed_keys: HashSet<(String, String)> = HashSet::new();
+    let mut conflict_rows: Vec<&PageSendRow<'_>> = Vec::new();
+    for chunk in ready_rows.chunks(PAGE_INSERT_CHUNK) {
+        let ids: Vec<Uuid> = chunk.iter().map(|(row, _)| row.message_id).collect();
+        let tenants: Vec<String> = chunk
+            .iter()
+            .map(|(row, _)| row.recipient.tenant_id.clone())
+            .collect();
+        let from_emails: Vec<&str> = chunk
+            .iter()
+            .map(|(row, _)| row.context.from_email.as_str())
+            .collect();
+        let to_emails: Vec<serde_json::Value> = chunk
+            .iter()
+            .map(|(row, _)| serde_json::json!([row.recipient.email]))
+            .collect();
+        let cc_emails: Vec<serde_json::Value> =
+            chunk.iter().map(|_| serde_json::Value::Null).collect();
+        let bcc_emails: Vec<serde_json::Value> =
+            chunk.iter().map(|_| serde_json::Value::Null).collect();
+        let subjects: Vec<&str> = chunk
+            .iter()
+            .map(|(row, _)| row.rendered.subject.as_str())
+            .collect();
+        let htmls: Vec<Option<&str>> = chunk
+            .iter()
+            .map(|(row, _)| row.rendered.html.as_deref())
+            .collect();
+        let texts: Vec<Option<&str>> = chunk
+            .iter()
+            .map(|(row, _)| row.rendered.text.as_deref())
+            .collect();
+        let tags: Vec<serde_json::Value> = chunk
+            .iter()
+            .map(|_| serde_json::json!(["campaign"]))
+            .collect();
+        let metadatas: Vec<&serde_json::Value> =
+            chunk.iter().map(|(row, _)| &row.metadata).collect();
+        let scheduled_ats: Vec<Option<chrono::DateTime<Utc>>> =
+            chunk.iter().map(|(row, _)| row.scheduled_at).collect();
+        let created_ats: Vec<chrono::DateTime<Utc>> = chunk.iter().map(|_| now).collect();
+        let idempotency_keys: Vec<&str> = chunk
+            .iter()
+            .map(|(row, _)| row.idempotency_key.as_str())
+            .collect();
+        let categories: Vec<&str> = chunk.iter().map(|(row, _)| row.category.as_str()).collect();
+
+        let inserted: Vec<(Uuid, String, String)> = sqlx::query_as(PAGE_MESSAGES_INSERT_SQL)
+            .bind(&ids)
+            .bind(&tenants)
+            .bind(&from_emails)
+            .bind(&to_emails)
+            .bind(&cc_emails)
+            .bind(&bcc_emails)
+            .bind(&subjects)
+            .bind(&htmls)
+            .bind(&texts)
+            .bind(&tags)
+            .bind(&metadatas)
+            .bind(&scheduled_ats)
+            .bind(&created_ats)
+            .bind(&idempotency_keys)
+            .bind(&categories)
+            .fetch_all(&mut **tx)
+            .await?;
+        for (_, tenant_id, idempotency_key) in inserted {
+            landed_keys.insert((tenant_id, idempotency_key));
+        }
+        // A row's insert landed iff its (tenant, idempotency key) came back
+        // (the RETURNING order is not the input order).
+        for (row, _) in chunk {
+            if landed_keys.contains(&(row.recipient.tenant_id.clone(), row.idempotency_key.clone()))
+            {
+                outcome.fresh.push((row.recipient.id, row.message_id));
+            } else {
+                conflict_rows.push(row);
+            }
+        }
+        landed_keys.clear();
+    }
+    // Fill the conflicts' EXISTING message ids in ONE pair-join lookup (the
+    // single-recipient ladder's follow-up SELECT, batched; only when a
+    // conflict actually happened).
+    if !conflict_rows.is_empty() {
+        let tenants: Vec<String> = conflict_rows
+            .iter()
+            .map(|row| row.recipient.tenant_id.clone())
+            .collect();
+        let keys: Vec<&str> = conflict_rows
+            .iter()
+            .map(|row| row.idempotency_key.as_str())
+            .collect();
+        // The single-recipient ladder swallows a lookup error and falls back
+        // to the generated id (`unwrap_or(None)`) — same posture here: a
+        // lookup failure degrades to the generated-id fallback, never to a
+        // page failure.
+        let existing: Vec<(Uuid, String, String)> = sqlx::query_as(
+            "SELECT m.id, r.tenant_id, r.idem \
+             FROM UNNEST($1::text[], $2::text[]) AS r(tenant_id, idem) \
+             JOIN messages m ON m.tenant_id = r.tenant_id AND m.idempotency_key = r.idem",
+        )
+        .bind(&tenants)
+        .bind(&keys)
+        .fetch_all(&mut **tx)
+        .await
+        .unwrap_or(Vec::new());
+        let existing_by_key: HashMap<(String, String), Uuid> = existing
+            .into_iter()
+            .map(|(id, tenant_id, idempotency_key)| ((tenant_id, idempotency_key), id))
+            .collect();
+        for row in conflict_rows {
+            let existing = existing_by_key
+                .get(&(row.recipient.tenant_id.clone(), row.idempotency_key.clone()))
+                .copied();
+            outcome.duplicates.push((row.recipient.id, existing));
+        }
+    }
+
+    // -- 3. The page's email_queue rows for the FRESH messages: ONE
+    //       multi-row insert per chunk. Conflicted recipients get none (the
+    //       existing message is already queued).
+    let fresh_rows: Vec<(&PageSendRow<'_>, Uuid)> = ready_rows
+        .into_iter()
+        .filter(|(row, _)| outcome.fresh.iter().any(|(id, _)| *id == row.recipient.id))
+        .collect();
+    if !fresh_rows.is_empty() {
+        for chunk in fresh_rows.chunks(PAGE_INSERT_CHUNK) {
+            let ids: Vec<Uuid> = chunk.iter().map(|(row, _)| row.queue_id).collect();
+            let message_ids: Vec<Uuid> = chunk.iter().map(|(row, _)| row.message_id).collect();
+            let tenants: Vec<String> = chunk
+                .iter()
+                .map(|(row, _)| row.recipient.tenant_id.clone())
+                .collect();
+            let domain_ids: Vec<Uuid> = chunk.iter().map(|(_, domain_id)| *domain_id).collect();
+            let from_addresses: Vec<&str> = chunk
+                .iter()
+                .map(|(row, _)| row.context.from_email.as_str())
+                .collect();
+            let tos: Vec<&str> = chunk
+                .iter()
+                .map(|(row, _)| row.recipient.email.as_str())
+                .collect();
+            let subjects: Vec<&str> = chunk
+                .iter()
+                .map(|(row, _)| row.rendered.subject.as_str())
+                .collect();
+            let htmls: Vec<Option<&str>> = chunk
+                .iter()
+                .map(|(row, _)| row.rendered.html.as_deref())
+                .collect();
+            let texts: Vec<Option<&str>> = chunk
+                .iter()
+                .map(|(row, _)| row.rendered.text.as_deref())
+                .collect();
+            let metadatas: Vec<&serde_json::Value> =
+                chunk.iter().map(|(row, _)| &row.metadata).collect();
+            let headerss: Vec<serde_json::Value> = chunk
+                .iter()
+                .map(|(row, _)| match row.context.reply_to.as_deref() {
+                    // F26 server-written MIME header map: the `custom` key
+                    // marks the structured shape (a bare object would be read
+                    // as a legacy flat custom-header map and emit a literal
+                    // `reply_to` header). Carries the campaign's Reply-To as
+                    // a structured mailbox.
+                    Some(reply_to) => serde_json::json!({
+                        "to": [],
+                        "reply_to": reply_to,
+                        "custom": {},
+                    }),
+                    None => serde_json::json!({}),
+                })
+                .collect();
+            let scheduled_ats: Vec<Option<chrono::DateTime<Utc>>> =
+                chunk.iter().map(|(row, _)| row.scheduled_at).collect();
+            let created_ats: Vec<chrono::DateTime<Utc>> = chunk.iter().map(|_| now).collect();
+            let categories: Vec<&str> =
+                chunk.iter().map(|(row, _)| row.category.as_str()).collect();
+            let campaign_ids: Vec<Uuid> = chunk
+                .iter()
+                .map(|(row, _)| row.recipient.campaign_id)
+                .collect();
+            let contact_ids: Vec<Uuid> = chunk
+                .iter()
+                .map(|(row, _)| row.recipient.contact_id)
+                .collect();
+
+            sqlx::query(PAGE_QUEUE_INSERT_SQL)
+                .bind(&ids)
+                .bind(&message_ids)
+                .bind(&tenants)
+                .bind(&domain_ids)
+                .bind(&from_addresses)
+                .bind(&tos)
+                .bind(&subjects)
+                .bind(&htmls)
+                .bind(&texts)
+                .bind(&metadatas)
+                .bind(&headerss)
+                .bind(&scheduled_ats)
+                .bind(&created_ats)
+                .bind(&categories)
+                .bind(&campaign_ids)
+                .bind(&contact_ids)
+                .execute(&mut **tx)
+                .await?;
+        }
+    }
+
+    Ok(outcome)
+}
+
+/// The batched `mark_recipient`: ONE `UPDATE ... FROM UNNEST` for a page's
+/// marks with the exact per-recipient column contract
+/// (`error = NULLIF(error, '')`, `message_id = COALESCE(v.message_id,
+/// message_id)`), chunked.
+async fn flush_recipient_marks(
+    db: &sqlx::PgPool,
+    marks: &[RecipientMark],
+) -> Result<(), CampaignError> {
+    for chunk in marks.chunks(MARK_FLUSH_CHUNK) {
+        let ids: Vec<Uuid> = chunk.iter().map(|mark| mark.id).collect();
+        let statuses: Vec<&str> = chunk.iter().map(|mark| mark.status).collect();
+        let errors: Vec<&str> = chunk.iter().map(|mark| mark.error).collect();
+        let message_ids: Vec<Option<Uuid>> = chunk.iter().map(|mark| mark.message_id).collect();
+        sqlx::query(
+            "UPDATE campaign_recipients cr \
+             SET status = v.status, error = NULLIF(v.error, ''), \
+                 message_id = COALESCE(v.message_id, cr.message_id), updated_at = NOW() \
+             FROM UNNEST($1::uuid[], $2::text[], $3::text[], $4::uuid[]) \
+                  AS v(id, status, error, message_id) \
+             WHERE cr.id = v.id",
+        )
+        .bind(&ids)
+        .bind(&statuses)
+        .bind(&errors)
+        .bind(&message_ids)
+        .execute(db)
+        .await?;
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -2216,10 +3159,10 @@ fn sender_domain(from: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
     use std::sync::Arc;
 
-    use billing_service::send_admission::SendAdmissionBackend;
+    use billing_service::send_admission::{AdmissionSendDecision, SendAdmissionBackend};
     use billing_service::usage::{QuotaRecordResult, UsageError};
     use serde_json::Value;
 
@@ -2395,6 +3338,11 @@ mod tests {
         reserves: AtomicUsize,
         events: std::sync::Mutex<std::collections::HashSet<Uuid>>,
         suppressed: std::sync::Mutex<Vec<String>>,
+        /// F4: consent enforcement is opt-in so the pre-existing tests keep
+        /// their contract; the parity test enables it explicitly (the same
+        /// shape as the billing-service FakeBackend).
+        consent_enforced: AtomicBool,
+        consented: std::sync::Mutex<std::collections::HashSet<String>>,
     }
 
     impl FakeAdmission {
@@ -2405,6 +3353,8 @@ mod tests {
                 reserves: AtomicUsize::new(0),
                 events: std::sync::Mutex::new(std::collections::HashSet::new()),
                 suppressed: std::sync::Mutex::new(Vec::new()),
+                consent_enforced: AtomicBool::new(false),
+                consented: std::sync::Mutex::new(std::collections::HashSet::new()),
             }
         }
 
@@ -2417,6 +3367,25 @@ mod tests {
 
         fn set_limit(&self, limit: i64) {
             self.limit.store(limit, Ordering::SeqCst);
+        }
+
+        fn used(&self) -> i64 {
+            self.used.load(Ordering::SeqCst)
+        }
+
+        fn reserves(&self) -> usize {
+            self.reserves.load(Ordering::SeqCst)
+        }
+
+        fn enforce_consent(&self) {
+            self.consent_enforced.store(true, Ordering::SeqCst);
+        }
+
+        fn grant_marketing_consent(&self, email: &str) {
+            self.consented
+                .lock()
+                .unwrap()
+                .insert(email.trim().to_ascii_lowercase());
         }
     }
 
@@ -2480,6 +3449,24 @@ mod tests {
                 .filter(|recipient| suppressed.contains(recipient))
                 .cloned()
                 .collect())
+        }
+
+        async fn consent_decision(
+            &self,
+            _tenant_id: &str,
+            email: &str,
+            is_transactional: bool,
+        ) -> Result<AdmissionSendDecision, String> {
+            if is_transactional
+                || !self.consent_enforced.load(Ordering::SeqCst)
+                || self.consented.lock().unwrap().contains(email)
+            {
+                Ok(AdmissionSendDecision::Allowed)
+            } else {
+                Ok(AdmissionSendDecision::Blocked(
+                    "no marketing consent on file — recipient must opt in".into(),
+                ))
+            }
         }
     }
 
@@ -3781,6 +4768,32 @@ mod tests {
         assert_eq!(config["winnerMetric"], "opened");
         let z = config["winnerZ"].as_f64().expect("winner z recorded");
         assert!(z >= apexmail_lib::ab_testing::Z_CRITICAL, "z = {z}");
+        // Z parity with the documented rule: the persisted z is EXACTLY the
+        // z `decide_winner` computes from the same (trials, successes) the
+        // set-based refresh derived — the old path's number, bit for bit.
+        let verdict = apexmail_lib::ab_testing::decide_winner(&[
+            apexmail_lib::ab_testing::ArmOutcome {
+                arm_index: 0,
+                trials: 100,
+                successes: 30,
+            },
+            apexmail_lib::ab_testing::ArmOutcome {
+                arm_index: 1,
+                trials: 100,
+                successes: 10,
+            },
+        ]);
+        match verdict {
+            apexmail_lib::ab_testing::AbVerdict::Winner {
+                arm_index,
+                z: expected,
+                ..
+            } => {
+                assert_eq!(arm_index, 0);
+                assert_eq!(z, expected, "the persisted winnerZ is the rule's z");
+            }
+            other => panic!("the seeded scenario must declare arm 0: {other:?}"),
+        }
         let promoted: Vec<(String, i32)> = sqlx::query_as(
             "SELECT phase, arm_index FROM campaign_recipients \
              WHERE campaign_id = $1 AND email LIKE 'big-h-%' ORDER BY email",
@@ -3851,6 +4864,21 @@ mod tests {
             campaigns.push(campaign);
         }
 
+        // A webhook subscriber so the winner events fan out and the payload
+        // parity below can be asserted from `webhook_queue`. webhooks.id is
+        // VARCHAR(26), not UUID — a UUID's 36-char text form overflows it.
+        let webhook_id = format!("wh{}", &Uuid::new_v4().simple().to_string()[..20]);
+        sqlx::query(
+            "INSERT INTO webhooks (id, tenant_id, name, url, secret, events, enabled, created_at) \
+             VALUES ($1, $2, 'ab-winner', 'https://ab-winner.example.test/hook', 's', \
+                     '[\"*\"]'::jsonb, true, NOW())",
+        )
+        .bind(&webhook_id)
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("seed webhook subscriber");
+
         let (capture, guard) = capture_sql();
         exec.evaluate_ab_tests().await.expect("evaluate");
         drop(guard);
@@ -3868,6 +4896,77 @@ mod tests {
             "both winner decisions persist in one statement: {:?}",
             capture.statements()
         );
+        // Set-based evaluation (findings 6+8): the refresh, the gates and
+        // the arms read are O(1) per batch — one grouped statement each (the
+        // two candidates share the 'open' metric), not 4 queries per
+        // campaign.
+        assert_eq!(
+            capture.count_starting_with("WITH per_arm AS"),
+            1,
+            "ONE grouped outcomes refresh per metric group: {:?}",
+            capture.statements()
+        );
+        assert_eq!(
+            capture.count_starting_with("SELECT v.id,"),
+            1,
+            "ONE grouped in-flight/window gate for the whole batch: {:?}",
+            capture.statements()
+        );
+        assert_eq!(
+            capture.count_starting_with("SELECT a.campaign_id,"),
+            1,
+            "ONE grouped arms read for the ready campaigns: {:?}",
+            capture.statements()
+        );
+        assert_eq!(
+            capture.count_starting_with(
+                "SELECT COUNT(*) FROM campaign_recipients WHERE campaign_id = $1"
+            ),
+            0,
+            "no per-campaign in-flight probes remain: {:?}",
+            capture.statements()
+        );
+        assert_eq!(
+            capture.count_starting_with("SELECT NOW() >="),
+            0,
+            "no per-campaign window probes remain: {:?}",
+            capture.statements()
+        );
+
+        // Webhook payload parity: the fan-out keeps the documented shape —
+        // every deterministic field byte-identical to the legacy path's
+        // payload (the per-event id/timestamp are generation-time values).
+        let payloads: Vec<Value> = sqlx::query_scalar(
+            "SELECT wq.payload FROM webhook_queue wq \
+             JOIN webhooks w ON w.id = wq.webhook_id \
+             WHERE wq.event_type = 'campaign.ab_winner_selected' \
+             ORDER BY wq.payload->'data'->>'campaign_id'",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("ab winner webhook payloads");
+        assert_eq!(payloads.len(), 2, "one winner event per campaign");
+        for payload in &payloads {
+            assert_eq!(payload["type"], "campaign.ab_winner_selected");
+            assert_eq!(payload["tenantId"], tenant);
+            let campaign_id = Uuid::parse_str(payload["data"]["campaign_id"].as_str().unwrap())
+                .expect("payload campaign id");
+            let index = campaigns
+                .iter()
+                .position(|c| *c == campaign_id)
+                .expect("payload names a seeded campaign");
+            assert_eq!(payload["data"]["winner_arm"], 0);
+            assert_eq!(payload["data"]["metric"], "opened");
+            assert_eq!(payload["data"]["rule"], "two_proportion_z_95");
+            assert_eq!(payload["data"]["source"], "auto");
+            assert_eq!(
+                payload["data"]["holdout_promoted"].as_i64(),
+                Some((4 + index) as i64),
+                "the whole holdout was promoted"
+            );
+            let z = payload["data"]["z"].as_f64().expect("payload z");
+            assert!(z >= apexmail_lib::ab_testing::Z_CRITICAL, "payload z = {z}");
+        }
 
         for (index, campaign) in campaigns.iter().enumerate() {
             let config: Value = sqlx::query_scalar("SELECT ab_config FROM campaigns WHERE id = $1")
@@ -4178,5 +5277,527 @@ mod tests {
         assert_eq!(plain_scheduled, None, "without STO the send is immediate");
 
         pool.close().await;
+    }
+
+    // -----------------------------------------------------------------------
+    // Campaign drain batching (perf audit findings 6+8): statement-count
+    // regression, per-recipient parity, page-granular admission.
+    // -----------------------------------------------------------------------
+
+    /// Seed a `sending` campaign with `recipient_count` queued recipients on
+    /// its own fresh canonical database, drain ONE page under SQL capture,
+    /// and return the capture with the sent count.
+    async fn captured_drain_counts(
+        test_name: &str,
+        db_suffix: &str,
+        recipient_count: usize,
+    ) -> Option<(SqlCapture, u64)> {
+        let base = fresh_pool(test_name, db_suffix).await?;
+        let pool = logging_pool(&base).await;
+        let tenant = fresh_tenant("camp-page");
+        insert_tenant(&pool, &tenant).await;
+        let backend = Arc::new(FakeAdmission::new());
+        let exec = executor(&pool, backend);
+        let campaign = insert_ready_campaign(&pool, &tenant, "sending", None).await;
+        for index in 0..recipient_count {
+            let email = format!("bulk-{index}-{}@example.test", Uuid::new_v4().simple());
+            let contact = insert_contact(&pool, &tenant, &email, "active").await;
+            sqlx::query(
+                "INSERT INTO campaign_recipients (tenant_id, campaign_id, contact_id, email, status) \
+                 VALUES ($1, $2, $3, $4, 'queued')",
+            )
+            .bind(&tenant)
+            .bind(campaign)
+            .bind(contact)
+            .bind(&email)
+            .execute(&pool)
+            .await
+            .expect("queue recipient");
+        }
+
+        let (capture, guard) = capture_sql();
+        let report = exec
+            .drain_queued_recipients()
+            .await
+            .expect("drain the page");
+        drop(guard);
+        pool.close().await;
+        Some((capture, report.recipients_sent))
+    }
+
+    /// Statement-count regression (brief, finding 6): the four per-recipient
+    /// statements of the legacy ladder — sender-domain resolution, `messages`
+    /// INSERT, `email_queue` INSERT and the recipient mark — are O(1) per
+    /// page: a 1-recipient page and a 5-recipient page issue the SAME
+    /// statements, exactly once each.
+    #[tokio::test]
+    async fn drain_page_statement_counts_are_constant_in_page_size() {
+        let Some((small, small_sent)) =
+            captured_drain_counts("campaigns_page_sql_1", "page_sql_one", 1).await
+        else {
+            return;
+        };
+        let Some((large, large_sent)) =
+            captured_drain_counts("campaigns_page_sql_5", "page_sql_five", 5).await
+        else {
+            return;
+        };
+        assert_eq!(small_sent, 1);
+        assert_eq!(large_sent, 5);
+
+        for (label, capture) in [("1-recipient page", &small), ("5-recipient page", &large)] {
+            let count = |prefix: &str| capture.count_starting_with(prefix);
+            assert_eq!(
+                count("WITH claimed AS"),
+                1,
+                "{label}: the page is claimed with ONE statement: {:?}",
+                capture.statements()
+            );
+            assert_eq!(
+                count("WITH ready AS"),
+                1,
+                "{label}: sender-domain resolution is ONE FOR SHARE statement per page: {:?}",
+                capture.statements()
+            );
+            assert_eq!(
+                count("INSERT INTO messages"),
+                1,
+                "{label}: the page's messages rows land in ONE statement: {:?}",
+                capture.statements()
+            );
+            assert_eq!(
+                count("INSERT INTO email_queue"),
+                1,
+                "{label}: the page's queue rows land in ONE statement: {:?}",
+                capture.statements()
+            );
+            assert_eq!(
+                count("UPDATE campaign_recipients cr SET"),
+                1,
+                "{label}: the page's marks flush in ONE statement: {:?}",
+                capture.statements()
+            );
+        }
+        assert_eq!(
+            small.statements().len(),
+            large.statements().len(),
+            "the statement count must not grow with the page size (O(1) in N): 1-recipient {:?} vs 5-recipient {:?}",
+            small.statements(),
+            large.statements()
+        );
+    }
+
+    /// Behavior parity (brief): suppression-terminal, consent-refused,
+    /// STO-windowed and normal recipients on ONE page land in exactly the
+    /// rows/statuses/metadata the per-recipient ladder produced — asserted
+    /// with concrete values.
+    #[tokio::test]
+    async fn drain_page_parity_suppressed_consent_refused_sto_and_normal() {
+        use chrono::Datelike as _;
+
+        let Some(pool) = fresh_pool("campaigns_parity", "parity").await else {
+            return;
+        };
+        let tenant = fresh_tenant("camp-parity");
+        insert_tenant(&pool, &tenant).await;
+        let backend = Arc::new(FakeAdmission::new());
+        backend.suppress("suppressed@example.test");
+        backend.enforce_consent();
+        backend.grant_marketing_consent("normal@example.test");
+        backend.grant_marketing_consent("sto@example.test");
+        let exec = executor(&pool, backend.clone())
+            .with_send_time_optimizer(SendTimeOptimizer::without_cache(pool.clone()));
+
+        // Campaign A (plain): normal + suppressed + consent-refused.
+        let plain_campaign = insert_ready_campaign(&pool, &tenant, "sending", None).await;
+        // Campaign B (STO): the windowed recipient.
+        let sto_campaign = insert_ready_campaign(&pool, &tenant, "sending", None).await;
+        sqlx::query("UPDATE campaigns SET settings = $2::jsonb WHERE id = $1")
+            .bind(sto_campaign)
+            .bind(r#"{"sendTimeOptimization": true}"#)
+            .execute(&pool)
+            .await
+            .expect("attach STO settings");
+
+        // The STO recipient's engagement profile: 8 opens at 14:00 UTC on a
+        // Tuesday (2026-06-16) — the window the drain must schedule.
+        let sto_email = "sto@example.test";
+        for _ in 0..8 {
+            sqlx::query(
+                "INSERT INTO events (id, tenant_id, message_id, event_type, recipient, timestamp) \
+                 VALUES ($1, $2, $3, 'opened', $4, \
+                         TIMESTAMPTZ '2026-06-16 00:00:00+00' + INTERVAL '14 hours')",
+            )
+            .bind(Uuid::new_v4().to_string())
+            .bind(&tenant)
+            .bind(Uuid::new_v4().to_string())
+            .bind(sto_email)
+            .execute(&pool)
+            .await
+            .expect("seed STO event");
+        }
+
+        for (campaign, email) in [
+            (plain_campaign, "normal@example.test"),
+            (plain_campaign, "suppressed@example.test"),
+            (plain_campaign, "no-consent@example.test"),
+            (sto_campaign, sto_email),
+        ] {
+            let contact = insert_contact(&pool, &tenant, email, "active").await;
+            sqlx::query(
+                "INSERT INTO campaign_recipients (tenant_id, campaign_id, contact_id, email, status) \
+                 VALUES ($1, $2, $3, $4, 'queued')",
+            )
+            .bind(&tenant)
+            .bind(campaign)
+            .bind(contact)
+            .bind(email)
+            .execute(&pool)
+            .await
+            .expect("queue parity recipient");
+        }
+
+        let report = exec
+            .drain_queued_recipients()
+            .await
+            .expect("drain the parity page");
+        // The plain recipient's full queue row shape under assertion.
+        type NormalQueueRow = (
+            String,
+            i32,
+            Vec<String>,
+            Option<chrono::DateTime<Utc>>,
+            Vec<String>,
+            String,
+        );
+        assert_eq!(report.recipients_sent, 2, "normal + STO sent");
+        assert_eq!(
+            report.recipients_suppressed, 2,
+            "suppressed + consent-refused"
+        );
+        assert_eq!(report.recipients_failed, 0);
+        assert_eq!(report.recipients_deferred, 0);
+        assert_eq!(
+            backend.reserves(),
+            1,
+            "ONE page reservation for the whole tenant group"
+        );
+        assert_eq!(backend.used(), 2, "only the allowed count is metered");
+
+        // -- normal: sent, message + queue row with the exact legacy shape.
+        let (status, error, message_id): (String, Option<String>, Option<Uuid>) = sqlx::query_as(
+            "SELECT status, error, message_id FROM campaign_recipients \
+             WHERE campaign_id = $1 AND email = 'normal@example.test'",
+        )
+        .bind(plain_campaign)
+        .fetch_one(&pool)
+        .await
+        .expect("normal recipient row");
+        assert_eq!(status, "sent");
+        assert_eq!(error, None, "an empty mark error stays NULL (NULLIF)");
+        let Some(message_id) = message_id else {
+            panic!("the normal recipient carries its message back-reference")
+        };
+        let (meta, category, message_status): (Value, String, String) =
+            sqlx::query_as("SELECT metadata, message_category, status FROM messages WHERE id = $1")
+                .bind(message_id)
+                .fetch_one(&pool)
+                .await
+                .expect("normal message row");
+        assert_eq!(message_status, "queued");
+        assert_eq!(category, "marketing");
+        assert_eq!(meta["source"], "campaigns");
+        assert_eq!(meta["campaign_id"], plain_campaign.to_string());
+        assert_eq!(meta["track_opens"], true);
+        assert!(
+            meta["quota_event_id"].is_string(),
+            "the owning quota event is in the metadata: {meta}"
+        );
+        let (queue_status, priority, tags, scheduled_at, to_addresses, from): NormalQueueRow =
+            sqlx::query_as(
+                "SELECT status, priority, tags, scheduled_at, to_addresses, \"from\" \
+             FROM email_queue WHERE message_id = $1",
+            )
+            .bind(message_id)
+            .fetch_one(&pool)
+            .await
+            .expect("normal queue row");
+        assert_eq!(queue_status, "pending");
+        assert_eq!(priority, 5);
+        assert_eq!(tags, vec!["campaign".to_string()]);
+        assert_eq!(scheduled_at, None, "a plain recipient sends immediately");
+        assert_eq!(to_addresses, vec!["normal@example.test".to_string()]);
+        assert!(from.contains("@"), "the campaign sender is preserved");
+
+        // -- suppression-terminal: `suppressed` + the exact error text,
+        //    never retried, no message.
+        let (status, error, message_id): (String, Option<String>, Option<Uuid>) = sqlx::query_as(
+            "SELECT status, error, message_id FROM campaign_recipients \
+             WHERE campaign_id = $1 AND email = 'suppressed@example.test'",
+        )
+        .bind(plain_campaign)
+        .fetch_one(&pool)
+        .await
+        .expect("suppressed recipient row");
+        assert_eq!(status, "suppressed");
+        assert_eq!(error.as_deref(), Some("recipient is suppressed"));
+        assert_eq!(message_id, None);
+        let (suppressed_messages,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM messages WHERE tenant_id = $1 AND to_emails = $2")
+                .bind(&tenant)
+                .bind(serde_json::json!(["suppressed@example.test"]))
+                .fetch_one(&pool)
+                .await
+                .expect("suppressed message count");
+        assert_eq!(
+            suppressed_messages, 0,
+            "a suppressed recipient is never enqueued"
+        );
+
+        // -- consent-refused: the SAME terminal shape, its own error text.
+        let (status, error, message_id): (String, Option<String>, Option<Uuid>) = sqlx::query_as(
+            "SELECT status, error, message_id FROM campaign_recipients \
+             WHERE campaign_id = $1 AND email = 'no-consent@example.test'",
+        )
+        .bind(plain_campaign)
+        .fetch_one(&pool)
+        .await
+        .expect("consent-refused recipient row");
+        assert_eq!(status, "suppressed");
+        assert_eq!(error.as_deref(), Some("marketing consent required"));
+        assert_eq!(message_id, None);
+        let (refused_messages,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM messages WHERE tenant_id = $1 AND to_emails = $2")
+                .bind(&tenant)
+                .bind(serde_json::json!(["no-consent@example.test"]))
+                .fetch_one(&pool)
+                .await
+                .expect("consent-refused message count");
+        assert_eq!(
+            refused_messages, 0,
+            "a consent-refused recipient is never enqueued"
+        );
+
+        // -- STO-windowed: sent like a normal recipient, but the queue row
+        //    (and its message mirror) carries the next Tuesday-14:00 window.
+        let (status, message_id): (String, Option<Uuid>) = sqlx::query_as(
+            "SELECT status, message_id FROM campaign_recipients \
+             WHERE campaign_id = $1 AND email = $2",
+        )
+        .bind(sto_campaign)
+        .bind(sto_email)
+        .fetch_one(&pool)
+        .await
+        .expect("sto recipient row");
+        assert_eq!(status, "sent");
+        let (scheduled,): (Option<chrono::DateTime<Utc>>,) =
+            sqlx::query_as("SELECT scheduled_at FROM email_queue WHERE message_id = $1")
+                .bind(message_id.expect("sto message back-reference"))
+                .fetch_one(&pool)
+                .await
+                .expect("sto queue row");
+        let scheduled = scheduled.expect("the STO recipient must be scheduled");
+        assert!(scheduled > Utc::now(), "the window is in the future");
+        assert_eq!(
+            scheduled.time(),
+            chrono::NaiveTime::from_hms_opt(14, 0, 0).unwrap(),
+            "the profile's 14:00 UTC peak is the scheduled hour"
+        );
+        assert_eq!(
+            scheduled.date_naive().weekday().num_days_from_monday(),
+            1,
+            "the profile's Tuesday peak is the scheduled weekday ({scheduled})"
+        );
+        let (message_scheduled,): (Option<chrono::DateTime<Utc>>,) =
+            sqlx::query_as("SELECT scheduled_at FROM messages WHERE id = $1")
+                .bind(message_id.unwrap())
+                .fetch_one(&pool)
+                .await
+                .expect("sto message row");
+        assert_eq!(
+            message_scheduled,
+            Some(scheduled),
+            "messages.scheduled_at mirrors the queue window"
+        );
+
+        pool.close().await;
+    }
+
+    /// Batch admission through the drain (brief): ONE quota reservation per
+    /// page; an insert failure rolls the WHOLE page back — quota compensated,
+    /// recipients back to `queued` with the attempt recorded — and the retry
+    /// re-admits under the same page identity.
+    #[tokio::test]
+    async fn drain_page_reserves_quota_once_and_a_failed_page_compensates_together() {
+        let Some(pool) = fresh_pool("campaigns_page_quota", "page_quota").await else {
+            return;
+        };
+        let tenant = fresh_tenant("camp-pageq");
+        insert_tenant(&pool, &tenant).await;
+        let backend = Arc::new(FakeAdmission::new());
+        let exec = executor(&pool, backend.clone());
+
+        // -- the happy page: 4 recipients, ONE reservation.
+        let campaign = insert_ready_campaign(&pool, &tenant, "sending", None).await;
+        for index in 0..4 {
+            let email = format!("q-{index}-{}@example.test", Uuid::new_v4().simple());
+            let contact = insert_contact(&pool, &tenant, &email, "active").await;
+            sqlx::query(
+                "INSERT INTO campaign_recipients (tenant_id, campaign_id, contact_id, email, status) \
+                 VALUES ($1, $2, $3, $4, 'queued')",
+            )
+            .bind(&tenant)
+            .bind(campaign)
+            .bind(contact)
+            .bind(&email)
+            .execute(&pool)
+            .await
+            .expect("queue recipient");
+        }
+        let report = exec
+            .drain_queued_recipients()
+            .await
+            .expect("drain the happy page");
+        assert_eq!(report.recipients_sent, 4);
+        assert_eq!(
+            backend.reserves(),
+            1,
+            "the page reserves quota ONCE, not once per recipient"
+        );
+        assert_eq!(
+            backend.used(),
+            4,
+            "the reservation covers the allowed count"
+        );
+
+        // -- the faulted page: the email_queue insert fails, so the WHOLE
+        //    page transaction rolls back (all-or-nothing, documented): quota
+        //    compensated, every recipient back to `queued` under the attempt
+        //    cap, nothing enqueued.
+        let page2 = insert_ready_campaign(&pool, &tenant, "sending", None).await;
+        for index in 0..2 {
+            let email = format!("f-{index}-{}@example.test", Uuid::new_v4().simple());
+            let contact = insert_contact(&pool, &tenant, &email, "active").await;
+            sqlx::query(
+                "INSERT INTO campaign_recipients (tenant_id, campaign_id, contact_id, email, status) \
+                 VALUES ($1, $2, $3, $4, 'queued')",
+            )
+            .bind(&tenant)
+            .bind(page2)
+            .bind(contact)
+            .bind(&email)
+            .execute(&pool)
+            .await
+            .expect("queue faulted-page recipient");
+        }
+        crate::test_support::install_fault_trigger(
+            &pool,
+            "page_queue_insert",
+            "email_queue",
+            "INSERT",
+        )
+        .await;
+        crate::test_support::set_fault(&pool, "page_queue_insert", true).await;
+        let report = exec
+            .drain_queued_recipients()
+            .await
+            .expect("drain the faulted page");
+        assert_eq!(
+            report.recipients_deferred, 2,
+            "under the attempt cap the failed page defers (stays queued)"
+        );
+        assert_eq!(report.recipients_failed, 0);
+        assert_eq!(
+            backend.used(),
+            4,
+            "the failed page's reservation is compensated; the committed page stands"
+        );
+        let rows: Vec<(String, i32, Option<String>)> = sqlx::query_as(
+            "SELECT status, attempts, error FROM campaign_recipients \
+             WHERE campaign_id = $1 ORDER BY email",
+        )
+        .bind(page2)
+        .fetch_all(&pool)
+        .await
+        .expect("faulted-page rows");
+        assert!(
+            rows.iter()
+                .all(|(status, attempts, error)| status == "queued"
+                    && *attempts == 1
+                    && error
+                        .as_deref()
+                        .is_some_and(|e| e.starts_with("enqueue_failed:"))),
+            "every page recipient gets the attempt-counted bookkeeping: {rows:?}"
+        );
+        let (page2_messages,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM messages WHERE tenant_id = $1 AND metadata->>'campaign_id' = $2",
+        )
+        .bind(&tenant)
+        .bind(page2.to_string())
+        .fetch_one(&pool)
+        .await
+        .expect("page2 message count");
+        assert_eq!(page2_messages, 0, "the rollback left no message rows");
+
+        // -- recovery: disarm the fault and re-drain. The SAME page identity
+        //    re-reserves (the compensated event is gone), the page lands,
+        //    and the earlier page's reservation is untouched.
+        crate::test_support::set_fault(&pool, "page_queue_insert", false).await;
+        let report = exec
+            .drain_queued_recipients()
+            .await
+            .expect("re-drain the recovered page");
+        assert_eq!(report.recipients_sent, 2);
+        assert_eq!(
+            backend.reserves(),
+            3,
+            "one ask per page attempt: happy page + faulted page + retry"
+        );
+        assert_eq!(
+            backend.used(),
+            6,
+            "the retry reserves fresh after the compensation"
+        );
+        let (page2_sent,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM campaign_recipients WHERE campaign_id = $1 AND status = 'sent'",
+        )
+        .bind(page2)
+        .fetch_one(&pool)
+        .await
+        .expect("page2 sent count");
+        assert_eq!(page2_sent, 2);
+
+        pool.close().await;
+    }
+
+    /// The page's idempotency identity is deterministic: row order must not
+    /// change it, a different page or tenant must, and it stays prefixed for
+    /// the metering event namespace.
+    #[test]
+    fn page_idempotency_key_is_order_independent_and_tenant_scoped() {
+        let a = Uuid::from_u128(1);
+        let b = Uuid::from_u128(2);
+        let c = Uuid::from_u128(3);
+
+        let key = page_idempotency_key("ten_parity", &[(a, b), (c, a)]);
+        assert_eq!(
+            key,
+            page_idempotency_key("ten_parity", &[(c, a), (a, b)]),
+            "claim order must not change the page identity"
+        );
+        assert_ne!(
+            key,
+            page_idempotency_key("ten_parity", &[(a, b)]),
+            "a different recipient set is a different page identity"
+        );
+        assert_ne!(
+            key,
+            page_idempotency_key("ten_other", &[(a, b), (c, a)]),
+            "the page identity is tenant-scoped"
+        );
+        assert!(
+            key.starts_with("campaign-drain:ten_parity:page:"),
+            "the identity lands in the campaign-drain metering namespace: {key}"
+        );
     }
 }

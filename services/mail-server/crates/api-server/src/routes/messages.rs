@@ -1839,20 +1839,12 @@ async fn resolve_sender_domain_id(
     .await
 }
 
-/// Resolve verified domain IDs for every unique sender domain in a batch with
-/// one query per batch (instead of one query per message — the previous code
-/// performed an N+1 lookup inside `insert_message_and_queue` for each item).
-async fn resolve_batch_domain_ids(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    tenant_id: &str,
-    bodies: &[SendMessageRequest],
-) -> Result<std::collections::HashMap<String, Option<String>>, sqlx::Error> {
+/// Collect the unique sender domains of a batch's bodies (F48: from the
+/// parsed bare addr-spec — unparsable mailboxes contribute nothing here and
+/// are rejected per-item later by validation).
+fn batch_sender_domains(bodies: &[SendMessageRequest]) -> Vec<String> {
     let mut unique: std::collections::HashSet<String> = std::collections::HashSet::new();
     for body in bodies {
-        // F48: sender domains come from the parsed bare addr-spec — a
-        // display-name form must not corrupt the domain lookup. Unparsable
-        // mailboxes contribute nothing here and are rejected per-item later
-        // by validation.
         if let Some(domain) = parse_mailbox(&body.from)
             .ok()
             .and_then(|from| sender_domain(&from.addr_spec))
@@ -1860,14 +1852,35 @@ async fn resolve_batch_domain_ids(
             unique.insert(domain);
         }
     }
+    unique.into_iter().collect()
+}
 
+/// Resolve verified domain IDs for a set of unique sender domain names with
+/// one query (instead of one query per message — the previous code performed
+/// an N+1 lookup inside `insert_message_and_queue` for each item).
+///
+/// The returned map contains an entry for every requested name: `Some(id)`
+/// when the tenant owns a transport-ready verified domain, `None` otherwise.
+///
+/// The executor may be the pool or an open transaction. The batch's
+/// VALIDATION pass runs it on the pool — an autocommit read's `FOR SHARE`
+/// row locks last only for the statement — while the batch's insert phase
+/// re-runs it INSIDE the write transaction so the locks actually protect the
+/// inserts (perf finding 2; see `commit_admitted_batch`).
+async fn resolve_batch_domain_ids<'e, E>(
+    executor: E,
+    tenant_id: &str,
+    domains: &[String],
+) -> Result<std::collections::HashMap<String, Option<String>>, sqlx::Error>
+where
+    E: sqlx::PgExecutor<'e>,
+{
     let mut map: std::collections::HashMap<String, Option<String>> =
         std::collections::HashMap::new();
-    if unique.is_empty() {
+    if domains.is_empty() {
         return Ok(map);
     }
 
-    let domains: Vec<String> = unique.into_iter().collect();
     let rows: Vec<(String, String)> = sqlx::query_as(
         "SELECT name, id::text FROM domains
                  WHERE tenant_id = $1 AND name = ANY($2) AND status = 'verified'
@@ -1878,13 +1891,13 @@ async fn resolve_batch_domain_ids(
                  FOR SHARE",
     )
     .bind(tenant_id)
-    .bind(&domains)
-        .bind(Config::ses_transport_enabled())
-        .fetch_all(&mut **tx)
+    .bind(domains)
+    .bind(Config::ses_transport_enabled())
+    .fetch_all(executor)
     .await?;
 
     for domain in domains {
-        map.insert(domain, None);
+        map.insert(domain.clone(), None);
     }
     for (name, id) in rows {
         map.insert(name, Some(id));
@@ -2246,84 +2259,16 @@ pub(crate) async fn send_message(
         None => Cow::Borrowed(&body),
     };
 
-    let mut tx = state.db.begin().await.map_err(|error| {
-        tracing::error!(error = %error, tenant_id = %auth.tenant_id, "failed to begin message transaction");
-        ApiError::Internal("database error".into())
-    })?;
-
-    // F20/F21: open the ledger record inside this transaction so the
-    // message row, every queue row, and the idempotent response commit (or
-    // roll back) together.
-    let owner_token = Uuid::new_v4().simple().to_string();
-    if let Some(key) = idempotency_key.as_deref() {
-        match open_ledger_in_tx(
-            &mut tx,
-            &auth.tenant_id,
-            key,
-            "POST",
-            SEND_ROUTE,
-            &payload_hash,
-            &principal,
-            &owner_token,
-        )
-        .await
-        {
-            Ok(true) => {}
-            Ok(false) => {
-                // A completed record appeared between preflight and the
-                // locked insert — replay it instead of double-sending.
-                if let Some(row) = fetch_ledger_row(&mut *tx, &auth.tenant_id, key).await? {
-                    if let LedgerReplay::Complete {
-                        response_status,
-                        response_body,
-                    } = classify_ledger_row(&row, "POST", SEND_ROUTE, &payload_hash, &principal)
-                    {
-                        let _ = tx.rollback().await;
-                        return replay_ledger_response(
-                            response_status,
-                            response_body.as_deref().unwrap_or(""),
-                        );
-                    }
-                }
-                let _ = tx.rollback().await;
-                return Err(ApiError::Conflict(
-                    "a request with this Idempotency-Key is already in flight; retry after a short delay".into(),
-                ));
-            }
-            Err(LedgerReplay::Conflict(reason)) => {
-                let _ = tx.rollback().await;
-                return Err(ApiError::Conflict(reason.into()));
-            }
-            Err(LedgerReplay::InFlight) => {
-                let _ = tx.rollback().await;
-                return Err(ApiError::Conflict(
-                    "a request with this Idempotency-Key is already in flight; retry after a short delay".into(),
-                ));
-            }
-            // Unreachable by construction (classify drives Complete to
-            // Ok(false)), but the compiler cannot prove it.
-            Err(LedgerReplay::Complete { .. }) => {
-                let _ = tx.rollback().await;
-                return Err(ApiError::Conflict(
-                    "a request with this Idempotency-Key is already in flight; retry after a short delay".into(),
-                ));
-            }
-        }
-    }
-
-    // Resolve the sender domain once (shared by validation and the insert).
-    let domain_id = resolve_sender_domain_id(&mut tx, &auth.tenant_id, &parsed.from.addr_spec)
-        .await
-        .map_err(|error| {
-            tracing::error!(error = %error, tenant_id = %auth.tenant_id, "failed to resolve sender domain");
-            ApiError::Internal("database error".into())
-        })?
-        .ok_or_else(|| {
-            ApiError::Validation(vec![
-                "sender domain is not ready for the configured delivery transport".into(),
-            ])
-        })?;
-
+    // Perf finding 2 (2026-10-18): the admission/quota reservation runs on
+    // the shared admission backend (Redis + its own short Postgres
+    // transaction on a SECOND pool connection), so it MUST complete before
+    // the write transaction opens — with the tx open it pinned a second
+    // connection and left the send tx idle in transaction across the whole
+    // admission round trip (pool-exhaustion/deadlock amplifier on the
+    // partitioned hot table). The reservation is idempotent (F22 derived
+    // usage event id) and every failure path below compensates it, so
+    // reserving ahead of the transaction changes no observable outcome.
+    //
     // Admission-time quota gate (extracted into the shared
     // `SendAdmissionService` so the SMTP submission path reserves the same
     // EmailsSent quota through the same code): meter one unit per delivery
@@ -2349,6 +2294,122 @@ pub(crate) async fn send_message(
         body.category.as_deref(),
     )
     .await?;
+
+    let mut tx = match state.db.begin().await {
+        Ok(tx) => tx,
+        Err(error) => {
+            compensate_reservation(&state, &auth.tenant_id, &quota_reservation).await;
+            tracing::error!(error = %error, tenant_id = %auth.tenant_id, "failed to begin message transaction");
+            return Err(ApiError::Internal("database error".into()));
+        }
+    };
+
+    // F20/F21: open the ledger record inside this transaction so the
+    // message row, every queue row, and the idempotent response commit (or
+    // roll back) together. The reservation now PRE-DATES this point (perf
+    // finding 2), so every early exit below compensates it: this request
+    // queued nothing, and only a real insert ever keeps its reservation.
+    let owner_token = Uuid::new_v4().simple().to_string();
+    if let Some(key) = idempotency_key.as_deref() {
+        match open_ledger_in_tx(
+            &mut tx,
+            &auth.tenant_id,
+            key,
+            "POST",
+            SEND_ROUTE,
+            &payload_hash,
+            &principal,
+            &owner_token,
+        )
+        .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                // A completed record appeared between preflight and the
+                // locked insert — replay it instead of double-sending. Every
+                // exit releases the pre-transaction reservation (F22: the
+                // concurrent winner's own event carries the quota when this
+                // admission was its duplicate).
+                let replay = match fetch_ledger_row(&mut *tx, &auth.tenant_id, key).await {
+                    Ok(row) => row,
+                    Err(error) => {
+                        let _ = tx.rollback().await;
+                        compensate_reservation(&state, &auth.tenant_id, &quota_reservation).await;
+                        return Err(error.into());
+                    }
+                };
+                if let Some(row) = replay {
+                    if let LedgerReplay::Complete {
+                        response_status,
+                        response_body,
+                    } = classify_ledger_row(&row, "POST", SEND_ROUTE, &payload_hash, &principal)
+                    {
+                        let _ = tx.rollback().await;
+                        compensate_reservation(&state, &auth.tenant_id, &quota_reservation).await;
+                        return replay_ledger_response(
+                            response_status,
+                            response_body.as_deref().unwrap_or(""),
+                        );
+                    }
+                }
+                let _ = tx.rollback().await;
+                compensate_reservation(&state, &auth.tenant_id, &quota_reservation).await;
+                return Err(ApiError::Conflict(
+                    "a request with this Idempotency-Key is already in flight; retry after a short delay".into(),
+                ));
+            }
+            Err(LedgerReplay::Conflict(reason)) => {
+                let _ = tx.rollback().await;
+                compensate_reservation(&state, &auth.tenant_id, &quota_reservation).await;
+                return Err(ApiError::Conflict(reason.into()));
+            }
+            Err(LedgerReplay::InFlight) => {
+                let _ = tx.rollback().await;
+                compensate_reservation(&state, &auth.tenant_id, &quota_reservation).await;
+                return Err(ApiError::Conflict(
+                    "a request with this Idempotency-Key is already in flight; retry after a short delay".into(),
+                ));
+            }
+            // Unreachable by construction (classify drives Complete to
+            // Ok(false)), but the compiler cannot prove it.
+            Err(LedgerReplay::Complete { .. }) => {
+                let _ = tx.rollback().await;
+                compensate_reservation(&state, &auth.tenant_id, &quota_reservation).await;
+                return Err(ApiError::Conflict(
+                    "a request with this Idempotency-Key is already in flight; retry after a short delay".into(),
+                ));
+            }
+        }
+    }
+
+    // Resolve the sender domain once (shared by validation and the insert).
+    //
+    // KEPT INSIDE the write transaction (perf finding 2 carve-out): this
+    // read takes a `FOR SHARE` row lock that must be held through the
+    // message/queue inserts to close the check-then-enqueue race — a domain
+    // disabled or deleted after validation must fail (or null) here under
+    // the lock, never hand the worker an unsigned send. It is a single fast
+    // query on the transaction's own connection; the cross-connection
+    // admission work moved above, so nothing here waits on a second
+    // connection while the tx is pinned.
+    let domain_id = match resolve_sender_domain_id(&mut tx, &auth.tenant_id, &parsed.from.addr_spec)
+        .await
+    {
+        Ok(Some(domain_id)) => domain_id,
+        Ok(None) => {
+            let _ = tx.rollback().await;
+            compensate_reservation(&state, &auth.tenant_id, &quota_reservation).await;
+            return Err(ApiError::Validation(vec![
+                "sender domain is not ready for the configured delivery transport".into(),
+            ]));
+        }
+        Err(error) => {
+            let _ = tx.rollback().await;
+            compensate_reservation(&state, &auth.tenant_id, &quota_reservation).await;
+            tracing::error!(error = %error, tenant_id = %auth.tenant_id, "failed to resolve sender domain");
+            return Err(ApiError::Internal("database error".into()));
+        }
+    };
 
     // Idempotency key for the send — stored in the dedicated column so the
     // UNIQUE(tenant_id, idempotency_key) index is enforced inside the insert
@@ -2668,18 +2729,74 @@ pub(crate) async fn send_batch(
         }
     }
 
-    let mut accepted = 0usize;
-    let mut rejected = 0usize;
-    let mut results = Vec::with_capacity(body.messages.len());
-    let mut committed_quota_reservations: Vec<QuotaReservation> =
-        Vec::with_capacity(body.messages.len());
+    // ── Phase 1 — admission, NO write transaction open (perf finding 2) ──
+    //
+    // Every read (templates, suppression union, sender domains) and every
+    // per-item admission (validation, consent, quota reservation) runs on
+    // the pool/Redis BEFORE the write transaction opens. Under the previous
+    // shape each concurrent batch pinned 2+ pool connections and held its tx
+    // idle in transaction across up to 1+100 admission round trips — a
+    // pool-exhaustion/deadlock amplifier on the partitioned hot table.
+    let (admitted, results) = admit_batch_items(&state, &auth, batch_key.as_deref(), &body).await?;
 
+    // ── Phase 2 — ONE short write transaction: ledger + inserts ─────────
+    // Covers ONLY the idempotency-ledger row, the sender-domain `FOR SHARE`
+    // re-resolution and the per-item message + email_queue inserts. Every
+    // failure path compensates all live reservations and rolls the ledger
+    // back (see `commit_admitted_batch`).
+    commit_admitted_batch(
+        &state,
+        &auth,
+        batch_key.as_deref(),
+        &payload_hash,
+        &principal,
+        admitted,
+        results,
+    )
+    .await
+}
+
+/// Everything the insert transaction needs for one batch item that survived
+/// admission. Collected while NO write transaction is open (perf finding 2):
+/// the admission's quota reservation runs on the pool/Redis — a second
+/// connection — and must never run with the batch's write tx pinned.
+struct AdmittedBatchItem<'a> {
+    index: usize,
+    parsed: ParsedSendAddresses,
+    metadata: Option<serde_json::Value>,
+    effective: Cow<'a, SendMessageRequest>,
+    reservation: QuotaReservation,
+}
+
+/// Phase 1 of [`send_batch`] (perf finding 2, 2026-10-18): every read and
+/// every per-item admission runs BEFORE the write transaction opens.
+///
+/// * loads every DISTINCT template once and probes suppression ONCE over the
+///   union of the batch's recipients — pure reads on the pool (perf P3);
+/// * resolves the batch's sender domains on the pool for VALIDATION only
+///   (an autocommit read's `FOR SHARE` lock lasts for its statement alone);
+///   the lock that actually protects the inserts is re-taken inside the
+///   phase-2 transaction over the admitted items' domains;
+/// * validates, parses, renders and reserves quota per item, filling one
+///   result slot per batch item with the exact rejection reasons and
+///   statuses of the pre-restructure path (a rejected item never touches
+///   quota — F23).
+///
+/// Returns the admitted items in batch order plus one result slot per item
+/// (`None` = awaiting the insert phase). A quota-infrastructure failure
+/// compensates every reservation collected so far and aborts the batch with
+/// the admission error — no ledger record was opened yet, so nothing else
+/// needs unwinding.
+async fn admit_batch_items<'a>(
+    state: &AppState,
+    auth: &AuthUser,
+    batch_key: Option<&str>,
+    body: &'a BatchSendRequest,
+) -> Result<(Vec<AdmittedBatchItem<'a>>, Vec<Option<BatchResult>>), ApiError> {
     // Perf P3: load every DISTINCT template once and run ONE suppression
-    // probe over the union of the batch's recipients BEFORE opening the
-    // write transaction. They use the pool (another connection), so running
-    // them under `tx` pinned a second connection and held the batch tx idle
-    // in transaction across both reads. They are pure reads: nothing below
-    // depends on the transaction for them.
+    // probe over the union of the batch's recipients BEFORE the write
+    // transaction. They are pure reads: nothing below depends on a
+    // transaction for them.
     let preloaded_templates = preload_batch_templates(&state.db, &auth.tenant_id, &body.messages)
         .await
         .map_err(|e| {
@@ -2688,86 +2805,30 @@ pub(crate) async fn send_batch(
         })?;
     let suppressed_recipients =
         preload_batch_suppressed_recipients(&state.db, &auth.tenant_id, &body.messages).await?;
-    let renderer = TemplateRenderer::new(state.db.clone(), send_template_renderer_config());
 
-    let mut tx = state.db.begin().await.map_err(|e| {
-        tracing::error!(error = %e, "failed to begin batch transaction");
+    // Validation-only domain map (pool read — see the phase-2 re-resolution
+    // in `commit_admitted_batch` for the lock that protects the inserts).
+    let domain_ids = resolve_batch_domain_ids(
+        &state.db,
+        &auth.tenant_id,
+        &batch_sender_domains(&body.messages),
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "failed to resolve batch sender domains");
         ApiError::Internal("database error".into())
     })?;
+    let renderer = TemplateRenderer::new(state.db.clone(), send_template_renderer_config());
 
-    // F21: open the ledger record inside this transaction — the batch's
-    // queue rows and its stored response commit (or roll back) together.
-    let owner_token = Uuid::new_v4().simple().to_string();
-    if let Some(key) = batch_key.as_deref() {
-        match open_ledger_in_tx(
-            &mut tx,
-            &auth.tenant_id,
-            key,
-            "POST",
-            BATCH_ROUTE,
-            &payload_hash,
-            &principal,
-            &owner_token,
-        )
-        .await
-        {
-            Ok(true) => {}
-            Ok(false) => {
-                if let Some(row) = fetch_ledger_row(&mut *tx, &auth.tenant_id, key).await? {
-                    if let LedgerReplay::Complete {
-                        response_status,
-                        response_body,
-                    } = classify_ledger_row(&row, "POST", BATCH_ROUTE, &payload_hash, &principal)
-                    {
-                        let _ = tx.rollback().await;
-                        return replay_ledger_response(
-                            response_status,
-                            response_body.as_deref().unwrap_or(""),
-                        );
-                    }
-                }
-                let _ = tx.rollback().await;
-                return Err(ApiError::Conflict(
-                    "a request with this Idempotency-Key is already in flight; retry after a short delay".into(),
-                ));
-            }
-            Err(LedgerReplay::Conflict(reason)) => {
-                let _ = tx.rollback().await;
-                return Err(ApiError::Conflict(reason.into()));
-            }
-            Err(LedgerReplay::InFlight) => {
-                let _ = tx.rollback().await;
-                return Err(ApiError::Conflict(
-                    "a request with this Idempotency-Key is already in flight; retry after a short delay".into(),
-                ));
-            }
-            // Unreachable by construction (classify drives Complete to
-            // Ok(false)), but the compiler cannot prove it.
-            Err(LedgerReplay::Complete { .. }) => {
-                let _ = tx.rollback().await;
-                return Err(ApiError::Conflict(
-                    "a request with this Idempotency-Key is already in flight; retry after a short delay".into(),
-                ));
-            }
-        }
-    }
-
-    // Resolve every unique sender domain once per batch instead of once per
-    // message (removes the N+1 domain lookups from validation and inserts).
-    let domain_ids = resolve_batch_domain_ids(&mut tx, &auth.tenant_id, &body.messages)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "failed to resolve batch sender domains");
-            ApiError::Internal("database error".into())
-        })?;
+    let mut admitted: Vec<AdmittedBatchItem<'a>> = Vec::new();
+    let mut results: Vec<Option<BatchResult>> = (0..body.messages.len()).map(|_| None).collect();
 
     for (i, msg) in body.messages.iter().enumerate() {
         // F23: forbidden/invalid values are validated BEFORE this item's
         // quota reservation — a rejected item never touches quota.
         macro_rules! reject_item {
             ($error:expr) => {{
-                rejected += 1;
-                results.push(BatchResult {
+                results[i] = Some(BatchResult {
                     index: i,
                     id: None,
                     status: "rejected".into(),
@@ -2861,11 +2922,11 @@ pub(crate) async fn send_batch(
         // index), so a concurrent duplicate batch can never reserve item
         // quota twice — the billing layer de-duplicates on the event id.
         let quota_reservation = match reserve_email_quota(
-            &state,
+            state,
             &auth.tenant_id,
             quota_quantity_for_request(msg),
             &delivery_recipients(msg),
-            batch_key.as_deref(),
+            batch_key,
             Some(i),
             msg.category.as_deref(),
         )
@@ -2877,22 +2938,221 @@ pub(crate) async fn send_batch(
                 continue;
             }
             Err(err) => {
-                // Quota infrastructure failure aborts the whole batch. The
-                // still-open transaction is dropped (message inserts roll
-                // back), but reservations for earlier items live OUTSIDE the
-                // transaction and must be released explicitly — otherwise they
-                // leak and permanently consume the tenant's quota.
-                for reservation in &committed_quota_reservations {
-                    compensate_reservation(&state, &auth.tenant_id, reservation).await;
+                // Quota infrastructure failure aborts the whole batch. No
+                // write transaction is open yet (this IS the admission
+                // phase — perf finding 2), so there is no ledger record to
+                // roll back; the reservations collected so far live OUTSIDE
+                // any transaction and must be released explicitly —
+                // otherwise they leak and permanently consume the tenant's
+                // quota.
+                for item in &admitted {
+                    compensate_reservation(state, &auth.tenant_id, &item.reservation).await;
                 }
-                let _ = tx.rollback().await;
                 return Err(err);
             }
         };
 
-        let domain_id = sender_domain(&parsed.from.addr_spec)
-            .and_then(|domain| domain_ids.get(&domain).cloned())
-            .flatten();
+        admitted.push(AdmittedBatchItem {
+            index: i,
+            parsed,
+            metadata: item_metadata,
+            effective,
+            reservation: quota_reservation,
+        });
+    }
+
+    Ok((admitted, results))
+}
+
+/// Phase 2 of [`send_batch`] (perf finding 2, 2026-10-18): ONE short write
+/// transaction covering ONLY the idempotency-ledger row, the sender-domain
+/// `FOR SHARE` re-resolution and the per-item message + email_queue inserts.
+///
+/// Per-item admissions (and their quota reservations) already completed in
+/// [`admit_batch_items`]; nothing here crosses to a second connection, so the
+/// transaction lasts exactly its own statements and is never `idle in
+/// transaction` across an admission round trip. Every failure path
+/// compensates ALL live reservations (F22 machinery — idempotent per usage
+/// event id; duplicate admissions own no metering state to compensate) and
+/// rolls the in-transaction ledger record back, so a retry executes cleanly.
+///
+/// Rejection reasons and per-item statuses, the replay/in-flight/conflict
+/// arms, ledger open/close, circuit recording, the batched `message.accepted`
+/// audit and the partial-success commit (accepted items land, rejected items
+/// report) are exactly the pre-restructure contract.
+async fn commit_admitted_batch(
+    state: &AppState,
+    auth: &AuthUser,
+    batch_key: Option<&str>,
+    payload_hash: &str,
+    principal: &str,
+    admitted: Vec<AdmittedBatchItem<'_>>,
+    mut results: Vec<Option<BatchResult>>,
+) -> Result<Response, ApiError> {
+    // Nothing survived admission: no transaction, no ledger record — the
+    // caller's per-item rejections stand and a retry executes cleanly. (The
+    // pre-restructure path opened a transaction, opened the ledger inside it
+    // and rolled the whole thing back; the observable outcome is identical.)
+    if admitted.is_empty() {
+        return Ok(success(finalize_batch_response(results)).into_response());
+    }
+
+    let mut tx = match state.db.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            for item in &admitted {
+                compensate_reservation(state, &auth.tenant_id, &item.reservation).await;
+            }
+            tracing::error!(error = %e, "failed to begin batch transaction");
+            return Err(ApiError::Internal("database error".into()));
+        }
+    };
+
+    // F21: open the ledger record inside this transaction — the batch's
+    // queue rows and its stored response commit (or roll back) together.
+    // Reservations PRE-DATE the transaction (perf finding 2), so every early
+    // exit below compensates them all: this request queued nothing, and only
+    // a real insert ever keeps its reservation (F22).
+    let owner_token = Uuid::new_v4().simple().to_string();
+    if let Some(key) = batch_key {
+        match open_ledger_in_tx(
+            &mut tx,
+            &auth.tenant_id,
+            key,
+            "POST",
+            BATCH_ROUTE,
+            payload_hash,
+            principal,
+            &owner_token,
+        )
+        .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                let replay = match fetch_ledger_row(&mut *tx, &auth.tenant_id, key).await {
+                    Ok(row) => row,
+                    Err(error) => {
+                        let _ = tx.rollback().await;
+                        for item in &admitted {
+                            compensate_reservation(state, &auth.tenant_id, &item.reservation).await;
+                        }
+                        return Err(error.into());
+                    }
+                };
+                if let Some(row) = replay {
+                    if let LedgerReplay::Complete {
+                        response_status,
+                        response_body,
+                    } = classify_ledger_row(&row, "POST", BATCH_ROUTE, payload_hash, principal)
+                    {
+                        let _ = tx.rollback().await;
+                        for item in &admitted {
+                            compensate_reservation(state, &auth.tenant_id, &item.reservation).await;
+                        }
+                        return replay_ledger_response(
+                            response_status,
+                            response_body.as_deref().unwrap_or(""),
+                        );
+                    }
+                }
+                let _ = tx.rollback().await;
+                for item in &admitted {
+                    compensate_reservation(state, &auth.tenant_id, &item.reservation).await;
+                }
+                return Err(ApiError::Conflict(
+                    "a request with this Idempotency-Key is already in flight; retry after a short delay".into(),
+                ));
+            }
+            Err(LedgerReplay::Conflict(reason)) => {
+                let _ = tx.rollback().await;
+                for item in &admitted {
+                    compensate_reservation(state, &auth.tenant_id, &item.reservation).await;
+                }
+                return Err(ApiError::Conflict(reason.into()));
+            }
+            Err(LedgerReplay::InFlight) => {
+                let _ = tx.rollback().await;
+                for item in &admitted {
+                    compensate_reservation(state, &auth.tenant_id, &item.reservation).await;
+                }
+                return Err(ApiError::Conflict(
+                    "a request with this Idempotency-Key is already in flight; retry after a short delay".into(),
+                ));
+            }
+            // Unreachable by construction (classify drives Complete to
+            // Ok(false)), but the compiler cannot prove it.
+            Err(LedgerReplay::Complete { .. }) => {
+                let _ = tx.rollback().await;
+                for item in &admitted {
+                    compensate_reservation(state, &auth.tenant_id, &item.reservation).await;
+                }
+                return Err(ApiError::Conflict(
+                    "a request with this Idempotency-Key is already in flight; retry after a short delay".into(),
+                ));
+            }
+        }
+    }
+
+    // Perf finding 2: RE-take the sender-domain `FOR SHARE` row locks inside
+    // the write transaction, immediately before the inserts, over the
+    // admitted items' domains. The phase-1 map (resolved on the pool for
+    // validation) holds its locks only for that statement; this
+    // in-transaction resolution is the one that actually protects the
+    // inserts — a domain disabled or deleted after admission blocks (FOR
+    // SHARE) until this transaction ends instead of queueing unsigned mail.
+    let mut unique_domains: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for item in &admitted {
+        if let Some(domain) = sender_domain(&item.parsed.from.addr_spec) {
+            unique_domains.insert(domain);
+        }
+    }
+    let domains: Vec<String> = unique_domains.into_iter().collect();
+    let domain_ids = match resolve_batch_domain_ids(&mut *tx, &auth.tenant_id, &domains).await {
+        Ok(domain_ids) => domain_ids,
+        Err(e) => {
+            let _ = tx.rollback().await;
+            for item in &admitted {
+                compensate_reservation(state, &auth.tenant_id, &item.reservation).await;
+            }
+            tracing::error!(error = %e, "failed to resolve batch sender domains");
+            return Err(ApiError::Internal("database error".into()));
+        }
+    };
+
+    let mut accepted = 0usize;
+    let mut committed_quota_reservations: Vec<QuotaReservation> =
+        Vec::with_capacity(admitted.len());
+
+    for item in admitted {
+        // The phase-1 validation map and this in-transaction resolution can
+        // only disagree across the disable-between-phases race: a domain
+        // that validated ready but no longer resolves here was disabled or
+        // deleted after admission — reject the item exactly like validation
+        // would have, instead of queueing unsigned mail with a NULL domain.
+        let domain_id = match sender_domain(&item.parsed.from.addr_spec) {
+            Some(domain) => match domain_ids.get(&domain) {
+                Some(Some(domain_id)) => Some(domain_id.clone()),
+                Some(None) => {
+                    compensate_reservation(state, &auth.tenant_id, &item.reservation).await;
+                    results[item.index] = Some(BatchResult {
+                        index: item.index,
+                        id: None,
+                        status: "rejected".into(),
+                        error: Some(format!(
+                            "domain '{domain}' is not ready for the configured delivery transport"
+                        )),
+                    });
+                    continue;
+                }
+                // Unreachable for an admitted item (its sender domain
+                // contributed an entry to the map above): fall through to
+                // the same NULL-domain insert the pre-restructure path used.
+                None => None,
+            },
+            // No domain in the parsed addr-spec — nothing to protect; the
+            // pre-restructure path inserted the same NULL-domain row.
+            None => None,
+        };
 
         // F23: per-item SAVEPOINT. Previously one failed item INSERT
         // aborted the whole Postgres transaction — every later item then
@@ -2900,13 +3160,18 @@ pub(crate) async fn send_batch(
         // items it had "accepted". Each item's mutations now roll back to
         // their own savepoint, the transaction stays usable, and the
         // committed per-item results tell the truth.
-        sqlx::query("SAVEPOINT batch_item")
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| {
-                tracing::error!(error = %e, "failed to open batch item savepoint");
-                ApiError::Internal("database error".into())
-            })?;
+        if let Err(e) = sqlx::query("SAVEPOINT batch_item").execute(&mut *tx).await {
+            // The transaction is unusable: roll it back and release every
+            // live reservation (this item's plus the committed-so-far set —
+            // the pre-restructure `?` arm leaked both).
+            let _ = tx.rollback().await;
+            compensate_reservation(state, &auth.tenant_id, &item.reservation).await;
+            for reservation in &committed_quota_reservations {
+                compensate_reservation(state, &auth.tenant_id, reservation).await;
+            }
+            tracing::error!(error = %e, "failed to open batch item savepoint");
+            return Err(ApiError::Internal("database error".into()));
+        }
 
         // Batch items carry no per-message idempotency key (and a NULL key
         // can never conflict); the batch-level ledger above owns replay.
@@ -2915,20 +3180,20 @@ pub(crate) async fn send_batch(
         match insert_message_and_queue(
             &mut tx,
             &auth.tenant_id,
-            effective.as_ref(),
-            &parsed,
-            &item_metadata,
+            item.effective.as_ref(),
+            &item.parsed,
+            &item.metadata,
             None,
             domain_id,
-            quota_reservation.category(),
+            item.reservation.category(),
         )
         .await
         {
             Ok(Some(persisted)) => {
                 accepted += 1;
-                committed_quota_reservations.push(quota_reservation);
-                results.push(BatchResult {
-                    index: i,
+                committed_quota_reservations.push(item.reservation);
+                results[item.index] = Some(BatchResult {
+                    index: item.index,
                     id: Some(persisted.id),
                     status: persisted.status,
                     error: None,
@@ -2939,11 +3204,13 @@ pub(crate) async fn send_batch(
                 // will be delivered) and report the item as a duplicate.
                 // F22: a duplicate billing event owns no quota — only a real
                 // insert is compensated.
-                compensate_reservation(&state, &auth.tenant_id, &quota_reservation).await;
-                tracing::warn!(batch_index = i, "batch insert skipped idempotent duplicate");
-                rejected += 1;
-                results.push(BatchResult {
-                    index: i,
+                compensate_reservation(state, &auth.tenant_id, &item.reservation).await;
+                tracing::warn!(
+                    batch_index = item.index,
+                    "batch insert skipped idempotent duplicate"
+                );
+                results[item.index] = Some(BatchResult {
+                    index: item.index,
                     id: None,
                     status: "rejected".into(),
                     error: Some("duplicate message".into()),
@@ -2959,11 +3226,10 @@ pub(crate) async fn send_batch(
                 {
                     tracing::error!(error = %rollback_error, "failed to roll back batch item savepoint");
                 }
-                compensate_reservation(&state, &auth.tenant_id, &quota_reservation).await;
-                tracing::error!(error = %e, batch_index = i, "batch insert failed");
-                rejected += 1;
-                results.push(BatchResult {
-                    index: i,
+                compensate_reservation(state, &auth.tenant_id, &item.reservation).await;
+                tracing::error!(error = %e, batch_index = item.index, "batch insert failed");
+                results[item.index] = Some(BatchResult {
+                    index: item.index,
                     id: None,
                     status: "rejected".into(),
                     error: Some("database error".into()),
@@ -2972,11 +3238,7 @@ pub(crate) async fn send_batch(
         }
     }
 
-    let response = BatchSendResponse {
-        accepted,
-        rejected,
-        results,
-    };
+    let response = finalize_batch_response(results);
 
     // F20: store the full per-item results in the ledger BEFORE the commit,
     // so they are durable the instant the batch itself is — independent of
@@ -2986,7 +3248,7 @@ pub(crate) async fn send_batch(
     // response. Completion failures roll the whole batch back with idempotent
     // quota compensation — no accepted-but-unrecorded items survive.
     if accepted > 0 {
-        if let Some(key) = batch_key.as_deref() {
+        if let Some(key) = batch_key {
             // Rollback + idempotent quota compensation for every earlier
             // item reservation — shared by both failure arms below.
             let stored_body = match ledger_response_body(&response) {
@@ -2994,9 +3256,9 @@ pub(crate) async fn send_batch(
                 Err(error) => {
                     let _ = tx.rollback().await;
                     for reservation in &committed_quota_reservations {
-                        compensate_reservation(&state, &auth.tenant_id, reservation).await;
+                        compensate_reservation(state, &auth.tenant_id, reservation).await;
                     }
-                    record_tenant_message_circuit_failure(&state, &auth.tenant_id).await;
+                    record_tenant_message_circuit_failure(state, &auth.tenant_id).await;
                     tracing::error!(error = %error, tenant_id = %auth.tenant_id, "batch response envelope serialization failed");
                     return Err(ApiError::Internal("database error".into()));
                 }
@@ -3013,9 +3275,9 @@ pub(crate) async fn send_batch(
             {
                 let _ = tx.rollback().await;
                 for reservation in &committed_quota_reservations {
-                    compensate_reservation(&state, &auth.tenant_id, reservation).await;
+                    compensate_reservation(state, &auth.tenant_id, reservation).await;
                 }
-                record_tenant_message_circuit_failure(&state, &auth.tenant_id).await;
+                record_tenant_message_circuit_failure(state, &auth.tenant_id).await;
                 tracing::error!(
                     error = ?error,
                     tenant_id = %auth.tenant_id,
@@ -3027,11 +3289,11 @@ pub(crate) async fn send_batch(
         }
         if let Err(error) = tx.commit().await {
             for reservation in &committed_quota_reservations {
-                compensate_reservation(&state, &auth.tenant_id, reservation).await;
+                compensate_reservation(state, &auth.tenant_id, reservation).await;
             }
 
             tracing::error!(error = %error, "failed to commit batch transaction");
-            record_tenant_message_circuit_failure(&state, &auth.tenant_id).await;
+            record_tenant_message_circuit_failure(state, &auth.tenant_id).await;
             return Err(ApiError::Internal("database error".into()));
         }
 
@@ -3043,7 +3305,7 @@ pub(crate) async fn send_batch(
 
         // Mirror the single-send path: a committed delivery resets the
         // tenant's circuit failure counter.
-        record_tenant_message_circuit_success(&state, &auth.tenant_id).await;
+        record_tenant_message_circuit_success(state, &auth.tenant_id).await;
 
         // Audit every accepted item (the response's queued rows carry the
         // persisted message ids) in ONE transaction: the per-message writer
@@ -3083,11 +3345,32 @@ pub(crate) async fn send_batch(
         }
     } else {
         // Nothing accepted: drop the transaction (and with it the in-flight
-        // ledger record) so a retry can execute cleanly.
+        // ledger record) so a retry can execute cleanly. Every failed and
+        // duplicate item's reservation was already compensated above.
         let _ = tx.rollback().await;
     }
 
     Ok(success(response).into_response())
+}
+
+/// Assemble the batch response from the per-item result slots: every item
+/// contributes exactly one slot (admission refusals in phase 1, insert
+/// outcomes in phase 2), so the accepted/rejected counts derive directly
+/// from them — identical to the pre-restructure counters.
+fn finalize_batch_response(results: Vec<Option<BatchResult>>) -> BatchSendResponse {
+    let results: Vec<BatchResult> = results
+        .into_iter()
+        .map(|slot| slot.expect("every batch item produces exactly one result slot"))
+        .collect();
+    let rejected = results
+        .iter()
+        .filter(|result| result.status == "rejected")
+        .count();
+    BatchSendResponse {
+        accepted: results.len() - rejected,
+        rejected,
+        results,
+    }
 }
 
 async fn list_messages(
@@ -3806,6 +4089,28 @@ mod tests {
             )
             .await
             .expect("logging pool over the canonical test database")
+    }
+
+    /// A second pool over the same canonical database allowing EXACTLY ONE
+    /// connection (statements logged, like [`logging_pool`]). Any second
+    /// concurrent checkout — e.g. an admission round trip running while a
+    /// write transaction is pinned — blocks until the pool's acquire timeout
+    /// and fails, so a handler that completes on this pool provably never
+    /// overlaps its write transaction with another connection (perf finding
+    /// 2's regression guard).
+    async fn single_connection_pool(pool: &PgPool) -> PgPool {
+        use sqlx::ConnectOptions;
+        sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_secs(5))
+            .test_before_acquire(false)
+            .connect_with(
+                (*pool.connect_options())
+                    .clone()
+                    .log_statements(tracing::log::LevelFilter::Debug),
+            )
+            .await
+            .expect("single-connection pool over the canonical test database")
     }
 
     /// Parsed mailboxes for a test request body — bodies here always use
@@ -8949,6 +9254,615 @@ Bcc: victim@example.com"@example.com"#
         let errors = sanitize_customer_metadata(&Some(serde_json::Value::Null))
             .expect("null metadata is absence");
         assert_eq!(errors, None);
+    }
+
+    // ── Perf finding 2 (2026-10-18): the two-phase send/batch shape ─────
+    //
+    // The guards below pin the restructure's contract: every read and every
+    // per-item admission/quota reservation completes BEFORE the write
+    // transaction opens; the transaction covers only the ledger + inserts;
+    // a failure after reservation compensates EVERY reservation and leaves
+    // the ledger replayable; and the single-send path kept its exact
+    // status/error contract.
+
+    /// Durable `emails_sent` metering rows for a tenant — the Postgres half
+    /// of a quota reservation. A compensated reservation deletes its row
+    /// (and its `usage_operations` claim, in the same transaction), so a
+    /// zero count after a forced failure is direct proof every reservation
+    /// was compensated; a count of N after a successful send is proof the
+    /// surviving reservations were re-recorded exactly once.
+    async fn emails_sent_metering_rows(pool: &sqlx::PgPool, tenant: &str) -> i64 {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM metering_events \
+             WHERE tenant_id = $1 AND event_type = 'emails_sent'",
+        )
+        .bind(tenant)
+        .fetch_one(pool)
+        .await
+        .expect("count emails_sent metering rows")
+    }
+
+    /// Disarm a trigger armed by [`crate::routes::fault::arm_write_fault`]
+    /// (the helper has no disarm arm; its trigger name is `_fi_{tag}`).
+    async fn disarm_write_fault(pool: &sqlx::PgPool, table: &str, tag: &str) {
+        sqlx::query(&format!("DROP TRIGGER IF EXISTS _fi_{tag} ON {table}"))
+            .execute(pool)
+            .await
+            .expect("disarm fault trigger");
+    }
+
+    /// Point the tenant at a fresh plan whose email quota is exactly
+    /// `limit`, the same override pattern the router-level quota tests use.
+    /// Returns the plan name (unique per call).
+    async fn seed_tight_email_plan(pool: &sqlx::PgPool, tenant: &str, limit: i64) -> String {
+        let plan = format!("tight{}", &Uuid::new_v4().simple().to_string()[..22]);
+        sqlx::query(
+            "INSERT INTO plans (id, name, display_name, email_limit, api_call_limit, price_cents, features, is_active)
+             VALUES (substring(replace(gen_random_uuid()::text,'-','') from 1 for 26), $1, 'Perf Finding 2', $2, 100000, 0, '{}'::jsonb, true)",
+        )
+        .bind(&plan)
+        .bind(limit)
+        .execute(pool)
+        .await
+        .expect("seed tight plan");
+        sqlx::query(
+            "INSERT INTO plan_overrides (tenant_id, plan, active, overridden_by, reason)
+             VALUES ($1, $2, true, 'test', 'perf finding 2 compensation guard')",
+        )
+        .bind(tenant)
+        .bind(&plan)
+        .execute(pool)
+        .await
+        .expect("seed tight plan override");
+        plan
+    }
+
+    /// Perf finding 2's regression guard, by construction AND at runtime:
+    /// the batch path is two phases — [`admit_batch_items`] (every read and
+    /// per-item admission on the pool/Redis) feeds [`commit_admitted_batch`]
+    /// (ONE write transaction over the ledger + inserts) — and admission
+    /// results feed the inserts. The whole flow runs on a pool allowing
+    /// EXACTLY ONE connection: any admission round trip attempted while the
+    /// write transaction pinned the only connection (the pre-restructure
+    /// shape) would block past the 5s acquire timeout and fail the test.
+    #[tokio::test]
+    async fn batch_two_phase_admission_feeds_the_inserts_on_one_connection() {
+        let Some(fixture) = cov_fixture("msg_two_phase").await else {
+            return;
+        };
+        let single = single_connection_pool(&fixture.pool).await;
+        let state = crate::app::test_support::test_state_over(single).await;
+        let auth = cov_auth(&fixture);
+
+        let bad: SendMessageRequest = serde_json::from_value(serde_json::json!({
+            "from": format!("sender@{}", fixture.domain),
+            "to": ["to@example.com"],
+            "subject": "",
+            "html": "<p>bad</p>",
+        }))
+        .expect("bad batch item body");
+        let body = BatchSendRequest {
+            messages: vec![cov_send_body(&fixture.domain, "two phase good"), bad],
+        };
+        let key = "two-phase-key";
+        let payload_hash = canonical_send_hash(&body);
+        let principal = principal_binding(&auth);
+
+        // ── Phase 1 alone: no transaction is open, admissions run on the
+        // pool/Redis, rejected items carry their exact refusal, admitted
+        // items stay open for phase 2.
+        let (admitted, results) = admit_batch_items(&state, &auth, Some(key), &body)
+            .await
+            .expect("batch admission phase");
+        assert_eq!(admitted.len(), 1, "only the valid item is admitted");
+        assert_eq!(admitted[0].index, 0);
+        assert_eq!(results.len(), 2);
+        assert!(results[0].is_none(), "item 0 awaits the insert phase");
+        let rejected = results[1]
+            .as_ref()
+            .expect("item 1 was decided in admission");
+        assert_eq!(rejected.status, "rejected");
+        assert!(rejected.id.is_none());
+        assert!(
+            rejected
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("subject is required"),
+            "item 1's refusal names the field: {rejected:?}"
+        );
+
+        // Admission alone persists nothing and reserves durably: exactly one
+        // metering row (item 0's reservation), no message or queue rows —
+        // no transaction has run yet.
+        assert_eq!(
+            emails_sent_metering_rows(&fixture.pool, &fixture.tenant).await,
+            1
+        );
+        assert_eq!(
+            tenant_message_counts(&fixture.pool, &fixture.tenant).await,
+            (0, 0)
+        );
+
+        // ── Phase 2: ONE transaction over the ledger + inserts, fed by
+        // phase 1's admissions.
+        let response = commit_admitted_batch(
+            &state,
+            &auth,
+            Some(key),
+            &payload_hash,
+            &principal,
+            admitted,
+            results,
+        )
+        .await
+        .expect("batch insert phase");
+        let (status, json) = cov_json(response).await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["data"]["accepted"], 1, "{json}");
+        assert_eq!(json["data"]["rejected"], 1, "{json}");
+        assert!(json["data"]["results"][0]["id"].is_string(), "{json}");
+        assert_eq!(json["data"]["results"][1]["status"], "rejected", "{json}");
+
+        // The admission results fed the inserts: exactly item 0 landed, its
+        // reservation is the only metering row, and the ledger record
+        // completed inside the same transaction.
+        assert_eq!(
+            tenant_message_counts(&fixture.pool, &fixture.tenant).await,
+            (1, 1)
+        );
+        assert_eq!(
+            emails_sent_metering_rows(&fixture.pool, &fixture.tenant).await,
+            1
+        );
+        let ledger_status: String = sqlx::query_scalar(
+            "SELECT status FROM idempotency_records WHERE tenant_id = $1 AND idempotency_key = $2",
+        )
+        .bind(&fixture.tenant)
+        .bind(key)
+        .fetch_one(&fixture.pool)
+        .await
+        .expect("batch ledger row");
+        assert_eq!(ledger_status, "complete");
+
+        // The production entry point under the same single connection: a
+        // full send_batch (both phases internally) also completes — the
+        // pre-restructure shape could not, because its per-item admission
+        // needed a second connection while its transaction pinned the only
+        // one.
+        let keyed = BatchSendRequest {
+            messages: vec![cov_send_body(&fixture.domain, "handler on one connection")],
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("idempotency-key", "two-phase-handler-key".parse().unwrap());
+        let response = send_batch(
+            State(state.clone()),
+            cov_auth(&fixture),
+            headers,
+            Json(keyed),
+        )
+        .await
+        .expect("handler batch completes on a single connection");
+        let (status, json) = cov_json(response).await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["data"]["accepted"], 1, "{json}");
+    }
+
+    /// A forced failure AFTER the reservations (the batch ledger's
+    /// completion UPDATE fails mid-transaction) rolls the batch back and
+    /// compensates EVERY item's reservation: the tenant's quota is fully
+    /// released (zero `emails_sent` metering rows, zero usage-operation
+    /// claims), nothing is queued, and the ledger is replayable — the retry
+    /// with the SAME key executes cleanly and re-reserves exactly once per
+    /// accepted item.
+    #[tokio::test]
+    async fn batch_failure_compensates_every_reservation_and_stays_replayable() {
+        let Some(fixture) = cov_fixture("msg_batch_comp").await else {
+            return;
+        };
+
+        // A quota of exactly the batch quantity: if ANY reservation leaked
+        // past the forced failure, the retry below cannot re-admit both
+        // items.
+        seed_tight_email_plan(&fixture.pool, &fixture.tenant, 2).await;
+
+        let items = vec![
+            cov_send_body(&fixture.domain, "comp a"),
+            cov_send_body(&fixture.domain, "comp b"),
+        ];
+
+        // Fire 1 = the ledger OPEN insert (succeeds), fire 2 = the
+        // completion UPDATE (fails) — the whole write transaction rolls back.
+        crate::routes::fault::arm_write_fault(
+            &fixture.pool,
+            "idempotency_records",
+            "batch_comp",
+            1,
+        )
+        .await
+        .expect("arm completion fault");
+
+        let mut headers = HeaderMap::new();
+        headers.insert("idempotency-key", "batch-comp-key".parse().unwrap());
+        let error = send_batch(
+            State(fixture.state.clone()),
+            cov_auth(&fixture),
+            headers,
+            Json(BatchSendRequest {
+                messages: items.clone(),
+            }),
+        )
+        .await
+        .expect_err("completion failure propagates");
+        assert!(matches!(error, ApiError::Internal(_)), "got {error:?}");
+
+        // Every reservation compensated, nothing queued, nothing ledgered.
+        assert_eq!(
+            emails_sent_metering_rows(&fixture.pool, &fixture.tenant).await,
+            0,
+            "every reservation was compensated"
+        );
+        let claims: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM usage_operations WHERE tenant_id = $1")
+                .bind(&fixture.tenant)
+                .fetch_one(&fixture.pool)
+                .await
+                .expect("count usage operation claims");
+        assert_eq!(claims, 0, "every usage-operation claim was released");
+        let ledger: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM idempotency_records WHERE tenant_id = $1")
+                .bind(&fixture.tenant)
+                .fetch_one(&fixture.pool)
+                .await
+                .expect("count ledger rows");
+        assert_eq!(
+            ledger, 0,
+            "no in-flight record may survive a failed attempt"
+        );
+        assert_eq!(
+            tenant_message_counts(&fixture.pool, &fixture.tenant).await,
+            (0, 0)
+        );
+
+        // Disarm and retry with the SAME key: the replayable ledger accepts
+        // a clean fresh execution and re-reserves exactly once per item.
+        disarm_write_fault(&fixture.pool, "idempotency_records", "batch_comp").await;
+        let mut headers = HeaderMap::new();
+        headers.insert("idempotency-key", "batch-comp-key".parse().unwrap());
+        let response = send_batch(
+            State(fixture.state.clone()),
+            cov_auth(&fixture),
+            headers,
+            Json(BatchSendRequest { messages: items }),
+        )
+        .await
+        .expect("retry after the failed attempt");
+        let (status, json) = cov_json(response).await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["data"]["accepted"], 2, "{json}");
+        assert_eq!(
+            emails_sent_metering_rows(&fixture.pool, &fixture.tenant).await,
+            2,
+            "the retry re-reserved exactly once per accepted item"
+        );
+        let ledger_status: String = sqlx::query_scalar(
+            "SELECT status FROM idempotency_records WHERE tenant_id = $1 AND idempotency_key = $2",
+        )
+        .bind(&fixture.tenant)
+        .bind("batch-comp-key")
+        .fetch_one(&fixture.pool)
+        .await
+        .expect("retry ledger row");
+        assert_eq!(ledger_status, "complete");
+    }
+
+    /// Idempotency across a FAILED first attempt: a single send whose insert
+    /// fails mid-transaction compensates its reservation, leaves no ledger
+    /// record behind, and the retry with the SAME key performs a clean fresh
+    /// insert (replay-after-failure). A LIVE in-flight record still conflicts
+    /// — including on the batch route, before any admission runs.
+    #[tokio::test]
+    async fn send_retry_after_failure_replays_and_in_flight_still_conflicts() {
+        let Some(fixture) = cov_fixture("msg_retry_idem").await else {
+            return;
+        };
+        let body = cov_send_body(&fixture.domain, "retry after failure");
+
+        // Fire 1 = the very first `messages` INSERT of the keyed send.
+        crate::routes::fault::arm_write_fault(&fixture.pool, "messages", "retry_idem", 0)
+            .await
+            .expect("arm insert fault");
+
+        let mut headers = HeaderMap::new();
+        headers.insert("idempotency-key", "retry-key".parse().unwrap());
+        let error = send_message(
+            State(fixture.state.clone()),
+            cov_auth(&fixture),
+            headers,
+            Json(body.clone()),
+        )
+        .await
+        .expect_err("insert failure propagates");
+        assert!(matches!(error, ApiError::Internal(_)), "got {error:?}");
+
+        // The reservation was compensated and no ledger record survived —
+        // the retry below is a fresh, cleanly-metered execution.
+        assert_eq!(
+            emails_sent_metering_rows(&fixture.pool, &fixture.tenant).await,
+            0,
+            "the failed attempt's reservation was compensated"
+        );
+        let ledger: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM idempotency_records WHERE tenant_id = $1")
+                .bind(&fixture.tenant)
+                .fetch_one(&fixture.pool)
+                .await
+                .expect("count ledger rows");
+        assert_eq!(ledger, 0);
+        assert_eq!(
+            tenant_message_counts(&fixture.pool, &fixture.tenant).await,
+            (0, 0)
+        );
+
+        disarm_write_fault(&fixture.pool, "messages", "retry_idem").await;
+
+        // Retry, same key + payload: replay-after-failure is a clean insert.
+        let mut headers = HeaderMap::new();
+        headers.insert("idempotency-key", "retry-key".parse().unwrap());
+        let response = send_message(
+            State(fixture.state.clone()),
+            cov_auth(&fixture),
+            headers,
+            Json(body),
+        )
+        .await
+        .expect("retry after the failed attempt");
+        let (status, json) = cov_json(response).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{json}");
+        assert_eq!(json["data"]["status"], "queued", "{json}");
+        assert_eq!(
+            emails_sent_metering_rows(&fixture.pool, &fixture.tenant).await,
+            1
+        );
+
+        // A live in-flight record on the BATCH route still 409s — and the
+        // refusal happens at preflight, before any admission or reservation.
+        let batch = BatchSendRequest {
+            messages: vec![cov_send_body(&fixture.domain, "in flight batch")],
+        };
+        let principal = principal_binding(&cov_auth(&fixture));
+        sqlx::query(
+            "INSERT INTO idempotency_records
+                 (tenant_id, idempotency_key, request_method, request_route, payload_hash,
+                  principal_id, owner_token, status, updated_at)
+             VALUES ($1, 'batch-inflight-key', 'POST', $2, $3, $4, 'token-other', 'in_flight', NOW())",
+        )
+        .bind(&fixture.tenant)
+        .bind(BATCH_ROUTE)
+        .bind(canonical_send_hash(&batch))
+        .bind(&principal)
+        .execute(&fixture.pool)
+        .await
+        .expect("seed batch in-flight ledger row");
+
+        let mut headers = HeaderMap::new();
+        headers.insert("idempotency-key", "batch-inflight-key".parse().unwrap());
+        let error = send_batch(
+            State(fixture.state.clone()),
+            cov_auth(&fixture),
+            headers,
+            Json(batch),
+        )
+        .await
+        .expect_err("in-flight batch key refuses");
+        assert!(
+            matches!(&error, ApiError::Conflict(message)
+                if message.contains("already in flight")),
+            "got {error:?}"
+        );
+        assert_eq!(
+            tenant_message_counts(&fixture.pool, &fixture.tenant).await,
+            (1, 1),
+            "the in-flight refusal must not enqueue"
+        );
+    }
+
+    /// Single-send parity (perf finding 2): the reordered path — reservation
+    /// BEFORE the write transaction — answers with exactly the
+    /// pre-restructure statuses and error strings on every refusal arm,
+    /// reserves nothing for a refused send (F23) and exactly the
+    /// delivery-recipient quantity for an accepted one.
+    #[tokio::test]
+    async fn single_send_status_and_error_contract_unchanged() {
+        let Some(fixture) = cov_fixture("msg_parity").await else {
+            return;
+        };
+
+        // 202 success shape, one metering unit, one queued row.
+        let response = send_message(
+            State(fixture.state.clone()),
+            cov_auth(&fixture),
+            HeaderMap::new(),
+            Json(cov_send_body(&fixture.domain, "parity ok")),
+        )
+        .await
+        .expect("parity send");
+        let (status, json) = cov_json(response).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{json}");
+        assert_eq!(json["data"]["status"], "queued", "{json}");
+        assert!(json["data"]["id"].is_string(), "{json}");
+        assert_eq!(
+            emails_sent_metering_rows(&fixture.pool, &fixture.tenant).await,
+            1
+        );
+        assert_eq!(
+            tenant_message_counts(&fixture.pool, &fixture.tenant).await,
+            (1, 1)
+        );
+
+        // 404 template — refused before any reservation (F23).
+        let templated: SendMessageRequest = serde_json::from_value(serde_json::json!({
+            "from": format!("sender@{}", fixture.domain),
+            "to": ["to@example.com"],
+            "subject": "parity template",
+            "html": "<p>p</p>",
+            "template_id": "tpl_missing_parity",
+        }))
+        .expect("template body");
+        let error = send_message(
+            State(fixture.state.clone()),
+            cov_auth(&fixture),
+            HeaderMap::new(),
+            Json(templated),
+        )
+        .await
+        .expect_err("unknown template refuses");
+        assert!(
+            matches!(&error, ApiError::NotFound(message)
+                if message.contains("template not found")),
+            "got {error:?}"
+        );
+        assert_eq!(
+            emails_sent_metering_rows(&fixture.pool, &fixture.tenant).await,
+            1,
+            "a refused send reserves nothing"
+        );
+
+        // 422 option validation names the reserved operational key.
+        let forged: SendMessageRequest = serde_json::from_value(serde_json::json!({
+            "from": format!("sender@{}", fixture.domain),
+            "to": ["to@example.com"],
+            "subject": "parity forged",
+            "html": "<p>p</p>",
+            "metadata": {"lease_token": "forged"},
+        }))
+        .expect("forged metadata body");
+        let response = send_message(
+            State(fixture.state.clone()),
+            cov_auth(&fixture),
+            HeaderMap::new(),
+            Json(forged),
+        )
+        .await
+        .expect("forged metadata answers");
+        let (status, json) = cov_json(response).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{json}");
+        assert!(
+            json["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("reserved")
+                || json.to_string().contains("reserved"),
+            "the 422 names the reserved key: {json}"
+        );
+        assert_eq!(
+            emails_sent_metering_rows(&fixture.pool, &fixture.tenant).await,
+            1
+        );
+
+        // 400 unverified sender domain — the exact pre-restructure wording.
+        let error = send_message(
+            State(fixture.state.clone()),
+            cov_auth(&fixture),
+            HeaderMap::new(),
+            Json(cov_send_body("not-verified.example.com", "parity domain")),
+        )
+        .await
+        .expect_err("unverified domain refuses");
+        assert!(
+            matches!(&error, ApiError::Validation(details)
+                if details.iter().any(|d| d.contains("not ready"))),
+            "got {error:?}"
+        );
+        assert_eq!(
+            emails_sent_metering_rows(&fixture.pool, &fixture.tenant).await,
+            1
+        );
+
+        // 422 consent gate — a marketing send without a consent record is a
+        // named validation refusal (F4), still pre-transaction.
+        let no_consent: SendMessageRequest = serde_json::from_value(serde_json::json!({
+            "from": format!("sender@{}", fixture.domain),
+            "to": ["no-consent@example.com"],
+            "subject": "parity consent",
+            "html": "<p>p</p>",
+        }))
+        .expect("no-consent body");
+        let error = send_message(
+            State(fixture.state.clone()),
+            cov_auth(&fixture),
+            HeaderMap::new(),
+            Json(no_consent),
+        )
+        .await
+        .expect_err("missing consent refuses");
+        assert!(
+            matches!(&error, ApiError::Validation(details)
+                if details.iter().any(|d| d.contains("marketing consent required"))),
+            "got {error:?}"
+        );
+        assert_eq!(
+            emails_sent_metering_rows(&fixture.pool, &fixture.tenant).await,
+            1
+        );
+
+        // 403 quota exceeded — the EXACT documented contract message.
+        seed_tight_email_plan(&fixture.pool, &fixture.tenant, 1).await;
+        let error = send_message(
+            State(fixture.state.clone()),
+            cov_auth(&fixture),
+            HeaderMap::new(),
+            Json(cov_send_body(&fixture.domain, "parity quota")),
+        )
+        .await
+        .expect_err("exhausted quota refuses");
+        assert!(
+            matches!(&error, ApiError::Forbidden(message)
+                if message == QUOTA_EXCEEDED_MESSAGE),
+            "got {error:?}"
+        );
+        assert_eq!(
+            emails_sent_metering_rows(&fixture.pool, &fixture.tenant).await,
+            1,
+            "the quota-refused reservation left nothing behind"
+        );
+
+        // 503 open tenant circuit — refused before any admission.
+        let redis_url = std::env::var("TEST_REDIS_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "redis://127.0.0.1:1".into());
+        let redis = deadpool_redis::Config::from_url(&redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("lazy redis pool");
+        let mut conn = redis
+            .get()
+            .await
+            .expect("redis must be reachable for the circuit arm");
+        let open_key = tenant_message_circuit_open_key(&fixture.tenant);
+        let _: () = deadpool_redis::redis::AsyncCommands::set_ex(&mut *conn, &open_key, "1", 60)
+            .await
+            .expect("set circuit open");
+        let error = send_message(
+            State(fixture.state.clone()),
+            cov_auth(&fixture),
+            HeaderMap::new(),
+            Json(cov_send_body(&fixture.domain, "parity circuit")),
+        )
+        .await
+        .expect_err("open circuit refuses");
+        assert!(
+            matches!(&error, ApiError::ServiceUnavailable(message)
+                if message.contains("circuit")),
+            "got {error:?}"
+        );
+        let _: i64 = deadpool_redis::redis::AsyncCommands::del(&mut *conn, &open_key)
+            .await
+            .expect("clear circuit");
+        assert_eq!(
+            emails_sent_metering_rows(&fixture.pool, &fixture.tenant).await,
+            1
+        );
     }
 }
 

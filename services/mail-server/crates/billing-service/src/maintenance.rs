@@ -1157,6 +1157,154 @@ async fn perform_month_end_closing(state: &AppState) -> Result<bool, String> {
     Ok(true)
 }
 
+/// One audit entry handed to [`append_audit_log_batch`]: the exact fields the
+/// per-row [`append_audit_log`] writes, prepared in sweep order.
+pub(crate) struct BatchedAuditEntry {
+    tenant_id: String,
+    action: &'static str,
+    resource_type: &'static str,
+    resource_id: Option<String>,
+    metadata: Value,
+    timestamp: DateTime<Utc>,
+}
+
+/// Append a whole batch of audit entries with a BOUNDED number of statements
+/// per sweep (perf audit 2026-10-18, finding 15): ONE chain-head advance and
+/// ONE multi-row INSERT — never a transaction round trip per entry.
+///
+/// Chain/hash semantics are IDENTICAL to N calls to [`append_audit_log`] in
+/// input order, batched the way compliance `AuditLogger::log_batch` batches:
+/// * the row hash is the canonical 7-segment SHA-256 over
+///   `tenant|user|action|resource|resource_id|details|timestamp` — the chain
+///   link is NOT part of the row hash, so every hash can be computed before
+///   the head is read;
+/// * ONE atomic `audit_chain_head` upsert advances the head to the LAST
+///   entry's hash and returns the hash it replaced, which entry 0 links to;
+///   entries 1..n chain in memory in input order (concurrent appenders
+///   serialise on the single head row exactly as before — the batch is one
+///   link on the shared chain);
+/// * timestamps stay microsecond-truncated (one per entry, in order) and the
+///   HMAC signature still covers `previous_hash|hash`.
+async fn append_audit_log_batch(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    entries: Vec<BatchedAuditEntry>,
+) -> Result<(), String> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+
+    // Row hashes first: the canonical formula never mixes the chain link in,
+    // so the whole chain of hashes is computable before we touch the head.
+    let mut hashes: Vec<String> = Vec::with_capacity(entries.len());
+    for entry in &entries {
+        let timestamp = apexmail_lib::audit::truncate_timestamp_to_micros(entry.timestamp);
+        let hash_payload = apexmail_lib::audit::audit_hash_payload(
+            Some(&entry.tenant_id),
+            None, // machine context: user segment EMPTY, never absent
+            entry.action,
+            entry.resource_type,
+            entry.resource_id.as_deref(),
+            &entry.metadata,
+            timestamp,
+        );
+        hashes.push(apexmail_lib::audit::audit_row_hash(&hash_payload));
+    }
+
+    // ONE atomic head advance for the whole batch: the head becomes the LAST
+    // hash and returns the hash it replaced — the link for entry 0.
+    let head_hash = hashes.last().cloned().unwrap_or_default();
+    let first_previous_hash: Option<String> = sqlx::query_scalar(
+        r#"
+        INSERT INTO audit_chain_head (chain_id, head_hash, prev_hash, head_seq, updated_at)
+        VALUES ('global', $1, NULL, 1, NOW())
+        ON CONFLICT (chain_id) DO UPDATE SET
+            prev_hash  = audit_chain_head.head_hash,
+            head_hash  = EXCLUDED.head_hash,
+            head_seq   = audit_chain_head.head_seq + 1,
+            updated_at = NOW()
+        RETURNING prev_hash
+        "#,
+    )
+    .bind(&head_hash)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|e| format!("Failed to advance audit chain head: {e}"))?
+    .flatten();
+
+    // Link the in-memory chain in input order, sign every link, and write
+    // ONE multi-row INSERT (same columns, outcome and timestamp/created_at
+    // shape the per-row writer uses).
+    let signing_key = audit_signing_key();
+    let mut previous_hash = first_previous_hash;
+    let mut linked: Vec<(String, Option<String>)> = Vec::with_capacity(entries.len());
+    for hash in &hashes {
+        linked.push((hash.clone(), previous_hash.clone()));
+        previous_hash = Some(hash.clone());
+    }
+
+    let mut builder = sqlx::QueryBuilder::new(
+        r#"
+        INSERT INTO audit_logs (
+            id, tenant_id, action, resource, resource_id,
+            details, outcome, previous_hash, hash, signature, timestamp, created_at
+        )
+        "#,
+    );
+    builder.push_values(
+        linked.into_iter().zip(entries),
+        |mut b, ((hash, previous_hash), entry)| {
+            let signature = match apexmail_lib::audit::audit_log_signature(
+                previous_hash.as_deref(),
+                &hash,
+                &signing_key,
+            ) {
+                Ok(signature) => signature,
+                Err(_) => {
+                    tracing::error!(
+                        "AUDIT_SIGNING_KEY could not be parsed; audit-log signature left empty"
+                    );
+                    String::new()
+                }
+            };
+            let timestamp = apexmail_lib::audit::truncate_timestamp_to_micros(entry.timestamp);
+            b.push_bind(crate::routes::generate_audit_log_id())
+                .push_bind(entry.tenant_id.clone())
+                .push_bind(entry.action)
+                .push_bind(entry.resource_type)
+                .push_bind(entry.resource_id)
+                .push_bind(entry.metadata)
+                .push_bind("success")
+                .push_bind(previous_hash)
+                .push_bind(hash)
+                .push_bind(signature)
+                .push_bind(timestamp)
+                .push_bind(timestamp);
+        },
+    );
+    builder
+        .build()
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| format!("Failed to insert audit log batch: {e}"))?;
+
+    Ok(())
+}
+
+/// The HMAC key for audit chain signatures: `AUDIT_SIGNING_KEY` when
+/// configured, else the documented development fallback — the same policy
+/// `routes::audit_log_signature` applies for per-row appends.
+fn audit_signing_key() -> String {
+    match std::env::var("AUDIT_SIGNING_KEY") {
+        Ok(key) if !key.trim().is_empty() => key,
+        _ => {
+            tracing::warn!(
+                "AUDIT_SIGNING_KEY is not configured — signing with the documented development fallback key"
+            );
+            "apexmail-audit-fallback-key".to_string()
+        }
+    }
+}
+
 /// Apply subscriptions canceled for period end once the period has actually
 /// ended (external audit 15 Oct, H1).
 ///
@@ -1166,6 +1314,15 @@ async fn perform_month_end_closing(state: &AppState) -> Result<bool, String> {
 /// audit entry. Idempotent (the `cancel_at_period_end = true` predicate is
 /// cleared in the same statement), and the period lock is skipped, so a
 /// concurrent maintenance pass cannot double-count.
+///
+/// Set-based (perf audit 2026-10-18, finding 15): one transaction, ONE
+/// `WITH due … FOR UPDATE SKIP LOCKED` statement that performs the
+/// subscription transition and the tenant downgrade in bulk, then ONE
+/// multi-row audit append — 3 statements per sweep instead of ~3 per row, so
+/// a mass-cancellation event no longer holds long per-row write loops on
+/// `tenants`/`adyen_subscriptions`. Status values, timestamp columns, the
+/// `plan <> 'free'` guard and the audit payload are byte-identical to the
+/// per-row loop this replaced.
 async fn sweep_canceled_at_period_end(state: &AppState) -> Result<u64, String> {
     let mut tx = state
         .db
@@ -1173,52 +1330,60 @@ async fn sweep_canceled_at_period_end(state: &AppState) -> Result<u64, String> {
         .await
         .map_err(|e| format!("Failed to begin canceled-subscription sweep transaction: {e}"))?;
 
+    // Lock the due set, transition the subscriptions and downgrade their
+    // tenants in ONE statement; the RETURNING chain yields exactly the rows
+    // that were ended (same predicate, same writes as the old per-row loop).
     let due: Vec<(uuid::Uuid, String)> = sqlx::query_as(
         r#"
-        SELECT s.id, s.tenant_id
-        FROM adyen_subscriptions s
-        WHERE s.cancel_at_period_end = true
-          AND s.status IN ('active', 'trialing', 'past_due', 'unpaid')
-          AND s.billing_cycle_end IS NOT NULL
-          AND s.billing_cycle_end <= NOW()
-        FOR UPDATE SKIP LOCKED
+        WITH due AS (
+            SELECT s.id, s.tenant_id
+            FROM adyen_subscriptions s
+            WHERE s.cancel_at_period_end = true
+              AND s.status IN ('active', 'trialing', 'past_due', 'unpaid')
+              AND s.billing_cycle_end IS NOT NULL
+              AND s.billing_cycle_end <= NOW()
+            FOR UPDATE SKIP LOCKED
+        ),
+        ended AS (
+            UPDATE adyen_subscriptions s
+               SET status = 'canceled',
+                   cancel_at_period_end = false,
+                   updated_at = NOW()
+              FROM due
+             WHERE s.id = due.id
+            RETURNING s.id
+        ),
+        downgraded AS (
+            UPDATE tenants t
+               SET plan = 'free', updated_at = NOW()
+              FROM due
+             WHERE t.id = due.tenant_id
+               AND t.plan <> 'free'
+        )
+        SELECT due.id, due.tenant_id
+        FROM due
+        JOIN ended ON ended.id = due.id
+        ORDER BY due.id
         "#,
     )
     .fetch_all(&mut *tx)
     .await
-    .map_err(|e| format!("Failed to query subscriptions to end: {e}"))?;
+    .map_err(|e| format!("Failed to end due subscriptions: {e}"))?;
 
-    for (subscription_id, tenant_id) in &due {
-        sqlx::query(
-            "UPDATE adyen_subscriptions
-                SET status = 'canceled',
-                    cancel_at_period_end = false,
-                    updated_at = NOW()
-              WHERE id = $1",
-        )
-        .bind(subscription_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| format!("Failed to end subscription {subscription_id}: {e}"))?;
-        sqlx::query(
-            "UPDATE tenants SET plan = 'free', updated_at = NOW()
-              WHERE id = $1 AND plan <> 'free'",
-        )
-        .bind(tenant_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| format!("Failed to downgrade tenant {tenant_id}: {e}"))?;
-        append_audit_log(
-            &mut tx,
-            tenant_id,
-            "billing.subscription_ended_at_period_end",
-            "subscription",
-            Some(&subscription_id.to_string()),
-            serde_json::json!({ "effective": "period_end" }),
-            Utc::now(),
-        )
-        .await?;
-    }
+    append_audit_log_batch(
+        &mut tx,
+        due.iter()
+            .map(|(subscription_id, tenant_id)| BatchedAuditEntry {
+                tenant_id: tenant_id.clone(),
+                action: "billing.subscription_ended_at_period_end",
+                resource_type: "subscription",
+                resource_id: Some(subscription_id.to_string()),
+                metadata: serde_json::json!({ "effective": "period_end" }),
+                timestamp: Utc::now(),
+            })
+            .collect(),
+    )
+    .await?;
 
     tx.commit()
         .await
@@ -1229,6 +1394,13 @@ async fn sweep_canceled_at_period_end(state: &AppState) -> Result<u64, String> {
 /// Downgrade tenants whose trialing subscription ended without a terminal
 /// webhook (see the sweep task comment). Returns the number of tenants
 /// downgraded. Idempotent: rows already canceled no longer match.
+///
+/// Set-based (perf audit 2026-10-18, finding 15): one transaction, ONE
+/// statement that cancels every stale trialing subscription and downgrades
+/// its tenant, then ONE multi-row audit append — 3 statements per sweep
+/// instead of ~3 per stale row. Status values, timestamp columns, the
+/// `status = 'trialing'` write guard and the audit payload are byte-identical
+/// to the per-row loop this replaced.
 async fn sweep_expired_trials(state: &AppState) -> Result<u64, String> {
     // Webhook retries span ~4 hours after the transition; allow 24h before
     // the reconciler acts so a merely-delayed webhook is never raced.
@@ -1240,51 +1412,58 @@ async fn sweep_expired_trials(state: &AppState) -> Result<u64, String> {
 
     let stale: Vec<(String, String)> = sqlx::query_as(
         r#"
-        SELECT DISTINCT s.tenant_id, s.adyen_subscription_id
-        FROM adyen_subscriptions s
-        JOIN tenants t ON t.id = s.tenant_id AND t.plan <> 'free'
-        WHERE s.status = 'trialing'
-          AND COALESCE(s.trial_end, s.billing_cycle_end) < NOW() - INTERVAL '24 hours'
+        WITH stale AS (
+            SELECT DISTINCT s.tenant_id, s.adyen_subscription_id
+            FROM adyen_subscriptions s
+            JOIN tenants t ON t.id = s.tenant_id AND t.plan <> 'free'
+            WHERE s.status = 'trialing'
+              AND COALESCE(s.trial_end, s.billing_cycle_end) < NOW() - INTERVAL '24 hours'
+        ),
+        canceled AS (
+            UPDATE adyen_subscriptions s
+               SET status = 'canceled', updated_at = NOW()
+              FROM stale
+             WHERE s.adyen_subscription_id = stale.adyen_subscription_id
+               AND s.status = 'trialing'
+        ),
+        downgraded AS (
+            UPDATE tenants t
+               SET plan = 'free', updated_at = NOW()
+              FROM stale
+             WHERE t.id = stale.tenant_id
+        )
+        SELECT tenant_id, adyen_subscription_id
+        FROM stale
+        ORDER BY tenant_id
         "#,
     )
     .fetch_all(&mut *tx)
     .await
-    .map_err(|e| format!("Failed to query stale trials: {e}"))?;
+    .map_err(|e| format!("Failed to cancel stale trials: {e}"))?;
 
     if stale.is_empty() {
         tx.commit().await.map_err(|e| e.to_string())?;
         return Ok(0);
     }
 
-    for (tenant_id, subscription_id) in &stale {
-        sqlx::query(
-            "UPDATE adyen_subscriptions SET status = 'canceled', updated_at = NOW()              WHERE adyen_subscription_id = $1 AND status = 'trialing'",
-        )
-        .bind(subscription_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| format!("Failed to cancel stale trial {subscription_id}: {e}"))?;
-
-        sqlx::query("UPDATE tenants SET plan = 'free', updated_at = NOW() WHERE id = $1")
-            .bind(tenant_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| format!("Failed to downgrade tenant {tenant_id}: {e}"))?;
-
-        append_audit_log(
-            &mut tx,
-            tenant_id,
-            "billing.trial_expired_sweep",
-            "adyen_subscription",
-            Some(subscription_id),
-            serde_json::json!({
-                "reason": "trialing subscription period ended without a terminal webhook",
-            }),
-            chrono::Utc::now(),
-        )
-        .await
-        .map_err(|e| format!("Failed to audit trial sweep for {tenant_id}: {e}"))?;
-    }
+    append_audit_log_batch(
+        &mut tx,
+        stale
+            .iter()
+            .map(|(tenant_id, subscription_id)| BatchedAuditEntry {
+                tenant_id: tenant_id.clone(),
+                action: "billing.trial_expired_sweep",
+                resource_type: "adyen_subscription",
+                resource_id: Some(subscription_id.clone()),
+                metadata: serde_json::json!({
+                    "reason": "trialing subscription period ended without a terminal webhook",
+                }),
+                timestamp: chrono::Utc::now(),
+            })
+            .collect(),
+    )
+    .await
+    .map_err(|e| format!("Failed to audit trial sweep: {e}"))?;
 
     let count = stale.len() as u64;
     tx.commit()
@@ -1524,9 +1703,58 @@ struct UsageAlertConfigRow {
     severity: String,
 }
 
+/// One enabled usage-alert rule together with its tenant, as loaded by the
+/// grouped sweep (one query for ALL tenants with rules instead of one query
+/// per tenant).
 #[derive(Debug, FromRow)]
-struct TenantAlertSettingsRow {
-    settings: Value,
+struct TenantUsageAlertConfigRow {
+    tenant_id: String,
+    id: Uuid,
+    name: Option<String>,
+    metric_type: String,
+    threshold_percent: i32,
+    notification_channel: String,
+    severity: String,
+}
+
+/// One row of the grouped plan-limits query — `usage.rs`'s
+/// `TenantPlanLimitRow` widened with the tenant id (the override-aware
+/// `COALESCE(po.plan, t.plan)` resolution lives in the sweep's SQL).
+#[derive(Debug, FromRow)]
+struct TenantAlertPlanLimitRow {
+    tenant_id: String,
+    plan_name: String,
+    email_limit: Option<i64>,
+    api_call_limit: Option<i64>,
+    tenant_created_at: Option<DateTime<Utc>>,
+}
+
+/// The limit resolution `usage.rs::resolve_plan_limits` applies, mirrored for
+/// the grouped usage-alert sweep: DB plan values win, builtin plan defaults
+/// fill the gaps, and the free-plan launch allowance only ever WIDENS the
+/// free email ceiling during the first 30 days of the tenant's life.
+fn resolve_alert_plan_limits(row: &TenantAlertPlanLimitRow) -> (i64, i64) {
+    let (fallback_email_limit, fallback_api_call_limit) =
+        crate::plans::builtin_quota_limits(Some(&row.plan_name));
+
+    let mut email_limit = row.email_limit.unwrap_or(fallback_email_limit);
+    if row.plan_name == "free" {
+        let in_launch_window = row
+            .tenant_created_at
+            .map(|created| {
+                Utc::now() - created
+                    < chrono::Duration::days(crate::usage::FREE_PLAN_LAUNCH_WINDOW_DAYS)
+            })
+            .unwrap_or(false); // unknown creation date: never widened
+        if in_launch_window {
+            email_limit = email_limit.max(crate::usage::FREE_PLAN_LAUNCH_ALLOWANCE);
+        }
+    }
+
+    (
+        email_limit,
+        row.api_call_limit.unwrap_or(fallback_api_call_limit),
+    )
 }
 
 #[derive(Debug, FromRow)]
@@ -1537,6 +1765,16 @@ struct TenantCostSummaryRow {
     dedicated_ip_cost: i64,
     total_cost: i64,
     revenue: i64,
+}
+
+/// One tenant's cost summary as loaded by the grouped cost-margin sweep —
+/// `TenantCostSummaryRow` keyed by tenant id (the LEFT JOIN keeps tenants
+/// with no `tenant_costs` rows, whose COALESCE zeros are Healthy).
+#[derive(Debug, FromRow)]
+struct TenantGroupedCostSummaryRow {
+    tenant_id: String,
+    #[sqlx(flatten)]
+    summary: TenantCostSummaryRow,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2399,64 +2637,116 @@ pub async fn process_usage_alerts(
     state: &AppState,
     client: &Client,
 ) -> Result<UsageAlertSweepResult, String> {
-    let tenant_ids: Vec<String> = sqlx::query_scalar(
-        r#"
-        SELECT DISTINCT tenant_id
-        FROM usage_alert_configs
-        WHERE enabled = true
-        ORDER BY tenant_id
-        "#,
-    )
-    .fetch_all(&state.db)
-    .await
-    .map_err(|error| format!("Failed to load usage alert tenants: {error}"))?;
-
-    let mut alerts_triggered = 0_i64;
-    for tenant_id in &tenant_ids {
-        match process_usage_alerts_for_tenant(state, client, tenant_id).await {
-            Ok(count) => alerts_triggered += count,
-            Err(error_message) => {
-                warn!(tenant_id = %tenant_id, error = %error_message, "failed to process usage alerts for tenant");
-            }
-        }
-    }
-
-    Ok(UsageAlertSweepResult {
-        tenants_checked: i64::try_from(tenant_ids.len()).unwrap_or(i64::MAX),
-        alerts_triggered,
-    })
-}
-
-async fn process_usage_alerts_for_tenant(
-    state: &AppState,
-    client: &Client,
-    tenant_id: &str,
-) -> Result<i64, String> {
     let period_start = month_start(Utc::now());
     let period_end = next_month_start(period_start);
-    let usage_summary = crate::usage::get_usage(&state.db, tenant_id, period_start, period_end)
-        .await
-        .map_err(|error| format!("Failed to load usage summary for {tenant_id}: {error}"))?;
 
-    let configs = sqlx::query_as::<_, UsageAlertConfigRow>(
+    // ONE fetch of every enabled rule (perf audit 2026-10-18, finding 17):
+    // the tenant list is derived from it instead of a separate DISTINCT
+    // query, and the within-tenant order (threshold ASC) is preserved.
+    let configs: Vec<TenantUsageAlertConfigRow> = sqlx::query_as(
         r#"
-        SELECT id, name, metric_type, threshold_percent, notification_channel, severity
+        SELECT tenant_id, id, name, metric_type, threshold_percent, notification_channel, severity
         FROM usage_alert_configs
-        WHERE tenant_id = $1
-          AND enabled = true
-        ORDER BY threshold_percent ASC
+        WHERE enabled = true
+        ORDER BY tenant_id ASC, threshold_percent ASC
         "#,
     )
-    .bind(tenant_id)
     .fetch_all(&state.db)
     .await
-    .map_err(|error| format!("Failed to load usage alert configs for {tenant_id}: {error}"))?;
+    .map_err(|error| format!("Failed to load usage alert configs: {error}"))?;
 
-    if configs.is_empty() {
-        return Ok(0);
+    let tenant_ids: Vec<String> = {
+        let mut seen = HashSet::new();
+        configs
+            .iter()
+            .map(|config| config.tenant_id.clone())
+            .filter(|tenant_id| seen.insert(tenant_id.clone()))
+            .collect()
+    };
+    if tenant_ids.is_empty() {
+        return Ok(UsageAlertSweepResult {
+            tenants_checked: 0,
+            alerts_triggered: 0,
+        });
     }
 
-    let webhook_url = load_usage_alert_webhook_url(state, tenant_id).await?;
+    // ONE grouped usage aggregate for ALL tenants with rules — never one
+    // metering SUM per tenant.
+    let usage_rows: Vec<(String, String, i64)> = sqlx::query_as(
+        r#"
+        SELECT tenant_id, event_type, SUM(quantity)::bigint AS total
+        FROM metering_events
+        WHERE tenant_id = ANY($1)
+          AND timestamp >= $2
+          AND timestamp <  $3
+        GROUP BY tenant_id, event_type
+        "#,
+    )
+    .bind(&tenant_ids)
+    .bind(period_start)
+    .bind(period_end)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|error| format!("Failed to load grouped usage summaries: {error}"))?;
+
+    // ONE override-aware plan-limits fetch (mirrors usage.rs's
+    // TENANT_PLAN_LIMITS_SQL widened to an IN list).
+    let limit_rows: Vec<TenantAlertPlanLimitRow> = sqlx::query_as(
+        r#"
+        SELECT t.id AS tenant_id,
+               COALESCE(po.plan, t.plan) AS plan_name,
+               p.email_limit,
+               p.api_call_limit,
+               t.created_at AS tenant_created_at
+        FROM tenants t
+        LEFT JOIN plan_overrides po
+          ON po.tenant_id = t.id
+         AND po.active = true
+         AND (po.expires_at IS NULL OR po.expires_at > NOW())
+        LEFT JOIN plans p ON p.name = COALESCE(po.plan, t.plan)
+        WHERE t.id = ANY($1)
+        "#,
+    )
+    .bind(&tenant_ids)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|error| format!("Failed to load grouped plan limits: {error}"))?;
+    let mut limits: HashMap<String, (i64, i64)> = HashMap::new();
+    for row in limit_rows {
+        // A tenant with several active overrides resolves to one row in the
+        // per-tenant query (fetch_optional keeps the first) — do the same.
+        limits
+            .entry(row.tenant_id.clone())
+            .or_insert_with(|| resolve_alert_plan_limits(&row));
+    }
+
+    // ONE webhook-URL fetch for every tenant with rules.
+    let settings_rows: Vec<(String, Value)> = sqlx::query_as(
+        r#"
+        SELECT id, COALESCE(settings, '{}'::jsonb) AS settings
+        FROM tenants
+        WHERE id = ANY($1)
+        "#,
+    )
+    .bind(&tenant_ids)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|error| format!("Failed to load grouped tenant settings: {error}"))?;
+    let webhook_urls: HashMap<String, Option<String>> = settings_rows
+        .into_iter()
+        .map(|(tenant_id, settings)| {
+            let url = settings
+                .get("webhookUrl")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
+            (tenant_id, url)
+        })
+        .collect();
+
+    // One pooled Redis connection for the whole sweep; the per-config
+    // cooldown check/set semantics are unchanged.
     let mut conn = state
         .redis
         .get()
@@ -2464,91 +2754,151 @@ async fn process_usage_alerts_for_tenant(
         .map_err(|error| format!("Failed to get Redis connection for usage alerts: {error}"))?;
 
     let mut alerts_triggered = 0_i64;
-
-    for config in configs {
-        let cooldown_key = format!(
-            "alert:cooldown:{tenant_id}:{}:{}",
-            config.metric_type, config.threshold_percent
-        );
-        let in_cooldown: bool = conn.exists(&cooldown_key).await.map_err(|error| {
-            format!("Failed to check usage alert cooldown for {tenant_id}: {error}")
-        })?;
-        if in_cooldown {
-            continue;
+    // Fold the grouped usage rows once: tenant → (emails_sent, api_calls).
+    let mut usage: HashMap<String, (i64, i64)> = HashMap::new();
+    for (tenant_id, event_type, total) in usage_rows {
+        let entry = usage.entry(tenant_id).or_insert((0, 0));
+        match event_type.as_str() {
+            "emails_sent" => entry.0 = total,
+            "api_calls" => entry.1 = total,
+            _ => {}
         }
+    }
+    let mut index = 0_usize;
+    while index < configs.len() {
+        let tenant_id = configs[index].tenant_id.clone();
+        let end = configs[index..]
+            .iter()
+            .take_while(|config| config.tenant_id == tenant_id)
+            .count()
+            + index;
 
-        let Some((current_value, limit_value)) =
-            resolve_usage_alert_metric(&usage_summary, &config.metric_type)
-        else {
-            continue;
-        };
-
-        let current_percent = if limit_value > 0 {
-            (current_value as f64 / limit_value as f64) * 100.0
+        let (emails_sent, api_calls) = usage.get(&tenant_id).copied().unwrap_or((0, 0));
+        let (emails_limit, api_calls_limit) = limits.get(&tenant_id).copied().unwrap_or((0, 0));
+        let percent_used = if emails_limit > 0 {
+            (emails_sent as f64 / emails_limit as f64) * 100.0
         } else {
             0.0
         };
-        if current_percent < f64::from(config.threshold_percent) {
-            continue;
-        }
+        let usage_summary = crate::types::UsageSummary {
+            tenant_id: tenant_id.clone(),
+            period_start,
+            period_end,
+            emails_sent,
+            emails_limit,
+            api_calls,
+            api_calls_limit,
+            percent_used,
+            metrics: serde_json::Value::Object(serde_json::Map::new()),
+        };
+        let webhook_url = webhook_urls.get(&tenant_id).cloned().flatten();
 
-        // The condition HOLDS: raise the incident on the control-plane alert
-        // rail. This is independent of channel delivery on purpose — the CP
-        // /alerts page is a first-class destination, so a rule whose webhook
-        // is down or absent still fires where operators look. `delivered`
-        // below keeps its exact prior semantics (channel acceptance gates the
-        // cooldown and `alerts_triggered`), so a failed webhook still retries.
-        record_usage_alert_incident(
-            state,
-            tenant_id,
-            &config,
-            current_value,
-            limit_value,
-            current_percent,
-        )
-        .await;
+        for config in &configs[index..end] {
+            let cooldown_key = format!(
+                "alert:cooldown:{tenant_id}:{}:{}",
+                config.metric_type, config.threshold_percent
+            );
+            let in_cooldown: bool = match conn.exists(&cooldown_key).await {
+                Ok(exists) => exists,
+                Err(error) => {
+                    // Same blast radius as the per-tenant sweep: a Redis
+                    // failure abandons this tenant's remaining rules for the
+                    // cycle and the next tick retries.
+                    warn!(tenant_id = %tenant_id, error = %error, "Failed to check usage alert cooldown");
+                    break;
+                }
+            };
+            if in_cooldown {
+                continue;
+            }
 
-        let delivered = send_usage_alert(
-            state,
-            client,
-            tenant_id,
-            webhook_url.as_deref(),
-            &config,
-            current_value,
-            limit_value,
-            current_percent,
-        )
-        .await;
+            let Some((current_value, limit_value)) =
+                resolve_usage_alert_metric(&usage_summary, &config.metric_type)
+            else {
+                continue;
+            };
 
-        if !delivered {
-            continue;
-        }
+            let current_percent = if limit_value > 0 {
+                (current_value as f64 / limit_value as f64) * 100.0
+            } else {
+                0.0
+            };
+            if current_percent < f64::from(config.threshold_percent) {
+                continue;
+            }
 
-        let _: () = conn
-            .set_ex(&cooldown_key, "1", USAGE_ALERT_COOLDOWN_SECONDS)
+            let config = UsageAlertConfigRow {
+                id: config.id,
+                name: config.name.clone(),
+                metric_type: config.metric_type.clone(),
+                threshold_percent: config.threshold_percent,
+                notification_channel: config.notification_channel.clone(),
+                severity: config.severity.clone(),
+            };
+
+            // The condition HOLDS: raise the incident on the control-plane alert
+            // rail. This is independent of channel delivery on purpose — the CP
+            // /alerts page is a first-class destination, so a rule whose webhook
+            // is down or absent still fires where operators look. `delivered`
+            // below keeps its exact prior semantics (channel acceptance gates the
+            // cooldown and `alerts_triggered`), so a failed webhook still retries.
+            record_usage_alert_incident(
+                state,
+                &tenant_id,
+                &config,
+                current_value,
+                limit_value,
+                current_percent,
+            )
+            .await;
+
+            let delivered = send_usage_alert(
+                state,
+                client,
+                &tenant_id,
+                webhook_url.as_deref(),
+                &config,
+                current_value,
+                limit_value,
+                current_percent,
+            )
+            .await;
+
+            if !delivered {
+                continue;
+            }
+
+            let _: () = conn
+                .set_ex(&cooldown_key, "1", USAGE_ALERT_COOLDOWN_SECONDS)
+                .await
+                .map_err(|error| {
+                    format!("Failed to set usage alert cooldown for {tenant_id}: {error}")
+                })?;
+
+            sqlx::query(
+                r#"
+                UPDATE usage_alert_configs
+                SET last_triggered_at = NOW()
+                WHERE id = $1
+                "#,
+            )
+            .bind(config.id)
+            .execute(&state.db)
             .await
             .map_err(|error| {
-                format!("Failed to set usage alert cooldown for {tenant_id}: {error}")
+                format!("Failed to update usage alert trigger time for {tenant_id}: {error}")
             })?;
 
-        sqlx::query(
-            r#"
-            UPDATE usage_alert_configs
-            SET last_triggered_at = NOW()
-            WHERE id = $1
-            "#,
-        )
-        .bind(config.id)
-        .execute(&state.db)
-        .await
-        .map_err(|error| {
-            format!("Failed to update usage alert trigger time for {tenant_id}: {error}")
-        })?;
+            alerts_triggered += 1;
+        }
 
-        alerts_triggered += 1;
+        index = end;
     }
 
-    Ok(alerts_triggered)
+    Ok(UsageAlertSweepResult {
+        tenants_checked: i64::try_from(tenant_ids.len()).unwrap_or(i64::MAX),
+        alerts_triggered,
+    })
 }
 
 /// Persist a fired usage rule into `system_alerts` — the store the control
@@ -2622,32 +2972,6 @@ fn resolve_usage_alert_metric(
         "api_calls" => Some((usage_summary.api_calls, usage_summary.api_calls_limit)),
         _ => None,
     }
-}
-
-async fn load_usage_alert_webhook_url(
-    state: &AppState,
-    tenant_id: &str,
-) -> Result<Option<String>, String> {
-    let row = sqlx::query_as::<_, TenantAlertSettingsRow>(
-        r#"
-        SELECT COALESCE(settings, '{}'::jsonb) AS settings
-        FROM tenants
-        WHERE id = $1
-        "#,
-    )
-    .bind(tenant_id)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|error| format!("Failed to load tenant settings for {tenant_id}: {error}"))?;
-
-    Ok(row.and_then(|row| {
-        row.settings
-            .get("webhookUrl")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
-    }))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3460,6 +3784,158 @@ async fn update_dedicated_ip_retry_metadata(
 }
 
 async fn process_cost_margin_checks(state: &AppState) -> Result<CostMarginSweepResult, String> {
+    let period_start = month_start(Utc::now());
+    let period_end = next_month_start(period_start);
+
+    // ONE grouped query for the entire fleet (perf audit 2026-10-18,
+    // finding 15): every ACTIVE tenant's cost/revenue summary in a single
+    // GROUP BY over `tenant_costs` — the old loop paid one full SUM per
+    // tenant. The LEFT JOIN keeps zero-activity tenants in the result, so
+    // `checked` and their Healthy classification match the per-tenant SUM
+    // (COALESCE zeros) exactly.
+    let summaries: Vec<TenantGroupedCostSummaryRow> = match sqlx::query_as(
+        r#"
+        SELECT t.id AS tenant_id,
+               COALESCE(SUM(tc.storage_cost), 0)::bigint AS storage_cost,
+               COALESCE(SUM(tc.bandwidth_cost), 0)::bigint AS bandwidth_cost,
+               COALESCE(SUM(tc.compute_cost), 0)::bigint AS compute_cost,
+               COALESCE(SUM(tc.dedicated_ip_cost), 0)::bigint AS dedicated_ip_cost,
+               COALESCE(SUM(tc.total_cost), 0)::bigint AS total_cost,
+               COALESCE(SUM(tc.revenue), 0)::bigint AS revenue
+        FROM tenants t
+        LEFT JOIN tenant_costs tc
+          ON tc.tenant_id = t.id
+         AND tc.recorded_at >= $1
+         AND tc.recorded_at < $2
+        WHERE t.status = 'active'
+        GROUP BY t.id
+        ORDER BY t.id
+        "#,
+    )
+    .bind(period_start.date_naive())
+    .bind(period_end.date_naive())
+    .fetch_all(&state.db)
+    .await
+    {
+        Ok(summaries) => summaries,
+        // Degraded mode (fault-injection contract
+        // `cost_margin_status_arms_alert_dedup_and_throttle`): a broken
+        // `tenant_costs` table must NOT fail the sweep — it degrades to
+        // per-tenant isolation, one warn per unreachable tenant.
+        Err(error) => {
+            warn!(error = %error, "grouped tenant cost summary load failed; falling back to per-tenant cost checks");
+            return process_cost_margin_checks_per_tenant(state).await;
+        }
+    };
+
+    let mut warnings = 0_i64;
+    let mut critical = 0_i64;
+    let mut healthy: Vec<(String, Option<f64>)> = Vec::new();
+
+    for row in &summaries {
+        let tenant_id = &row.tenant_id;
+        let summary = &row.summary;
+        // The decision logic is the per-tenant rule (see
+        // `evaluate_tenant_cost_margin`); only the DB SUM is grouped away.
+        // Tenants whose margin actually breaches pay the full per-tenant
+        // alert/throttle path — those are the rare rows the sweep exists
+        // for. Healthy tenants get their throttle cleared and status cached
+        // through ONE pipelined Redis round trip for the whole batch
+        // instead of two round trips per tenant.
+        if summary.total_cost == 0 && summary.revenue == 0 {
+            healthy.push((tenant_id.clone(), None));
+            continue;
+        }
+        let margin_percent = if summary.revenue > 0 {
+            ((summary.revenue - summary.total_cost) as f64 / summary.revenue as f64) * 100.0
+        } else {
+            0.0
+        };
+        if margin_percent < COST_MARGIN_CRITICAL_THRESHOLD
+            || margin_percent < COST_MARGIN_WARNING_THRESHOLD
+        {
+            match evaluate_tenant_cost_margin(state, tenant_id, summary).await {
+                Ok(CostMarginStatus::Warning) => warnings += 1,
+                Ok(CostMarginStatus::Critical) => critical += 1,
+                Ok(CostMarginStatus::Healthy) => {}
+                Err(error_message) => {
+                    warn!(tenant_id = %tenant_id, error = %error_message, "failed to evaluate tenant cost margin");
+                }
+            }
+        } else {
+            healthy.push((tenant_id.clone(), Some(margin_percent)));
+        }
+    }
+
+    cache_healthy_cost_margins_batch(state, &healthy).await;
+
+    Ok(CostMarginSweepResult {
+        checked: i64::try_from(summaries.len()).unwrap_or(i64::MAX),
+        warnings,
+        critical,
+    })
+}
+
+/// The healthy tail of the cost-margin sweep in ONE Redis round trip: clear
+/// each tenant's (stale) cost throttle and cache its evaluated status — the
+/// exact writes `clear_cost_throttling` + `cache_cost_margin_status` perform
+/// per tenant, pipelined. A throttle that actually existed (a recovery) still
+/// gets its per-tenant audit event, in tenant order, exactly as before.
+async fn cache_healthy_cost_margins_batch(state: &AppState, healthy: &[(String, Option<f64>)]) {
+    if healthy.is_empty() {
+        return;
+    }
+    let mut conn = match state.redis.get().await {
+        Ok(conn) => conn,
+        Err(error) => {
+            warn!(count = healthy.len(), error = %error, "failed to get Redis connection for cost margin sweep");
+            return;
+        }
+    };
+
+    let mut pipeline = redis::pipe();
+    for (tenant_id, margin_percent) in healthy {
+        // Per-tenant DEL then SETEX — the exact command order the per-row
+        // clear/cache used, and the order the results come back in.
+        pipeline.del(cost_throttle_key(tenant_id));
+        let payload = json!({
+            "status": CostMarginStatus::Healthy.as_str(),
+            "margin": margin_percent,
+            "checkedAt": Utc::now().to_rfc3339(),
+        })
+        .to_string();
+        pipeline.set_ex(format!("cost:status:{tenant_id}"), payload, 60 * 60);
+    }
+    let results: Vec<(usize, ())> = match pipeline.query_async(&mut conn).await {
+        Ok(results) => results,
+        Err(error) => {
+            warn!(count = healthy.len(), error = %error, "failed to refresh healthy cost margins in Redis");
+            return;
+        }
+    };
+
+    for ((tenant_id, _), (deleted, _)) in healthy.iter().zip(results) {
+        if deleted > 0 {
+            info!(tenant_id = %tenant_id, "cleared cost-protection rate limit");
+            record_cost_throttle_audit(
+                state,
+                tenant_id,
+                "billing.cost_throttle.cleared",
+                json!({ "reason": "margin_recovered" }),
+            )
+            .await;
+        }
+    }
+}
+
+/// The pre-batching shape, kept as the DEGRADED path: when the grouped
+/// summary cannot be loaded (e.g. `tenant_costs` missing during a migration
+/// window), the sweep falls back to one query per active tenant so a broken
+/// table isolates per-tenant failures instead of failing the whole fleet —
+/// exactly the semantics the batching replaced.
+async fn process_cost_margin_checks_per_tenant(
+    state: &AppState,
+) -> Result<CostMarginSweepResult, String> {
     let tenant_ids: Vec<String> = sqlx::query_scalar(
         r#"
         SELECT id
@@ -3493,6 +3969,9 @@ async fn process_cost_margin_checks(state: &AppState) -> Result<CostMarginSweepR
     })
 }
 
+/// Per-tenant loader + decision: the degraded path above and the direct
+/// recovery/parity checks the test-suite drives run through the same decision
+/// the batched sweep runs. The decision half is `evaluate_tenant_cost_margin`.
 async fn check_tenant_cost_margin(
     state: &AppState,
     tenant_id: &str,
@@ -3522,6 +4001,19 @@ async fn check_tenant_cost_margin(
     .await
     .map_err(|error| format!("Failed to load tenant cost summary for {tenant_id}: {error}"))?;
 
+    evaluate_tenant_cost_margin(state, tenant_id, &summary).await
+}
+
+/// The per-tenant cost-margin decision, unchanged from the original
+/// `check_tenant_cost_margin` body: zero activity is Healthy, else the margin
+/// percent classifies Critical (< 10%) / Warning (< 20%) / Healthy, with the
+/// alert, throttle and cache side effects below. The grouped sweep calls this
+/// ONLY for breaching tenants; their summaries come from the grouped query.
+async fn evaluate_tenant_cost_margin(
+    state: &AppState,
+    tenant_id: &str,
+    summary: &TenantCostSummaryRow,
+) -> Result<CostMarginStatus, String> {
     if summary.total_cost == 0 && summary.revenue == 0 {
         clear_cost_throttling(state, tenant_id).await;
         cache_cost_margin_status(state, tenant_id, CostMarginStatus::Healthy, None).await;
@@ -3546,7 +4038,7 @@ async fn check_tenant_cost_margin(
             alert_type,
             COST_MARGIN_CRITICAL_THRESHOLD,
             margin_percent,
-            &summary,
+            summary,
         )
         .await?;
         apply_cost_throttling(state, tenant_id, margin_percent).await;
@@ -3558,7 +4050,7 @@ async fn check_tenant_cost_margin(
             "low_margin",
             COST_MARGIN_WARNING_THRESHOLD,
             margin_percent,
-            &summary,
+            summary,
         )
         .await?;
         CostMarginStatus::Warning
@@ -9141,6 +9633,901 @@ mod coverage_adversarial {
         .expect("alerts");
         assert_eq!(alerts, 1, "an open alert is never duplicated");
     });
+
+    // ---------------- sweep statement-count regressions ----------------
+    // Perf audit 2026-10-18 (findings 15 + 17): the subscription sweeps,
+    // the usage-alert sweep and the cost-margin sweep used to pay per-row
+    // statements. The captures below (the worker crate's `log_statements`
+    // pattern) pin the batched shapes; the behavior-parity tests next to
+    // them pin identical rows/statuses/audit payloads.
+
+    /// Thread-local SQL capture for the batching regression tests (the pool
+    /// is rebuilt with `log_statements(Debug)`), mirroring the worker
+    /// crate's capture in `worker-processors::campaigns`.
+    /// One fetched `audit_logs` row: (tenant_id, resource, resource_id,
+    /// details, previous_hash, hash, signature, timestamp).
+    type FetchedAuditRow = (
+        String,
+        String,
+        Option<String>,
+        Value,
+        Option<String>,
+        String,
+        String,
+        DateTime<Utc>,
+    );
+
+    #[derive(Clone, Default)]
+    struct SweepSqlCapture {
+        statements: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl SweepSqlCapture {
+        fn statements(&self) -> Vec<String> {
+            self.statements.lock().unwrap().clone()
+        }
+
+        fn count_starting_with(&self, prefix: &str) -> usize {
+            self.statements()
+                .iter()
+                .filter(|statement| statement.trim_start().starts_with(prefix))
+                .count()
+        }
+
+        fn print(&self, label: &str) {
+            eprintln!("sql capture [{label}]");
+            for statement in self.statements() {
+                eprintln!("  {statement:?}");
+            }
+        }
+    }
+
+    struct SqlCaptureLayer(SweepSqlCapture);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SqlCaptureLayer {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _context: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if event.metadata().target() != "sqlx::query" {
+                return;
+            }
+            struct SummaryVisitor<'a>(&'a mut Option<String>);
+            impl tracing::field::Visit for SummaryVisitor<'_> {
+                fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                    if field.name() == "summary" {
+                        *self.0 = Some(value.to_string());
+                    }
+                }
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if field.name() == "summary" {
+                        *self.0 = Some(format!("{value:?}"));
+                    }
+                }
+            }
+            let mut summary = None;
+            event.record(&mut SummaryVisitor(&mut summary));
+            if let Some(summary) = summary {
+                self.0.statements.lock().unwrap().push(summary);
+            }
+        }
+    }
+
+    fn capture_sweep_sql() -> (SweepSqlCapture, tracing::subscriber::DefaultGuard) {
+        use tracing_subscriber::layer::SubscriberExt;
+        let capture = SweepSqlCapture::default();
+        let subscriber = tracing_subscriber::registry().with(SqlCaptureLayer(capture.clone()));
+        (capture, tracing::subscriber::set_default(subscriber))
+    }
+
+    /// A second AppState over the SAME database whose pool logs every
+    /// statement, so the capture sees exactly what the sweep issues.
+    async fn logging_pool_state(env: &Env) -> Arc<AppState> {
+        use sqlx::ConnectOptions;
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .test_before_acquire(false)
+            .connect_with(
+                (*env.pool.connect_options())
+                    .clone()
+                    .log_statements(tracing::log::LevelFilter::Debug),
+            )
+            .await
+            .expect("logging pool over the coverage database");
+        AppState::new(
+            pool,
+            env.redis.clone(),
+            crate::config::BillingConfig::default(),
+        )
+    }
+
+    /// Seed a subscription shaped like `subscriptions::cancel_subscription`
+    /// leaves behind for a period-end stop (`cancel_at_period_end = true`).
+    async fn seed_period_end_subscription(env: &Env, tenant: &str, due: bool, status: &str) {
+        sqlx::query(
+            "INSERT INTO adyen_subscriptions
+                 (tenant_id, adyen_subscription_id, plan, status,
+                  billing_cycle_start, billing_cycle_end,
+                  cancel_at_period_end, canceled_at, adyen_shopper_reference)
+             VALUES ($1, $2, 'growth', $4,
+                     NOW() - INTERVAL '30 days',
+                     CASE WHEN $3 THEN NOW() - INTERVAL '1 hour'
+                          ELSE NOW() + INTERVAL '10 days' END,
+                     true, NOW(), $1)",
+        )
+        .bind(tenant)
+        .bind(format!("psp_{tenant}"))
+        .bind(due)
+        .bind(status)
+        .execute(&env.pool)
+        .await
+        .expect("seed canceled subscription");
+    }
+
+    env_test!(
+        sweep_canceled_at_period_end_is_set_based_with_identical_rows,
+        |env| {
+            let due_a = "mtcov_cset_due_a";
+            let due_b = "mtcov_cset_due_b";
+            let future = "mtcov_cset_future";
+            for tenant in [due_a, due_b, future] {
+                seed_tenant(env, tenant, "growth", "active").await;
+            }
+            seed_period_end_subscription(env, due_a, true, "active").await;
+            seed_period_end_subscription(env, due_b, true, "past_due").await;
+            seed_period_end_subscription(env, future, false, "active").await;
+
+            let guard = ENV_LOCK.lock().await;
+            let previous_key = std::env::var("AUDIT_SIGNING_KEY").ok();
+            std::env::set_var("AUDIT_SIGNING_KEY", "cset-audit-key-0123456789abcdef");
+            let signing_key = "cset-audit-key-0123456789abcdef".to_string();
+
+            let head_before: Option<i64> = sqlx::query_scalar(
+                "SELECT head_seq FROM audit_chain_head WHERE chain_id = 'global'",
+            )
+            .fetch_optional(&env.pool)
+            .await
+            .expect("chain head before");
+
+            let state = logging_pool_state(env).await;
+            let (capture, capture_guard) = capture_sweep_sql();
+            let ended = sweep_canceled_at_period_end(state.as_ref())
+                .await
+                .expect("sweep");
+            drop(capture_guard);
+            capture.print("sweep_canceled_at_period_end");
+
+            // SET-BASED: one CTE statement performs BOTH writes, and the
+            // whole audit append costs ONE head advance + ONE multi-row
+            // INSERT — regardless of how many subscriptions are due.
+            assert_eq!(
+                capture.count_starting_with("WITH due AS"),
+                1,
+                "the lock+transition+downgrade must be ONE statement: {:?}",
+                capture.statements()
+            );
+            assert_eq!(
+                capture.count_starting_with("UPDATE adyen_subscriptions"),
+                0,
+                "no per-row subscription updates: {:?}",
+                capture.statements()
+            );
+            assert_eq!(
+                capture.count_starting_with("UPDATE tenants"),
+                0,
+                "no per-row tenant downgrades: {:?}",
+                capture.statements()
+            );
+            assert_eq!(
+                capture.count_starting_with("SELECT"),
+                0,
+                "no separate due-list SELECT: {:?}",
+                capture.statements()
+            );
+            assert_eq!(
+                capture.count_starting_with("INSERT INTO audit_chain_head"),
+                1,
+                "ONE chain-head advance per batch"
+            );
+            assert_eq!(
+                capture.count_starting_with("INSERT INTO audit_logs"),
+                1,
+                "ONE multi-row audit insert per batch"
+            );
+            assert!(
+                capture.statements().len() <= 6,
+                "the whole sweep must stay at ~5 statements (BEGIN + CTE + audit batch + COMMIT): {:?}",
+                capture.statements()
+            );
+
+            // BEHAVIOR PARITY: same statuses, flags, plan, audit payloads.
+            assert_eq!(ended, 2, "both due subscriptions end");
+            for tenant in [due_a, due_b] {
+                let (status, cancel_at_period_end): (String, bool) = sqlx::query_as(
+                    "SELECT status, cancel_at_period_end FROM adyen_subscriptions
+                     WHERE tenant_id = $1",
+                )
+                .bind(tenant)
+                .fetch_one(&env.pool)
+                .await
+                .expect("subscription after sweep");
+                assert_eq!(status, "canceled");
+                assert!(!cancel_at_period_end);
+                let (plan,): (String,) = sqlx::query_as("SELECT plan FROM tenants WHERE id = $1")
+                    .bind(tenant)
+                    .fetch_one(&env.pool)
+                    .await
+                    .expect("tenant after sweep");
+                assert_eq!(plan, "free");
+            }
+            let future_status: String =
+                sqlx::query_scalar("SELECT status FROM adyen_subscriptions WHERE tenant_id = $1")
+                    .bind(future)
+                    .fetch_one(&env.pool)
+                    .await
+                    .expect("future status");
+            assert_eq!(future_status, "active", "a future period end is untouched");
+            let (future_plan,): (String,) =
+                sqlx::query_as("SELECT plan FROM tenants WHERE id = $1")
+                    .bind(future)
+                    .fetch_one(&env.pool)
+                    .await
+                    .expect("future tenant plan");
+            assert_eq!(future_plan, "growth");
+
+            // Audit rows: one per ended subscription, exact payload fields,
+            // byte-re-derivable hashes and signed links — exactly what the
+            // per-row append produced (resource_id is the subscription's
+            // internal id, as in the original loop).
+            let subscriptions: Vec<(uuid::Uuid, String)> = sqlx::query_as(
+                "SELECT id, tenant_id FROM adyen_subscriptions
+                 WHERE tenant_id IN ($1, $2) AND status = 'canceled'",
+            )
+            .bind(due_a)
+            .bind(due_b)
+            .fetch_all(&env.pool)
+            .await
+            .expect("ended subscriptions");
+            let expected_audits: std::collections::HashSet<(String, String)> = subscriptions
+                .iter()
+                .map(|(id, tenant)| (tenant.clone(), id.to_string()))
+                .collect();
+            let audits: Vec<FetchedAuditRow> = sqlx::query_as(
+                "SELECT tenant_id, resource, resource_id, details, previous_hash, hash,
+                        signature, timestamp
+                 FROM audit_logs
+                 WHERE action = 'billing.subscription_ended_at_period_end'",
+            )
+            .fetch_all(&env.pool)
+            .await
+            .expect("audit rows");
+            assert_eq!(audits.len(), 2, "one audit row per ended subscription");
+            let audited_set: std::collections::HashSet<(String, String)> = audits
+                .iter()
+                .map(|(tenant_id, _, resource_id, ..)| {
+                    (tenant_id.clone(), resource_id.clone().expect("resource id"))
+                })
+                .collect();
+            assert_eq!(
+                audited_set, expected_audits,
+                "each ended subscription gets its own tenant-attributed audit row"
+            );
+            for (
+                tenant_id,
+                resource,
+                resource_id,
+                details,
+                previous_hash,
+                hash,
+                signature,
+                timestamp,
+            ) in &audits
+            {
+                assert_eq!(resource, "subscription");
+                assert_eq!(
+                    details,
+                    &serde_json::json!({ "effective": "period_end" }),
+                    "the audit payload is unchanged"
+                );
+                let recomputed = apexmail_lib::audit::audit_hash(
+                    Some(tenant_id),
+                    None,
+                    "billing.subscription_ended_at_period_end",
+                    resource,
+                    resource_id.as_deref(),
+                    details,
+                    *timestamp,
+                );
+                assert_eq!(&recomputed, hash, "the row hash re-derives byte-exactly");
+                let expected_signature = apexmail_lib::audit::audit_log_signature(
+                    previous_hash.as_deref(),
+                    hash,
+                    &signing_key,
+                )
+                .expect("signs");
+                assert_eq!(&expected_signature, signature, "the link is signed");
+            }
+
+            // The batch chains in due order and advances the shared head
+            // exactly once (one link per batch, like compliance log_batch).
+            // Row order in the SELECT is unspecified: the row the OTHER row
+            // links to was written first.
+            let first_index = if audits[1].4.as_deref() == Some(audits[0].5.as_str()) {
+                0
+            } else {
+                1
+            };
+            let second_index = 1 - first_index;
+            let head_hash_after: Option<String> = sqlx::query_scalar(
+                "SELECT head_hash FROM audit_chain_head WHERE chain_id = 'global'",
+            )
+            .fetch_optional(&env.pool)
+            .await
+            .expect("chain head after");
+            let head_seq_after: i64 = sqlx::query_scalar(
+                "SELECT head_seq FROM audit_chain_head WHERE chain_id = 'global'",
+            )
+            .fetch_one(&env.pool)
+            .await
+            .expect("chain seq after");
+            assert_eq!(
+                head_hash_after.as_deref(),
+                Some(audits[second_index].5.as_str()),
+                "the batch's LAST row is the new chain head"
+            );
+            assert_eq!(
+                audits[second_index].4.as_deref(),
+                Some(audits[first_index].5.as_str()),
+                "entry 1 links entry 0 — in-memory chain, input order"
+            );
+            assert_eq!(
+                head_seq_after,
+                head_before.unwrap_or(0) + 1,
+                "one batch = one head-seq advance"
+            );
+
+            // Idempotent replay: nothing matches, nothing is written.
+            let (capture_replay, replay_guard) = capture_sweep_sql();
+            let replay = sweep_canceled_at_period_end(state.as_ref())
+                .await
+                .expect("replay");
+            drop(replay_guard);
+            assert_eq!(replay, 0, "replay is a no-op");
+            assert_eq!(
+                capture_replay.count_starting_with("INSERT INTO audit_logs"),
+                0,
+                "an empty sweep writes no audit rows"
+            );
+
+            match previous_key {
+                Some(value) => std::env::set_var("AUDIT_SIGNING_KEY", value),
+                None => std::env::remove_var("AUDIT_SIGNING_KEY"),
+            }
+            drop(guard);
+        }
+    );
+
+    env_test!(
+        sweep_expired_trials_is_set_based_with_identical_rows,
+        |env| {
+            let stale_a = "mtcov_tset_stale_a";
+            let stale_b = "mtcov_tset_stale_b";
+            let fresh = "mtcov_tset_fresh";
+            let free = "mtcov_tset_free";
+            for tenant in [stale_a, stale_b, fresh] {
+                seed_tenant(env, tenant, "growth", "active").await;
+            }
+            seed_tenant(env, free, "free", "active").await;
+            let now = Utc::now();
+            for (tenant, sub, trial_end) in [
+                (
+                    stale_a,
+                    "psp_trial_stale_a",
+                    now - chrono::Duration::hours(48),
+                ),
+                (
+                    stale_b,
+                    "psp_trial_stale_b",
+                    now - chrono::Duration::hours(30),
+                ),
+                (fresh, "psp_trial_fresh", now - chrono::Duration::hours(1)),
+                (free, "psp_trial_free", now - chrono::Duration::hours(48)),
+            ] {
+                sqlx::query(
+                    "INSERT INTO adyen_subscriptions
+                         (tenant_id, adyen_subscription_id, plan, status, trial_end,
+                          billing_cycle_start, billing_cycle_end)
+                     VALUES ($1, $2, 'growth', 'trialing', $3, $4, $5)",
+                )
+                .bind(tenant)
+                .bind(sub)
+                .bind(trial_end)
+                .bind(now - chrono::Duration::days(14))
+                .bind(now + chrono::Duration::days(16))
+                .execute(&env.pool)
+                .await
+                .expect("seed trial");
+            }
+
+            let guard = ENV_LOCK.lock().await;
+            let previous_key = std::env::var("AUDIT_SIGNING_KEY").ok();
+            std::env::set_var("AUDIT_SIGNING_KEY", "tset-audit-key-0123456789abcdef");
+            let signing_key = "tset-audit-key-0123456789abcdef".to_string();
+
+            let state = logging_pool_state(env).await;
+            let (capture, capture_guard) = capture_sweep_sql();
+            let swept = sweep_expired_trials(state.as_ref()).await.expect("sweep");
+            drop(capture_guard);
+            capture.print("sweep_expired_trials");
+
+            // SET-BASED: one CTE statement cancels every stale trialing
+            // subscription and downgrades its tenant; ONE audit batch.
+            assert_eq!(
+                capture.count_starting_with("WITH stale AS"),
+                1,
+                "the stale detection + cancel + downgrade must be ONE statement: {:?}",
+                capture.statements()
+            );
+            assert_eq!(
+                capture.count_starting_with("UPDATE adyen_subscriptions"),
+                0,
+                "no per-row subscription cancellations: {:?}",
+                capture.statements()
+            );
+            assert_eq!(
+                capture.count_starting_with("UPDATE tenants"),
+                0,
+                "no per-row tenant downgrades: {:?}",
+                capture.statements()
+            );
+            assert_eq!(
+                capture.count_starting_with("SELECT"),
+                0,
+                "no separate stale-list SELECT: {:?}",
+                capture.statements()
+            );
+            assert_eq!(
+                capture.count_starting_with("INSERT INTO audit_chain_head"),
+                1,
+                "ONE chain-head advance per batch"
+            );
+            assert_eq!(
+                capture.count_starting_with("INSERT INTO audit_logs"),
+                1,
+                "ONE multi-row audit insert per batch"
+            );
+
+            // BEHAVIOR PARITY: same rows and statuses as the per-row sweep.
+            assert_eq!(swept, 2, "both stale trials downgrade");
+            for tenant in [stale_a, stale_b] {
+                let (plan, status): (String, String) = sqlx::query_as(
+                    "SELECT t.plan, s.status FROM tenants t
+                     JOIN adyen_subscriptions s ON s.tenant_id = t.id WHERE t.id = $1",
+                )
+                .bind(tenant)
+                .fetch_one(&env.pool)
+                .await
+                .expect("stale tenant after sweep");
+                assert_eq!(plan, "free");
+                assert_eq!(status, "canceled");
+            }
+            let fresh_status: String =
+                sqlx::query_scalar("SELECT status FROM adyen_subscriptions WHERE tenant_id = $1")
+                    .bind(fresh)
+                    .fetch_one(&env.pool)
+                    .await
+                    .expect("fresh status");
+            assert_eq!(fresh_status, "trialing", "a recent trial is never raced");
+            let free_status: String =
+                sqlx::query_scalar("SELECT status FROM adyen_subscriptions WHERE tenant_id = $1")
+                    .bind(free)
+                    .fetch_one(&env.pool)
+                    .await
+                    .expect("free tenant status");
+            assert_eq!(
+                free_status, "trialing",
+                "a free-plan tenant is not the sweep's business"
+            );
+
+            // Audit rows: one per downgraded tenant, exact payload fields.
+            let audits: Vec<(String, String, Option<String>, Value)> = sqlx::query_as(
+                "SELECT tenant_id, resource, resource_id, details
+                 FROM audit_logs
+                 WHERE action = 'billing.trial_expired_sweep'
+                 ORDER BY tenant_id",
+            )
+            .fetch_all(&env.pool)
+            .await
+            .expect("audit rows");
+            assert_eq!(audits.len(), 2, "one audit row per downgraded tenant");
+            for (index, (tenant_id, resource, resource_id, details)) in audits.iter().enumerate() {
+                assert_eq!(resource, "adyen_subscription");
+                let expected_sub = if index == 0 {
+                    "psp_trial_stale_a"
+                } else {
+                    "psp_trial_stale_b"
+                };
+                assert_eq!(resource_id.as_deref(), Some(expected_sub));
+                assert_eq!(
+                    tenant_id.as_str(),
+                    if index == 0 { stale_a } else { stale_b }
+                );
+                assert_eq!(
+                    details,
+                    &serde_json::json!({
+                        "reason": "trialing subscription period ended without a terminal webhook",
+                    }),
+                    "the audit payload is unchanged"
+                );
+            }
+
+            // The chain still verifies: re-derive and check the links.
+            let chain: Vec<(Option<String>, String, String)> = sqlx::query_as(
+                "SELECT previous_hash, hash, signature FROM audit_logs
+                 WHERE action = 'billing.trial_expired_sweep'
+                 ORDER BY tenant_id",
+            )
+            .fetch_all(&env.pool)
+            .await
+            .expect("chain rows");
+            for (previous_hash, hash, signature) in &chain {
+                let expected_signature = apexmail_lib::audit::audit_log_signature(
+                    previous_hash.as_deref(),
+                    hash,
+                    &signing_key,
+                )
+                .expect("signs");
+                assert_eq!(&expected_signature, signature, "the link is signed");
+            }
+
+            // Idempotent replay.
+            let replay = sweep_expired_trials(state.as_ref()).await.expect("replay");
+            assert_eq!(replay, 0, "replay is a no-op");
+
+            match previous_key {
+                Some(value) => std::env::set_var("AUDIT_SIGNING_KEY", value),
+                None => std::env::remove_var("AUDIT_SIGNING_KEY"),
+            }
+            drop(guard);
+        }
+    );
+
+    env_test!(
+        cost_margin_sweep_is_grouped_with_identical_decisions,
+        |env| {
+            // Same shape as cost_margin_throttles_critical_and_recovers plus
+            // a zero-activity tenant: the sweep must classify identically
+            // while paying ONE grouped query for the whole fleet.
+            let healthy = "mtcov_gcost_healthy";
+            let warning = "mtcov_gcost_warning";
+            let critical = "mtcov_gcost_critical";
+            let inactive = "mtcov_gcost_inactive";
+            seed_cost_row(env, healthy, 10_000, 1_000).await; // 90% margin
+            seed_cost_row(env, warning, 10_000, 8_500).await; // 15% margin
+            seed_cost_row(env, critical, 1_000, 2_000).await; // -100% margin
+            seed_tenant(env, inactive, "growth", "active").await;
+
+            let state = logging_pool_state(env).await;
+            let (capture, capture_guard) = capture_sweep_sql();
+            let result = process_cost_margin_checks(state.as_ref())
+                .await
+                .expect("checks");
+            drop(capture_guard);
+            capture.print("process_cost_margin_checks");
+
+            // SET-BASED: ONE grouped summary query, NO per-tenant SUM and NO
+            // separate active-tenant list; only breaching tenants pay the
+            // per-tenant alert path (2 here).
+            assert_eq!(
+                capture.count_starting_with("SELECT t.id AS tenant_id"),
+                1,
+                "one GROUP BY query for the whole fleet: {:?}",
+                capture.statements()
+            );
+            assert_eq!(
+                capture.count_starting_with("SELECT COALESCE(SUM(storage_cost)"),
+                0,
+                "no per-tenant cost SUM may remain: {:?}",
+                capture.statements()
+            );
+            assert_eq!(
+                capture.count_starting_with("SELECT id FROM tenants WHERE status"),
+                0,
+                "no separate active-tenant list query: {:?}",
+                capture.statements()
+            );
+            assert_eq!(
+                capture.count_starting_with("WITH existing_alert AS"),
+                2,
+                "exactly the breaching tenants pay an alert statement"
+            );
+
+            // BEHAVIOR PARITY: identical counts, throttle and cache writes.
+            // The canonical chain seeds the platform `system` tenant, so 5
+            // active tenants are checked.
+            assert_eq!(result.checked, 5);
+            assert_eq!(result.warnings, 1);
+            assert_eq!(result.critical, 1);
+            let mut conn = env.redis.get().await.expect("redis");
+            let throttled: bool = redis::cmd("EXISTS")
+                .arg(cost_throttle_key(critical))
+                .query_async(&mut conn)
+                .await
+                .expect("exists");
+            assert!(throttled, "a critical margin still activates the throttle");
+            let healthy_throttled: bool = redis::cmd("EXISTS")
+                .arg(cost_throttle_key(healthy))
+                .query_async(&mut conn)
+                .await
+                .expect("exists");
+            assert!(!healthy_throttled, "a healthy margin never throttles");
+            let inactive_throttled: bool = redis::cmd("EXISTS")
+                .arg(cost_throttle_key(inactive))
+                .query_async(&mut conn)
+                .await
+                .expect("exists");
+            assert!(!inactive_throttled, "zero activity never throttles");
+            for tenant in [healthy, inactive] {
+                let cached: Option<String> = redis::cmd("GET")
+                    .arg(format!("cost:status:{tenant}"))
+                    .query_async(&mut conn)
+                    .await
+                    .expect("cache");
+                assert!(
+                    cached.is_some(),
+                    "healthy tenants still get their evaluated status cached"
+                );
+            }
+            let cached_healthy: String = redis::cmd("GET")
+                .arg(format!("cost:status:{healthy}"))
+                .query_async(&mut conn)
+                .await
+                .expect("cache");
+            let cached: Value = serde_json::from_str(&cached_healthy).expect("cache json");
+            assert_eq!(cached["status"], "healthy");
+            assert!(
+                (cached["margin"].as_f64().expect("margin") - 90.0).abs() < 1e-9,
+                "the healthy margin value rides the cache: {cached}"
+            );
+            let alerts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cost_alerts")
+                .fetch_one(&env.pool)
+                .await
+                .expect("alerts");
+            assert_eq!(alerts, 2, "warning + critical open one alert each");
+
+            // RECOVERY through the batched healthy path: a pre-existing
+            // throttle on a now-healthy tenant is cleared and audited.
+            {
+                let mut seed_conn = env.redis.get().await.expect("redis");
+                let _: () = redis::pipe()
+                    .set_ex(cost_throttle_key(healthy), "{}", 60)
+                    .ignore()
+                    .query_async(&mut seed_conn)
+                    .await
+                    .expect("seed throttle");
+            }
+            let result = process_cost_margin_checks(&env.state)
+                .await
+                .expect("recovery sweep");
+            assert_eq!(result.critical, 1);
+            let still_throttled: bool = redis::cmd("EXISTS")
+                .arg(cost_throttle_key(healthy))
+                .query_async(&mut conn)
+                .await
+                .expect("exists");
+            assert!(!still_throttled, "the stale throttle is cleared");
+            let clear_audits: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM audit_logs
+                 WHERE tenant_id = $1 AND action = 'billing.cost_throttle.cleared'",
+            )
+            .bind(healthy)
+            .fetch_one(&env.pool)
+            .await
+            .expect("clear audits");
+            assert_eq!(
+                clear_audits, 1,
+                "an actual throttle clear keeps its per-tenant audit event"
+            );
+        }
+    );
+
+    env_test!(
+        usage_alert_sweep_is_grouped_with_identical_behavior,
+        |env| {
+            // Two tenants with rules (one breaching rule each) prove the
+            // grouped evaluation fires the same rows the per-tenant sweep
+            // did — including the cooldown that gates the second sweep.
+            let tenant_a = "mtcov_galert_a";
+            let tenant_b = "mtcov_galert_b";
+            for tenant in [tenant_a, tenant_b] {
+                seed_tenant(env, tenant, "growth", "active").await;
+            }
+            sqlx::query(
+                "INSERT INTO plans (id, name, display_name, price_cents, email_limit, api_call_limit)
+                 VALUES ('plan_galert_a', 'mtcov_galert_plan_a', 'x', 0, 10, 1000),
+                        ('plan_galert_b', 'mtcov_galert_plan_b', 'x', 0, 20, 1000)
+                 ON CONFLICT (name) DO UPDATE SET email_limit = EXCLUDED.email_limit",
+            )
+            .execute(&env.pool)
+            .await
+            .expect("plans");
+            sqlx::query("UPDATE tenants SET plan = 'mtcov_galert_plan_a' WHERE id = $1")
+                .bind(tenant_a)
+                .execute(&env.pool)
+                .await
+                .expect("plan a");
+            sqlx::query("UPDATE tenants SET plan = 'mtcov_galert_plan_b' WHERE id = $1")
+                .bind(tenant_b)
+                .execute(&env.pool)
+                .await
+                .expect("plan b");
+            // tenant A: one rule, 80% of 10 = 8 used → fires.
+            // tenant B: rules at 40% and 80% of 20 = 10 used → only 40 fires.
+            sqlx::query(
+                "INSERT INTO usage_alert_configs
+                     (tenant_id, metric_type, threshold_percent, notification_channel, enabled)
+                 VALUES ($1, 'emails', 80, 'email', true),
+                        ($2, 'emails', 40, 'email', true),
+                        ($2, 'emails', 80, 'email', true)",
+            )
+            .bind(tenant_a)
+            .bind(tenant_b)
+            .execute(&env.pool)
+            .await
+            .expect("alert configs");
+            sqlx::query(
+                "INSERT INTO metering_events (id, tenant_id, event_type, quantity, timestamp)
+                 VALUES (gen_random_uuid(), $1, 'emails_sent', 8, NOW()),
+                        (gen_random_uuid(), $2, 'emails_sent', 10, NOW())",
+            )
+            .bind(tenant_a)
+            .bind(tenant_b)
+            .execute(&env.pool)
+            .await
+            .expect("usage");
+
+            // The cooldown keys live in the SHARED test Redis and survive a
+            // failed prior run: clear them first.
+            {
+                let mut conn = env.redis.get().await.expect("redis");
+                let _: () = redis::pipe()
+                    .del(format!("alert:cooldown:{tenant_a}:emails:80"))
+                    .ignore()
+                    .del(format!("alert:cooldown:{tenant_b}:emails:40"))
+                    .ignore()
+                    .del(format!("alert:cooldown:{tenant_b}:emails:80"))
+                    .ignore()
+                    .query_async(&mut conn)
+                    .await
+                    .expect("clear stale cooldowns");
+            }
+
+            let state = logging_pool_state(env).await;
+            let client = Client::new();
+            let (capture, capture_guard) = capture_sweep_sql();
+            let first = process_usage_alerts(state.as_ref(), &client)
+                .await
+                .expect("sweep");
+            drop(capture_guard);
+            capture.print("process_usage_alerts");
+
+            // SET-BASED: one configs fetch, ONE grouped usage aggregate, one
+            // plan-limits fetch, one webhook-URL fetch — for BOTH tenants.
+            assert_eq!(
+                capture.count_starting_with("SELECT tenant_id, id,"),
+                1,
+                "one configs fetch for all rules: {:?}",
+                capture.statements()
+            );
+            assert_eq!(
+                capture.count_starting_with("SELECT DISTINCT tenant_id"),
+                0,
+                "no separate tenant-list query: {:?}",
+                capture.statements()
+            );
+            assert_eq!(
+                capture.count_starting_with("SELECT tenant_id, event_type"),
+                1,
+                "ONE grouped usage query for all tenants with rules: {:?}",
+                capture.statements()
+            );
+            assert_eq!(
+                capture.count_starting_with("SELECT event_type"),
+                0,
+                "no per-tenant metering SUM may remain: {:?}",
+                capture.statements()
+            );
+            assert_eq!(
+                capture.count_starting_with("SELECT t.id AS tenant_id"),
+                1,
+                "one plan-limits fetch (IN list): {:?}",
+                capture.statements()
+            );
+            assert_eq!(
+                capture.count_starting_with("SELECT id, COALESCE(settings"),
+                1,
+                "one webhook-URL fetch (IN list): {:?}",
+                capture.statements()
+            );
+
+            // BEHAVIOR PARITY: same fired rules, incidents, queue rows,
+            // cooldowns and last_triggered stamps.
+            assert_eq!(first.tenants_checked, 2);
+            assert_eq!(first.alerts_triggered, 2, "A's 80% and B's 40% fire");
+            let queued_a: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM notification_queue WHERE tenant_id = $1 AND type = 'usage_alert'",
+            )
+            .bind(tenant_a)
+            .fetch_one(&env.pool)
+            .await
+            .expect("queue a");
+            assert_eq!(queued_a, 1);
+            let queued_b: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM notification_queue WHERE tenant_id = $1 AND type = 'usage_alert'",
+            )
+            .bind(tenant_b)
+            .fetch_one(&env.pool)
+            .await
+            .expect("queue b");
+            assert_eq!(queued_b, 1);
+            let incidents: Vec<(Option<String>, String, String)> = sqlx::query_as(
+                "SELECT tenant_id, severity, message FROM system_alerts
+                 WHERE source = 'usage_alert' ORDER BY fingerprint",
+            )
+            .fetch_all(&env.pool)
+            .await
+            .expect("incidents");
+            assert_eq!(incidents.len(), 2, "one incident per fired rule");
+            let triggered: Vec<(i32,)> = sqlx::query_as(
+                "SELECT threshold_percent FROM usage_alert_configs
+                 WHERE last_triggered_at IS NOT NULL ORDER BY tenant_id, threshold_percent",
+            )
+            .fetch_all(&env.pool)
+            .await
+            .expect("triggered");
+            assert_eq!(
+                triggered,
+                vec![(80,), (40,)],
+                "only the fired rules are stamped"
+            );
+            let mut conn = env.redis.get().await.expect("redis");
+            let cooldown_a: bool = conn
+                .exists(format!("alert:cooldown:{tenant_a}:emails:80"))
+                .await
+                .expect("cooldown a");
+            assert!(cooldown_a, "the delivered rule enters cooldown");
+            let cooldown_b80: bool = conn
+                .exists(format!("alert:cooldown:{tenant_b}:emails:80"))
+                .await
+                .expect("cooldown b80");
+            assert!(
+                !cooldown_b80,
+                "a rule below its threshold never enters cooldown"
+            );
+
+            // The second sweep finds every fired rule in cooldown: the
+            // per-config cooldown semantics are unchanged.
+            let second = process_usage_alerts(&env.state, &client)
+                .await
+                .expect("second sweep");
+            assert_eq!(
+                second.alerts_triggered, 0,
+                "cooldown suppresses the same rule in the next sweep"
+            );
+            let queued_after: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM notification_queue WHERE type = 'usage_alert'",
+            )
+            .fetch_one(&env.pool)
+            .await
+            .expect("queue total");
+            assert_eq!(queued_after, 2, "no additional queue rows");
+        }
+    );
 
     // ---------------- KMD backfill ----------------
 

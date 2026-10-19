@@ -31,6 +31,19 @@
 //!    enqueue never consumes quota. A duplicate reservation owns no metering
 //!    state and is never compensated (F22).
 //!
+//! ## Batch admission (campaign drain batching)
+//!
+//! [`SendAdmissionService::admit_batch`] is the page-granular form of
+//! `admit` for the campaign drain: ONE category validation, ONE suppression
+//! probe, ONE batched consent decision and ONE quota reservation for the
+//! page's allowed count (a single [`SendAdmission`] handle whose rollback
+//! compensates the whole page). It returns one
+//! [`BatchAdmissionOutcome`] per recipient so suppressed/consent-refused
+//! recipients still land in the same terminal state the single-recipient
+//! path gives them — refusal stays per-recipient, only the probes and the
+//! reservation are page-granular. The single-recipient `admit` is untouched
+//! and remains the fallback ladder.
+//!
 //! ## Dependency direction
 //!
 //! The service lives in `billing-service` because the canonical metering
@@ -64,6 +77,11 @@ use uuid::Uuid;
 
 use apexmail_lib::email_headers::message_category;
 use compliance::consent_enforcement::{ConsentEnforcer, SendDecision};
+
+// Re-exported so downstream admission callers (the campaign drain's test
+// backends) can implement `SendAdmissionBackend::consent_decision` without
+// taking a `compliance` dependency of their own.
+pub use compliance::consent_enforcement::SendDecision as AdmissionSendDecision;
 
 use crate::types::MeterEventType;
 use crate::usage::{self, QuotaRecordResult, UsageError};
@@ -444,6 +462,144 @@ pub struct SendAdmissionRequest<'a> {
     pub category: Option<&'a str>,
 }
 
+/// One recipient's outcome inside a batch admission, in the page's input
+/// order (see [`SendAdmissionService::admit_batch`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BatchAdmissionOutcome {
+    /// Admitted under the page-level reservation ([`BatchAdmission`]).
+    Allowed,
+    /// On the tenant suppression list — a terminal refusal for a campaign
+    /// recipient (the campaign drain marks it `suppressed`, never retries).
+    Suppressed,
+    /// The send-time consent gate refused this marketing recipient — a
+    /// terminal refusal. Carries the enforcer's named reason, exactly as the
+    /// single-recipient [`SendAdmissionError::ConsentRefused`] does.
+    ConsentRefused { reason: String },
+    /// The batch failed before this recipient's gates ran. The caller must
+    /// defer (requeue) it exactly like today's transient arms — never mark
+    /// it sent, never silently skip it. Only ever present alongside a
+    /// [`BatchAdmission::failure`].
+    Unchecked,
+}
+
+/// Why a batch admission could not complete for the whole page. Outcomes
+/// resolved BEFORE the failure stay valid ([`BatchAdmission::outcomes`]) and
+/// must still be applied per recipient; the rest of the page defers.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum BatchAdmissionFailure {
+    /// The server-owned category failed validation — the batch never probed
+    /// and never reserved anything.
+    #[error("invalid message category '{raw}'")]
+    InvalidCategory { raw: String },
+
+    /// The ONE suppression probe failed — nothing is known, nothing was
+    /// reserved; the page defers.
+    #[error("suppression lookup unavailable: {0}")]
+    SuppressionUnavailable(String),
+
+    /// The batched consent gate failed closed AFTER the suppression probe —
+    /// the already-resolved suppression outcomes stay valid.
+    #[error("consent lookup unavailable: {0}")]
+    ConsentUnavailable(String),
+
+    /// The plan gate refused the WHOLE allowed set. A page reserves once, so
+    /// a page that does not fit defers together; a caller that needs the
+    /// pre-batch partial-fit granularity falls back to the untouched
+    /// single-recipient [`SendAdmissionService::admit`] ladder (the campaign
+    /// drain does). Refusal outcomes already resolved stay valid.
+    #[error("email quota exceeded")]
+    QuotaExceeded,
+
+    /// The canonical metering layer was unavailable — fail closed, never
+    /// admit unmetered.
+    #[error("billing quota enforcement unavailable: {0}")]
+    MeteringUnavailable(String),
+}
+
+/// The batch admission result for one claimed page (one tenant): ONE quota
+/// reservation covering every allowed recipient, plus the per-recipient
+/// decisions in input order.
+///
+/// Settlement is page-granular: [`SendAdmission::commit`] the reservation
+/// after the page's enqueue transaction succeeds, or
+/// [`SendAdmission::rollback`] when it fails — compensating the WHOLE page.
+/// The reservation is `None` when nothing was allowed (every recipient
+/// refused, or the page failed before reserving): there is nothing to settle.
+pub struct BatchAdmission {
+    outcomes: Vec<BatchAdmissionOutcome>,
+    reservation: Option<SendAdmission>,
+    failure: Option<BatchAdmissionFailure>,
+}
+
+impl fmt::Debug for BatchAdmission {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BatchAdmission")
+            .field("allowed", &self.allowed_count())
+            .field("outcomes", &self.outcomes)
+            .field("failure", &self.failure)
+            .finish_non_exhaustive()
+    }
+}
+
+impl BatchAdmission {
+    /// The per-recipient decisions, input order preserved. An entry is
+    /// [`BatchAdmissionOutcome::Unchecked`] only when the batch failed before
+    /// that recipient's gates ran.
+    pub fn outcomes(&self) -> &[BatchAdmissionOutcome] {
+        &self.outcomes
+    }
+
+    /// The page-level reservation, `None` when nothing was reserved (every
+    /// recipient refused, or the batch failed before reserving).
+    pub fn reservation(&self) -> Option<&SendAdmission> {
+        self.reservation.as_ref()
+    }
+
+    /// Take the page reservation out of the handle (the caller settles it
+    /// after the page's enqueue transaction).
+    pub fn into_reservation(self) -> Option<SendAdmission> {
+        self.reservation
+    }
+
+    /// Destructure the batch in one move: the per-recipient outcomes (input
+    /// order), the page reservation to settle after the enqueue transaction,
+    /// and the batch failure (if any). The drain's hot path consumes all
+    /// three; nothing is dropped — an unconsumed reservation is the caller's
+    /// bug, so no `Drop` compensation hides here.
+    pub fn into_parts(
+        self,
+    ) -> (
+        Vec<BatchAdmissionOutcome>,
+        Option<SendAdmission>,
+        Option<BatchAdmissionFailure>,
+    ) {
+        (self.outcomes, self.reservation, self.failure)
+    }
+
+    /// Why the batch could not complete, when it could not. `None` means the
+    /// admission itself finished — the outcomes are complete and a
+    /// reservation exists iff any recipient was allowed.
+    pub fn failure(&self) -> Option<&BatchAdmissionFailure> {
+        self.failure.as_ref()
+    }
+
+    /// How many recipients were admitted under the page reservation.
+    pub fn allowed_count(&self) -> usize {
+        self.outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, BatchAdmissionOutcome::Allowed))
+            .count()
+    }
+
+    fn failed(outcomes: Vec<BatchAdmissionOutcome>, failure: BatchAdmissionFailure) -> Self {
+        Self {
+            outcomes,
+            reservation: None,
+            failure: Some(failure),
+        }
+    }
+}
+
 /// A successful admission: the quota is reserved, the category is validated
 /// and normalized, and (for [`AdmissionMeter::FilteredRecipients`]) the
 /// allowed recipients are known.
@@ -724,6 +880,200 @@ impl SendAdmissionService {
             suppressed_recipients,
         })
     }
+
+    /// The BATCH admission gate for one claimed campaign page (one tenant):
+    /// validate the server-owned category ONCE, run ONE suppression probe and
+    /// ONE batched consent decision for the whole page, then reserve
+    /// `EmailsSent` ONCE for the allowed count under the caller's page
+    /// idempotency identity — one [`SendAdmission`] handle whose rollback
+    /// compensates the WHOLE page.
+    ///
+    /// Per-recipient parity with [`Self::admit`] is preserved through the
+    /// returned [`BatchAdmissionOutcome`]s: a suppressed or consent-refused
+    /// recipient is reported individually (with the enforcer's named reason)
+    /// so the caller can land it in the same terminal state it gets today —
+    /// never silently skipped, never refused as a whole send. Suppression and
+    /// consent refusals stay PER-RECIPIENT decisions; only the page's
+    /// infrastructure steps (probe/store/quota) are page-granular
+    /// ([`BatchAdmissionFailure`]), each carrying the outcomes already
+    /// resolved before the failure.
+    ///
+    /// The total-function shape (no `Err`) is deliberate: every input yields
+    /// a defined disposition for every recipient. The single-recipient
+    /// [`Self::admit`] stays untouched for the REST/SMTP/automations/sales
+    /// callers, and a batch failure lets the caller fall back to that ladder
+    /// when it needs the pre-batch per-recipient granularity (the campaign
+    /// drain does).
+    pub async fn admit_batch(
+        &self,
+        tenant_id: &str,
+        recipients: &[String],
+        idempotency_key: Option<&str>,
+        category: Option<&str>,
+    ) -> BatchAdmission {
+        // 1. Category once: cheap, side-effect free, and a validation failure
+        //    must never probe or touch quota.
+        let category = match normalize_category(category) {
+            Ok(category) => category,
+            Err(SendAdmissionError::InvalidCategory { raw }) => {
+                return BatchAdmission::failed(
+                    vec![BatchAdmissionOutcome::Unchecked; recipients.len()],
+                    BatchAdmissionFailure::InvalidCategory { raw },
+                );
+            }
+            Err(other) => {
+                // normalize_category only ever returns InvalidCategory.
+                return BatchAdmission::failed(
+                    vec![BatchAdmissionOutcome::Unchecked; recipients.len()],
+                    BatchAdmissionFailure::MeteringUnavailable(other.to_string()),
+                );
+            }
+        };
+        let consent_exempt = message_category::is_preference_exempt(&category);
+
+        // 2. ONE suppression probe for the whole page (the canonical query,
+        //    exactly what the per-recipient admit would ask for each one).
+        let canonical: Vec<String> = recipients
+            .iter()
+            .map(|recipient| canonical_recipient(recipient))
+            .collect();
+        let suppressed = match self
+            .backend
+            .suppressed_recipients(tenant_id, &canonical)
+            .await
+        {
+            Ok(suppressed) => suppressed,
+            Err(error) => {
+                return BatchAdmission::failed(
+                    vec![BatchAdmissionOutcome::Unchecked; recipients.len()],
+                    BatchAdmissionFailure::SuppressionUnavailable(error),
+                );
+            }
+        };
+        let suppressed_set: HashSet<&str> = suppressed.iter().map(|email| email.as_str()).collect();
+
+        let mut outcomes = vec![BatchAdmissionOutcome::Unchecked; canonical.len()];
+        for (index, email) in canonical.iter().enumerate() {
+            if suppressed_set.contains(email.as_str()) {
+                outcomes[index] = BatchAdmissionOutcome::Suppressed;
+            }
+        }
+
+        // 3. ONE batched consent decision for the non-suppressed remainder.
+        //    Preference-exempt categories (transactional/service) bypass the
+        //    marketing-consent gate on the legitimate-interest path — the
+        //    same contract `admit`/`enforce_consent` apply — but suppression
+        //    still blocks. A missing decision for a requested address fails
+        //    closed: silence is not consent.
+        let consent_inputs: Vec<String> = canonical
+            .iter()
+            .filter(|email| !suppressed_set.contains(email.as_str()))
+            .cloned()
+            .collect();
+        let decisions = if consent_exempt || consent_inputs.is_empty() {
+            std::collections::HashMap::new()
+        } else {
+            match self
+                .backend
+                .consent_decisions(tenant_id, &consent_inputs, false)
+                .await
+            {
+                Ok(decisions) => decisions,
+                Err(reason) => {
+                    return BatchAdmission::failed(
+                        outcomes,
+                        BatchAdmissionFailure::ConsentUnavailable(reason),
+                    );
+                }
+            }
+        };
+        for (index, email) in canonical.iter().enumerate() {
+            if !matches!(outcomes[index], BatchAdmissionOutcome::Unchecked) {
+                continue; // already suppressed
+            }
+            if consent_exempt {
+                outcomes[index] = BatchAdmissionOutcome::Allowed;
+                continue;
+            }
+            match decisions.get(email) {
+                Some(SendDecision::Allowed) => outcomes[index] = BatchAdmissionOutcome::Allowed,
+                Some(SendDecision::Blocked(reason))
+                | Some(SendDecision::RequiresConfirmation(reason)) => {
+                    outcomes[index] = BatchAdmissionOutcome::ConsentRefused {
+                        reason: reason.clone(),
+                    };
+                }
+                // Fail closed for the still-unchecked remainder.
+                _ => {
+                    return BatchAdmission::failed(
+                        outcomes,
+                        BatchAdmissionFailure::ConsentUnavailable(format!(
+                            "no consent decision returned for {email}"
+                        )),
+                    );
+                }
+            }
+        }
+
+        // 4. Reserve the quota ONCE for the allowed count under the page's
+        //    deterministic identity. The returned handle's rollback
+        //    compensates the whole page; a re-admitted page with the same
+        //    identity collapses onto the original event (duplicate) and is
+        //    never compensated (F22).
+        let allowed_count = outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, BatchAdmissionOutcome::Allowed))
+            .count() as i64;
+        if allowed_count == 0 {
+            // Every recipient refused (or an empty page): nothing to meter,
+            // nothing to settle — the outcomes carry the refusals.
+            return BatchAdmission {
+                outcomes,
+                reservation: None,
+                failure: None,
+            };
+        }
+        let event_id = usage_event_id(tenant_id, idempotency_key, None);
+        let recorded_at = Utc::now();
+        let result = match self
+            .backend
+            .record_send_usage(tenant_id, allowed_count, event_id)
+            .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                return BatchAdmission::failed(
+                    outcomes,
+                    BatchAdmissionFailure::MeteringUnavailable(error.to_string()),
+                );
+            }
+        };
+        if !result.allowed {
+            return BatchAdmission::failed(outcomes, BatchAdmissionFailure::QuotaExceeded);
+        }
+
+        let allowed_recipients: Vec<String> = canonical
+            .iter()
+            .zip(&outcomes)
+            .filter(|(_, outcome)| matches!(outcome, BatchAdmissionOutcome::Allowed))
+            .map(|(email, _)| email.clone())
+            .collect();
+        BatchAdmission {
+            outcomes,
+            reservation: Some(SendAdmission {
+                backend: Arc::clone(&self.backend),
+                tenant_id: tenant_id.to_string(),
+                event_id,
+                recorded_at,
+                quantity: allowed_count,
+                duplicate: result.duplicate,
+                category,
+                allowed_recipients,
+                suppressed_recipients: suppressed,
+            }),
+            failure: None,
+        }
+    }
 }
 
 // ─── Tests ─────────────────────────────────────────────────────
@@ -756,6 +1106,9 @@ mod tests {
         /// backend always consults the canonical consent records.
         consent_enforced: bool,
         consented: std::collections::HashSet<String>,
+        /// Batch-admission instrumentation: how many times the metering
+        /// layer was asked to reserve (a page must ask ONCE).
+        reserves: usize,
     }
 
     impl FakeBackend {
@@ -770,6 +1123,10 @@ mod tests {
 
         fn used(&self) -> i64 {
             self.state.lock().unwrap().used
+        }
+
+        fn reserves(&self) -> usize {
+            self.state.lock().unwrap().reserves
         }
 
         fn suppress(&self, email: &str) {
@@ -802,6 +1159,7 @@ mod tests {
             event_id: Uuid,
         ) -> Result<QuotaRecordResult, UsageError> {
             let mut state = self.state.lock().unwrap();
+            state.reserves += 1;
             if let Some(previous) = state.events.get(&event_id) {
                 assert_eq!(
                     *previous, quantity,
@@ -1411,5 +1769,263 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(error, SendAdmissionError::ConsentUnavailable(_)));
+    }
+
+    // ── batch admission (campaign drain page) ───────────────────────────
+
+    /// A claimed page reserves quota ONCE for the allowed count, and the
+    /// returned handle's rollback compensates the WHOLE page.
+    #[tokio::test]
+    async fn batch_admission_reserves_once_and_rolls_back_the_whole_page() {
+        let (service, backend) = service(10);
+        let page = recipients(&[
+            "p1@example.com",
+            "p2@example.com",
+            "p3@example.com",
+            "p4@example.com",
+        ]);
+
+        let batch = service
+            .admit_batch(TENANT, &page, Some("campaign-drain:page-1"), None)
+            .await;
+        assert!(batch.failure().is_none(), "admission must succeed");
+        assert_eq!(
+            batch.outcomes(),
+            [
+                BatchAdmissionOutcome::Allowed,
+                BatchAdmissionOutcome::Allowed,
+                BatchAdmissionOutcome::Allowed,
+                BatchAdmissionOutcome::Allowed
+            ]
+        );
+        assert_eq!(batch.allowed_count(), 4);
+        assert_eq!(
+            backend.reserves(),
+            1,
+            "the page must reserve quota exactly once"
+        );
+        assert_eq!(backend.used(), 4);
+        assert_eq!(batch.reservation().expect("page reservation").quantity(), 4);
+        assert_eq!(
+            batch.reservation().unwrap().category(),
+            DEFAULT_MESSAGE_CATEGORY,
+            "the missing category gets the documented policy default once"
+        );
+
+        // The page's enqueue failed: one rollback compensates the page.
+        batch
+            .into_reservation()
+            .expect("reservation")
+            .rollback()
+            .await
+            .unwrap();
+        assert_eq!(backend.used(), 0, "the whole page's quota is released");
+    }
+
+    /// Suppression and consent refusals stay PER-RECIPIENT in a batch: the
+    /// refused outcomes carry the same named reasons the single-recipient
+    /// ladder reports, only the allowed remainder is metered.
+    #[tokio::test]
+    async fn batch_admission_reports_refusals_per_recipient_with_reasons() {
+        let (service, backend) = service(10);
+        backend.enforce_consent();
+        backend.suppress("blocked@example.com");
+        backend.grant_marketing_consent("opted-in@example.com");
+        let page = recipients(&[
+            "Blocked@Example.com",
+            "opted-in@example.com",
+            "no-consent@example.com",
+        ]);
+
+        let batch = service
+            .admit_batch(TENANT, &page, Some("campaign-drain:mixed"), None)
+            .await;
+        assert!(batch.failure().is_none());
+        assert_eq!(
+            batch.outcomes(),
+            [
+                BatchAdmissionOutcome::Suppressed,
+                BatchAdmissionOutcome::Allowed,
+                BatchAdmissionOutcome::ConsentRefused {
+                    reason: "no marketing consent on file — recipient must opt in".to_string()
+                },
+            ],
+            "refusal outcomes are per recipient, in input order"
+        );
+        assert_eq!(
+            backend.used(),
+            1,
+            "only the allowed recipient consumes quota"
+        );
+        assert_eq!(backend.reserves(), 1);
+        let reservation = batch.reservation().expect("one allowed → reserved");
+        assert_eq!(reservation.quantity(), 1);
+        assert_eq!(reservation.allowed_recipients(), ["opted-in@example.com"]);
+        assert_eq!(reservation.suppressed_recipients(), ["blocked@example.com"]);
+    }
+
+    /// The page's idempotency identity is stable: re-admitting the same page
+    /// under the same key collapses onto the original reservation (duplicate)
+    /// instead of double-charging.
+    #[tokio::test]
+    async fn batch_admission_identity_is_stable_and_duplicates_collapse() {
+        let (service, backend) = service(10);
+        let page = recipients(&["a@example.com", "b@example.com", "c@example.com"]);
+
+        let first = service
+            .admit_batch(TENANT, &page, Some("campaign-drain:page-7"), None)
+            .await;
+        let second = service
+            .admit_batch(TENANT, &page, Some("campaign-drain:page-7"), None)
+            .await;
+
+        assert!(first.failure().is_none());
+        assert!(second.failure().is_none());
+        let first = first.into_reservation().unwrap();
+        let second = second.into_reservation().unwrap();
+        assert_eq!(
+            first.event_id(),
+            second.event_id(),
+            "the same page identity derives the same usage event id"
+        );
+        assert!(!first.duplicate());
+        assert!(second.duplicate(), "the replay must collapse to one event");
+        assert_eq!(backend.used(), 3, "the duplicate reserved nothing");
+        assert_eq!(backend.reserves(), 2, "one live + one duplicate ask");
+        // The duplicate's rollback is a no-op (F22) — the winner stands.
+        second.rollback().await.unwrap();
+        assert_eq!(backend.used(), 3);
+        first.commit();
+    }
+
+    /// Every recipient refused → nothing is reserved and nothing is failed:
+    /// the outcomes carry the refusals for the caller to mark per recipient.
+    #[tokio::test]
+    async fn batch_admission_with_every_recipient_refused_reserves_nothing() {
+        let (service, backend) = service(10);
+        backend.suppress("only@example.com");
+        let page = recipients(&["Only@Example.com", "only@example.com"]);
+
+        let batch = service
+            .admit_batch(TENANT, &page, Some("campaign-drain:all-supp"), None)
+            .await;
+        assert!(
+            batch.failure().is_none(),
+            "refusals are outcomes, not a batch failure"
+        );
+        assert_eq!(
+            batch.outcomes(),
+            [
+                BatchAdmissionOutcome::Suppressed,
+                BatchAdmissionOutcome::Suppressed
+            ]
+        );
+        assert!(batch.reservation().is_none(), "nothing to settle");
+        assert_eq!(backend.used(), 0);
+        assert_eq!(backend.reserves(), 0, "an empty allowed set never meters");
+    }
+
+    /// The plan gate refuses the WHOLE page (it reserves once): no quota is
+    /// consumed, the failure is reported, and the resolved outcomes (here:
+    /// none refused) stay valid so the caller can defer the page.
+    #[tokio::test]
+    async fn batch_admission_quota_refusal_defers_the_whole_page() {
+        let (service, backend) = service(2);
+        let page = recipients(&["a@example.com", "b@example.com", "c@example.com"]);
+
+        let batch = service
+            .admit_batch(TENANT, &page, Some("campaign-drain:over"), None)
+            .await;
+        assert!(
+            matches!(batch.failure(), Some(BatchAdmissionFailure::QuotaExceeded)),
+            "a page that does not fit is refused together: {:?}",
+            batch.failure()
+        );
+        assert!(batch.reservation().is_none());
+        assert_eq!(backend.used(), 0, "a refused page reserves nothing");
+        assert_eq!(backend.reserves(), 1);
+    }
+
+    /// A suppression-probe failure fails closed with every outcome
+    /// `Unchecked` and nothing reserved; the caller defers the page.
+    #[tokio::test]
+    async fn batch_admission_suppression_failure_leaves_everything_unchecked() {
+        struct FailingSuppressionBackend;
+
+        #[async_trait]
+        impl SendAdmissionBackend for FailingSuppressionBackend {
+            async fn record_send_usage(
+                &self,
+                _tenant_id: &str,
+                _quantity: i64,
+                _event_id: Uuid,
+            ) -> Result<QuotaRecordResult, UsageError> {
+                panic!("must not reserve when the suppression probe failed");
+            }
+
+            async fn rollback_send_usage(
+                &self,
+                _tenant_id: &str,
+                _quantity: i64,
+                _event_id: Uuid,
+                _recorded_at: DateTime<Utc>,
+            ) -> Result<(), UsageError> {
+                Ok(())
+            }
+
+            async fn suppressed_recipients(
+                &self,
+                _tenant_id: &str,
+                _canonical_recipients: &[String],
+            ) -> Result<Vec<String>, String> {
+                Err("redis down".to_string())
+            }
+        }
+
+        let service = SendAdmissionService::new(Arc::new(FailingSuppressionBackend));
+        let batch = service
+            .admit_batch(
+                TENANT,
+                &recipients(&["a@example.com", "b@example.com"]),
+                Some("campaign-drain:down"),
+                None,
+            )
+            .await;
+        assert!(matches!(
+            batch.failure(),
+            Some(BatchAdmissionFailure::SuppressionUnavailable(_))
+        ));
+        assert!(
+            batch
+                .outcomes()
+                .iter()
+                .all(|outcome| matches!(outcome, BatchAdmissionOutcome::Unchecked)),
+            "nothing is known; the caller must defer the page"
+        );
+    }
+
+    /// A preference-exempt category (transactional) admits the whole page
+    /// without consulting the consent gate — the single-recipient contract,
+    /// batched.
+    #[tokio::test]
+    async fn batch_admission_exempt_category_skips_consent() {
+        let (service, backend) = service(10);
+        backend.enforce_consent();
+
+        let batch = service
+            .admit_batch(
+                TENANT,
+                &recipients(&["r1@example.com", "r2@example.com"]),
+                Some("campaign-drain:transactional"),
+                Some("transactional"),
+            )
+            .await;
+        assert!(batch.failure().is_none());
+        assert!(batch
+            .outcomes()
+            .iter()
+            .all(|outcome| matches!(outcome, BatchAdmissionOutcome::Allowed)));
+        assert_eq!(batch.reservation().unwrap().category(), "transactional");
+        assert_eq!(backend.used(), 2);
     }
 }

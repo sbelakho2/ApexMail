@@ -315,11 +315,21 @@ const MESSAGES_PROGRESS_UPDATE_SQL: &str =
 /// 'processing'. This is the scheduled → processing edge (scheduled
 /// messages previously had no worker-side transition at all) and gives the
 /// API's cancellation check a parent-visible dispatch signal (F24).
+///
+/// Perf audit 2026-10-18 (finding 18): ONE statement covers ALL tenants in
+/// the claim batch — the previous form ran one UPDATE per tenant per poll
+/// (a 100-tenant poll paid 100 extra statements on a continuous loop). The
+/// per-row semantics are unchanged: a parent moves only when its
+/// `(tenant_id, id)` pair was claimed in this batch AND its status is still
+/// 'queued'/'scheduled' (terminal states set by other paths are never
+/// crouched).
 const MESSAGES_CLAIMED_UPDATE_SQL: &str = r#"
-    UPDATE messages SET status = 'processing', updated_at = NOW()
-    WHERE id = ANY($1::uuid[])
-      AND tenant_id = $2
-      AND status IN ('queued', 'scheduled')
+    UPDATE messages m
+    SET status = 'processing', updated_at = NOW()
+    FROM UNNEST($1::text[], $2::uuid[]) AS claimed_parents(tenant_id, message_id)
+    WHERE m.id = claimed_parents.message_id
+      AND m.tenant_id = claimed_parents.tenant_id
+      AND m.status IN ('queued', 'scheduled')
 "#;
 
 /// Audit-1 / Fix 3 / P0 routing: the ready-domain lookup for a queued job.
@@ -827,13 +837,21 @@ const REQUEUE_JOB_UPDATE_SQL: &str = r#"
 /// release a row the next owner holds) lets the very next poll continue.
 /// Rows whose pending set emptied are already terminal ('sent') and do not
 /// match; requeued/deferred rows are already 'pending'.
+///
+/// Perf audit 2026-10-18 (finding 18): ONE statement covers the WHOLE
+/// claimed batch (`UNNEST(job_ids, lease_tokens)`); the previous form ran
+/// one UPDATE per claimed row per poll. The predicate is per row EXACTLY as
+/// before: each row matches only on ITS OWN id and THIS claim's lease token
+/// (`IS NOT DISTINCT FROM` keeps the legacy NULL-token rows releasable), so
+/// a row whose lease changed is not released — and not counted.
 const RELEASE_REMAINDER_SQL: &str = r#"
-            UPDATE email_queue
+            UPDATE email_queue q
             SET status = 'pending', locked_until = NULL, updated_at = NOW()
-            WHERE id = $1::uuid
-              AND status = 'processing'
-              AND (metadata->>'lease_token') IS NOT DISTINCT FROM $2::text
-              AND COALESCE(metadata->'pending_recipients', '[]'::jsonb) <> '[]'::jsonb
+            FROM UNNEST($1::uuid[], $2::text[]) AS released(job_id, lease_token)
+            WHERE q.id = released.job_id
+              AND q.status = 'processing'
+              AND (q.metadata->>'lease_token') IS NOT DISTINCT FROM released.lease_token
+              AND COALESCE(q.metadata->'pending_recipients', '[]'::jsonb) <> '[]'::jsonb
 "#;
 
 /// Audit-5: handle_permanent_job_failure's dead-letter write — previously
@@ -2658,29 +2676,41 @@ impl EmailProcessor {
         // 'scheduled' to 'processing' — the worker-side scheduled →
         // processing transition (previously scheduled audit rows never
         // moved at all) and the parent-visible dispatch signal the
-        // cancellation check relies on (F24). Grouped per tenant (a batch
-        // can span tenants). Best-effort: a failed parent update must not
-        // strand the claimed rows.
-        let mut claimed_parents: HashMap<String, Vec<uuid::Uuid>> = HashMap::new();
+        // cancellation check relies on (F24). ONE statement covers ALL
+        // tenants in the batch (perf audit 2026-10-18, finding 18: the old
+        // per-tenant loop ran one UPDATE per tenant per poll).
+        // Best-effort: a failed parent update must not strand the claimed
+        // rows.
+        let mut claimed_parents: Vec<(String, uuid::Uuid)> = Vec::new();
+        let mut seen_parents: std::collections::HashSet<(String, uuid::Uuid)> =
+            std::collections::HashSet::new();
         for row in &rows {
             if let Ok(message_uuid) = uuid::Uuid::parse_str(&row.message_id) {
-                claimed_parents
-                    .entry(row.tenant_id.clone())
-                    .or_default()
-                    .push(message_uuid);
+                // Deduped: multi-recipient rows of one message must not
+                // produce duplicate join candidates in the batched UPDATE.
+                if seen_parents.insert((row.tenant_id.clone(), message_uuid)) {
+                    claimed_parents.push((row.tenant_id.clone(), message_uuid));
+                }
             }
         }
-        for (tenant_id, parents) in claimed_parents {
+        if !claimed_parents.is_empty() {
+            let tenants: Vec<String> = claimed_parents
+                .iter()
+                .map(|(tenant_id, _)| tenant_id.clone())
+                .collect();
+            let parent_ids: Vec<uuid::Uuid> = claimed_parents
+                .iter()
+                .map(|(_, message_id)| *message_id)
+                .collect();
             if let Err(e) = sqlx::query(MESSAGES_CLAIMED_UPDATE_SQL)
-                .bind(&parents)
-                .bind(tenant_id)
+                .bind(&tenants)
+                .bind(&parent_ids)
                 .execute(&self.db)
                 .await
             {
-                let parent_count = parents.len();
                 warn!(
                     error = %e,
-                    parents = parent_count,
+                    parents = claimed_parents.len(),
                     "Failed to transition claimed message parents to 'processing'"
                 );
             }
@@ -2765,33 +2795,57 @@ impl EmailProcessor {
 
     /// F5:after a processed chunk, release rows that still owe recipients
     /// back to 'pending' (lease cleared) so the next poll continues without
-    /// waiting for the visibility lease to expire. Fenced on this claim's
-    /// lease token (Audit-5) — a stale worker cannot release a row the
-    /// next owner has re-claimed. Rows that finished (empty pending set →
+    /// waiting for the visibility lease to expire. ONE statement covers the
+    /// whole claimed batch (perf audit 2026-10-18, finding 18), and it is
+    /// fenced per row on this claim's lease token (Audit-5) — a stale worker
+    /// cannot release a row the next owner has re-claimed, and such a row is
+    /// not counted as released. Rows that finished (empty pending set →
     /// already 'sent') or were requeued/deferred by the failure handlers
-    /// simply do not match the predicate.
+    /// simply do not match the predicate; a statement-level failure leaves
+    /// every row to the lease expiry, exactly as the per-row loop did.
     async fn release_rows_with_remaining_recipients(&self, claimed: &[(String, Option<String>)]) {
+        let mut job_ids: Vec<uuid::Uuid> = Vec::with_capacity(claimed.len());
+        let mut lease_tokens: Vec<Option<String>> = Vec::with_capacity(claimed.len());
         for (job_id, lease_token) in claimed {
-            match sqlx::query(RELEASE_REMAINDER_SQL)
-                .bind(job_id)
-                .bind(lease_token.as_deref())
-                .execute(&self.db)
-                .await
-            {
-                Ok(updated) if updated.rows_affected() > 0 => {
-                    debug!(
-                        job_id = %job_id,
-                        "Released multi-recipient row with remaining recipients back to pending"
-                    );
+            match uuid::Uuid::parse_str(job_id) {
+                Ok(id) => {
+                    job_ids.push(id);
+                    // `None` for legacy rows claimed before the token existed:
+                    // UNNEST carries the NULL and `IS NOT DISTINCT FROM`
+                    // keeps those rows releasable, byte-for-byte like the
+                    // per-row form.
+                    lease_tokens.push(lease_token.clone());
                 }
-                Ok(_) => {}
-                Err(e) => {
+                Err(_) => {
                     warn!(
                         job_id = %job_id,
-                        error = %e,
-                        "Failed to release row with remaining recipients; the lease expiry will recover it"
+                        "Release skipped a malformed queue-row id (no such row can exist)"
                     );
                 }
+            }
+        }
+        if job_ids.is_empty() {
+            return;
+        }
+        match sqlx::query(RELEASE_REMAINDER_SQL)
+            .bind(&job_ids)
+            .bind(&lease_tokens)
+            .execute(&self.db)
+            .await
+        {
+            Ok(updated) if updated.rows_affected() > 0 => {
+                debug!(
+                    released = updated.rows_affected(),
+                    "Released multi-recipient rows with remaining recipients back to pending"
+                );
+            }
+            Ok(_) => {}
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    rows = job_ids.len(),
+                    "Failed to release rows with remaining recipients; the lease expiry will recover them"
+                );
             }
         }
     }
@@ -22187,5 +22241,484 @@ mod journaling_db_tests {
             !raw.contains(APEXMAIL_ROUTE_HEADER),
             "internal routing metadata must not enter the journal copy"
         );
+    }
+}
+
+#[cfg(test)]
+mod poll_batching_db_tests {
+    //! Perf audit 2026-10-18, finding 18: the poll's per-claim bookkeeping is
+    //! ONE statement per batch — the claimed-parent transition covers ALL
+    //! tenants in the batch with a single `UPDATE … FROM UNNEST(…)`, and the
+    //! post-chunk release is a single `UPDATE … FROM UNNEST(…)` that still
+    //! fences EVERY row on its own lease token (a row whose lease changed is
+    //! not released and not counted). `TEST_DATABASE_URL` gates the suite
+    //! exactly like the rest of the crate: unset soft-skips,
+    //! configured-but-broken FAILS.
+
+    use super::*;
+    use sqlx::PgPool;
+    use std::sync::atomic::AtomicUsize;
+
+    async fn poll_pool(test_name: &str) -> Option<PgPool> {
+        crate::test_support::canonical_pool(test_name, test_name).await
+    }
+
+    fn poll_redis() -> RedisPool {
+        let url = std::env::var("TEST_REDIS_URL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "redis://127.0.0.1:6379".to_string());
+        deadpool_redis::Config::from_url(url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool")
+    }
+
+    /// Thread-local SQL capture for the batching regression tests (the pool
+    /// is rebuilt with `log_statements(Debug)`).
+    #[derive(Clone, Default)]
+    struct SqlCapture {
+        statements: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl SqlCapture {
+        fn statements(&self) -> Vec<String> {
+            self.statements.lock().unwrap().clone()
+        }
+
+        fn count_starting_with(&self, prefix: &str) -> usize {
+            self.statements()
+                .iter()
+                .filter(|statement| statement.trim_start().starts_with(prefix))
+                .count()
+        }
+    }
+
+    struct SqlCaptureLayer(SqlCapture);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SqlCaptureLayer {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _context: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if event.metadata().target() != "sqlx::query" {
+                return;
+            }
+            struct SummaryVisitor<'a>(&'a mut Option<String>);
+            impl tracing::field::Visit for SummaryVisitor<'_> {
+                fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                    if field.name() == "summary" {
+                        *self.0 = Some(value.to_string());
+                    }
+                }
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if field.name() == "summary" {
+                        *self.0 = Some(format!("{value:?}"));
+                    }
+                }
+            }
+            let mut summary = None;
+            event.record(&mut SummaryVisitor(&mut summary));
+            if let Some(summary) = summary {
+                self.0.statements.lock().unwrap().push(summary);
+            }
+        }
+    }
+
+    fn capture_sql() -> (SqlCapture, tracing::subscriber::DefaultGuard) {
+        use tracing_subscriber::layer::SubscriberExt;
+        let capture = SqlCapture::default();
+        let subscriber = tracing_subscriber::registry().with(SqlCaptureLayer(capture.clone()));
+        (capture, tracing::subscriber::set_default(subscriber))
+    }
+
+    async fn logging_pool(pool: &PgPool) -> PgPool {
+        use sqlx::ConnectOptions;
+        sqlx::postgres::PgPoolOptions::new()
+            .max_connections(5)
+            .test_before_acquire(false)
+            .connect_with(
+                (*pool.connect_options())
+                    .clone()
+                    .log_statements(tracing::log::LevelFilter::Debug),
+            )
+            .await
+            .expect("logging pool over the canonical test database")
+    }
+
+    /// A transport double the poll tests never reach (fetch/release only).
+    struct NoSendTransport {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl EmailTransport for NoSendTransport {
+        fn transport_name(&self) -> &str {
+            "poll-no-send"
+        }
+
+        fn supports_source_binding(&self) -> bool {
+            false
+        }
+
+        async fn verify(&self) -> ProcessorResult<()> {
+            Ok(())
+        }
+
+        async fn send(
+            &self,
+            _email: &PreparedEmail,
+            _route: &DeliveryRoute,
+        ) -> ProcessorResult<DeliveryReceipt> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            panic!("the poll batching tests must never dispatch a send");
+        }
+
+        async fn close(&self) -> ProcessorResult<()> {
+            Ok(())
+        }
+    }
+
+    async fn build_poll_processor(pool: &PgPool) -> EmailProcessor {
+        let mut config = EmailConfig {
+            base: crate::common::ProcessorConfig {
+                name: "poll-batching".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        config.tracking.enabled = false;
+        config.tracking.secret_key = None;
+        config.ses.max_send_rate = 0;
+        let hybrid = HybridTransport::new(
+            Some(Arc::new(NoSendTransport {
+                calls: AtomicUsize::new(0),
+            }) as Arc<dyn EmailTransport>),
+            None,
+        );
+        EmailProcessor::with_transport(pool.clone(), poll_redis(), config, hybrid)
+            .await
+            .expect("poll processor")
+    }
+
+    async fn insert_tenant(pool: &PgPool, label: &str) -> String {
+        let suffix = &uuid::Uuid::new_v4().simple().to_string()[..12];
+        let tenant = format!("{label}-{suffix}");
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status) \
+             VALUES ($1, $2, $3, 'free', 'active')",
+        )
+        .bind(&tenant)
+        .bind(format!("Poll {tenant}"))
+        .bind(format!("slug-{tenant}"))
+        .execute(pool)
+        .await
+        .expect("insert tenant");
+        tenant
+    }
+
+    /// One audit parent row in an explicit status ('queued' is the claimable
+    /// shape, 'cancelled' the terminal one the transition must never touch).
+    async fn insert_message(pool: &PgPool, tenant: &str, status: &str) -> uuid::Uuid {
+        let id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO messages (id, tenant_id, from_email, to_emails, status) \
+             VALUES ($1, $2, 'poll@example.com', $3, $4)",
+        )
+        .bind(id)
+        .bind(tenant)
+        .bind(serde_json::json!(["r@example.com"]))
+        .bind(status)
+        .execute(pool)
+        .await
+        .expect("insert message");
+        id
+    }
+
+    /// One queue row bound to an optional tenant + audit parent, in an
+    /// explicit status with explicit metadata and visibility lease.
+    async fn insert_queue_row(
+        pool: &PgPool,
+        tenant: Option<&str>,
+        message_id: Option<uuid::Uuid>,
+        status: &str,
+        locked_until: Option<chrono::DateTime<Utc>>,
+        metadata: serde_json::Value,
+    ) -> uuid::Uuid {
+        let id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO email_queue \
+                 (id, from_address, to_addresses, subject, status, tenant_id, message_id, \
+                  locked_until, metadata) \
+             VALUES ($1, 'poll@example.com', $2, 'poll batching', $3, $4, $5, $6, $7)",
+        )
+        .bind(id)
+        .bind(vec!["r1@example.com".to_string()])
+        .bind(status)
+        .bind(tenant)
+        .bind(message_id)
+        .bind(locked_until)
+        .bind(metadata)
+        .execute(pool)
+        .await
+        .expect("insert queue row");
+        id
+    }
+
+    async fn queue_state(pool: &PgPool, id: uuid::Uuid) -> (String, Option<chrono::DateTime<Utc>>) {
+        sqlx::query_as("SELECT status, locked_until FROM email_queue WHERE id = $1")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .expect("queue row state")
+    }
+
+    /// Finding 18a: one poll batch spanning N tenants flips ALL claimed
+    /// parents with ONE `UPDATE messages` statement (the old loop ran one per
+    /// tenant), and parents in terminal statuses are never touched.
+    #[tokio::test]
+    async fn claimed_parents_transition_in_one_statement_across_tenants(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(base) = poll_pool("poll_claimed_parents").await else { return Ok(()) };
+        let pool = logging_pool(&base).await;
+        let tenant_a = insert_tenant(&pool, "poll-a").await;
+        let tenant_b = insert_tenant(&pool, "poll-b").await;
+
+        // Two claimable parents per tenant, one terminal parent that must
+        // stay 'cancelled'.
+        let queued_a1 = insert_message(&pool, &tenant_a, "queued").await;
+        let queued_a2 = insert_message(&pool, &tenant_a, "queued").await;
+        let queued_b1 = insert_message(&pool, &tenant_b, "queued").await;
+        let queued_b2 = insert_message(&pool, &tenant_b, "queued").await;
+        let cancelled_b = insert_message(&pool, &tenant_b, "cancelled").await;
+
+        for (tenant, parent) in [
+            (&tenant_a, queued_a1),
+            (&tenant_a, queued_a2),
+            (&tenant_b, queued_b1),
+            (&tenant_b, queued_b2),
+            (&tenant_b, cancelled_b),
+        ] {
+            insert_queue_row(
+                &pool,
+                Some(tenant),
+                Some(parent),
+                "pending",
+                None,
+                serde_json::json!({}),
+            )
+            .await;
+        }
+
+        let processor = build_poll_processor(&pool).await;
+        let (capture, guard) = capture_sql();
+        let jobs = processor.fetch_jobs(10).await.expect("claim");
+        drop(guard);
+
+        assert_eq!(jobs.len(), 5, "every pending row claimed");
+        // THE regression: one parent-transition statement for the WHOLE
+        // batch (two tenants). The per-tenant loop emitted one per tenant.
+        assert_eq!(
+            capture.count_starting_with("UPDATE messages"),
+            1,
+            "one UPDATE messages for all tenants: {:?}",
+            capture.statements()
+        );
+        assert_eq!(
+            capture.count_starting_with("UPDATE email_queue"),
+            1,
+            "the claim is still the only other write: {:?}",
+            capture.statements()
+        );
+
+        // All claimable parents moved to 'processing'…
+        for parent in [queued_a1, queued_a2, queued_b1, queued_b2] {
+            let status: String = sqlx::query_scalar("SELECT status FROM messages WHERE id = $1")
+                .bind(parent)
+                .fetch_one(&pool)
+                .await
+                .expect("read parent status");
+            assert_eq!(status, "processing", "the claimed parent must move");
+        }
+        // …and the terminal parent is untouched.
+        let cancelled: String = sqlx::query_scalar("SELECT status FROM messages WHERE id = $1")
+            .bind(cancelled_b)
+            .fetch_one(&pool)
+            .await
+            .expect("read cancelled parent status");
+        assert_eq!(cancelled, "cancelled", "terminal parents must not move");
+
+        // A second poll batch spanning one tenant is still ONE statement.
+        let queued_c = insert_message(&pool, &tenant_a, "queued").await;
+        insert_queue_row(
+            &pool,
+            Some(&tenant_a),
+            Some(queued_c),
+            "pending",
+            None,
+            serde_json::json!({}),
+        )
+        .await;
+        let (capture, guard) = capture_sql();
+        let jobs = processor.fetch_jobs(10).await.expect("second claim");
+        drop(guard);
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(
+            capture.count_starting_with("UPDATE messages"),
+            1,
+            "still one statement for a single tenant: {:?}",
+            capture.statements()
+        );
+        let status: String = sqlx::query_scalar("SELECT status FROM messages WHERE id = $1")
+            .bind(queued_c)
+            .fetch_one(&pool)
+            .await
+            .expect("read parent status");
+        assert_eq!(status, "processing");
+
+        pool.close().await;
+        base.close().await;
+        Ok(())
+    }
+
+    /// Finding 18b: the post-chunk release is ONE statement for N rows and
+    /// keeps the EXACT per-row predicates — a row whose lease token changed
+    /// since the claim (stale worker) is NOT released and NOT counted, an
+    /// emptied row is not released, and a legacy NULL-token claim still
+    /// releases via `IS NOT DISTINCT FROM`.
+    #[tokio::test]
+    async fn release_is_one_statement_and_fences_each_row_on_its_lease(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(base) = poll_pool("poll_release_fence").await else { return Ok(()) };
+        let pool = logging_pool(&base).await;
+
+        let lease = Utc::now() + chrono::Duration::minutes(5);
+        // (a) eligible: this claim's token, recipients still owed.
+        let releasable = insert_queue_row(
+            &pool,
+            None,
+            None,
+            "processing",
+            Some(lease),
+            serde_json::json!({
+                "lease_token": "tok-current",
+                "pending_recipients": ["r2@example.com"]
+            }),
+        )
+        .await;
+        // (b) STALE lease: the row was recovered and re-claimed by another
+        // worker — its token no longer matches this claim's.
+        let stale_lease = insert_queue_row(
+            &pool,
+            None,
+            None,
+            "processing",
+            Some(lease),
+            serde_json::json!({
+                "lease_token": "tok-reclaimed-by-other-worker",
+                "pending_recipients": ["r2@example.com"]
+            }),
+        )
+        .await;
+        // (c) finished: the pending set emptied (already terminal in the
+        // real flow; here held in 'processing' to pin the predicate).
+        let emptied = insert_queue_row(
+            &pool,
+            None,
+            None,
+            "processing",
+            Some(lease),
+            serde_json::json!({
+                "lease_token": "tok-current",
+                "pending_recipients": []
+            }),
+        )
+        .await;
+        // (d) legacy row claimed before lease tokens existed (NULL token,
+        // NULL claim token): `IS NOT DISTINCT FROM NULL` must release it.
+        let legacy = insert_queue_row(
+            &pool,
+            None,
+            None,
+            "processing",
+            Some(lease),
+            serde_json::json!({ "pending_recipients": ["r2@example.com"] }),
+        )
+        .await;
+
+        let processor = build_poll_processor(&pool).await;
+        let (capture, guard) = capture_sql();
+        processor
+            .release_rows_with_remaining_recipients(&[
+                (releasable.to_string(), Some("tok-current".into())),
+                (stale_lease.to_string(), Some("tok-current".into())),
+                (emptied.to_string(), Some("tok-current".into())),
+                (legacy.to_string(), None),
+            ])
+            .await;
+        drop(guard);
+
+        // THE regression: one statement for the whole batch (the old loop
+        // ran one UPDATE per claimed row).
+        assert_eq!(
+            capture.count_starting_with("UPDATE email_queue"),
+            1,
+            "one release UPDATE for N rows: {:?}",
+            capture.statements()
+        );
+
+        // (a) released: pending, lease cleared.
+        let (status, locked) = queue_state(&pool, releasable).await;
+        assert_eq!(status, "pending", "the eligible row must be released");
+        assert!(locked.is_none(), "the release must clear the lease");
+        // (b) STALE lease: NOT released, NOT counted — the row keeps the new
+        // owner's token, status and lease.
+        let (status, locked, token): (String, Option<chrono::DateTime<Utc>>, Option<String>) =
+            sqlx::query_as(
+                "SELECT status, locked_until, metadata->>'lease_token' \
+                 FROM email_queue WHERE id = $1",
+            )
+            .bind(stale_lease)
+            .fetch_one(&pool)
+            .await
+            .expect("stale row state");
+        assert_eq!(
+            status, "processing",
+            "a stale-lease row must not be released"
+        );
+        assert!(locked.is_some(), "the stale-lease row keeps its lease");
+        assert_eq!(
+            token.as_deref(),
+            Some("tok-reclaimed-by-other-worker"),
+            "the stale-lease row keeps the new owner's token"
+        );
+        // (c) emptied: NOT released.
+        let (status, _) = queue_state(&pool, emptied).await;
+        assert_eq!(status, "processing", "an emptied row must not be released");
+        // (d) legacy NULL token: released by the NOT DISTINCT fence.
+        let (status, locked) = queue_state(&pool, legacy).await;
+        assert_eq!(status, "pending", "the legacy NULL-token row must release");
+        assert!(locked.is_none());
+
+        // An empty claim list runs no statement at all.
+        let (capture, guard) = capture_sql();
+        processor.release_rows_with_remaining_recipients(&[]).await;
+        drop(guard);
+        assert_eq!(
+            capture.statements().len(),
+            0,
+            "no release statement without claimed rows: {:?}",
+            capture.statements()
+        );
+
+        pool.close().await;
+        base.close().await;
+        Ok(())
     }
 }

@@ -43,6 +43,24 @@ pub struct SendTimeOptimizer {
 /// How long a tenant's resolved UTC offset is reused in-process.
 const TENANT_OFFSET_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// One recipient in a batch optimal-window read (see
+/// [`SendTimeOptimizer::optimal_windows_batch`]) — the campaign drain's page
+/// entry.
+#[derive(Debug, Clone)]
+pub struct BatchWindowRequest {
+    pub tenant_id: String,
+    pub email: String,
+    /// The campaign `settings.timezone` override (see
+    /// [`SendTimeOptimizer::get_optimal_window_for_tenant_with_offset`]).
+    pub utc_offset_minutes_override: Option<i32>,
+}
+
+/// One grouped (tenant, recipient, hour, dow) histogram row of
+/// [`SendTimeOptimizer::optimal_windows_batch`]: the bucket's engagement
+/// mass and the bucket's earliest event of ANY type (the profile-age input,
+/// exactly what the per-recipient path's two queries produced together).
+type BatchHistogramRow = (String, String, i32, i32, i64, Option<chrono::DateTime<Utc>>);
+
 impl SendTimeOptimizer {
     pub fn new(pool: sqlx::PgPool, redis: deadpool_redis::Pool) -> Self {
         Self {
@@ -142,6 +160,191 @@ impl SendTimeOptimizer {
 
         self.set_cached(&cache_key, &result, 86400).await.ok();
         Ok(result)
+    }
+
+    /// Batch form of [`Self::get_optimal_window_for_tenant_with_offset`] for
+    /// a claimed campaign page: ONE grouped profile read per DISTINCT applied
+    /// offset (histogram AND profile age in the same GROUP BY) plus at most
+    /// ONE `tenants.settings` read per unseen tenant (the same in-process
+    /// offset cache the single-recipient path uses) — instead of two event
+    /// queries per recipient.
+    ///
+    /// Returns one result per request, ALIGNED with `requests` (a caller may
+    /// legitimately ask for the same (tenant, email) under two different
+    /// campaign timezones; positional results keep both). Profiles are
+    /// computed fresh (the read is already O(1) for the page) and written
+    /// through to the result cache when one is configured; a Redis-less
+    /// optimizer (test harness) behaves identically.
+    ///
+    /// The profile read is tenant-scoped per recipient — `(tenant_id,
+    /// recipient)` pairs — so the same address under a different tenant can
+    /// never contribute events (the wave-G contract, batched).
+    pub async fn optimal_windows_batch(
+        &self,
+        requests: &[BatchWindowRequest],
+    ) -> anyhow::Result<Vec<BulkOptimizationResult>> {
+        if requests.is_empty() {
+            return Ok(Vec::new());
+        }
+        // One result slot per request, filled positionally by the grouped
+        // reads below.
+        let mut aligned: Vec<Option<BulkOptimizationResult>> =
+            (0..requests.len()).map(|_| None).collect();
+
+        // 1. Effective offset per request: the explicit override (the
+        //    campaign's timezone), else the tenant's settings offset through
+        //    the memoized reader.
+        let mut resolved_offsets: std::collections::HashMap<String, i32> =
+            std::collections::HashMap::new();
+        let mut offsets: Vec<i32> = Vec::with_capacity(requests.len());
+        for request in requests {
+            let offset = match request.utc_offset_minutes_override {
+                Some(offset) => offset.clamp(-1440, 1440),
+                None => match resolved_offsets.get(&request.tenant_id) {
+                    Some(offset) => *offset,
+                    None => {
+                        let offset = self.tenant_utc_offset_minutes(&request.tenant_id).await?;
+                        resolved_offsets.insert(request.tenant_id.clone(), offset);
+                        offset
+                    }
+                },
+            };
+            offsets.push(offset);
+        }
+
+        // 2. One combined profile read per DISTINCT applied offset: the
+        //    (hour, day) histogram over opened/clicked events and the
+        //    all-events profile age come out of the same GROUP BY.
+        let mut indices_by_offset: std::collections::BTreeMap<i32, Vec<usize>> =
+            std::collections::BTreeMap::new();
+        for (index, offset) in offsets.iter().enumerate() {
+            indices_by_offset.entry(*offset).or_default().push(index);
+        }
+
+        for (offset, indices) in indices_by_offset {
+            let tenants: Vec<String> = indices
+                .iter()
+                .map(|&index| requests[index].tenant_id.clone())
+                .collect();
+            let recipients: Vec<String> = indices
+                .iter()
+                .map(|&index| requests[index].email.clone())
+                .collect();
+            let rows: Vec<BatchHistogramRow> = sqlx::query_as(
+                "WITH base AS ( \
+                         SELECT tenant_id, recipient, event_type, timestamp, \
+                                EXTRACT(HOUR FROM (timestamp AT TIME ZONE 'UTC') \
+                                    + make_interval(mins => $2))::int AS hour, \
+                                (EXTRACT(ISODOW FROM (timestamp AT TIME ZONE 'UTC') \
+                                    + make_interval(mins => $2))::int - 1) AS dow \
+                         FROM events \
+                         WHERE (tenant_id, recipient) IN ( \
+                             SELECT r.tenant_id, r.recipient \
+                             FROM UNNEST($1::text[], $3::text[]) AS r(tenant_id, recipient) \
+                         ) \
+                     ) \
+                     SELECT tenant_id, recipient, hour, dow, \
+                            COUNT(*) FILTER (WHERE event_type IN ('opened', 'clicked')) AS cnt, \
+                            MIN(timestamp) AS first_seen \
+                     FROM base \
+                     GROUP BY tenant_id, recipient, hour, dow",
+            )
+            .bind(&tenants)
+            .bind(offset)
+            .bind(&recipients)
+            .fetch_all(&self.pool)
+            .await?;
+
+            // Bucket rows per (tenant, recipient). A row with cnt = 0 is an
+            // age-only row (events of other metric types): it contributes the
+            // profile age but no histogram mass, exactly like the
+            // per-recipient path (whose histogram query filters event_type
+            // and whose age query does not).
+            struct Accum {
+                hours: [f64; 24],
+                days: [f64; 7],
+                total: i64,
+                first_seen: Option<chrono::DateTime<Utc>>,
+            }
+            let mut accums: std::collections::HashMap<(String, String), Accum> =
+                std::collections::HashMap::new();
+            for (tenant_id, recipient, hour, dow, cnt, first_seen) in rows {
+                let entry = accums.entry((tenant_id, recipient)).or_insert(Accum {
+                    hours: [0.0; 24],
+                    days: [0.0; 7],
+                    total: 0,
+                    first_seen: None,
+                });
+                if cnt > 0 {
+                    let h = (hour as usize).min(23);
+                    let d = (dow as usize).min(6);
+                    entry.hours[h] += cnt as f64;
+                    entry.days[d] += cnt as f64;
+                    entry.total += cnt;
+                }
+                if let Some(seen) = first_seen {
+                    entry.first_seen = Some(match entry.first_seen {
+                        Some(previous) if previous <= seen => previous,
+                        _ => seen,
+                    });
+                }
+            }
+
+            for &index in &indices {
+                let request = &requests[index];
+                let empty = Accum {
+                    hours: [0.0; 24],
+                    days: [0.0; 7],
+                    total: 0,
+                    first_seen: None,
+                };
+                let accum = accums
+                    .get(&(request.tenant_id.clone(), request.email.clone()))
+                    .unwrap_or(&empty);
+
+                let mut hour_dist = HourDistribution {
+                    hours: accum.hours.to_vec(),
+                };
+                let mut day_dist = DayDistribution {
+                    days: accum.days.to_vec(),
+                };
+                if accum.total > 0 {
+                    for h in &mut hour_dist.hours {
+                        *h /= accum.total as f64;
+                    }
+                    for d in &mut day_dist.days {
+                        *d /= accum.total as f64;
+                    }
+                }
+                let profile = RecipientProfile {
+                    hour_distribution: hour_dist,
+                    day_distribution: day_dist,
+                    total_events: accum.total,
+                    profile_age_days: accum
+                        .first_seen
+                        .map(|seen| (Utc::now() - seen).num_days() as u32)
+                        .unwrap_or(0),
+                };
+                let windows = compute_optimal_windows_at_offset(&profile, offset);
+                let email_hash = hash_email(&request.email, &self.hmac_key);
+                let result = BulkOptimizationResult {
+                    email_hash: email_hash.clone(),
+                    windows,
+                    confidence: profile.total_events as f64 / (profile.total_events as f64 + 100.0),
+                    profile_age_days: profile.profile_age_days,
+                    utc_offset_minutes: offset,
+                };
+                // The cache key matches the single-recipient path's (same
+                // tenant/offset/hash scoping); best-effort write-through.
+                let cache_key = format!("sto:{}:{offset}:{email_hash}", request.tenant_id);
+                self.set_cached(&cache_key, &result, 86400).await.ok();
+                aligned[index] = Some(result);
+            }
+        }
+        Ok(aligned
+            .into_iter()
+            .map(|slot| slot.expect("every request's offset group ran"))
+            .collect())
     }
 
     /// Read the tenant's UTC offset from `tenants.settings` (F5).

@@ -50,16 +50,22 @@
 //!
 //! ## Per-event applied marker (migration 205)
 //!
-//! [`OutcomeProjector::apply_claimed_event`] applies an event as ONE
-//! transaction:
+//! [`OutcomeProjector::project_sender_events`] applies a claimed batch as
+//! ONE transaction with a per-event savepoint (perf audit 2026-10-18,
+//! finding 9 — the per-event implementation paid one `BEGIN`/`COMMIT` cycle
+//! and one row-lock window PER EVENT per tick):
 //!
 //! ```text
-//! BEGIN;
-//!   INSERT INTO sales_sender_health_applied (event_id) VALUES ($event)
-//!     ON CONFLICT (event_id) DO NOTHING RETURNING event_id;
-//!   -- only when the INSERT returned a row:
-//!   <counter update + reassessment of sales_sender_health>;
-//! COMMIT;
+//! BEGIN;                          -- once per BATCH
+//!   SAVEPOINT event_1;
+//!     INSERT INTO sales_sender_health_applied (event_id) VALUES ($event)
+//!       ON CONFLICT (event_id) DO NOTHING RETURNING event_id;
+//!     -- only when the INSERT returned a row:
+//!     <counter update + reassessment of sales_sender_health>;
+//!   RELEASE SAVEPOINT event_1;    -- per event; on failure:
+//!                                 -- ROLLBACK TO SAVEPOINT event_1
+//!   ...                           -- batch-mates unaffected
+//! COMMIT;                         -- once per BATCH
 //! ```
 //!
 //! The marker's primary key makes application idempotent: re-claiming an
@@ -74,11 +80,15 @@
 //! sweep concluded the crashed event had been applied. That heuristic and
 //! its comment are gone.
 //!
-//! A failed [`sender_health::record_event_tx`] rolls the marker back with the
-//! aggregate, and the claim is deliberately left in place: the recovery sweep
-//! re-opens it after the lease expires (marker absent) and it is applied
-//! exactly once. Releasing immediately on error is unnecessary now that the
-//! whole application is atomic.
+//! A failed [`sender_health::record_event_tx`] rolls its event's SAVEPOINT
+//! back — undoing that event's marker with its aggregate — while the batch
+//! transaction (and the batch-mates) stay alive, and the event's claim is
+//! deliberately left in place: the recovery sweep re-opens it after the
+//! lease expires (marker absent) and it is applied exactly once. A COMMIT
+//! failure rolls the whole batch back; every claim was written OUTSIDE the
+//! batch transaction and stands, so the same sweep recovers the entire
+//! batch. Releasing on error is unnecessary now that application is atomic
+//! per event.
 //!
 //! ## Why the claim precedes the aggregate update
 //!
@@ -114,7 +124,7 @@
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::Serialize;
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{Acquire, PgPool, Postgres, Transaction};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use uuid::Uuid;
@@ -400,11 +410,13 @@ impl OutcomeProjector {
         report.claimed = rows.len() as u64;
         let lease_secs = config.lease_secs.max(1);
 
+        // Parse the vocabulary first: a corrupted row must not wedge the
+        // batch, and releasing it would wedge it forever. Leave it claimed
+        // and make it visible (unchanged semantics — it never reaches the
+        // batch transaction below).
+        let mut claimed_events: Vec<ClaimedSenderEvent> = Vec::with_capacity(rows.len());
         for row in rows {
             let Some(event_type) = SenderEventType::parse(&row.event_type) else {
-                // Unreachable through the CHECK constraint; a corrupted row
-                // must not wedge the batch, and releasing it would wedge it
-                // forever. Leave it claimed and make it visible.
                 report.unmapped += 1;
                 tracing::error!(
                     sender_event_id = %row.id,
@@ -417,7 +429,7 @@ impl OutcomeProjector {
             };
 
             let claimed_at = row.processed_at;
-            let claimed = ClaimedSenderEvent {
+            claimed_events.push(ClaimedSenderEvent {
                 id: row.id,
                 tenant_id: row.tenant_id,
                 sender_identity_id: row.sender_identity_id,
@@ -430,54 +442,80 @@ impl OutcomeProjector {
                     token: Uuid::new_v4(),
                     expires_at: claimed_at + ChronoDuration::seconds(lease_secs),
                 },
-            };
+            });
+        }
 
-            match self
-                .apply_claimed_event(&claimed, &config.health_thresholds)
+        // ONE transaction for the whole batch (perf audit 2026-10-18,
+        // finding 9): the per-event implementation opened one transaction per
+        // event (BEGIN, marker INSERT, health write, COMMIT — one durable
+        // commit and one row-lock cycle PER EVENT per tick). Now the batch
+        // commits once and every event applies inside its own SAVEPOINT, so
+        // an individual event's failure still rolls back ONLY that event
+        // (marker + aggregate) while its batch-mates commit. The durable
+        // claims above are written outside this transaction: a commit failure
+        // rolls the whole batch back with every claim standing, and the
+        // lease-expiry sweep below recovers exactly those (marker absent).
+        // An empty claim opens no transaction at all — the projector ticks
+        // on an interval and the idle tick must stay free.
+        if !claimed_events.is_empty() {
+            let mut tx: Transaction<'_, Postgres> = self
+                .db
+                .begin()
                 .await
-            {
-                Ok(Some(assessment)) => {
-                    report.applied += 1;
-                    metrics::counter!(
-                        "sales_sender_events_projected_total",
-                        "event_type" => claimed.event_type.as_str(),
-                        "state" => assessment.state.clone(),
-                    )
-                    .increment(1);
-                    tracing::debug!(
-                        sender_event_id = %claimed.id,
-                        sender_identity_id = %claimed.sender_identity_id,
-                        event_type = claimed.event_type.as_str(),
-                        state = %assessment.state,
-                        "sender health window advanced from the delivery ledger"
-                    );
-                }
-                Ok(None) => {
-                    // The per-event marker already existed: the aggregate
-                    // already contains this event. Move nothing.
-                    report.already_applied += 1;
-                    metrics::counter!("sales_sender_events_already_applied_total").increment(1);
-                    tracing::debug!(
-                        sender_event_id = %claimed.id,
-                        sender_identity_id = %claimed.sender_identity_id,
-                        "sender event already has an applied marker; re-claim is a no-op"
-                    );
-                }
-                Err(error) => {
-                    // Marker + aggregate rolled back together, so the claim
-                    // is left in place and the recovery sweep re-opens it
-                    // once the lease expires (the marker is absent).
-                    report.failed += 1;
-                    metrics::counter!("sales_sender_events_projection_failures_total").increment(1);
-                    tracing::error!(
-                        sender_event_id = %claimed.id,
-                        sender_identity_id = %claimed.sender_identity_id,
-                        event_type = claimed.event_type.as_str(),
-                        error = %error,
-                        "sender health projection failed; the claim is left for lease-expiry recovery"
-                    );
+                .map_err(|error| SalesError::Database(error.to_string()))?;
+
+            for claimed in &claimed_events {
+                match Self::apply_claimed_event(&mut tx, claimed, &config.health_thresholds).await {
+                    Ok(Some(assessment)) => {
+                        report.applied += 1;
+                        metrics::counter!(
+                            "sales_sender_events_projected_total",
+                            "event_type" => claimed.event_type.as_str(),
+                            "state" => assessment.state.clone(),
+                        )
+                        .increment(1);
+                        tracing::debug!(
+                            sender_event_id = %claimed.id,
+                            sender_identity_id = %claimed.sender_identity_id,
+                            event_type = claimed.event_type.as_str(),
+                            state = %assessment.state,
+                            "sender health window advanced from the delivery ledger"
+                        );
+                    }
+                    Ok(None) => {
+                        // The per-event marker already existed: the aggregate
+                        // already contains this event. Move nothing.
+                        report.already_applied += 1;
+                        metrics::counter!("sales_sender_events_already_applied_total").increment(1);
+                        tracing::debug!(
+                            sender_event_id = %claimed.id,
+                            sender_identity_id = %claimed.sender_identity_id,
+                            "sender event already has an applied marker; re-claim is a no-op"
+                        );
+                    }
+                    Err(error) => {
+                        // The event's savepoint rolled back its marker +
+                        // aggregate together, so the claim is left in place
+                        // and the recovery sweep re-opens it once the lease
+                        // expires (the marker is absent). The batch-mates are
+                        // unaffected.
+                        report.failed += 1;
+                        metrics::counter!("sales_sender_events_projection_failures_total")
+                            .increment(1);
+                        tracing::error!(
+                            sender_event_id = %claimed.id,
+                            sender_identity_id = %claimed.sender_identity_id,
+                            event_type = claimed.event_type.as_str(),
+                            error = %error,
+                            "sender health projection failed; the claim is left for lease-expiry recovery"
+                        );
+                    }
                 }
             }
+
+            tx.commit()
+                .await
+                .map_err(|error| SalesError::Database(error.to_string()))?;
         }
 
         if report.claimed > 0 {
@@ -493,61 +531,80 @@ impl OutcomeProjector {
         Ok(report)
     }
 
-    /// Apply one claimed event: insert its per-event applied marker and fold
-    /// the event into `sales_sender_health` in ONE transaction.
+    /// Apply one claimed event INSIDE the batch transaction, fenced by a
+    /// per-event savepoint (a nested `BEGIN` on the open transaction — sqlx
+    /// issues `SAVEPOINT`/`RELEASE SAVEPOINT` for it).
+    ///
+    /// The marker INSERT is the idempotency gate: its primary key makes a
+    /// second application of the same event conflict, and
+    /// `ON CONFLICT DO NOTHING` then returns no row. A concurrent
+    /// transaction that inserted the same key blocks here until it
+    /// commits or rolls back, so the aggregate below runs at most once
+    /// even if two workers apply the same event concurrently.
     ///
     /// Returns `Ok(Some(assessment))` when this call moved the aggregate,
     /// `Ok(None)` when a marker for this event already existed (idempotent
     /// re-claim: the aggregate already contains the event and is not touched
-    /// again). On error the transaction rolls back, leaving neither marker
-    /// nor aggregate movement, so lease-expiry recovery can retry safely.
+    /// again). On ANY error the savepoint rolls back — undoing ONLY this
+    /// event's marker and health writes, leaving the batch transaction and
+    /// the event's durable claim (written before it) intact, so lease-expiry
+    /// recovery can retry this event alone, safely.
     async fn apply_claimed_event(
-        &self,
+        tx: &mut Transaction<'_, Postgres>,
         claimed: &ClaimedSenderEvent,
         thresholds: &HealthThresholds,
     ) -> Result<Option<sender_health::HealthAssessment>, SalesError> {
-        let mut tx = self
-            .db
+        let mut savepoint = tx
             .begin()
             .await
             .map_err(|error| SalesError::Database(error.to_string()))?;
 
-        // The marker INSERT is the idempotency gate: its primary key makes a
-        // second application of the same event conflict, and
-        // `ON CONFLICT DO NOTHING` then returns no row. A concurrent
-        // transaction that inserted the same key blocks here until it
-        // commits or rolls back, so the aggregate below runs at most once
-        // even if two workers apply the same event concurrently.
-        let inserted: Option<Uuid> = sqlx::query_scalar(
-            "INSERT INTO sales_sender_health_applied (event_id) VALUES ($1) \
-             ON CONFLICT (event_id) DO NOTHING \
-             RETURNING event_id",
-        )
-        .bind(claimed.id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|error| SalesError::Database(error.to_string()))?;
-
-        if inserted.is_none() {
-            tx.commit()
-                .await
-                .map_err(|error| SalesError::Database(error.to_string()))?;
-            return Ok(None);
-        }
-
-        let assessment = sender_health::record_event_tx(
-            &mut tx,
-            &claimed.tenant_id,
-            claimed.sender_identity_id,
-            claimed.event_type.health_event(),
-            thresholds,
-        )
-        .await?;
-
-        tx.commit()
+        let result = async {
+            let inserted: Option<Uuid> = sqlx::query_scalar(
+                "INSERT INTO sales_sender_health_applied (event_id) VALUES ($1) \
+                 ON CONFLICT (event_id) DO NOTHING \
+                 RETURNING event_id",
+            )
+            .bind(claimed.id)
+            .fetch_optional(&mut *savepoint)
             .await
             .map_err(|error| SalesError::Database(error.to_string()))?;
-        Ok(Some(assessment))
+
+            if inserted.is_none() {
+                return Ok(None);
+            }
+
+            sender_health::record_event_tx(
+                &mut savepoint,
+                &claimed.tenant_id,
+                claimed.sender_identity_id,
+                claimed.event_type.health_event(),
+                thresholds,
+            )
+            .await
+            .map(Some)
+        }
+        .await;
+
+        match result {
+            Ok(outcome) => {
+                savepoint
+                    .commit()
+                    .await
+                    .map_err(|error| SalesError::Database(error.to_string()))?;
+                Ok(outcome)
+            }
+            Err(error) => {
+                // `ROLLBACK TO SAVEPOINT`: only this event's writes are
+                // undone; the batch transaction stays usable for its
+                // batch-mates.
+                savepoint
+                    .rollback()
+                    .await
+                    .map_err(|rollback_error| SalesError::Database(rollback_error.to_string()))?;
+                Err(error)
+            }
+        }
     }
 
     /// Re-open durable claims whose worker died before the application
@@ -1596,6 +1653,512 @@ mod tests {
             denied.is_err(),
             "a paused sender identity must be denied by the pre-send gate"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Batch-transaction regressions (perf audit 2026-10-18, finding 9):
+    // the sender-event projection must be ONE transaction per BATCH with a
+    // per-event SAVEPOINT — not one transaction per event.
+    // -----------------------------------------------------------------------
+
+    /// Isolated canonical database for the batch tests (the shared canonical
+    /// pool's counters cannot be asserted under parallel tests).
+    async fn isolated_projector_pool(test_name: &str, db_suffix: &str) -> Option<(PgPool, PgPool)> {
+        let base = match migrator::test_support::fresh_canonical_pool(test_name, db_suffix).await {
+            Ok(Some(pool)) => pool,
+            Ok(None) => return None,
+            Err(error) => panic!("{}", error.panic_message()),
+        };
+        let pool = logging_pool(&base).await;
+        Some((base, pool))
+    }
+
+    /// Statement/transaction-count regression: a batch of N claimed events is
+    /// applied in ONE transaction (exactly one `COMMIT` for the tick) with a
+    /// per-event savepoint, and the per-event idempotency gate still runs
+    /// once per event.
+    ///
+    /// Observable counts: sqlx issues `BEGIN`/`SAVEPOINT` through the
+    /// connection's simple-query queue (no query logger), but `COMMIT`,
+    /// `RELEASE SAVEPOINT` and every DML go through the logged executor path
+    /// — so "one `COMMIT` per tick" is the transaction count and
+    /// "N `RELEASE SAVEPOINT`" is the savepoint count.
+    #[tokio::test]
+    async fn sender_projection_is_one_transaction_per_batch_with_per_event_savepoints() {
+        let Some((_base, pool)) =
+            isolated_projector_pool("projector_batch_tx", "projector_batch_tx").await
+        else {
+            return;
+        };
+        let tenant = insert_tenant(&pool, "proj-batch-tx").await;
+        let a = insert_sender(&pool, &tenant).await;
+        let b = insert_sender(&pool, &tenant).await;
+        let c = insert_sender(&pool, &tenant).await;
+        insert_ledger_event(&pool, &tenant, a, "delivered", "msg-tx-a", "a@x.test").await;
+        insert_ledger_event(&pool, &tenant, b, "complaint", "msg-tx-b", "b@x.test").await;
+        insert_ledger_event(&pool, &tenant, c, "hard_bounce", "msg-tx-c", "c@x.test").await;
+
+        let projector = OutcomeProjector::new(pool.clone(), "test-worker-batch-tx");
+        let (capture, guard) = capture_sql();
+        let report = projector
+            .project_sender_events(&ProjectorConfig {
+                batch_size: 10,
+                ..ProjectorConfig::default()
+            })
+            .await
+            .expect("three-event batch tick");
+        drop(guard);
+
+        assert_eq!(report.claimed, 3);
+        assert_eq!(report.applied, 3);
+        assert_eq!(report.failed, 0);
+
+        // THE regression: one commit for the whole batch. The per-event
+        // implementation commits N times.
+        assert_eq!(
+            capture.count_starting_with("COMMIT"),
+            1,
+            "the batch must commit exactly once: {:?}",
+            capture.statements()
+        );
+        assert_eq!(
+            capture.count_starting_with("RELEASE SAVEPOINT"),
+            3,
+            "each event must apply inside its own savepoint: {:?}",
+            capture.statements()
+        );
+        // The per-event idempotency gate is untouched: one marker INSERT per
+        // event, and each event's health write still runs inside the batch.
+        assert_eq!(
+            capture.count_starting_with("INSERT INTO sales_sender_health_applied"),
+            3,
+            "the marker gate stays per-event: {:?}",
+            capture.statements()
+        );
+
+        // Every aggregate moved exactly once.
+        let (volume_a, _, _, _, _, _, _, _) = health_counters(&pool, &tenant, a).await;
+        assert_eq!(volume_a, 1, "delivered moves volume once");
+        let (_, _, _, complaints_b, _, _, _, _) = health_counters(&pool, &tenant, b).await;
+        assert_eq!(complaints_b, 1, "complaint moves complaints once");
+        let (volume_c, hard_bounces_c, _, _, _, _, _, _) = health_counters(&pool, &tenant, c).await;
+        assert_eq!(
+            (volume_c, hard_bounces_c),
+            (1, 1),
+            "hard bounce moves volume + hard_bounces once"
+        );
+
+        // A tick with nothing to claim opens no transaction at all.
+        let (capture, guard) = capture_sql();
+        let report = projector
+            .project_sender_events(&ProjectorConfig::default())
+            .await
+            .expect("idle tick");
+        drop(guard);
+        assert_eq!(report.claimed, 0);
+        assert_eq!(
+            capture.count_starting_with("COMMIT"),
+            0,
+            "an idle tick must not open a transaction: {:?}",
+            capture.statements()
+        );
+
+        pool.close().await;
+        _base.close().await;
+    }
+
+    /// Failure isolation: one poisoned event's health write fails, its
+    /// savepoint rolls back (marker + aggregate untouched, claim left for
+    /// lease-expiry recovery), and its BATCH-MATES still commit.
+    #[tokio::test]
+    async fn one_poisoned_event_does_not_roll_back_its_batch_mates() {
+        let Some((_base, pool)) =
+            isolated_projector_pool("projector_poison_event", "projector_poison_event").await
+        else {
+            return;
+        };
+        let tenant_ok = insert_tenant(&pool, "proj-ok").await;
+        let tenant_poison = insert_tenant(&pool, "proj-poison").await;
+        let ok = insert_sender(&pool, &tenant_ok).await;
+        let poison = insert_sender(&pool, &tenant_poison).await;
+
+        // Interleave poisoned events with healthy ones in one claim batch.
+        let ok1 =
+            insert_ledger_event(&pool, &tenant_ok, ok, "delivered", "msg-ok1", "o1@x.test").await;
+        let poison1 = insert_ledger_event(
+            &pool,
+            &tenant_poison,
+            poison,
+            "hard_bounce",
+            "msg-p1",
+            "p1@x.test",
+        )
+        .await;
+        let ok2 =
+            insert_ledger_event(&pool, &tenant_ok, ok, "delivered", "msg-ok2", "o2@x.test").await;
+        let poison2 = insert_ledger_event(
+            &pool,
+            &tenant_poison,
+            poison,
+            "complaint",
+            "msg-p2",
+            "p2@x.test",
+        )
+        .await;
+
+        // The poison: any health write for the poisoned tenant raises. The
+        // tenant id is generated by `unique_test_tenant` ([0-9a-zA-Z-]) so it
+        // is safe to inline into the function body.
+        sqlx::query(&format!(
+            "CREATE OR REPLACE FUNCTION projector_poison_fn() RETURNS trigger AS $$ \
+             BEGIN \
+               IF NEW.tenant_id = '{tenant_poison}' THEN \
+                 RAISE EXCEPTION 'injected poison for the projection batch test'; \
+               END IF; \
+               RETURN NEW; \
+             END; \
+             $$ LANGUAGE plpgsql"
+        ))
+        .execute(&pool)
+        .await
+        .expect("create poison fn");
+        sqlx::query("DROP TRIGGER IF EXISTS projector_poison_trg ON sales_sender_health")
+            .execute(&pool)
+            .await
+            .expect("drop old poison trigger");
+        sqlx::query(
+            "CREATE TRIGGER projector_poison_trg \
+             BEFORE INSERT OR UPDATE ON sales_sender_health \
+             FOR EACH ROW EXECUTE FUNCTION projector_poison_fn()",
+        )
+        .execute(&pool)
+        .await
+        .expect("create poison trigger");
+
+        let projector = OutcomeProjector::new(pool.clone(), "test-worker-poison");
+        let report = projector
+            .project_sender_events(&ProjectorConfig::default())
+            .await
+            .expect("the poisoned events fail per event; the tick itself succeeds");
+        assert_eq!(report.applied, 2, "both healthy events applied");
+        assert_eq!(report.failed, 2, "both poisoned events failed");
+        assert_eq!(report.already_applied, 0);
+
+        // Healthy events: markers + aggregate committed.
+        let (volume_ok, _, _, _, _, _, _, _) = health_counters(&pool, &tenant_ok, ok).await;
+        assert_eq!(volume_ok, 2, "the healthy batch-mates moved the aggregate");
+        let ok_markers: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM sales_sender_health_applied \
+             WHERE event_id = ANY($1)",
+        )
+        .bind(vec![ok1, ok2])
+        .fetch_one(&pool)
+        .await
+        .expect("count markers");
+        assert_eq!(ok_markers, 2, "both healthy events are marked applied");
+
+        // Poisoned events: savepoint rollback left NO marker and NO aggregate,
+        // and the durable claim stands for lease-expiry recovery.
+        for poison_event in [poison1, poison2] {
+            let marker: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*)::bigint FROM sales_sender_health_applied WHERE event_id = $1",
+            )
+            .bind(poison_event)
+            .fetch_one(&pool)
+            .await
+            .expect("count poison marker");
+            assert_eq!(marker, 0, "the failed event must not carry a marker");
+            let claimed: bool = sqlx::query_scalar(
+                "SELECT processed_at IS NOT NULL FROM sales_sender_events WHERE id = $1",
+            )
+            .bind(poison_event)
+            .fetch_one(&pool)
+            .await
+            .expect("read poison claim");
+            assert!(claimed, "the failed event's claim must be left in place");
+        }
+        let poison_rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM sales_sender_health WHERE tenant_id = $1",
+        )
+        .bind(&tenant_poison)
+        .fetch_one(&pool)
+        .await
+        .expect("count poisoned health rows");
+        assert_eq!(
+            poison_rows, 0,
+            "no aggregate movement for the poisoned sender"
+        );
+
+        // Recovery: lift the poison, age the claims past the lease, and the
+        // recovery sweep re-opens and applies each poisoned event exactly once.
+        sqlx::query("DROP TRIGGER projector_poison_trg ON sales_sender_health")
+            .execute(&pool)
+            .await
+            .expect("drop poison trigger");
+        sqlx::query("DROP FUNCTION projector_poison_fn()")
+            .execute(&pool)
+            .await
+            .expect("drop poison fn");
+        sqlx::query(
+            "UPDATE sales_sender_events \
+             SET processed_at = NOW() - INTERVAL '5 minutes' \
+             WHERE id = ANY($1)",
+        )
+        .bind(vec![poison1, poison2])
+        .execute(&pool)
+        .await
+        .expect("age the poisoned claims past the lease");
+        drain(&projector, 3).await;
+
+        // hard_bounce → (volume 1, hard 1); complaint → (complaints 1).
+        let (volume_p, hard_p, _, complaints_p, _, _, _, _) =
+            health_counters(&pool, &tenant_poison, poison).await;
+        assert_eq!(
+            (volume_p, hard_p, complaints_p),
+            (1, 1, 1),
+            "each recovered event applied exactly once"
+        );
+        let poison_markers: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM sales_sender_health_applied \
+             WHERE event_id = ANY($1)",
+        )
+        .bind(vec![poison1, poison2])
+        .fetch_one(&pool)
+        .await
+        .expect("count recovered markers");
+        assert_eq!(poison_markers, 2, "one marker per recovered event");
+        let (volume_ok, _, _, _, _, _, _, _) = health_counters(&pool, &tenant_ok, ok).await;
+        assert_eq!(volume_ok, 2, "recovery must not disturb the healthy events");
+
+        pool.close().await;
+        _base.close().await;
+    }
+
+    /// Idempotent re-claim: a claim re-opened while the per-event applied
+    /// marker stands runs the gate (marker INSERT … ON CONFLICT DO NOTHING),
+    /// gets no row back, and moves NO aggregate.
+    #[tokio::test]
+    async fn reclaim_with_marker_present_moves_no_aggregate() {
+        let Some((_base, pool)) =
+            isolated_projector_pool("projector_reclaim_gate", "projector_reclaim_gate").await
+        else {
+            return;
+        };
+        let tenant = insert_tenant(&pool, "proj-reclaim").await;
+        let sender = insert_sender(&pool, &tenant).await;
+        let event =
+            insert_ledger_event(&pool, &tenant, sender, "complaint", "msg-rc", "r@x.test").await;
+
+        let projector = OutcomeProjector::new(pool.clone(), "test-worker-reclaim");
+        drain(&projector, 3).await;
+        let (_, _, _, complaints, _, _, _, _) = health_counters(&pool, &tenant, sender).await;
+        assert_eq!(complaints, 1, "the first application moved the aggregate");
+
+        // Force the durable claim open again while the marker stands.
+        sqlx::query("UPDATE sales_sender_events SET processed_at = NULL WHERE id = $1")
+            .bind(event)
+            .execute(&pool)
+            .await
+            .expect("force a re-claim");
+
+        let (capture, guard) = capture_sql();
+        let report = projector
+            .project_sender_events(&ProjectorConfig::default())
+            .await
+            .expect("re-claim tick");
+        drop(guard);
+
+        assert_eq!(
+            report.already_applied, 1,
+            "the marker gate answers the re-claim"
+        );
+        assert_eq!(report.applied, 0);
+        // The gate statement still runs exactly once…
+        assert_eq!(
+            capture.count_starting_with("INSERT INTO sales_sender_health_applied"),
+            1,
+            "the idempotency gate runs: {:?}",
+            capture.statements()
+        );
+        // …inside its own savepoint (released, nothing to keep)…
+        assert_eq!(
+            capture.count_starting_with("RELEASE SAVEPOINT"),
+            1,
+            "the already-applied arm releases its savepoint: {:?}",
+            capture.statements()
+        );
+        // …and NO aggregate statement runs at all.
+        assert_eq!(
+            capture.count_starting_with("UPDATE sales_sender_health"),
+            0,
+            "no aggregate movement behind the marker: {:?}",
+            capture.statements()
+        );
+        assert_eq!(
+            capture.count_starting_with("INSERT INTO sales_sender_health "),
+            0,
+            "no aggregate movement behind the marker: {:?}",
+            capture.statements()
+        );
+        assert_eq!(
+            capture.count_starting_with("COMMIT"),
+            1,
+            "still exactly one commit for the tick: {:?}",
+            capture.statements()
+        );
+
+        // End state: aggregate untouched, marker singular, claim re-taken.
+        let (_, _, _, complaints, _, _, _, _) = health_counters(&pool, &tenant, sender).await;
+        assert_eq!(complaints, 1);
+        let markers: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM sales_sender_health_applied WHERE event_id = $1",
+        )
+        .bind(event)
+        .fetch_one(&pool)
+        .await
+        .expect("count markers");
+        assert_eq!(markers, 1, "the marker must remain singular");
+        let reclaimed: Option<DateTime<Utc>> =
+            sqlx::query_scalar("SELECT processed_at FROM sales_sender_events WHERE id = $1")
+                .bind(event)
+                .fetch_one(&pool)
+                .await
+                .expect("read the re-claim");
+        assert!(reclaimed.is_some(), "the re-claim must be durable");
+
+        pool.close().await;
+        _base.close().await;
+    }
+
+    /// Commit failure: a fault that fires at COMMIT time (a deferred
+    /// constraint trigger on the applied-marker table) rolls back the WHOLE
+    /// batch — no marker, no aggregate movement for any event — while the
+    /// durable claims (written outside the batch transaction) stand, so the
+    /// lease-expiry sweep recovers every event and applies it exactly once.
+    #[tokio::test]
+    async fn commit_failure_rolls_back_the_batch_and_stays_recoverable() {
+        let Some((_base, pool)) =
+            isolated_projector_pool("projector_commit_boom", "projector_commit_boom").await
+        else {
+            return;
+        };
+        let tenant = insert_tenant(&pool, "proj-boom").await;
+        let a = insert_sender(&pool, &tenant).await;
+        let b = insert_sender(&pool, &tenant).await;
+        let event_a =
+            insert_ledger_event(&pool, &tenant, a, "delivered", "msg-boom-a", "a@x.test").await;
+        let event_b =
+            insert_ledger_event(&pool, &tenant, b, "complaint", "msg-boom-b", "b@x.test").await;
+
+        // Commit-time fault: the deferred constraint trigger fires when the
+        // batch transaction COMMITS, not when the marker INSERT runs.
+        sqlx::query(
+            "CREATE OR REPLACE FUNCTION projector_commit_boom_fn() RETURNS trigger AS $$ \
+             BEGIN \
+               RAISE EXCEPTION 'injected commit-time failure'; \
+             END; \
+             $$ LANGUAGE plpgsql",
+        )
+        .execute(&pool)
+        .await
+        .expect("create boom fn");
+        sqlx::query("DROP TRIGGER IF EXISTS projector_commit_boom ON sales_sender_health_applied")
+            .execute(&pool)
+            .await
+            .expect("drop old boom trigger");
+        sqlx::query(
+            "CREATE CONSTRAINT TRIGGER projector_commit_boom \
+             AFTER INSERT ON sales_sender_health_applied \
+             DEFERRABLE INITIALLY DEFERRED \
+             FOR EACH ROW EXECUTE FUNCTION projector_commit_boom_fn()",
+        )
+        .execute(&pool)
+        .await
+        .expect("create boom trigger");
+
+        let projector = OutcomeProjector::new(pool.clone(), "test-worker-boom");
+        let result = projector
+            .project_sender_events(&ProjectorConfig::default())
+            .await;
+        assert!(
+            result.is_err(),
+            "the commit-time failure must surface to the caller"
+        );
+
+        // The WHOLE batch rolled back: no marker, no aggregate — for either
+        // event.
+        let markers: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM sales_sender_health_applied WHERE event_id = ANY($1)",
+        )
+        .bind(vec![event_a, event_b])
+        .fetch_one(&pool)
+        .await
+        .expect("count markers");
+        assert_eq!(markers, 0, "no marker may survive a failed commit");
+        let health_rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM sales_sender_health WHERE tenant_id = $1",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("count health rows");
+        assert_eq!(health_rows, 0, "no aggregate movement may survive");
+
+        // The durable claims stand — written OUTSIDE the batch transaction —
+        // which is exactly what lease recovery needs.
+        for event in [event_a, event_b] {
+            let claimed: bool = sqlx::query_scalar(
+                "SELECT processed_at IS NOT NULL FROM sales_sender_events WHERE id = $1",
+            )
+            .bind(event)
+            .fetch_one(&pool)
+            .await
+            .expect("read the durable claim");
+            assert!(claimed, "the claim must survive the failed commit");
+        }
+
+        // Lift the fault; age the claims past the lease (the lease clock
+        // started when the claim was taken) and lease-expiry recovery
+        // re-opens both claims so each event is applied exactly once.
+        sqlx::query("DROP TRIGGER projector_commit_boom ON sales_sender_health_applied")
+            .execute(&pool)
+            .await
+            .expect("drop boom trigger");
+        sqlx::query("DROP FUNCTION projector_commit_boom_fn()")
+            .execute(&pool)
+            .await
+            .expect("drop boom fn");
+        sqlx::query(
+            "UPDATE sales_sender_events \
+             SET processed_at = NOW() - INTERVAL '5 minutes' \
+             WHERE id = ANY($1)",
+        )
+        .bind(vec![event_a, event_b])
+        .execute(&pool)
+        .await
+        .expect("age the failed claims past the lease");
+        let recovered = projector
+            .recover_unapplied_claims(DEFAULT_LEASE_SECS, DEFAULT_RECOVERY_WINDOW_SECS)
+            .await
+            .expect("recovery sweep");
+        assert_eq!(recovered, 2, "both failed claims must be re-opened");
+        drain(&projector, 3).await;
+
+        let (volume_a, _, _, _, _, _, _, _) = health_counters(&pool, &tenant, a).await;
+        assert_eq!(volume_a, 1, "the delivered event applied exactly once");
+        let (_, _, _, complaints_b, _, _, _, _) = health_counters(&pool, &tenant, b).await;
+        assert_eq!(complaints_b, 1, "the complaint applied exactly once");
+        let markers: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM sales_sender_health_applied WHERE event_id = ANY($1)",
+        )
+        .bind(vec![event_a, event_b])
+        .fetch_one(&pool)
+        .await
+        .expect("count recovered markers");
+        assert_eq!(markers, 2, "one marker per recovered event");
+
+        pool.close().await;
+        _base.close().await;
     }
 
     /// Adversarial 4: a complaint ledger row is recorded as a complaint, not

@@ -827,11 +827,12 @@ impl GdprAutomation {
         }
 
         // Message content the subject sent or received (canonical `messages`
-        // store): from/to/cc/bcc JSONB recipient arrays.
-        self.export_table(
-            &mut data,
-            &mut stores,
-            "messages",
+        // store): from/to/cc/bcc JSONB recipient arrays. Bounded by the SAME
+        // configurable cap as the event history: `messages` carries full
+        // bodies, and an unbounded fetch_all here loaded an entire
+        // high-volume tenant's matching rows into memory on every access
+        // request. The manifest's `truncated` flag covers BOTH stores.
+        let message_rows: Result<Vec<(serde_json::Value,)>, sqlx::Error> = sqlx::query_as(
             "SELECT row_to_json(m) FROM messages m
              WHERE tenant_id = $2 AND (
                LOWER(from_email) = LOWER($1)
@@ -839,11 +840,26 @@ impl GdprAutomation {
                             COALESCE(to_emails, '[]'::jsonb) || COALESCE(cc_emails, '[]'::jsonb) ||
                             COALESCE(bcc_emails, '[]'::jsonb)) AS r(addr)
                           WHERE LOWER(addr) = LOWER($1))
-             )",
-            email,
-            tid,
+             )
+             LIMIT $3",
         )
-        .await?;
+        .bind(email)
+        .bind(tid)
+        .bind(self.config.access_request_max_messages)
+        .fetch_all(&self.db)
+        .await;
+        match message_rows {
+            Ok(rows) => {
+                truncated |= rows.len() as i64 >= self.config.access_request_max_messages;
+                let messages: Vec<serde_json::Value> = rows.into_iter().map(|(v,)| v).collect();
+                stores.push(StoreExportResult::included("messages", messages.len()));
+                data.insert("messages".into(), serde_json::Value::Array(messages));
+            }
+            Err(e) if is_missing_store(&e) => {
+                stores.push(StoreExportResult::skipped("messages", &e));
+            }
+            Err(e) => return Err(format!("DB error (messages): {e}")),
+        }
 
         // The subject's user account (anonymized-readable fields —
         // sanitize_pii strips password_hash/mfa_secret before storage).
@@ -1338,27 +1354,23 @@ impl GdprAutomation {
                 // invoice (the cast also made every rewrite a sequential scan
                 // instead of a primary-key lookup).
                 let email_lower = email.to_lowercase();
-                let rows: Vec<(Uuid, Option<String>, DateTime<Utc>)> = match sqlx::query_as(
-                    "SELECT id, billing_address, COALESCE(issued_at, created_at) \
-                     FROM invoices WHERE tenant_id = $1",
-                )
-                .bind(tid)
-                .fetch_all(&self.db)
-                .await
-                {
-                    Ok(rows) => rows,
-                    // F82: invoices are a REQUIRED canonical store — a
-                    // schema error fails the erasure visibly; it is not an
-                    // optional-store skip.
-                    Err(e) => {
-                        return StoreErasureResult {
-                            store: store.name(),
-                            status: StoreErasureStatus::Failed,
-                            rows_affected: 0,
-                            error: Some(format!("required store: {e}")),
-                        };
-                    }
-                };
+
+                // F82: invoices are a REQUIRED canonical store — a schema
+                // error fails the erasure visibly; it is not an optional-store
+                // skip.
+                //
+                // Perf (audit 2026-10-18): the scan is KEYSET-PAGINATED and
+                // each page flows straight into the set-based rewrite + legal
+                // archive, so a tenant with a million invoices no longer
+                // materialises every billing snapshot in memory before the
+                // first redaction. Per-page semantics are identical to the
+                // previous whole-tenant passes: malformed legacy snapshots are
+                // skipped, only snapshots addressed to the subject are
+                // rewritten, and a chunk failure stops the scan with the
+                // COMMITTED prefix both redacted AND archived (the legal trail
+                // can never lag the redaction).
+                const SNAPSHOT_REWRITE_CHUNK: usize = 1_000;
+                const INVOICE_SCAN_PAGE: i64 = 1_000;
 
                 // The statutory accounting class grounds the retention: no
                 // registry entry, no retention decision (fail loudly). Seed
@@ -1388,113 +1400,154 @@ impl GdprAutomation {
                 let subject_hash = legal_archive::subject_email_hash(email);
                 let mut updated: u64 = 0;
                 let mut failure: Option<sqlx::Error> = None;
+                // F82: a REQUIRED-store query failure keeps its "required
+                // store" prefix in the reported error (the contract the
+                // hostile-DB test pins), distinct from a mid-scan chunk error.
+                let mut required_store_error: Option<String> = None;
+                let mut last_id: Option<Uuid> = None;
 
-                // Pass 1: parse + redact in Rust, collect the rewrites.
-                let mut rewrites: Vec<(Uuid, String, DateTime<Utc>)> =
-                    Vec::with_capacity(rows.len());
-                for (invoice_id, snapshot_raw, issued_at) in rows {
-                    let Some(raw) = snapshot_raw.as_deref() else {
-                        continue;
-                    };
-                    let Ok(mut snapshot) = serde_json::from_str::<serde_json::Value>(raw) else {
-                        continue; // malformed legacy snapshot: skip safely
-                    };
-                    let matches_subject = snapshot
-                        .get("email")
-                        .and_then(|v| v.as_str())
-                        .is_some_and(|e| e.to_lowercase() == email_lower);
-                    if !matches_subject {
-                        continue;
-                    }
-                    if let Some(obj) = snapshot.as_object_mut() {
-                        obj.insert("email".into(), serde_json::Value::String(marker.clone()));
-                    }
-                    rewrites.push((invoice_id, snapshot.to_string(), issued_at));
-                }
-
-                // Pass 2: ONE set-based rewrite per chunk. The primary key is
-                // compared as UUID; a well-formed id that matches no row is a
-                // 0-row no-op (the same outcome the old text comparison had
-                // for an absent id).
-                //
-                // `committed` is the prefix of `rewrites` whose UPDATE chunk
-                // has committed. Pass 3 archives exactly that prefix even when
-                // a LATER chunk fails: a chunked rewrite is atomic per chunk,
-                // so earlier chunks are already redacted and must keep their
-                // legal-retention archive rows. (Before this, any failure
-                // skipped the whole archive pass, leaving redacted invoices
-                // with no legal trail — the opposite of the required order.)
-                const SNAPSHOT_REWRITE_CHUNK: usize = 1_000;
-                let mut committed: usize = 0;
-                for chunk in rewrites.chunks(SNAPSHOT_REWRITE_CHUNK) {
-                    let ids: Vec<Uuid> = chunk.iter().map(|(id, _, _)| *id).collect();
-                    let snapshots: Vec<String> = chunk
-                        .iter()
-                        .map(|(_, snapshot, _)| snapshot.clone())
-                        .collect();
-                    match sqlx::query(
-                        "UPDATE invoices i \
-                            SET billing_address = u.snapshot, updated_at = NOW() \
-                           FROM unnest($1::uuid[], $2::text[]) AS u(id, snapshot) \
-                          WHERE i.id = u.id",
+                'pages: loop {
+                    let rows: Vec<(Uuid, Option<String>, DateTime<Utc>)> = match sqlx::query_as(
+                        "SELECT id, billing_address, COALESCE(issued_at, created_at) \
+                         FROM invoices \
+                         WHERE tenant_id = $1 \
+                           AND ($2::uuid IS NULL OR id > $2::uuid) \
+                         ORDER BY id \
+                         LIMIT $3",
                     )
-                    .bind(&ids)
-                    .bind(&snapshots)
-                    .execute(&self.db)
+                    .bind(tid)
+                    .bind(last_id)
+                    .bind(INVOICE_SCAN_PAGE)
+                    .fetch_all(&self.db)
                     .await
                     {
-                        Ok(r) => {
-                            updated += r.rows_affected();
-                            committed += chunk.len();
-                        }
+                        Ok(rows) => rows,
                         Err(e) => {
-                            failure = Some(e);
+                            required_store_error = Some(format!("required store: {e}"));
+                            break 'pages;
+                        }
+                    };
+                    if rows.is_empty() {
+                        break 'pages;
+                    }
+                    let page_last = rows.last().map(|(id, _, _)| *id);
+                    let page_len = rows.len();
+
+                    // Pass 1 (per page): parse + redact in Rust, collect the
+                    // rewrites. Malformed legacy snapshots skip safely.
+                    let mut rewrites: Vec<(Uuid, String, DateTime<Utc>)> =
+                        Vec::with_capacity(rows.len());
+                    for (invoice_id, snapshot_raw, issued_at) in rows {
+                        let Some(raw) = snapshot_raw.as_deref() else {
+                            continue;
+                        };
+                        let Ok(mut snapshot) = serde_json::from_str::<serde_json::Value>(raw)
+                        else {
+                            continue; // malformed legacy snapshot: skip safely
+                        };
+                        let matches_subject = snapshot
+                            .get("email")
+                            .and_then(|v| v.as_str())
+                            .is_some_and(|e| e.to_lowercase() == email_lower);
+                        if !matches_subject {
+                            continue;
+                        }
+                        if let Some(obj) = snapshot.as_object_mut() {
+                            obj.insert("email".into(), serde_json::Value::String(marker.clone()));
+                        }
+                        rewrites.push((invoice_id, snapshot.to_string(), issued_at));
+                    }
+
+                    // Pass 2 (per page): ONE set-based rewrite per chunk. The
+                    // primary key is compared as UUID; a well-formed id that
+                    // matches no row is a 0-row no-op.
+                    let mut committed: usize = 0;
+                    for chunk in rewrites.chunks(SNAPSHOT_REWRITE_CHUNK) {
+                        let ids: Vec<Uuid> = chunk.iter().map(|(id, _, _)| *id).collect();
+                        let snapshots: Vec<String> = chunk
+                            .iter()
+                            .map(|(_, snapshot, _)| snapshot.clone())
+                            .collect();
+                        match sqlx::query(
+                            "UPDATE invoices i \
+                                SET billing_address = u.snapshot, updated_at = NOW() \
+                               FROM unnest($1::uuid[], $2::text[]) AS u(id, snapshot) \
+                              WHERE i.id = u.id",
+                        )
+                        .bind(&ids)
+                        .bind(&snapshots)
+                        .execute(&self.db)
+                        .await
+                        {
+                            Ok(r) => {
+                                updated += r.rows_affected();
+                                committed += chunk.len();
+                            }
+                            Err(e) => {
+                                failure = Some(e);
+                                break;
+                            }
+                        }
+                    }
+
+                    // Pass 3 (per page): archive the COMMITTED prefix — the
+                    // legal trail is written as soon as the redaction lands,
+                    // so a later page's failure still leaves every earlier
+                    // record redacted WITH its archive row. A rewrite failure
+                    // takes priority in the reported error.
+                    for (invoice_id, _snapshot, issued_at) in rewrites.iter().take(committed) {
+                        let invoice_id = invoice_id.to_string();
+                        // product-active → legally-restricted archive: the
+                        // record survives, its subject data is redacted, and
+                        // the archive row records why and until when.
+                        let expiry = class.expiry_for(*issued_at);
+                        let disclosure = serde_json::json!({
+                            "source_table": "invoices",
+                            "record_id": invoice_id,
+                            "retention_class_id": class.id,
+                            "legal_reference": class.legal_basis_reference,
+                            "reason": "Statutory accounting retention (EE, seven years): the \
+                                       invoice is retained as accounting evidence after the \
+                                       subject's erasure; the subject's PII was redacted.",
+                            "retain_until": expiry.to_rfc3339(),
+                        });
+                        let input = legal_archive::ArchiveRecordInput {
+                            tenant_id: tid.clone(),
+                            subject_email_hash: subject_hash.clone(),
+                            source_table: "invoices".into(),
+                            source_record_id: invoice_id.clone(),
+                            retention_class_id: class.id.clone(),
+                            reason:
+                                "Statutory accounting retention (EE, seven years) — Art. 17(3)(b) \
+                                     legal obligation"
+                                    .into(),
+                            statutory_expiry_at: expiry,
+                            disclosure,
+                        };
+                        if let Err(e) = legal_archive::archive_record(&self.db, &input).await {
+                            if failure.is_none() {
+                                failure = Some(sqlx::Error::Protocol(e));
+                            }
                             break;
                         }
                     }
+                    if failure.is_some() {
+                        break 'pages;
+                    }
+
+                    if page_len < INVOICE_SCAN_PAGE as usize {
+                        break 'pages;
+                    }
+                    last_id = page_last;
                 }
 
-                // Pass 3: archive the COMMITTED prefix (the legal trail).
-                //
-                // This runs even when a later rewrite chunk failed: those
-                // invoices are already redacted, so they must get their
-                // archive rows. If the archive itself fails, stop at the first
-                // failure (the rewrite failure, when present, takes priority
-                // in the reported error).
-                for (invoice_id, _snapshot, issued_at) in rewrites.iter().take(committed) {
-                    let invoice_id = invoice_id.to_string();
-                    // product-active → legally-restricted archive: the
-                    // record survives, its subject data is redacted, and
-                    // the archive row records why and until when.
-                    let expiry = class.expiry_for(*issued_at);
-                    let disclosure = serde_json::json!({
-                        "source_table": "invoices",
-                        "record_id": invoice_id,
-                        "retention_class_id": class.id,
-                        "legal_reference": class.legal_basis_reference,
-                        "reason": "Statutory accounting retention (EE, seven years): the \
-                                   invoice is retained as accounting evidence after the \
-                                   subject's erasure; the subject's PII was redacted.",
-                        "retain_until": expiry.to_rfc3339(),
-                    });
-                    let input = legal_archive::ArchiveRecordInput {
-                        tenant_id: tid.clone(),
-                        subject_email_hash: subject_hash.clone(),
-                        source_table: "invoices".into(),
-                        source_record_id: invoice_id.clone(),
-                        retention_class_id: class.id.clone(),
-                        reason: "Statutory accounting retention (EE, seven years) — Art. 17(3)(b) \
-                                 legal obligation"
-                            .into(),
-                        statutory_expiry_at: expiry,
-                        disclosure,
+                if let Some(e) = required_store_error {
+                    return StoreErasureResult {
+                        store: store.name(),
+                        status: StoreErasureStatus::Failed,
+                        rows_affected: 0,
+                        error: Some(e),
                     };
-                    if let Err(e) = legal_archive::archive_record(&self.db, &input).await {
-                        if failure.is_none() {
-                            failure = Some(sqlx::Error::Protocol(e));
-                        }
-                        break;
-                    }
                 }
                 if let Some(e) = failure {
                     return StoreErasureResult {
@@ -5009,6 +5062,67 @@ mod hostile_db_tests {
         assert!(
             !consent_exists(&pool, &free_consent).await,
             "an unheld tenant's withdrawn consent must still be purged"
+        );
+    }
+
+    /// The messages export is bounded by the SAME configurable cap as the
+    /// event history: full bodies make it the heaviest store, so an
+    /// unbounded fetch_all here loaded a high-volume tenant's matching rows
+    /// into memory on every access request. The manifest must say
+    /// `truncated` when the cap engages.
+    #[tokio::test]
+    async fn access_export_caps_messages_and_flags_truncation() {
+        let Some(pool) = hostile_db("access_messages_cap").await else {
+            return;
+        };
+        let gdpr = automation_with(pool.clone(), config_with_max_messages(2));
+        let tenant = test_support::unique_tenant();
+        seed_tenant(&pool, &tenant).await;
+        let email = format!("subject-{}@cap.example.test", Uuid::new_v4().simple());
+        let request_id = format!("dsr-cap-{}", Uuid::new_v4());
+        seed_request(&pool, &request_id, &tenant, &email, "access").await;
+        for i in 0..3 {
+            sqlx::query(
+                "INSERT INTO messages (tenant_id, from_email, to_emails, subject, status) \
+                 VALUES ($1, $2, $3::jsonb, $4, 'sent')",
+            )
+            .bind(&tenant)
+            .bind(&email)
+            .bind(serde_json::json!([email]))
+            .bind(format!("m{i}"))
+            .execute(&pool)
+            .await
+            .expect("seed message");
+        }
+
+        gdpr.process_request(&request_id)
+            .await
+            .expect("an access export succeeds");
+
+        let (data_text,): (String,) = sqlx::query_as(
+            "SELECT data::text FROM gdpr_exports WHERE request_id = $1 \
+             ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(&request_id)
+        .fetch_one(&pool)
+        .await
+        .expect("export row");
+        let data: serde_json::Value =
+            serde_json::from_str(&data_text).expect("the export payload is valid JSON");
+        let manifest = data.get("manifest").expect("the manifest is stored");
+        assert_eq!(
+            manifest["truncated"],
+            serde_json::json!(true),
+            "the cap must be disclosed in the manifest: {manifest}"
+        );
+        let messages = data
+            .get("messages")
+            .and_then(|value| value.as_array())
+            .expect("the messages array is stored");
+        assert_eq!(
+            messages.len(),
+            2,
+            "messages are capped at access_request_max_messages"
         );
     }
 
