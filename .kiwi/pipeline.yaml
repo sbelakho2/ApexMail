@@ -1,0 +1,123 @@
+version: 1
+"on":
+    pull_request: {}
+    push: {}
+secrets:
+    - GITHUB_TOKEN
+jobs:
+    toolchain:
+        name: toolchain
+        runtime: container
+        image: ghcr.io/sbelakho2/apexmail-ci@sha256:3e3fedac72307c5a7e0fd72933f055e71be0c9f399f1e58ed05aa74550f3c3d5
+        services:
+            - name: postgres
+              image: postgres:16-alpine
+              env:
+                POSTGRES_DB: apexmail_ci
+                POSTGRES_PASSWORD: apexmail_ci
+                POSTGRES_USER: postgres
+            - name: postgres-fresh
+              image: postgres:16-alpine
+              env:
+                POSTGRES_DB: apexmail_fresh
+                POSTGRES_PASSWORD: apexmail_ci
+                POSTGRES_USER: postgres
+            - name: redis
+              image: redis:7-alpine
+            - name: clickhouse
+              image: clickhouse/clickhouse-server:24.8-alpine
+        steps:
+            - name: toolchain
+              run: apexmail-ci-toolchain --assert
+              env:
+                CI_MISSING_TOOLS: fail
+            - name: validate
+              run: ./ci/woodpecker/stage.sh validate
+              env:
+                CI_MISSING_TOOLS: fail
+            - name: docs
+              run: ./ci/woodpecker/stage.sh docs
+              env:
+                CI_MISSING_TOOLS: fail
+            - name: ui
+              run: ./ci/woodpecker/stage.sh ui
+              env:
+                APEXMAIL_RELEASE_TEST_MODE: "1"
+                CI_MISSING_TOOLS: fail
+            - name: test
+              run: |-
+                for i in $(seq 1 30); do
+                  if curl -fsS "http://clickhouse:8123/ping" >/dev/null 2>&1; then break; fi
+                  sleep 2
+                done
+
+                curl -fsS "http://clickhouse:8123/?multiquery" --data-binary @deploy/clickhouse/initdb/001_schema.sql >/dev/null
+
+                ./ci/woodpecker/stage.sh test
+              env:
+                APEXMAIL_RELEASE_TEST_MODE: "1"
+                CI_MISSING_TOOLS: fail
+                CI_TEST_DB: service
+                CI_TEST_REDIS: service
+                CLICKHOUSE_TEST_URL: http://clickhouse:8123
+                CLICKHOUSE_TEST_USER: default
+                HA_TEST_DATABASE_URL: postgresql://postgres:apexmail_ci@postgres:5432/apexmail_ci
+                REDIS_TEST_URL: redis://redis:6379
+                TEST_DATABASE_ADMIN_URL: postgresql://postgres:apexmail_ci@postgres:5432/apexmail_ci
+                TEST_DATABASE_URL: postgresql://postgres:apexmail_ci@postgres:5432/apexmail_ci
+                TEST_FRESH_DATABASE_URL: postgresql://postgres:apexmail_ci@postgres-fresh:5432/apexmail_fresh
+                TEST_REDIS_URL: redis://redis:6379
+            - name: security
+              run: ./ci/woodpecker/stage.sh security
+              env:
+                APEXMAIL_RELEASE_TEST_MODE: "1"
+                CI_MISSING_TOOLS: fail
+                CI_TEST_DB: service
+                CI_TEST_REDIS: service
+                CLICKHOUSE_TEST_URL: http://clickhouse:8123
+                REDIS_TEST_URL: redis://redis:6379
+                TEST_DATABASE_ADMIN_URL: postgresql://postgres:apexmail_ci@postgres:5432/apexmail_ci
+                TEST_DATABASE_URL: postgresql://postgres:apexmail_ci@postgres:5432/apexmail_ci
+                TEST_FRESH_DATABASE_URL: postgresql://postgres:apexmail_ci@postgres-fresh:5432/apexmail_fresh
+                TEST_REDIS_URL: redis://redis:6379
+            - name: notify-github-success
+              run: |
+                . ci/woodpecker/run-dir.sh
+                _p=$(grep -h 'PASS: ' "$WP_RUN_DIR"/stages/*.log 2>/dev/null | wc -l | tr -d ' ')
+                _f=$(grep -h 'FAIL:' "$WP_RUN_DIR"/stages/*.log 2>/dev/null | wc -l | tr -d ' ')
+                GITHUB_STATUS_STATE=success \
+                GITHUB_STATUS_CONTEXT=woodpecker \
+                STATUS_TARGET_URL="${CI_PIPELINE_URL:-${CI_PIPELINE_LINK:-}}" \
+                STATUS_DESCRIPTION="woodpecker release gates GREEN (${CI_REPO:-repo} ${CI_COMMIT_SHA:-${CI_SHA:-unknown}}): $_p checks passed, $_f failed" \
+                tools/post_github_status.sh
+              if: success()
+              continue_on_error: true
+            - name: notify-github-failure
+              run: |
+                . ci/woodpecker/run-dir.sh
+                _f=$(grep -h 'FAIL:' "$WP_RUN_DIR"/stages/*.log 2>/dev/null | wc -l | tr -d ' ')
+                GITHUB_STATUS_STATE=failure \
+                GITHUB_STATUS_CONTEXT=woodpecker \
+                STATUS_TARGET_URL="${CI_PIPELINE_URL:-${CI_PIPELINE_LINK:-}}" \
+                STATUS_DESCRIPTION="woodpecker release gates RED: $_f failing checks in validate/ui/test/security — open the run log" \
+                tools/post_github_status.sh
+              if: failure()
+              continue_on_error: true
+        cache:
+            - name: cargo-target
+              paths:
+                - target
+              key: cargo-target
+              hash_files:
+                - Cargo.lock
+              restore_keys:
+                - cargo-target-
+            - name: cargo-registry
+              paths:
+                - ~/.cargo/registry
+                - ~/.cargo/git
+              key: cargo-registry
+              hash_files:
+                - Cargo.lock
+              restore_keys:
+                - cargo-registry-

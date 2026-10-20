@@ -1,0 +1,134 @@
+# =============================================================================
+# .kiwi/pipeline-scoped.yaml — LIVE Kiwi validation run on ApexMail (scoped).
+# =============================================================================
+# Scope decision (owner: "not absolutely everything — the most testing areas
+# for Kiwi"): run the stages that exercise the ENGINE hardest while avoiding
+# the in-container cold compile of the Leptos/test battery:
+#   toolchain assert → validate → docs → security → db-probe (bounded test).
+#
+#   * security is compile-free and hits THREE services (postgres, the
+#     NEVER-migrated postgres-fresh for the fresh-chain gate, redis) plus
+#     gitleaks full-history, cargo audit/vet, semgrep, trivy.
+#   * db-probe applies the real migration chain to the postgres service,
+#     provisions the canonical test template, and runs the migrator's own
+#     DB-backed suite — the exact DB machinery every suite depends on — with
+#     the smallest compile surface.
+#   * ui (Leptos fixture export) and the full test battery are deliberately
+#     deferred: cold in-container compile of that stack is hours, not
+#     minutes. Documented, not skipped silently.
+#
+# DEVIATION (documented): image = apexmail-ci:local-arm64, built locally from
+# ci/ci-image AFTER fixing its hardcoded arch=amd64 apt repo line (the ghcr
+# digest image is amd64-only and cannot run on this Apple Silicon host — see
+# the live-run report). Same recipe, different architecture.
+# =============================================================================
+version: 1
+name: apexmail-kiwi-live
+"on":
+    push: {}
+jobs:
+    gates:
+        runtime: container
+        image: apexmail-ci:local-arm64
+        # bridge: the db-probe compiles the migrator and needs crates.io
+        # (the image carries no registry cache).
+        network: bridge
+        services:
+            - name: postgres
+              image: postgres:16-alpine
+              env:
+                POSTGRES_DB: apexmail_ci
+                POSTGRES_PASSWORD: apexmail_ci
+                POSTGRES_USER: postgres
+            - name: postgres-fresh
+              image: postgres:16-alpine
+              env:
+                POSTGRES_DB: apexmail_fresh
+                POSTGRES_PASSWORD: apexmail_ci
+                POSTGRES_USER: postgres
+            - name: redis
+              image: redis:7-alpine
+            - name: clickhouse
+              image: clickhouse/clickhouse-server:24.8-alpine
+        cache:
+            - name: cargo-target
+              paths:
+                - target
+              key: cargo-target
+              hash_files:
+                - Cargo.lock
+              restore_keys:
+                - cargo-target-
+            # CARGO_HOME is redirected into the workspace by the db-probe
+            # step: Kiwi cache paths must be workspace-relative (absolute
+            # paths are refused), so the image's /usr/local/cargo is not
+            # cacheable directly.
+            - name: cargo-registry
+              paths:
+                - .cargo-home/registry
+                - .cargo-home/git
+              key: cargo-registry
+              hash_files:
+                - Cargo.lock
+              restore_keys:
+                - cargo-registry-
+        steps:
+            - name: toolchain-assert
+              run: apexmail-ci-toolchain --assert
+              env:
+                HOME: /root
+                TMPDIR: /tmp
+                PATH: /usr/local/cargo/bin:/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+                CI_MISSING_TOOLS: fail
+            - name: validate
+              timeout: 45m
+              run: ./ci/woodpecker/stage.sh validate
+              env:
+                HOME: /root
+                TMPDIR: /tmp
+                PATH: /usr/local/cargo/bin:/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+                CI_MISSING_TOOLS: fail
+            - name: docs
+              timeout: 10m
+              run: ./ci/woodpecker/stage.sh docs
+              env:
+                HOME: /root
+                TMPDIR: /tmp
+                PATH: /usr/local/cargo/bin:/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+                CI_MISSING_TOOLS: fail
+            - name: db-probe
+              timeout: 60m
+              env:
+                HOME: /root
+                TMPDIR: /tmp
+                PATH: /usr/local/cargo/bin:/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+              run: |
+                set -eu
+                cd "${CI_WORKSPACE:-/workspace}/services/mail-server"
+                echo "DIAG cwd=$(pwd) migrations=$(test -d migrations && echo present || echo ABSENT)"
+                export CARGO_HOME="/workspace/.cargo-home"
+                echo "== apply migration chain to the postgres service =="
+                DATABASE_URL="postgresql://postgres:apexmail_ci@postgres:5432/apexmail_ci" \
+                  sqlx migrate run --source migrations
+                echo "== provision the canonical test template =="
+                export TEST_DATABASE_URL="postgresql://postgres:apexmail_ci@postgres:5432/apexmail_ci"
+                export TEST_DATABASE_ADMIN_URL="postgresql://postgres:apexmail_ci@postgres:5432/apexmail_ci"
+                cargo run --locked -p migrator -- --ensure-canonical-template
+                echo "== migrator's own DB-backed suite =="
+                cargo nextest run -p migrator
+            - name: security
+              timeout: 60m
+              run: ./ci/woodpecker/stage.sh security
+              env:
+                HOME: /root
+                TMPDIR: /tmp
+                PATH: /usr/local/cargo/bin:/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+                CI_MISSING_TOOLS: fail
+                CI_TEST_DB: service
+                CI_TEST_REDIS: service
+                APEXMAIL_RELEASE_TEST_MODE: "1"
+                TEST_DATABASE_URL: postgresql://postgres:apexmail_ci@postgres:5432/apexmail_ci
+                TEST_DATABASE_ADMIN_URL: postgresql://postgres:apexmail_ci@postgres:5432/apexmail_ci
+                TEST_REDIS_URL: redis://redis:6379
+                REDIS_TEST_URL: redis://redis:6379
+                TEST_FRESH_DATABASE_URL: postgresql://postgres:apexmail_ci@postgres-fresh:5432/apexmail_fresh
