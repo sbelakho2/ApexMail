@@ -2528,10 +2528,16 @@ pub mod test_support {
         /// URL's userinfo is replaced, keeping host/port/query intact. Used
         /// to prove privilege-dependent failure paths with dedicated probe
         /// roles instead of touching shared role settings.
+        // PROBE_PASSWORD (2026-10-20): the roles these tests create must be
+        // created WITH a password and connected WITH that password — a
+        // passwordless connect only works on trust-auth servers (the dev
+        // Mac) and fails 28P01 on scram-only services (the postgres:16-alpine
+        // CI service). One fixed probe password keeps every host shape equal.
+        const PROBE_PASSWORD: &str = "migrator-probe-pw";
         fn url_as_role(server_part: &str, db: &str, role: &str) -> String {
             let (scheme, rest) = server_part.split_once("://").expect("scheme");
             let authority = rest.rsplit_once('@').map_or(rest, |(_, after)| after);
-            format!("{scheme}://{role}@{authority}/{db}")
+            format!("{scheme}://{role}:{PROBE_PASSWORD}@{authority}/{db}")
         }
 
         // ── drop_database retries ──────────────────────────────────────────
@@ -2607,10 +2613,12 @@ pub mod test_support {
             // with this run's CREATE ROLE (nextest restarts counters per
             // process).
             let role = format!("migrator_blocker_{}_{:04}", std::process::id(), counter());
-            sqlx::query(&format!(r#"CREATE ROLE "{role}" LOGIN"#))
-                .execute(&admin)
-                .await
-                .expect("create blocker role");
+            sqlx::query(&format!(
+                r#"CREATE ROLE "{role}" LOGIN PASSWORD '{PROBE_PASSWORD}'"#
+            ))
+            .execute(&admin)
+            .await
+            .expect("create blocker role");
             drop_quietly(&server, &probe).await;
             sqlx::query(&format!(r#"CREATE DATABASE "{probe}" OWNER "{role}""#))
                 .execute(&admin)
@@ -2660,10 +2668,12 @@ pub mod test_support {
                 counter()
             );
             let probe = probe_name("drop_noforce");
-            sqlx::query(&format!(r#"CREATE ROLE "{role}" LOGIN"#))
-                .execute(&admin)
-                .await
-                .expect("create role");
+            sqlx::query(&format!(
+                r#"CREATE ROLE "{role}" LOGIN PASSWORD '{PROBE_PASSWORD}'"#
+            ))
+            .execute(&admin)
+            .await
+            .expect("create role");
             drop_quietly(&server, &probe).await;
             sqlx::query(&format!(r#"CREATE DATABASE "{probe}" OWNER "{role}""#))
                 .execute(&admin)
