@@ -2541,11 +2541,7 @@
         "text": "Sum of revenue outcomes in the last 30 days."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:2616",
-        "text": "No revenue recorded"
-      },
-      {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:2617",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:2618",
         "text": "No revenue outcomes in the last 30 days."
       },
       {
@@ -3675,119 +3671,123 @@
         "text": "Control-plane access is restricted to ApexMail operators."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:10022",
-        "text": "Unknown alert."
-      },
-      {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:10035",
-        "text": "Alert acknowledged."
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:10015",
+        "text": "That lead's account record is missing — the stage cannot be changed. Re-enrich the lead first."
       },
       {
         "id": "services/mail-server/crates/api-server/src/routes/web.rs:10040",
+        "text": "Unknown alert."
+      },
+      {
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:10053",
+        "text": "Alert acknowledged."
+      },
+      {
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:10058",
         "text": "It may have been acknowledged already."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:10068",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:10086",
         "text": "Select at least one alert first."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:10072",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:10090",
         "text": "No valid alert ids were posted."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:10088",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:10106",
         "text": "They may have been acknowledged already."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:10268",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:10286",
         "text": "A rule for that tenant, metric and threshold already exists."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:10295",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:10313",
         "text": "Unknown alert rule."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:10363",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:10381",
         "text": "Alert rule updated."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:10366",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:10384",
         "text": "That alert rule no longer exists."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:10371",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:10389",
         "text": "Another rule for this tenant and metric already uses that threshold."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:10398",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:10416",
         "text": "Unknown alert rule."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:10405",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:10423",
         "text": "Invalid enable or disable request."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:10452",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:10470",
         "text": "That alert rule no longer exists."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:10479",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:10497",
         "text": "Unknown alert rule."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:10508",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:10526",
         "text": "That alert rule no longer exists."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:10558",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:10576",
         "text": "That tenant could not be found."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:10588",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:10606",
         "text": "Tenant resumed — status is now active."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:10593",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:10611",
         "text": "Only suspended tenants can be resumed."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:10632",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:10650",
         "text": "Pick a plan before changing this tenant."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:10691",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:10709",
         "text": "That tenant could not be found."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:10817",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:10835",
         "text": "That tenant could not be found."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:11018",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:11036",
         "text": "Add at least one comma-separated source."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:11025",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:11043",
         "text": "Sales engine not configured — set SALES_AUTOPILOT_BASE_URL to run discovery."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:11134",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:11152",
         "text": "An enrollment command needs a sequence id and an autonomy policy id."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:11152",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:11170",
         "text": "Provide 1-100 comma-separated contact ids."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:11159",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:11177",
         "text": "Sales engine not configured — set SALES_AUTOPILOT_BASE_URL to launch outreach."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:11276",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:11294",
         "text": "That GDPR request could not be found."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:11325",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:11343",
         "text": "The request changed state just now. Reload and retry."
       },
       {
@@ -3843,331 +3843,331 @@
         "text": "This account is not active yet. Check your verification email."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2615",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2633",
         "text": "SSO_REQUIRED: this organization requires single sign-on; password login is disabled."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2622",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2640",
         "text": "Verify your email address before signing in — check your inbox for the verification link."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2653",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2671",
         "text": "Multi-factor authentication enrollment is required before you can sign in."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2688",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2706",
         "text": "Signed in."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2692",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2710",
         "text": "Sign-in is temporarily unavailable. Try again."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2760",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2778",
         "text": "Invalid email or password."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2764",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2782",
         "text": "Your verification window expired. Sign in again."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2773",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2791",
         "text": "Verify your email address before signing in — check your inbox for the verification link."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2781",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2799",
         "text": "Too many verification attempts. Try again in a few minutes."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2791",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2809",
         "text": "Enter the 6-digit code from your authenticator app."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2879",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2897",
         "text": "That code did not match. Check your authenticator and try again."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2891",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2909",
         "text": "Signed in."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2928",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2946",
         "text": "Sign-in is temporarily unavailable. Try again."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3026",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3044",
         "text": "Check your email to finish creating your account."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3165",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3183",
         "text": "An account with this email already exists. Try signing in instead."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3172",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3190",
         "text": "Registration is temporarily unavailable. Try again."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3180",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3198",
         "text": "Account created. Check your email for a verification link."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3373",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3391",
         "text": "If that account exists, a reset link is on the way."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3492",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3510",
         "text": "Too many verification emails requested. Try again in a few minutes."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3689",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3707",
         "text": "Open the reset link from your email first."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3695",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3713",
         "text": "The passwords do not match."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3729",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3747",
         "text": "That reset link is invalid or has expired."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3736",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3754",
         "text": "This account is not active."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3768",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3786",
         "text": "That reset link has expired. Request a fresh one."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3821",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3839",
         "text": "Invitation accepted — your password is set. Sign in with it, and confirm your email address with the verification link from the invitation if you have not already."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3826",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3844",
         "text": "Your password has been reset. Sign in with your new password."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3831",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3849",
         "text": "That reset link is invalid or has expired."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3843",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3861",
         "text": "Could not reset the password. Try again."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3902",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3920",
         "text": "Signed out."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3938",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3956",
         "text": "Name is required."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3948",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3966",
         "text": "Profile updated."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3953",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3971",
         "text": "Could not save your profile. Sign in again."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3992",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4010",
         "text": "Your current password is incorrect."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4061",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4079",
         "text": "Password updated. Please sign in again with your new password."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4066",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4084",
         "text": "Could not update the password for this account. Sign in again."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4079",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4097",
         "text": "Could not update the password. Try again."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4102",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4120",
         "text": "Sign in again to manage MFA."
-      },
-      {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4128",
-        "text": "MFA is already enabled for this account."
-      },
-      {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4135",
-        "text": "MFA is already enabled for this account."
       },
       {
         "id": "services/mail-server/crates/api-server/src/routes/web.rs:4146",
-        "text": "Scan the QR code with your authenticator, then enter a code to confirm."
-      },
-      {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4177",
-        "text": "Sign in again to manage MFA."
-      },
-      {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4181",
-        "text": "The setup window expired. Start the MFA setup again."
-      },
-      {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4188",
-        "text": "Enter the 6-digit code from your authenticator app."
-      },
-      {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4198",
-        "text": "That code did not match. Check your authenticator and try again."
-      },
-      {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4251",
-        "text": "Could not enable MFA. Try again."
-      },
-      {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4265",
         "text": "MFA is already enabled for this account."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4372",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4153",
+        "text": "MFA is already enabled for this account."
+      },
+      {
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4164",
+        "text": "Scan the QR code with your authenticator, then enter a code to confirm."
+      },
+      {
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4195",
+        "text": "Sign in again to manage MFA."
+      },
+      {
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4199",
+        "text": "The setup window expired. Start the MFA setup again."
+      },
+      {
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4206",
+        "text": "Enter the 6-digit code from your authenticator app."
+      },
+      {
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4216",
+        "text": "That code did not match. Check your authenticator and try again."
+      },
+      {
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4269",
+        "text": "Could not enable MFA. Try again."
+      },
+      {
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4283",
+        "text": "MFA is already enabled for this account."
+      },
+      {
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4390",
         "text": "Only ApexMail operators can end impersonation sessions."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4433",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4451",
         "text": "Impersonation session ended."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4485",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4503",
         "text": "API access is not part of the current plan. Upgrade the plan or contact support to create API keys."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4643",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4661",
         "text": "Webhooks are not part of the current plan. Upgrade the plan or contact support to add webhooks."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4951",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4969",
         "text": "Only workspace owners and admins can send invitations."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4976",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4994",
         "text": "Only workspace owners and admins can send invitations."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4983",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5001",
         "text": "Only workspace owners and admins can send invitations."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4998",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5016",
         "text": "You cannot invite someone to a role above your own."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5009",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5027",
         "text": "Choose a valid role (member or admin)."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5017",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5035",
         "text": "Enter a valid email address."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5215",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5233",
         "text": "This plan does not include more team seats. Upgrade the plan to invite more teammates."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5225",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5243",
         "text": "Invitation limit reached: clear outstanding invitations before sending more."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5262",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5280",
         "text": "Choose a plan to upgrade to."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5280",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5298",
         "text": "Your plan change request was noted for the billing team. Nothing has been charged."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5304",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5322",
         "text": "Your request for billing portal access was noted for the billing team. Nothing was changed."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5350",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5368",
         "text": "There is no active subscription to cancel."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5361",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5379",
         "text": "Could not cancel the subscription — nothing was changed. Try again or contact support."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5384",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5402",
         "text": "Enter a valid email address."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5401",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5419",
         "text": "Contact added."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5405",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5423",
         "text": "Could not add the contact. It may already exist."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5463",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5481",
         "text": "That contact could not be found in this workspace."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5526",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5544",
         "text": "Pick a contact to save."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5532",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5550",
         "text": "Choose a valid status for the contact."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5554",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5572",
         "text": "Contact saved."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5557",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5575",
         "text": "That contact could not be found in this workspace."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5582",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5600",
         "text": "Give the list a name."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5595",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5613",
         "text": "List created."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5619",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5637",
         "text": "Pick a list and give it a name."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5635",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5653",
         "text": "List saved."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5638",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5656",
         "text": "That list could not be found in this workspace."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5722",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5740",
         "text": "This plan's sending-domain limit is reached. Remove a domain or upgrade the plan to add another."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5743",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5761",
         "text": "Domain added — review its DNS records and run verification when they are published."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5805",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5823",
         "text": "Custom templates are not part of the current plan. Upgrade the plan or contact support."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5820",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5838",
         "text": "Give the template a name."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5823",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5841",
         "text": "Add some HTML content."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5844",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5862",
         "text": "Template saved."
       },
       {
@@ -4175,344 +4175,340 @@
         "text": "The form could not be read. Reload the page and try again."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6177",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6195",
         "text": "Missing campaign id."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6181",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6199",
         "text": "Campaign name and subject are required."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6268",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6286",
         "text": "That campaign could not be found in this workspace."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6311",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6329",
         "text": "Operator access required."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6316",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6334",
         "text": "That action could not be found."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6335",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6353",
         "text": "Action requeued — it runs when the engine next polls."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6341",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6359",
         "text": "That action is no longer replayable — it may already have been requeued or handled."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6385",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6403",
         "text": "Operator access required."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6391",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6409",
         "text": "That decision could not be found."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6404",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6422",
         "text": "Choose Approve or Reject for this decision."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6487",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6505",
         "text": "Draft approved — the reply is queued."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6492",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6510",
         "text": "That draft was already handled."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6511",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6529",
         "text": "The draft could not be approved. It is still pending."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6532",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6550",
         "text": "Draft rejected."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6534",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6552",
         "text": "That draft was already handled."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6541",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6559",
         "text": "The draft could not be rejected. It is still pending."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6563",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6581",
         "text": "Choose a demo script."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6579",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6597",
         "text": "The demo could not be created. No session was started."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6663",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6681",
         "text": "That demo link has expired. Create a new session."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6679",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6697",
         "text": "No such demo session."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6690",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6708",
         "text": "Step executed."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6717",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6735",
         "text": "Your role does not include the AI assistant. Ask a workspace owner for access."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6737",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6755",
         "text": "Enter a question for the assistant."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6744",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6762",
         "text": "Messages are limited to 4,000 characters."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6803",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6821",
         "text": "The assistant answered."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6805",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6823",
         "text": "The assistant is receiving too many questions right now. Please retry in a minute."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6817",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6835",
         "text": "Enter a question up to 4,000 characters."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6824",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6842",
         "text": "The assistant is temporarily unavailable. Please try again."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6932",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6950",
         "text": "Placement test started — results poll as seeds report in."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6978",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6996",
         "text": "Provisioning request recorded — the allocator picks it up shortly."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6985",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7003",
         "text": "A provisioning request is already pending — the allocator will pick it up."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7085",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7103",
         "text": "That domain could not be found in this workspace."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7133",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7151",
         "text": "That domain could not be found in this workspace."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7270",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7288",
         "text": "That domain could not be found in this workspace."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7277",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7295",
         "text": "Verify the domain itself before configuring a tracking subdomain for it."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7328",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7346",
         "text": "That domain could not be found in this workspace."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7337",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7355",
         "text": "No tracking domain is configured for this domain yet."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7388",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7406",
         "text": "That domain could not be found in this workspace."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7397",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7415",
         "text": "No tracking domain is configured for this domain."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7458",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7476",
         "text": "That message could not be found in this workspace."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7465",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7483",
         "text": "That message could not be found in this workspace."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7473",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7491",
         "text": "The message timeline is temporarily unavailable. Please retry."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7504",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7522",
         "text": "The `at` timestamp must be RFC 3339, e.g. 2026-10-07T12:00:00Z."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7521",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7539",
         "text": "The message timeline is temporarily unavailable. Please retry."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7652",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7670",
         "text": "Unknown domain."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7747",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7765",
         "text": "That list could not be found in this workspace."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7806",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7824",
         "text": "That list could not be found in this workspace."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7868",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7886",
         "text": "That campaign could not be found in this workspace."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7913",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7931",
         "text": "That campaign could not be found in this workspace."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7953",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7971",
         "text": "The campaign changed state just now. Reload and retry."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7981",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7999",
         "text": "Unknown campaign."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8010",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8028",
         "text": "That campaign could not be found in this workspace."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8024",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8042",
         "text": "This campaign has no recipients yet — wire an audience list first."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8050",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8068",
         "text": "The selected audience list has no subscribed contacts — add contacts before starting."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8071",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8089",
         "text": "The campaign changed state just now. Reload and retry."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8176",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8194",
         "text": "Unknown campaign."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8217",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8235",
         "text": "That campaign could not be found in this workspace."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8465",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8483",
         "text": "The import could not be saved. Nothing was committed."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8523",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8541",
         "text": "Custom templates are not part of the current plan. Upgrade the plan or contact support."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8539",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8557",
         "text": "Missing template id."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8567",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8585",
         "text": "That template could not be found in this workspace."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8672",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8690",
         "text": "Add some HTML content to preview."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8825",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8843",
         "text": "That confirmation link expired. Nothing was changed."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8911",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8929",
         "text": "Operator access required."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8941",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8959",
         "text": "Operator access required."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8973",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8991",
         "text": "The typed name does not match the tenant — nothing was deleted."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8980",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8998",
         "text": "That tenant could not be found."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8988",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9006",
         "text": "Unknown action."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9002",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9020",
         "text": "It may have been deleted already."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9041",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9059",
         "text": "Select at least one row first."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9114",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9132",
         "text": "CSV export is not part of the current plan. Upgrade the plan or contact support to enable it."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9179",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9197",
         "text": "Operator access required."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9410",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9428",
         "text": "Enter a valid operator email."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9433",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9451",
         "text": "Provisioning is unavailable. Try again shortly."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9530",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9548",
         "text": "That job id is not valid."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9564",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9582",
         "text": "That job id is not valid."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9635",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9653",
         "text": "Only ApexMail owners can start impersonation."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9665",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9683",
         "text": "That tenant could not be found."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9669",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9687",
         "text": "Deleted tenants cannot be impersonated."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9709",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9727",
         "text": "Impersonation is temporarily unavailable. Try again."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9720",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9738",
         "text": "Impersonation is temporarily unavailable. Try again."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9749",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9767",
         "text": "Impersonation is temporarily unavailable. Try again."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9935",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9953",
         "text": "Pick at least one lead in the queue first."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9970",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9988",
         "text": "The stage change failed. Refresh and retry."
-      },
-      {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9997",
-        "text": "That lead's account record is missing — the stage cannot be changed. Re-enrich the lead first."
       },
       {
         "id": "services/mail-server/crates/integration-tests/tests/adversarial_ux_workflows.rs:1097",
@@ -4743,171 +4739,171 @@
         "text": "Password reset email enqueued"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5897",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5933",
         "text": "Full name is required."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5900",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5936",
         "text": "Company is required."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5904",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5940",
         "text": "Full name and company are required."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5914",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5950",
         "text": "Enter a valid email address."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5917",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5953",
         "text": "Enter a valid email address."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5943",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5979",
         "text": "SELECT COUNT(*) FROM users WHERE LOWER(email) = LOWER($1)"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5960",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5996",
         "text": "Check your email to finish creating your account."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5996",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6032",
         "text": "INSERT INTO tenants (id, name, slug, plan, status, settings, metadata, created_at, updated_at) VALUES ($1, $2, $3, 'free', 'pending', $4, $5, $6, $6)"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6010",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6046",
         "text": "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status, email_verified, mfa_enabled, metadata, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, 'owner', 'active', false, false, $6, $7, $7)"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6034",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6070",
         "text": "web signup users insert failed"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6039",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6075",
         "text": "{}/verify-email?token={}&email={}"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6060",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6096",
         "text": "Verify your email — ApexMail"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6061",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6097",
         "text": "Verify Your ApexMail Account"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6063",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6099",
         "text": "Finish setting up"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6063",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6099",
         "text": "This link expires in 24 hours. If you didn't create this account, you can safely ignore this email."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6063",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6099",
         "text": "by confirming this email address."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6067",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6103",
         "text": "Verify email"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6074",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6110",
         "text": "Verify Your ApexMail Account Confirm {email} by visiting: {verification_link} This link expires in 24 hours. If you didn't create this account, you can safely ignore this email. © 2026 ApexMail — https://apexmail.ee"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6079",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6115",
         "text": "Verify your ApexMail account"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6087",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6123",
         "text": "web signup verification email queue failed"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6099",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6135",
         "text": "An account with this email already exists. Try signing in instead."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6106",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6142",
         "text": "Registration is temporarily unavailable. Try again."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6114",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6150",
         "text": "Account created. Check your email for a verification link."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6115",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6151",
         "text": "/verify-email?email={}"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6390",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6426",
         "text": "Enter a valid email address."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6393",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6429",
         "text": "Enter a valid email address."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6413",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6449",
         "text": "SELECT id::text, tenant_id::text FROM users WHERE LOWER(email) = LOWER($1) AND status = 'active' LIMIT 1"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6423",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6459",
         "text": "web forgot-password lookup failed; answering neutrally (anti-enumeration)"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6438",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6474",
         "text": "UPDATE users SET metadata = COALESCE(metadata, '{}'::jsonb) || $1::jsonb, updated_at = NOW() WHERE id = $2::uuid AND status = 'active'"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6456",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6492",
         "text": "{}/reset-password?token={}&email={}"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6478",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6514",
         "text": "Reset your password — {company}"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6480",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6516",
         "text": "This link expires in 1 hour. If you didn't request a password reset, you can safely ignore this email."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6480",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6516",
         "text": "We received a request to reset the password for"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6486",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6522",
         "text": "Reset Your Password"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6489",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6525",
         "text": "Reset Password"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6500",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6536",
         "text": "© 2026 ApexMail — https://apexmail.ee"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6502",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6538",
         "text": "Reset Your Password We received a request to reset the password for {email}. Reset your password by visiting: {reset_link} This link expires in 1 hour. If you didn't request a password reset, you can safely ignore this email. {text_footer}"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6505",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6541",
         "text": "Reset your {company} password"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6509",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6545",
         "text": "Reset your ApexMail password"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6549",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6585",
         "text": "web password reset email enqueued"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6552",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6588",
         "text": "web forgot-password issuance failed"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6558",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6594",
         "text": "If that account exists, a reset link is on the way."
       }
     ]

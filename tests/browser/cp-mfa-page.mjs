@@ -1,0 +1,15 @@
+import { chromium } from "playwright";
+const browser = await chromium.launch();
+const page = await browser.newPage();
+await page.goto("http://admin.localhost:8080/cp/login");
+await page.getByLabel(/email/i).fill("operator@journey.test");
+await page.getByLabel(/password/i).fill("Journey!2026-Strong-Pass-2");
+await page.waitForTimeout(1200);
+await page.locator("button[type=submit]").click();
+await page.waitForLoadState("domcontentloaded");
+await page.waitForTimeout(800);
+console.log("url:", page.url());
+const snap = await page.locator("main").ariaSnapshot();
+console.log(snap.slice(0, 1500));
+await page.screenshot({ path: "/Users/sabelakhoua/IdeaProjects/ApexMail/.kiwi/journey-shots/cp-mfa-challenge.png" });
+await browser.close();

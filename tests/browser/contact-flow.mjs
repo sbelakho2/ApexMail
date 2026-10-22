@@ -1,0 +1,17 @@
+import { chromium } from "playwright";
+const BASE = "http://127.0.0.1:8080";
+const OUT = "/Users/sabelakhoua/IdeaProjects/ApexMail/.kiwi/journey-shots";
+const browser = await chromium.launch();
+const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+await page.goto(BASE + "/login");
+await page.getByLabel(/email/i).fill("owner@journey.test");
+await page.getByLabel(/password/i).fill("Journey!2026-Strong-Pass-1");
+await page.waitForTimeout(1200);
+await page.locator("button[type=submit]").click();
+await page.waitForURL("**/dashboard", { timeout: 15000 });
+await page.goto(BASE + "/contacts/new");
+await page.waitForLoadState("domcontentloaded");
+await page.screenshot({ path: `${OUT}/owner-contacts-new-live.png` });
+const snap = await page.locator("main").ariaSnapshot();
+console.log(snap.slice(0, 1200));
+await browser.close();

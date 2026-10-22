@@ -645,12 +645,17 @@ pub(crate) enum MfaChallengeRequirement {
 }
 
 /// The shared ladder's verdict (audit P1-1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PasswordLoginVerdict {
     /// Authentication may complete; no MFA challenge stands in the way.
     Allowed,
     /// The account exists but is not `active`.
     AccountInactive,
+    /// The TENANT is in a restricted state (pending/suspended/pending_deletion):
+    /// the user authenticates, but every route the middleware guards would
+    /// refuse them. The login surfaces must flash the honest workspace state
+    /// instead of "Signed in." followed by a silent bounce (live-run 2026-10-22).
+    TenantRestricted { status: String },
     /// The tenant enforces SSO: password login is disabled.
     SsoRequired,
     /// The account's email address is not verified.
@@ -694,6 +699,21 @@ pub(crate) struct PasswordLoginSubject<'a> {
 /// pre-authentication enrollment flow, so forcing [`MfaChallengeRequirement::Setup`]
 /// there would dead-end administrators behind an uncompletable challenge
 /// (the console enforces the flag post-login via the CP/session gates).
+/// The tenant's lifecycle status for the login verdict, or `None` when the
+/// tenants row is absent (fixture/partial deployments — the middleware's
+/// fallback governs there).
+async fn tenant_status_for_login(
+    db: &sqlx::PgPool,
+    tenant_id: &str,
+) -> Result<Option<String>, sqlx::Error> {
+    let status: Option<String> = sqlx::query_scalar("SELECT status FROM tenants WHERE id = $1")
+        .bind(tenant_id)
+        .fetch_optional(db)
+        .await?
+        .flatten();
+    Ok(status)
+}
+
 pub(crate) async fn evaluate_password_login_policy(
     state: &AppState,
     subject: PasswordLoginSubject<'_>,
@@ -728,6 +748,20 @@ pub(crate) async fn evaluate_password_login_policy(
     // 3. Email verification is a login prerequisite.
     if !subject.email_verified {
         return Ok(PasswordLoginVerdict::EmailUnverified);
+    }
+
+    // 3b. Tenant state: a restricted workspace (pending/suspended/
+    //     pending_deletion) would accept the session and then refuse every
+    //     guarded route at the middleware — "Signed in." followed by a
+    //     silent bounce back to the login form (live run 2026-10-22). Fail
+    //     AFTER the account checks so an unverified user still gets the
+    //     verification refusal first.
+    if let Some(status) = tenant_status_for_login(&state.db, subject.tenant_id).await? {
+        if !matches!(status.as_str(), "active" | "suspended") {
+            return Ok(PasswordLoginVerdict::TenantRestricted {
+                status: status.clone(),
+            });
+        }
     }
 
     // 4. ATO risk verdict on the successful-password authentication. The
@@ -2705,6 +2739,11 @@ async fn login(
         }
         PasswordLoginVerdict::AccountInactive => {
             return Err(ApiError::Forbidden("account is not active".into()));
+        }
+        PasswordLoginVerdict::TenantRestricted { status } => {
+            return Err(ApiError::Forbidden(format!(
+                "workspace is {status} — access is restricted"
+            )));
         }
         PasswordLoginVerdict::SsoRequired => {
             return Err(ApiError::Forbidden(
@@ -7541,6 +7580,17 @@ mod tests {
             .execute(&pool)
             .await
             .expect("mark verified");
+        // Mirror the verification-click side effect: activating the tenant
+        // from 'pending' (F16). The SQL shortcut used to skip that, leaving
+        // the tenant pending — the TenantRestricted login verdict now
+        // honestly refuses it.
+        sqlx::query(
+            "UPDATE tenants SET status = 'active' WHERE id = (SELECT tenant_id FROM users WHERE email = $1) AND status = 'pending'",
+        )
+        .bind(&email)
+        .execute(&pool)
+        .await
+        .expect("activate tenant");
         let state2 = signup_test_state(pool.clone(), &redis_url).await;
         let csrf2 = ui_foundation::csrf::generate_csrf_token(&state2.config.csrf_secret);
         let app2 = axum::Router::new()

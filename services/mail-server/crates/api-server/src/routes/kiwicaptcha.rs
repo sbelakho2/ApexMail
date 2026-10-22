@@ -202,11 +202,20 @@ async fn issue_challenge_handler(
     // Dev-mode bypass: if the secret key is "dev" in a debug build, return a
     // trivially-solvable challenge so local development works without a real
     // solve. (Mirrors the bypass in verify_kiwi_token.)
+    //
+    // SHAPE CONTRACT (2026-10-22): the widget's kiwiValidateChallenge
+    // requires the canonical nonce shape — standard base64 of exactly 32
+    // bytes (44 chars, one '=') — and a valid base64 salt. The original
+    // nonce/salt of "dev" failed that gate, the widget never solved, and
+    // the client-side gate blocked every login on a dev environment
+    // (observed live: "Challenge failed … unexpected response"). The
+    // bypass now mints canonical-shaped, deterministic values while
+    // keeping target_bits=1 (a trivial solve).
     if cfg!(debug_assertions) && state.config.kiwi_secret_key == "dev" {
         return Ok(Json(ChallengeResponse {
-            nonce: "dev".into(),
-            challenge: "dev".into(),
-            salt: "dev".into(),
+            nonce: "a2l3aS1kZXYtYnlwYXNzLW5vbmNlLTAxMjM0NTY3ODk=".into(),
+            challenge: "kiwi-dev".into(),
+            salt: "ZGV2LXNhbHQ=".into(),
             algorithm: "sha256".into(),
             m_kib: 0,
             t: 1,
@@ -532,8 +541,14 @@ mod adversarial_tests {
             .post("/api/kcaptcha/challenge", r#"{"scope":"login"}"#)
             .await;
         assert_eq!(status, axum::http::StatusCode::OK, "{body}");
-        assert_eq!(body["nonce"], "dev");
+        // The bypass challenge must carry the CANONICAL nonce shape — the
+        // widget's kiwiValidateChallenge rejects anything else, and a
+        // rejected challenge blocked every dev login (live run 2026-10-22).
+        let nonce = body["nonce"].as_str().expect("nonce is a string");
+        assert_eq!(nonce.len(), 44, "canonical base64 nonce: {nonce}");
+        assert!(nonce.ends_with('='));
         assert_eq!(body["algorithm"], "sha256");
+        assert_eq!(body["targetBits"], 1, "bypass stays trivially solvable");
         assert_eq!(body["ttlSecs"], 120);
         assert_eq!(body["prefix"], "dev|dev|");
     }

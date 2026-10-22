@@ -2612,10 +2612,10 @@ fn sales_hero(data: &SalesPageData) -> String {
             format_eur_amount(overview.revenue.iter().map(|row| row.eur).sum()),
             "Sum of revenue outcomes in the last 30 days.",
         ),
-        Some(_) => (
-            "No revenue recorded".to_string(),
-            "No revenue outcomes in the last 30 days.",
-        ),
+        // Zero is the honest VALUE here: "No revenue recorded" rendered as
+        // the hero figure wrapped letter-by-letter in its KPI card (live
+        // run 2026-10-22). The prose belongs in the hint line alone.
+        Some(_) => ("0".to_string(), "No revenue outcomes in the last 30 days."),
         None => (
             "Unavailable".to_string(),
             "This information is temporarily unavailable. Reload to try again.",

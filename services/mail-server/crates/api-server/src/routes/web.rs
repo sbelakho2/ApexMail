@@ -2610,6 +2610,24 @@ async fn perform_password_login(
                 &state.config,
             );
         }
+        crate::routes::auth::PasswordLoginVerdict::TenantRestricted { status } => {
+            // Live-run 2026-10-22: the honest workspace state instead of
+            // "Signed in." followed by a middleware bounce to the login form.
+            let what = match status.as_str() {
+                "pending" => "is pending activation".to_string(),
+                "pending_deletion" => "is scheduled for deletion".to_string(),
+                "suspended" => "is suspended".to_string(),
+                other => format!("is {other}"),
+            };
+            return redirect_error(
+                &format!(
+                    "Your workspace {what} — signing in is restricted until it is reactivated. \
+                     Contact support if this is unexpected."
+                ),
+                "/login",
+                &state.config,
+            );
+        }
         crate::routes::auth::PasswordLoginVerdict::SsoRequired => {
             return redirect_error(
                 "SSO_REQUIRED: this organization requires single sign-on; password login is disabled.",
@@ -14703,6 +14721,16 @@ mod tests {
                 .execute(&state.db)
                 .await
                 .unwrap();
+            // Mirror the verification-click side effect (F16): verifying the
+            // address ALSO activates the tenant from 'pending'. The SQL
+            // shortcut used to skip that, leaving the tenant pending — the
+            // exact state the TenantRestricted login verdict now honestly
+            // refuses.
+            sqlx::query("UPDATE tenants SET status = 'active' WHERE id = (SELECT tenant_id FROM users WHERE email = $1) AND status = 'pending'")
+                .bind(&email)
+                .execute(&pool)
+                .await
+                .expect("activate tenant");
             let response = app
                 .clone()
                 .oneshot(post_form("/web/auth/login", &login_body))

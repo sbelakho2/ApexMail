@@ -1,0 +1,15 @@
+import { chromium } from "playwright";
+const browser = await chromium.launch();
+const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+await page.goto("http://127.0.0.1:8080/login");
+await page.getByLabel(/email/i).fill("owner@journey.test");
+await page.getByLabel(/password/i).fill("Journey!2026-Strong-Pass-1");
+await page.waitForTimeout(1200);
+await page.locator("button[type=submit]").click();
+await page.waitForLoadState("domcontentloaded");
+await page.waitForTimeout(500);
+const flash = await page.locator("[role=alert], [role=status]").allTextContents();
+console.log("flash:", flash.join(" | "));
+console.log("url:", page.url());
+await page.screenshot({ path: "/Users/sabelakhoua/IdeaProjects/ApexMail/.kiwi/journey-shots/login-pending-honest.png" });
+await browser.close();
