@@ -1,8 +1,8 @@
 {
   "asset_authority": "console: ui-foundation GLOBALS_CSS -> assets/globals.css; marketing: apps/marketing-zola/public -> css/, fonts/, images/, root files",
-  "css_sha256": "a9ce5227342b0bce6be9a6d9b178edfe96677c0277a0fe006ffec88e5b119930",
+  "css_sha256": "dcf34c4aa27c560110bb5456fb7146809aaf6de9236bcfb1298da5a0561ee099",
   "marketing_sha256": "7b1740b6198ae4a52ec4b26ca9ca631ab9ca4b9d3fac884e680c419c643c8dd3",
-  "renderer_sha256": "3022c2aaff894d6fd0d3023d807bdcbe4d136cf98c7b4215b0070c064f32cd54",
+  "renderer_sha256": "5d495b04c24b503b903812e3c76baa28a2d2570375b13d26d477db2a48e6bf9e",
   "fixtures": [
     {
       "id": "web-home-desktop",
@@ -835,6 +835,28 @@
       "route": "/settings/suppressions",
       "htmlFile": "web-settings-suppressions.html",
       "snapshotFile": "web-settings-suppressions-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "web-settings-journal-desktop",
+      "surface": "web",
+      "route": "/settings/journal",
+      "htmlFile": "web-settings-journal.html",
+      "snapshotFile": "web-settings-journal-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "web-settings-journal-mobile",
+      "surface": "web",
+      "route": "/settings/journal",
+      "htmlFile": "web-settings-journal.html",
+      "snapshotFile": "web-settings-journal-mobile.png",
       "viewport": {
         "width": 390,
         "height": 844

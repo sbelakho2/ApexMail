@@ -1363,7 +1363,10 @@ a {
 .apex-field select,
   .apex-field input[type="text"],
   .apex-field input[type="email"],
-  .apex-field input[type="number"] {
+  .apex-field input[type="number"],
+  .apex-field input[type="url"],
+  .apex-field input[type="search"],
+  .apex-field textarea {
   min-height: 2.75rem;
   width: 100%;
   padding: 0.5rem 0.875rem;
@@ -1375,11 +1378,43 @@ a {
   font-size: 0.875rem;
 }
 
+/* A textarea keeps the border, padding and background above (the
+   affordance) but grows instead of holding one row. It was missing from
+   this primitive, which is why one page hand-rolled its own field markup
+   and lost the border entirely (live run 2026-10-22). */
+.apex-field textarea {
+  min-height: 9rem;
+  line-height: 1.5;
+  resize: vertical;
+}
+
 .apex-field select:focus,
-  .apex-field input:focus {
+  .apex-field input:focus,
+  .apex-field textarea:focus {
   outline: none;
   border-color: rgb(var(--primary));
   box-shadow: 0 0 0 2px rgb(var(--primary) / 0.25);
+}
+
+/* Live-view auto-refresh options. These were bare text links ~22x16 — below
+   the 24px minimum target size (WCAG 2.5.8) and hard to hit on a phone. One
+   shared class so every page carrying the live-view bar gets the same
+   control. */
+.apex-refresh-option {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 1.5rem;
+  min-width: 1.5rem;
+  padding: 0.125rem 0.375rem;
+  border-radius: var(--radius-arch);
+  font-weight: 700;
+  color: rgb(var(--primary));
+  text-decoration: underline;
+}
+
+.apex-refresh-option:hover {
+  background: rgb(var(--muted));
 }
 
 .apex-table {

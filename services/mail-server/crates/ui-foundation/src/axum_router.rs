@@ -1499,7 +1499,7 @@ fn inject_opt_in_auto_refresh(
             path = crate::shell::html_escape(path),
         ),
         None => format!(
-            "<div role=\"status\" class=\"fixed bottom-4 right-4 z-50 flex items-center gap-2 rounded-sm border border-surface-300 bg-card px-3 py-2 text-xs shadow-premium\"><span class=\"inline-block h-2 w-2 rounded-full bg-surface-400\" aria-hidden=\"true\"></span><span class=\"font-bold\">Live view</span><span class=\"text-muted-foreground\" aria-hidden=\"true\">Auto-refresh:</span><a class=\"font-bold text-primary underline\" href=\"{path}?refresh=10\">10s</a><a class=\"font-bold text-primary underline\" href=\"{path}?refresh=30\">30s</a><a class=\"font-bold text-primary underline\" href=\"{path}?refresh=60\">60s</a></div>",
+            "<div role=\"status\" class=\"fixed bottom-4 right-4 z-50 flex items-center gap-2 rounded-sm border border-surface-300 bg-card px-3 py-2 text-xs shadow-premium\"><span class=\"inline-block h-2 w-2 rounded-full bg-surface-400\" aria-hidden=\"true\"></span><span class=\"font-bold\">Live view</span><span class=\"text-muted-foreground\" aria-hidden=\"true\">Auto-refresh:</span><a class=\"apex-refresh-option\" href=\"{path}?refresh=10\">10s</a><a class=\"apex-refresh-option\" href=\"{path}?refresh=30\">30s</a><a class=\"apex-refresh-option\" href=\"{path}?refresh=60\">60s</a></div>",
             path = crate::shell::html_escape(path),
         ),
     };

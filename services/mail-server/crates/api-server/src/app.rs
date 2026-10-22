@@ -1207,6 +1207,20 @@ fn kiwi_resend_scope_for_status(status: Option<&str>) -> Option<&'static str> {
 /// are admitted. The nonce is minted per response, so no other inline
 /// script can execute on these pages even if one were ever injected —
 /// a script without the exact per-response nonce still violates the policy.
+///
+/// `'wasm-unsafe-eval'` is required: the widget ships a WebAssembly module
+/// (`kiwicaptcha-wasm.js`) and without this source expression the browser
+/// refuses to compile it —
+///
+///   Compiling or instantiating WebAssembly module violates the following
+///   Content Security policy directive because 'unsafe-eval' is not an
+///   allowed source
+///
+/// — leaving only the widget's JavaScript fallback and logging a CSP
+/// violation on every auth page (live run 2026-10-22). The keyword permits
+/// WebAssembly compilation and NOTHING else: `eval()`, `new Function()` and
+/// inline script without the nonce all stay blocked, so this is strictly
+/// narrower than adding `'unsafe-eval'`.
 fn auth_csp_header(nonce: &str) -> HeaderValue {
     let analytics_img_src = std::env::var("ANALYTICS_IMAGE_SRC").ok();
     let analytics_img_src = analytics_img_src
@@ -1218,7 +1232,7 @@ fn auth_csp_header(nonce: &str) -> HeaderValue {
         .unwrap_or_default();
 
     HeaderValue::from_str(&format!(
-        "default-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; connect-src 'self'; img-src 'self' data:{analytics_img_src}; font-src 'self' data:; manifest-src 'self'; style-src 'self' 'nonce-{nonce}'; style-src-attr 'unsafe-inline'; script-src 'nonce-{nonce}'; frame-src 'none'; object-src 'none'"
+        "default-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; connect-src 'self'; img-src 'self' data:{analytics_img_src}; font-src 'self' data:; manifest-src 'self'; style-src 'self' 'nonce-{nonce}'; style-src-attr 'unsafe-inline'; script-src 'nonce-{nonce}' 'wasm-unsafe-eval'; frame-src 'none'; object-src 'none'"
     ))
     .expect("auth CSP should be valid")
 }
@@ -3934,6 +3948,20 @@ mod tests {
         assert!(
             !csp.contains("script-src 'unsafe-inline'"),
             "CSP was: {csp}"
+        );
+        // The KiwiCaptcha widget ships a WebAssembly module, and a CSP
+        // without `'wasm-unsafe-eval'` makes the browser refuse to compile
+        // it — leaving only the JS fallback and logging a violation on every
+        // auth page (live run 2026-10-22). The keyword permits WASM
+        // compilation ONLY; `'unsafe-eval'` would additionally permit
+        // eval()/new Function() and must never appear.
+        assert!(
+            csp.contains("'wasm-unsafe-eval'"),
+            "the auth CSP must permit WebAssembly compilation for the widget: {csp}"
+        );
+        assert!(
+            !csp.contains("'unsafe-eval'"),
+            "WASM permission must not be widened to eval(): {csp}"
         );
         let body = response_body_string(page).await;
         assert!(

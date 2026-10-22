@@ -1776,7 +1776,7 @@ impl<'a> Toast<'a> {
             .map(|value| format!("<div class=\"text-sm opacity-90\">{}</div>", value))
             .unwrap_or_default();
         let action = self.action_label.map(|value| format!("<button class=\"inline-flex h-8 shrink-0 items-center justify-center rounded-[8px_8px_7px_7px] border bg-transparent px-3 text-sm font-medium ring-offset-background transition-colors hover:bg-secondary\">{}</button>", value)).unwrap_or_default();
-        format!("<div class=\"group pointer-events-auto relative flex w-full items-center justify-between space-x-4 overflow-hidden rounded-[16px_16px_9px_9px] border p-4 pr-8 transition-all {}\" role=\"status\"><div class=\"flex items-start gap-3\">{}<div class=\"grid gap-1\">{}{}</div></div>{}<button class=\"absolute right-2 top-2 rounded-[8px_8px_7px_7px] p-1 text-foreground/50\" aria-label=\"Close notification\">{}</button></div>", toast_variant_class(self.variant), toast_icon_markup(self.variant), title, description, action, primitive_icon("x", "h-4 w-4"))
+        format!("<div class=\"group pointer-events-auto relative flex w-full items-center justify-between space-x-4 overflow-hidden rounded-[16px_16px_9px_9px] border p-4 pr-8 transition-all {}\" role=\"status\"><div class=\"flex items-start gap-3\">{}<div class=\"grid gap-1\">{}{}</div></div>{}<button class=\"absolute right-2 top-2 rounded-[8px_8px_7px_7px] p-1 text-muted-foreground\" aria-label=\"Close notification\">{}</button></div>", toast_variant_class(self.variant), toast_icon_markup(self.variant), title, description, action, primitive_icon("x", "h-4 w-4"))
     }
 }
 

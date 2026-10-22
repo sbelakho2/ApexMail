@@ -1361,6 +1361,26 @@ async fn load_placement_detail(
     })
 }
 
+/// The dashboard's "Contacts — Active addressable" tile.
+///
+/// "Addressable" must mean what it says: a contact we would actually send
+/// to. Counting `status <> 'deleted'` included bounced and unsubscribed
+/// contacts — the very addresses the suppressions page exists to withhold —
+/// so the tile overstated reach by exactly the audience the operator had
+/// already lost (live run 2026-10-22: 12 shown against 10 subscribed, the
+/// other two being one bounce and one unsubscribe).
+///
+/// `dashboard_contacts_kpi_counts_only_addressable_contacts` pins the two
+/// predicates this number depends on, so the label and the number cannot
+/// drift apart again.
+const DASHBOARD_CONTACTS_ADDRESSABLE_SQL: &str = "SELECT COUNT(*)::bigint FROM contacts c \
+     WHERE c.tenant_id = $1 \
+       AND c.status = 'subscribed' \
+       AND NOT EXISTS ( \
+         SELECT 1 FROM suppressions s \
+         WHERE s.tenant_id = c.tenant_id AND lower(s.email) = lower(c.email) \
+       )";
+
 async fn web_dashboard(state: &AppState, tenant: &str, cid: &str) -> ListPageData {
     let campaigns = loaded_count(
         state,
@@ -1374,7 +1394,7 @@ async fn web_dashboard(state: &AppState, tenant: &str, cid: &str) -> ListPageDat
         state,
         "web.dashboard.contacts",
         cid,
-        "SELECT COUNT(*)::bigint FROM contacts WHERE tenant_id = $1 AND status <> 'deleted'",
+        DASHBOARD_CONTACTS_ADDRESSABLE_SQL,
         &[tenant.to_string()],
     )
     .await;
@@ -8411,7 +8431,16 @@ mod coverage_loader_tests {
         // KPI-only overviews: exact tenant-scoped counts.
         let dashboard = web(&app, "/dashboard", None, &user_a).await;
         assert_eq!(kpi(&dashboard, "Campaigns"), "28");
-        assert_eq!(kpi(&dashboard, "Contacts"), "3");
+        // The fixture seeds one contact per status — subscribed, unsubscribed,
+        // bounced — and the tile is "Active addressable", so exactly ONE of
+        // the three counts. Asserting 3 here pinned the old definition, which
+        // counted every non-deleted row and so claimed reach over an
+        // unsubscribe and a bounce (live run 2026-10-22).
+        assert_eq!(kpi(&dashboard, "Contacts"), "1");
+        // ...and the list still shows all three rows, so the difference
+        // between "every row" and "addressable" stays visible.
+        let contacts = web(&app, "/contacts", None, &user_a).await;
+        assert_eq!(contacts.total_count, 3);
         assert_eq!(kpi(&dashboard, "Domains"), "2");
         assert_eq!(kpi(&dashboard, "Sent (30d)"), "1");
 
@@ -9583,6 +9612,38 @@ mod coverage_residual_tests {
         assert!(
             !html.contains(&format!("/web/admin/jobs/{processing}/retry")),
             "an in-flight row must not offer retry"
+        );
+    }
+
+    /// The dashboard's "Contacts — Active addressable" tile counts the
+    /// audience we would actually send to: subscribed AND not suppressed.
+    ///
+    /// It used to count `status <> 'deleted'`, which swept in bounced and
+    /// unsubscribed contacts — the addresses the suppressions page exists to
+    /// withhold — so the tile claimed more reach than the product had (live
+    /// run 2026-10-22). The label and the number must agree.
+    #[test]
+    fn dashboard_contacts_kpi_counts_only_addressable_contacts() {
+        let sql = super::DASHBOARD_CONTACTS_ADDRESSABLE_SQL;
+        assert!(
+            sql.contains("c.status = 'subscribed'"),
+            "the tile must count the sendable status, not merely non-deleted rows: {sql}"
+        );
+        assert!(
+            sql.contains("FROM suppressions"),
+            "a suppressed address is not addressable, whatever the contact row says: {sql}"
+        );
+        assert!(
+            sql.contains("lower(s.email) = lower(c.email)"),
+            "suppression matching must be case-insensitive — addresses are not case-sensitive: {sql}"
+        );
+        assert!(
+            !sql.contains("status <> 'deleted'"),
+            "counting every non-deleted row is exactly the overstatement this pins against: {sql}"
+        );
+        assert!(
+            sql.contains("c.tenant_id = $1"),
+            "the count must stay tenant-scoped: {sql}"
         );
     }
 }

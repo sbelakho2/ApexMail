@@ -3048,7 +3048,7 @@ fn sales_first_response_section(data: &SalesPageData) -> String {
          <div><p class=\"text-2xl font-bold\">{p50}</p><p class=\"text-xs text-foreground/60\">p50 to queue</p></div>\
          <div><p class=\"text-2xl font-bold\">{p95}</p><p class=\"text-xs text-foreground/60\">p95 to queue ({within})</p></div>\
          </div>\
-         <p class=\"mt-3 text-xs text-foreground/50\">Automated path only: accept to queued reply. Human review time is excluded; the target is {target:.0}s (docs/operations/first-response-slo.md).</p>\
+         <p class=\"mt-3 text-xs text-muted-foreground\">Automated path only: accept to queued reply. Human review time is excluded; the target is {target:.0}s (docs/operations/first-response-slo.md).</p>\
          </section>",
         pending = kpi.pending,
         queued = kpi.queued,
@@ -4658,18 +4658,18 @@ pub fn web_inbox_placement_new_page() -> String {
         form = Card {
             title: "Test configuration",
             body: "<form data-form-id=\"placement-test-create\" action=\"/web/inbox-placement/tests\" method=\"post\" class=\"space-y-4\">\
-<div><label for=\"placement-name\" class=\"block text-sm font-medium text-surface-700\">Test name</label>\
-<input id=\"placement-name\" name=\"name\" type=\"text\" required maxlength=\"120\" class=\"mt-1 w-full rounded-sm border-surface-300 focus:border-primary focus:ring-primary text-sm\" placeholder=\"Q1 onboarding sequence — variant A\" /></div>\
+<div class=\"apex-field\"><label for=\"placement-name\">Test name</label>\
+<input id=\"placement-name\" name=\"name\" type=\"text\" required maxlength=\"120\" placeholder=\"Q1 onboarding sequence — variant A\" /></div>\
 <div class=\"grid gap-4 md:grid-cols-2\">\
-<div><label for=\"placement-from\" class=\"block text-sm font-medium text-surface-700\">From email</label>\
-<input id=\"placement-from\" name=\"from_email\" type=\"email\" required autocomplete=\"email\" class=\"mt-1 w-full rounded-sm border-surface-300 focus:border-primary focus:ring-primary text-sm\" placeholder=\"hello@yourdomain.com\" /></div>\
-<div><label for=\"placement-from-name\" class=\"block text-sm font-medium text-surface-700\">From name (optional)</label>\
-<input id=\"placement-from-name\" name=\"from_name\" type=\"text\" maxlength=\"120\" class=\"mt-1 w-full rounded-sm border-surface-300 focus:border-primary focus:ring-primary text-sm\" placeholder=\"Acme Sales\" /></div>\
+<div class=\"apex-field\"><label for=\"placement-from\">From email</label>\
+<input id=\"placement-from\" name=\"from_email\" type=\"email\" required autocomplete=\"email\" placeholder=\"hello@yourdomain.com\" /></div>\
+<div class=\"apex-field\"><label for=\"placement-from-name\">From name (optional)</label>\
+<input id=\"placement-from-name\" name=\"from_name\" type=\"text\" maxlength=\"120\" placeholder=\"Acme Sales\" /></div>\
 </div>\
-<div><label for=\"placement-subject\" class=\"block text-sm font-medium text-surface-700\">Subject</label>\
-<input id=\"placement-subject\" name=\"subject\" type=\"text\" required maxlength=\"200\" class=\"mt-1 w-full rounded-sm border-surface-300 focus:border-primary focus:ring-primary text-sm\" /></div>\
-<div><label for=\"placement-html\" class=\"block text-sm font-medium text-surface-700\">HTML body</label>\
-<textarea id=\"placement-html\" name=\"html_body\" rows=\"10\" required class=\"mt-1 w-full rounded-sm border-surface-300 focus:border-primary focus:ring-primary text-sm font-mono\"></textarea></div>\
+<div class=\"apex-field\"><label for=\"placement-subject\">Subject</label>\
+<input id=\"placement-subject\" name=\"subject\" type=\"text\" required maxlength=\"200\" /></div>\
+<div class=\"apex-field\"><label for=\"placement-html\">HTML body</label>\
+<textarea id=\"placement-html\" name=\"html_body\" rows=\"10\" required class=\"font-mono\"></textarea></div>\
 <fieldset><legend class=\"block text-sm font-medium text-surface-700 mb-2\">Target providers</legend>\
 <div class=\"grid gap-2 md:grid-cols-3\">\
 <label class=\"inline-flex items-center gap-2 text-sm\"><input type=\"checkbox\" name=\"providers\" value=\"gmail\" checked class=\"rounded border-surface-300 text-primary focus:ring-primary\" /> Gmail</label>\
@@ -4680,8 +4680,8 @@ pub fn web_inbox_placement_new_page() -> String {
 <label class=\"inline-flex items-center gap-2 text-sm\"><input type=\"checkbox\" name=\"providers\" value=\"protonmail\" class=\"rounded border-surface-300 text-primary focus:ring-primary\" /> ProtonMail</label>\
 </div></fieldset>\
 <div class=\"flex items-center justify-end gap-3 pt-4 border-t\">\
-<a href=\"/inbox-placement\" class=\"text-sm text-surface-600 hover:text-surface-900\">Cancel</a>\
-<button type=\"submit\" class=\"inline-flex items-center justify-center rounded-sm bg-primary px-4 py-2 text-sm font-bold text-white hover:bg-brand-700 transition-colors\">Start test</button>\
+<a href=\"/inbox-placement\" class=\"apex-btn apex-btn--secondary\">Cancel</a>\
+<button type=\"submit\" class=\"apex-btn\">Start test</button>\
 </div>\
 </form>",
             variant: "default",
