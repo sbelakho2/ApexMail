@@ -42,6 +42,66 @@ pub(crate) fn is_browser_facing_path(path: &str) -> bool {
         || path.starts_with("/cp/")
 }
 
+/// Suffixes of a document's own sub-resources — the stylesheet, script,
+/// font or image a page loads alongside its HTML.
+///
+/// These are browser furniture even though nothing about their path says
+/// "web page", and a blocked one breaks the page the user is looking at.
+/// `.json` is deliberately absent: a JSON body is an API contract whether
+/// or not a browser asked for it.
+const STATIC_ASSET_EXTENSIONS: [&str; 16] = [
+    "css", "js", "mjs", "map", "woff", "woff2", "ttf", "otf", "eot", "png", "jpg", "jpeg", "gif",
+    "svg", "webp", "ico",
+];
+
+fn has_static_asset_extension(path: &str) -> bool {
+    let last_segment = path.rsplit('/').next().unwrap_or_default();
+    match last_segment.rsplit_once('.') {
+        Some((_, ext)) => STATIC_ASSET_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()),
+        None => false,
+    }
+}
+
+fn header_str<'a>(headers: &'a axum::http::HeaderMap, name: &str) -> Option<&'a str> {
+    headers.get(name).and_then(|value| value.to_str().ok())
+}
+
+/// Presentation classification for an error response: is this request a
+/// browser showing something to a human, or a machine client?
+///
+/// [`is_browser_facing_path`] is not enough on its own. The console lives
+/// at `/dashboard`, `/campaigns`, `/settings` … — none of them under
+/// `/web/` — and every one of those pages loads `/assets/*`. So the
+/// decision is taken from the request itself, where the browser
+/// advertises what it is about to do:
+///
+/// - `Sec-Fetch-Dest` names the destination. Every modern browser sends
+///   it and no API client does; `empty` is a `fetch()`/XHR, i.e. an API
+///   call that wants the JSON contract, while `document`, `style`,
+///   `script`, `font`, `image` and friends are page furniture.
+/// - `Accept: text/html` is a top-level navigation or a form post.
+/// - A static-asset extension covers the sub-resources of a page whose
+///   own request the middleware may never have seen (an asset served
+///   straight from the browser's second connection).
+///
+/// The path list remains the fallback for callers that send neither
+/// header — the zero-JS form posts driven by tests and older browsers.
+pub(crate) fn is_browser_request(path: &str, headers: &axum::http::HeaderMap) -> bool {
+    if is_browser_facing_path(path) || has_static_asset_extension(path) {
+        return true;
+    }
+    if let Some(dest) = header_str(headers, "sec-fetch-dest") {
+        return !dest.eq_ignore_ascii_case("empty");
+    }
+    if let Some(mode) = header_str(headers, "sec-fetch-mode") {
+        if mode.eq_ignore_ascii_case("navigate") {
+            return true;
+        }
+    }
+    header_str(headers, axum::http::header::ACCEPT.as_str())
+        .is_some_and(|accept| accept.contains("text/html"))
+}
+
 /// Small branded HTML error page in the tracking-service template idiom
 /// (white card, `#dc2626` accent, mono type, zero radius) — inline-styled,
 /// zero-JS, ~15 lines. Every input is a compile-site constant, never user
@@ -185,5 +245,94 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("no-store")
         );
+    }
+
+    fn headers(pairs: &[(&str, &str)]) -> axum::http::HeaderMap {
+        let mut map = axum::http::HeaderMap::new();
+        for (name, value) in pairs {
+            map.insert(
+                axum::http::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                axum::http::HeaderValue::from_str(value).unwrap(),
+            );
+        }
+        map
+    }
+
+    /// Live run 2026-10-22: the console's own pages are not under `/web/`,
+    /// so the path list alone sent a blocked `/dashboard` and a blocked
+    /// `/assets/globals.css` down the JSON branch — the user saw an
+    /// untitled blank page. The request itself says what it is.
+    #[test]
+    fn console_documents_and_their_assets_are_browser_requests() {
+        // A top-level navigation to a console page.
+        assert!(is_browser_request(
+            "/dashboard",
+            &headers(&[
+                ("sec-fetch-dest", "document"),
+                ("sec-fetch-mode", "navigate"),
+                ("accept", "text/html,application/xhtml+xml,*/*;q=0.8"),
+            ])
+        ));
+        // The page's own stylesheet: `text/css`, `dest: style`.
+        assert!(is_browser_request(
+            "/assets/globals.css",
+            &headers(&[
+                ("sec-fetch-dest", "style"),
+                ("sec-fetch-mode", "no-cors"),
+                ("accept", "text/css,*/*;q=0.1"),
+            ])
+        ));
+        // A font, requested with no `Accept` a human would recognise.
+        assert!(is_browser_request(
+            "/fonts/inter-var.woff2",
+            &headers(&[("sec-fetch-dest", "font")])
+        ));
+        // A form post from a page (the zero-JS surfaces) with no
+        // `Sec-Fetch-*` at all — `Accept: text/html` carries it.
+        assert!(is_browser_request(
+            "/login",
+            &headers(&[("accept", "text/html,application/xhtml+xml")])
+        ));
+    }
+
+    /// The JSON contract must be untouched: a `fetch()` from the console
+    /// sends `Sec-Fetch-Dest: empty`, and a curl-style client sends
+    /// neither header family.
+    #[test]
+    fn api_calls_and_clients_stay_on_the_json_contract() {
+        assert!(!is_browser_request(
+            "/v1/contacts",
+            &headers(&[
+                ("sec-fetch-dest", "empty"),
+                ("sec-fetch-mode", "cors"),
+                ("accept", "*/*"),
+            ])
+        ));
+        assert!(!is_browser_request("/api/auth/session", &headers(&[])));
+        assert!(!is_browser_request(
+            "/v1/campaigns",
+            &headers(&[("accept", "application/json")])
+        ));
+        assert!(!is_browser_request(
+            "/health",
+            &headers(&[("accept", "*/*")])
+        ));
+        // A `.json` sub-resource is still an API contract, not an asset.
+        assert!(!is_browser_request(
+            "/assets/manifest.json",
+            &headers(&[("accept", "*/*")])
+        ));
+    }
+
+    #[test]
+    fn static_asset_extension_matching_is_suffix_only() {
+        assert!(has_static_asset_extension("/assets/globals.css"));
+        assert!(has_static_asset_extension("/a/b/x.WOFF2"));
+        assert!(has_static_asset_extension("/favicon.ico"));
+        // A dot in a directory name is not an extension, and a path with
+        // no dot at all is not an asset.
+        assert!(!has_static_asset_extension("/v1/contacts"));
+        assert!(!has_static_asset_extension("/assets/globals"));
+        assert!(!has_static_asset_extension("/v1/files/report.csv"));
     }
 }

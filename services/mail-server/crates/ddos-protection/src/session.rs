@@ -8,7 +8,46 @@ use std::time::{Duration, Instant};
 use dashmap::DashMap;
 use parking_lot::RwLock;
 
+use crate::adaptive::monotonic_cutoff;
 use crate::RequestContext;
+
+/// Hard cap on a session's timestamped recent-request deque.
+///
+/// The deque is pruned by window on every read, but a client flooding at
+/// thousands of requests/second pushes one entry per request — without a cap
+/// it would grow to `rate × window` entries before anything expires. 512
+/// entries is far more than the largest window this crate asks about
+/// (10 s × 50 rps), and the oldest samples are dropped past it.
+const MAX_RECENT_REQUEST_TIMES: usize = 512;
+
+/// Suffixes of a page's own sub-resources — the stylesheet, script, font or
+/// image a document loads alongside its HTML.
+///
+/// These are NOT independent client behaviour: a browser fetches them because
+/// it fetched a document, and it fetches a fixed, page-defined set of them.
+/// Counting them as separate requests inflated every real client by 10-40× —
+/// a single console page is one document plus ~20-40 sub-resource fetches —
+/// which is what pushed ordinary browsing past the per-IP rate floor (live
+/// run 2026-10-22). The adaptive limiter is a BEHAVIOURAL detector, so it is
+/// fed the requests a client actually chooses to make; the cost-based limiter
+/// and the reputation table still count every request, so nothing is exempt
+/// from the hard limits.
+///
+/// Deliberately its own list rather than a shared one: `api-server` has a
+/// sibling predicate for deciding whether an ERROR RESPONSE should be HTML or
+/// JSON, and the two sets serve different purposes (that one must include
+/// `.json`, this one must not). They may diverge.
+pub fn is_subresource_fetch(path: &str) -> bool {
+    const SUBRESOURCE_EXTENSIONS: [&str; 16] = [
+        "css", "js", "mjs", "map", "woff", "woff2", "ttf", "otf", "eot", "png", "jpg", "jpeg",
+        "gif", "svg", "webp", "ico",
+    ];
+    let last_segment = path.rsplit('/').next().unwrap_or_default();
+    match last_segment.rsplit_once('.') {
+        Some((_, ext)) => SUBRESOURCE_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()),
+        None => false,
+    }
+}
 
 /// Session tracker for behavioral analysis
 pub struct SessionTracker {
@@ -50,6 +89,15 @@ pub struct Session {
     pub inter_arrival_times: VecDeque<u64>,
     /// Request durations (milliseconds)
     pub request_durations: VecDeque<u64>,
+    /// Timestamps of the most recent requests, oldest first.
+    ///
+    /// The rate a client is CURRENTLY generating is what an anomaly detector
+    /// needs. `request_count / age` cannot supply it: a cumulative average
+    /// over the whole session is monotonically non-decreasing for any client
+    /// that keeps making requests, so feeding it to a Z-score detector made
+    /// "under attack" a mathematical certainty — see
+    /// [`Session::rate_per_sec`].
+    pub recent_request_times: VecDeque<Instant>,
 }
 
 impl Session {
@@ -66,11 +114,17 @@ impl Session {
             request_sequence: VecDeque::with_capacity(100),
             inter_arrival_times: VecDeque::with_capacity(100),
             request_durations: VecDeque::with_capacity(100),
+            recent_request_times: VecDeque::with_capacity(512),
         }
     }
 
-    /// Record a request
-    fn record_request(&mut self, endpoint_hash: u64, is_error: bool) {
+    /// Record a request.
+    ///
+    /// `counts_as_behaviour` is false for a page's own sub-resource fetches
+    /// (see [`is_subresource_fetch`]): they still count towards
+    /// `request_count` and the error rate, but they do not enter the
+    /// behavioural rate window the adaptive limiter learns from.
+    fn record_request(&mut self, endpoint_hash: u64, is_error: bool, counts_as_behaviour: bool) {
         let now = Instant::now();
 
         // Only record inter-arrival time after the first request.
@@ -104,6 +158,44 @@ impl Session {
         self.recent_endpoints.push_back(endpoint_hash);
 
         self.last_activity = now;
+
+        // Timestamped recent-request window for the instantaneous rate.
+        // Bounded like every other per-session deque so a sustained flood
+        // cannot grow it without limit.
+        if counts_as_behaviour {
+            if self.recent_request_times.len() >= MAX_RECENT_REQUEST_TIMES {
+                self.recent_request_times.pop_front();
+            }
+            self.recent_request_times.push_back(now);
+        }
+    }
+
+    /// Requests per second over the trailing `window`.
+    ///
+    /// This is the rate signal the per-IP adaptive limiter consumes. The
+    /// cumulative average ([`Session::requests_per_minute`]) is NOT usable
+    /// for anomaly detection: for any client that keeps making requests it
+    /// rises monotonically, so its Z-score against a baseline built from its
+    /// own history eventually crosses any threshold. Live run 2026-10-22:
+    /// that declared a browser "under attack" after ~12 requests of ordinary
+    /// console browsing, collapsed the threshold to half the baseline rate,
+    /// and 429'd every subsequent request — including the page's own
+    /// `/assets/globals.css`, which the browser then refused as a stylesheet
+    /// (wrong MIME type), leaving the console blank and unstyled.
+    ///
+    /// A trailing window measures what the client is doing NOW, which is the
+    /// quantity a rate limiter is supposed to bound.
+    pub fn rate_per_sec(&mut self, window: Duration) -> f64 {
+        let now = Instant::now();
+        let cutoff = monotonic_cutoff(now, window);
+        while self
+            .recent_request_times
+            .front()
+            .is_some_and(|&t| t < cutoff)
+        {
+            self.recent_request_times.pop_front();
+        }
+        self.recent_request_times.len() as f64 / window.as_secs_f64().max(1.0)
     }
 
     /// Record request duration
@@ -211,7 +303,14 @@ impl SessionTracker {
             .clone();
 
         let mut session_guard = session.write();
-        session_guard.record_request(endpoint_hash, false); // Error recorded separately
+        session_guard.record_request(
+            endpoint_hash,
+            false, // Error recorded separately
+            !is_subresource_fetch(&ctx.path),
+        );
+
+        let recent_rate_per_sec =
+            session_guard.rate_per_sec(Duration::from_secs(RATE_OBSERVATION_WINDOW_SECS));
 
         SessionInfo {
             key: key.clone(),
@@ -221,6 +320,7 @@ impl SessionTracker {
             endpoint_diversity: session_guard.endpoint_diversity(),
             inter_arrival_cov: session_guard.inter_arrival_cov(),
             age_secs: session_guard.age().as_secs(),
+            recent_rate_per_sec,
         }
     }
 
@@ -266,6 +366,11 @@ impl SessionTracker {
                 endpoint_diversity: session.endpoint_diversity(),
                 inter_arrival_cov: session.inter_arrival_cov(),
                 age_secs: session.age().as_secs(),
+                // Read-only view: `get_session` cannot mutate, so the
+                // trailing window cannot be pruned here. Callers that need
+                // the pruned instantaneous rate use `track`.
+                recent_rate_per_sec: session.recent_request_times.len() as f64
+                    / RATE_OBSERVATION_WINDOW_SECS as f64,
             }
         })
     }
@@ -332,7 +437,16 @@ pub struct SessionInfo {
     pub inter_arrival_cov: f64,
     /// Session age in seconds
     pub age_secs: u64,
+    /// Requests per second over the trailing
+    /// [`RATE_OBSERVATION_WINDOW_SECS`] window — the instantaneous rate the
+    /// adaptive limiter consumes.
+    pub recent_rate_per_sec: f64,
 }
+
+/// Trailing window over which the instantaneous per-client request rate is
+/// measured. Long enough to smooth a page load's burst of asset fetches into
+/// one ordinary rate, short enough to still see a real flood forming.
+pub const RATE_OBSERVATION_WINDOW_SECS: u64 = 10;
 
 /// Hash an endpoint for compact storage
 fn hash_endpoint(path: &str) -> u64 {
@@ -382,7 +496,7 @@ mod tests {
 
         // Add some requests
         for i in 0..10 {
-            session.record_request(i, false);
+            session.record_request(i, false, true);
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
 

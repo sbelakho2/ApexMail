@@ -125,20 +125,62 @@ pub struct ProtectorConfig {
 
     /// Block expiration for low reputation
     pub low_rep_block_duration: Duration,
+
+    // ─── Probe exemption ──────────────────────────────────────
+    /// Paths that must ALWAYS be answered, whatever the client's rate or
+    /// reputation: the liveness/readiness endpoints an orchestrator polls and
+    /// the metrics endpoint a scraper polls.
+    ///
+    /// A refused probe is worse than no protection. The orchestrator reads a
+    /// non-200 as "this instance is unhealthy" and restarts a healthy
+    /// service — repeatedly, forever, because the restart does not change
+    /// the client's rate. The same applies to a load balancer's health check
+    /// and a Prometheus scrape. These endpoints do no database work and
+    /// return a constant, so exempting them cannot be amplified into load.
+    ///
+    /// Live run 2026-10-22: `/health/live` answered 429 to all 250 polls of a
+    /// liveness-probe cadence, and `/health/ready` to 150 of 250 — the
+    /// protector was throttling the endpoints whose only job is to say
+    /// whether the process is alive. `DDOS_PROBE_PATHS` (comma-separated)
+    /// overrides the list for deployments with different probe routes.
+    pub probe_paths: Vec<String>,
 }
 
 impl Default for ProtectorConfig {
     fn default() -> Self {
         Self {
             // Rate limiting
-            default_cost_budget: 100_000,
+            //
+            // Per-client cost budget, per minute. Sized against the real
+            // traffic shape of the browser console: one page load is a
+            // document (~1 020 units) plus its API calls (~1 020 each) plus
+            // ~30 sub-resource fetches (64 units each, see
+            // `cost_based::SUBRESOURCE_COST`) — roughly 11 200 units. The old
+            // 100 000 was sized when "a request" meant one API call, so it
+            // held only ~2 page loads per minute and 429'd an ordinary user
+            // mid-session (live run 2026-10-22). 2 000 000 holds ~178 page
+            // loads per minute, far above any human session, while a
+            // single-client flood (thousands of requests per minute at
+            // ~1 020 units) still exceeds it.
+            default_cost_budget: 2_000_000,
             system_cost_capacity: 10_000_000,
 
             // Per-IP adaptive thresholds (Feb 2026)
             enable_per_ip_adaptive: true, // Enabled by default for production safety
             per_ip_z_threshold: 3.0,
             per_ip_baseline_window_secs: 300, // 5 minutes
-            per_ip_min_rpm: 10,
+            // The FLOOR of the adaptive threshold. It must sit above what a
+            // legitimate browser generates, because a console page load is
+            // one document plus ~20-40 sub-resource fetches (stylesheet,
+            // scripts, fonts, images, then the page's own API calls) — and
+            // every one of those is a request this limiter counts. The old
+            // floor of 10 RPM (1/6 rps) was below a single page load, so the
+            // limiter's attack-mode threshold (baseline × 0.5) could collapse
+            // under a normal user's traffic and 429 the page's own CSS (live
+            // run 2026-10-22). 600 RPM is 10 rps sustained per IP: no human
+            // browsing session reaches it, while a single-IP flood is still
+            // caught long before the 10 000 RPM ceiling.
+            per_ip_min_rpm: 600,
             per_ip_max_rpm: 10_000,
             per_ip_adaptive_table_cap: 100_000, // matches the session table
 
@@ -173,11 +215,44 @@ impl Default for ProtectorConfig {
             // Cleanup
             cleanup_interval: Duration::from_secs(60),
             low_rep_block_duration: Duration::from_secs(3600),
+
+            // Probe exemption. Every name here is a route the service
+            // actually serves (`routes::health`) plus the metrics scrape
+            // port's path; the common aliases are included so a deployment
+            // that mounts probes at the usual alternative paths is safe by
+            // default rather than by configuration.
+            probe_paths: vec![
+                "/health".into(),
+                "/health/live".into(),
+                "/health/ready".into(),
+                "/health/startup".into(),
+                "/healthz".into(),
+                "/livez".into(),
+                "/readyz".into(),
+                "/live".into(),
+                "/ready".into(),
+                "/metrics".into(),
+            ],
         }
     }
 }
 
 impl ProtectorConfig {
+    /// Is this request path a probe that must always be answered?
+    ///
+    /// Exact match on the configured list, plus any path nested beneath a
+    /// configured probe path (`/health/live` also covers
+    /// `/health/live/deep`), so a deeper probe route cannot slip back into
+    /// the throttled set.
+    pub fn is_probe_path(&self, path: &str) -> bool {
+        self.probe_paths.iter().any(|probe| {
+            path == probe
+                || (path.len() > probe.len()
+                    && path.starts_with(probe.as_str())
+                    && path.as_bytes()[probe.len()] == b'/')
+        })
+    }
+
     /// Create a new configuration builder
     pub fn builder() -> ProtectorConfigBuilder {
         ProtectorConfigBuilder::default()
@@ -205,6 +280,21 @@ impl ProtectorConfig {
 
         if let Ok(val) = std::env::var("DDOS_REGION") {
             config.local_region = val;
+        }
+
+        // The probe list is deployment-shaped (an orchestrator's probe route
+        // is an operator decision), so it is overridable — but only
+        // wholesale: a deployment that adds its own routes must still list
+        // the standard ones it relies on.
+        if let Ok(val) = std::env::var("DDOS_PROBE_PATHS") {
+            let paths: Vec<String> = val
+                .split(',')
+                .map(|entry| entry.trim().to_string())
+                .filter(|entry| !entry.is_empty())
+                .collect();
+            if !paths.is_empty() {
+                config.probe_paths = paths;
+            }
         }
 
         config

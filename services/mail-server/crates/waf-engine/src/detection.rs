@@ -71,9 +71,59 @@ pub fn analyze_path_traversal(input: &str, location: MatchLocation) -> Vec<RuleM
     results
 }
 
+/// Does this input carry a token shaped like a shell invocation?
+///
+/// The metacharacter tier (932050) exists to catch chaining onto binaries
+/// that are not in [`dangerous_cmds`]. That intent needs a *shape* test, not
+/// merely a metacharacter: a path-like token (`/usr/bin/x`, `./x`, `../x`), a
+/// flag-like token (`-rf`, `--exfiltrate`), a command substitution (`$(…)`
+/// or a backtick) or a redirect (`>`/`<` immediately after the chain).
+/// English prose, CSS and User-Agent strings contain `;` but none of these
+/// shapes, so they stay clean.
+fn has_shell_token_shape(input: &str) -> bool {
+    if input.contains("$(") || input.contains('`') {
+        return true;
+    }
+    input.split_whitespace().any(|token| {
+        let t = token.trim_matches(|c: char| matches!(c, ')' | ';' | '"' | '\''));
+        if t.is_empty() {
+            return false;
+        }
+        // Absolute or relative path, or an explicit binary path.
+        if t.starts_with('/') || t.starts_with("./") || t.starts_with("../") {
+            return true;
+        }
+        // Flag-like argument (`-rf`, `--exfiltrate`) — the shape an
+        // invocation carries; prose words and OS-version tokens do not.
+        if t.starts_with('-') && t.len() > 1 && t.len() <= 24 {
+            return true;
+        }
+        // A redirect attached to the chain (`>file`, `>>log`, `2>&1`).
+        if t.starts_with('>') || t.starts_with('<') {
+            return true;
+        }
+        false
+    })
+}
+
 /// Detect command injection attacks
-/// Two-tier detection:/// - Rule 932050 (score 3):shell metacharacter alone (may indicate injection attempt)
-/// - Rule 932100 (score 5):metacharacter + known dangerous command (confirmed injection)
+///
+/// Two-tier detection:
+/// - Rule 932100 (score 5): a chaining metacharacter followed (within a small
+///   window) by a known dangerous command — a confirmed injection.
+/// - Rule 932050 (score 3): a chaining metacharacter whose chain target has
+///   the SHAPE of a shell invocation — a path (`/opt/bin`, `./x`), a flag
+///   (`-rf`), a command substitution (`$(`, backtick) or a redirect (`>`).
+///
+/// The shape requirement on the second tier is load-bearing (live run
+/// 2026-10-22): the rule used to fire on a bare `"; "`, which is ubiquitous
+/// in legitimate input — every browser User-Agent contains
+/// `(Macintosh; Intel Mac OS X …)`, CSS carries `; ` between declarations and
+/// prose contains semicolons. That scored 3 points on EVERY browser request,
+/// and two requests reached the anomaly threshold: with `WAF_ENFORCE=true`
+/// the product blocked its own users (and its own stylesheet) on their
+/// second page view. A semicolon is punctuation; only a semicolon followed
+/// by something that looks like a command is a signal.
 pub fn analyze_command_injection(input: &str, location: MatchLocation) -> Vec<RuleMatch> {
     let mut results = Vec::new();
     let lower = input.to_lowercase();
@@ -141,6 +191,48 @@ pub fn analyze_command_injection(input: &str, location: MatchLocation) -> Vec<Ru
         "openssl",
         "socat ",
         "busybox",
+        // Windows builtins and LOLBins — the interpreter's own command set.
+        // These were never listed, so `; dir C:\\` and `| net user` only ever
+        // scored through the bare-metacharacter tier; once that tier required
+        // a shell SHAPE (live run 2026-10-22) they stopped scoring at all.
+        // They belong here: a chained `dir`/`type`/`net` IS a confirmed
+        // injection, and the adjacency window + complete-word match keep prose
+        // ("; type of thing") from firing it.
+        "dir ",
+        "type ",
+        "net ",
+        "netstat ",
+        "cmd ",
+        "ipconfig",
+        "tasklist",
+        "taskkill",
+        "systeminfo",
+        "wmic ",
+        "reg ",
+        "sc ",
+        "schtasks",
+        "certutil",
+        "bitsadmin",
+        "findstr ",
+        "del ",
+        "copy ",
+        "move ",
+        "start ",
+        "rundll32",
+        "regsvr32",
+        "mshta",
+        "cscript",
+        "wscript",
+        // Blind-injection time/network probes: the classic "is it vulnerable"
+        // payloads. Without them `; sleep 10` and `| nslookup evil.com`
+        // scored nothing.
+        "sleep ",
+        "ping ",
+        "nslookup ",
+        "dig ",
+        "host ",
+        "tracert ",
+        "telnet ",
     ];
     let cmd_names: Vec<&str> = dangerous_cmds.iter().map(|c| c.trim()).collect();
 
@@ -167,10 +259,12 @@ pub fn analyze_command_injection(input: &str, location: MatchLocation) -> Vec<Ru
     } else if space_meta_patterns
         .iter()
         .any(|p| normalized_shell.contains(p))
+        && has_shell_token_shape(&normalized_shell)
     {
-        // Metacharacter-only rule:fire even if no known command follows it.
-        // This catches injection attempts using unlisted/custom binaries
-        // without letting prose words escalate the score to blocking.
+        // Metacharacter-only rule: fires for unlisted/custom binaries — but
+        // only when the chain target has a shell-invocation SHAPE. Without
+        // that guard a bare `"; "` (browser User-Agents, CSS declarations,
+        // ordinary prose) scored every request (live run 2026-10-22).
         results.push(RuleMatch {
             rule_id: 932050,
             category: AttackCategory::CommandInjection,
@@ -988,6 +1082,69 @@ mod tests {
             r2.iter().any(|m| m.rule_id == 932100),
             "`|w\\hoami` must fire 932100"
         );
+    }
+
+    /// Live run 2026-10-22 (P0): every real browser User-Agent contains a
+    /// `"; "` inside its platform comment. The bare-metacharacter tier used
+    /// to score 3 for each of them, so two page views reached the anomaly
+    /// threshold — under `WAF_ENFORCE=true` the product blocked its own
+    /// users and its own stylesheet. Real UAs must be clean.
+    #[test]
+    fn browser_user_agents_are_not_command_injection() {
+        for ua in [
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:130.0) Gecko/20100101 Firefox/130.0",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+            "curl/8.7.1",
+        ] {
+            let r = analyze_command_injection(ua, MatchLocation::Header("user-agent".into()));
+            assert!(
+                r.is_empty(),
+                "a real User-Agent must not score: {ua} → {:?}",
+                r.iter().map(|m| (m.rule_id, m.score)).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    /// The same class in other legitimate surfaces: CSS declarations, prose
+    /// with semicolons, JSON-ish text and a URL with a query separator.
+    #[test]
+    fn semicolon_punctuation_is_not_command_injection() {
+        for text in [
+            "font-family: ui-monospace, monospace; color: #000; margin: 0 0 16px",
+            "Hello there; thanks for the update. Let me know how it goes.",
+            "a=1; b=2; c=3",
+            "https://example.test/path?x=1;y=2",
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)",
+        ] {
+            let r = analyze_command_injection(text, MatchLocation::Body);
+            assert!(
+                r.is_empty(),
+                "punctuation must not score: {text} → {:?}",
+                r.iter().map(|m| (m.rule_id, m.score)).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    /// The tier still does its job: an unlisted binary invoked by path or by
+    /// flag shape keeps firing 932050 (the metacharacter tier's purpose).
+    #[test]
+    fn unlisted_binary_with_shell_shape_still_scores() {
+        for text in [
+            "; /opt/custom_binary --exfiltrate",
+            "| ./payload.sh",
+            "; custombin -rf /tmp/x",
+            "&& ../../bin/thing",
+            "; cat > /tmp/exfil",
+        ] {
+            let r = analyze_command_injection(text, MatchLocation::Body);
+            assert!(
+                r.iter().any(|m| m.rule_id == 932050 || m.rule_id == 932100),
+                "shell-shaped chain must score: {text} → {r:?}"
+            );
+        }
     }
 
     #[test]

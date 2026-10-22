@@ -3602,28 +3602,78 @@ mod tests {
         );
         let app = test_app_with_ddos(ddos_protector).await;
 
+        // The fixture is a NON-probe public route. It used to be
+        // `/health/live`, which asserted that a liveness probe gets 429 —
+        // i.e. it pinned the very defect that made orchestrators restart
+        // healthy instances (live run 2026-10-22). Probes are now exempt
+        // (see `probe_routes_stay_answerable_under_a_constrained_ddos_
+        // protector`), so the assertion moves to a route whose refusal is
+        // the point: `/consent` is public and unauthenticated, and the
+        // constrained protector serves it once and then refuses it.
         let first = app
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/health/live")
+                    .uri("/consent")
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(first.status(), StatusCode::OK);
+        assert_ne!(
+            first.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "the first public request must be served"
+        );
 
         let second = app
             .oneshot(
                 Request::builder()
-                    .uri("/health/live")
+                    .uri("/consent")
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    /// The counterpart to the test above: the SAME constrained protector must
+    /// not refuse the liveness probe, however hard it is polled.
+    ///
+    /// Live run 2026-10-22: `/health/live` answered 429 to every poll at a
+    /// liveness cadence, so an orchestrator would have read a healthy
+    /// instance as unhealthy and restarted it — forever, because a restart
+    /// does not change the client's rate.
+    #[tokio::test]
+    async fn probe_routes_stay_answerable_under_a_constrained_ddos_protector() {
+        let ddos_protector = Arc::new(
+            DdosProtector::new(ProtectorConfig {
+                system_cost_capacity: 1020,
+                ..ProtectorConfig::default()
+            })
+            .await
+            .expect("failed to create constrained ddos protector"),
+        );
+        let app = test_app_with_ddos(ddos_protector).await;
+
+        for poll in 0..40 {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/health/live")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "poll {poll} of /health/live must answer"
+            );
+        }
     }
 
     #[derive(Clone)]

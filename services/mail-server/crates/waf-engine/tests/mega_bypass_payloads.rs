@@ -669,3 +669,86 @@ fn test_false_positive_clean_requests() {
         false_positives
     );
 }
+
+// ============================================================================
+// Real browser traffic must be CLEAN — zero score, not merely "not blocked".
+// ============================================================================
+
+/// Live run 2026-10-22 (P0): `test_false_positive_clean_requests` sent no
+/// headers at all, so the corpus never contained a User-Agent. Every real
+/// browser UA carries `"; "` inside its platform comment
+/// (`Mozilla/5.0 (Macintosh; Intel Mac OS X …)`), and the bare-metacharacter
+/// tier scored 3 for it. Nothing was blocked in isolation — but the api-server
+/// accumulates score per client IP, so two page views reached the anomaly
+/// threshold and the product blocked its own users and its own stylesheet
+/// (`/assets/globals.css`) under `WAF_ENFORCE=true`.
+///
+/// The assertion is therefore on `total_score == 0`, which is what the
+/// per-IP accumulator consumes. Anything that merely scores below the block
+/// threshold still poisons the next request from that browser.
+#[test]
+fn real_browser_traffic_scores_zero() {
+    let e = engine();
+    let user_agents = [
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:130.0) Gecko/20100101 Firefox/130.0",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+        "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Mobile Safari/537.36",
+    ];
+    // The requests a console page actually issues: the document, its
+    // stylesheet, its fonts, and its JSON API calls.
+    let paths: [(&str, Option<&str>); 6] = [
+        ("/dashboard", None),
+        ("/assets/globals.css", None),
+        ("/assets/app.js", None),
+        ("/fonts/inter-var.woff2", None),
+        ("/api/v1/contacts", Some("page=1&limit=25")),
+        ("/api/v1/campaigns", Some("status=active&sort=created_at")),
+    ];
+
+    let mut dirty = Vec::new();
+    for ua in user_agents {
+        let headers: Vec<(String, String)> = [
+            ("host", "127.0.0.1:8080"),
+            ("user-agent", ua),
+            ("accept", "*/*"),
+            ("accept-language", "en-US,en;q=0.9,fr;q=0.8"),
+            ("referer", "http://127.0.0.1:8080/dashboard"),
+            ("cookie", "session=abc123; theme=dark; csrf=xyz789"),
+        ]
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        for (path, qs) in paths {
+            let req = HttpRequest {
+                client_ip: client_ip(),
+                method: "GET",
+                path,
+                query_string: qs,
+                headers: &headers,
+                body: None,
+            };
+            let info = e.inspect(&req);
+            if info.total_score != 0 {
+                dirty.push(format!(
+                    "{path} with UA {ua} scored {} ({:?})",
+                    info.total_score,
+                    info.matches
+                        .iter()
+                        .map(|m| (m.rule_id, m.score))
+                        .collect::<Vec<_>>()
+                ));
+            }
+        }
+    }
+
+    assert!(
+        dirty.is_empty(),
+        "legitimate browser traffic must score zero — {} dirty request(s):\n{}",
+        dirty.len(),
+        dirty.join("\n")
+    );
+}

@@ -70,6 +70,39 @@ pub fn globals_css_url() -> &'static str {
 
 pub const FOUNDATION_MANIFEST_JSON: &str =
     include_str!("../../../../../docs/development/ui-rust-foundation-manifest.json");
+/// The canonical webhook event vocabulary — the ONE list.
+///
+/// api-server's `KNOWN_WEBHOOK_EVENTS` re-exports this constant, so the
+/// validator's accepted names and the console's checkbox group cannot drift
+/// apart. The names are the wire contract (they appear in delivered
+/// payloads), so they are lowercase dotted identifiers, never display copy.
+pub const WEBHOOK_EVENTS: &[&str] = &[
+    // Message lifecycle (canonical vocabulary)
+    "message.accepted",
+    "message.queued",
+    "message.attempted",
+    "message.deferred",
+    "message.delivered",
+    "message.bounced",
+    "message.complained",
+    "message.suppressed",
+    "message.opened",
+    "message.clicked",
+    "message.cancelled",
+    // tracking-service
+    "recipient.unsubscribed",
+    // Campaign lifecycle (customer campaigns; produced by the campaign worker)
+    "campaign.started",
+    "campaign.ab_winner_selected",
+    "campaign.completed",
+    // inbox-placement
+    "placement_test.completed",
+    // inbound email pipeline
+    "inbound",
+    // Wildcard honoured by every webhook selector
+    "*",
+];
+
 pub const GLOBALS_CSS: &str = include_str!("../assets/globals.css");
 pub const GLOBALS_INPUT_CSS: &str = include_str!("../assets/globals.input.css");
 /// Source-of-truth marketing stylesheet (the Zola build compiles it into

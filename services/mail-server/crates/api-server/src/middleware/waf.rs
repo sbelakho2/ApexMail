@@ -80,7 +80,7 @@ pub async fn waf_middleware(
         WafDecision::Block(status) => {
             if state.config.waf_enforce {
                 log_threat("WAF block", &threat);
-                blocked_response(status, &threat)
+                blocked_response(status, &threat, req.uri().path(), req.headers())
             } else {
                 // Monitor mode: the engine WOULD have blocked; record it
                 // at WARN so operators can size the false-positive rate
@@ -104,12 +104,31 @@ fn log_threat(label: &str, threat: &ThreatInfo) {
     );
 }
 
-fn blocked_response(status: u16, threat: &ThreatInfo) -> Response {
+/// A blocked request gets the JSON envelope when a machine asked for it and
+/// the branded HTML page when a browser did (live run 2026-10-22: a block on
+/// a page's own stylesheet rendered as an untitled JSON document, so the
+/// console looked like a blank white page rather than a security refusal).
+fn blocked_response(
+    status: u16,
+    threat: &ThreatInfo,
+    path: &str,
+    headers: &axum::http::HeaderMap,
+) -> Response {
     let code = if (400..599).contains(&status) {
         axum::http::StatusCode::from_u16(status).unwrap_or(axum::http::StatusCode::FORBIDDEN)
     } else {
         axum::http::StatusCode::FORBIDDEN
     };
+    if crate::middleware::is_browser_request(path, headers) {
+        return crate::middleware::browser_error_page_response(
+            code,
+            "Request Blocked",
+            "Request blocked",
+            "This request was stopped by our security screening. If you believe this is a mistake, contact support.",
+            "/",
+            "Back to ApexMail",
+        );
+    }
     (
         code,
         axum::Json(serde_json::json!({
@@ -181,6 +200,7 @@ mod tests {
 
     #[test]
     fn blocked_response_uses_engine_status() {
+        let api_headers = axum::http::HeaderMap::new();
         let resp = blocked_response(
             403,
             &ThreatInfo {
@@ -188,6 +208,8 @@ mod tests {
                 matches: vec![],
                 decision: WafDecision::Block(403),
             },
+            "/v1/messages",
+            &api_headers,
         );
         assert_eq!(resp.status(), axum::http::StatusCode::FORBIDDEN);
         // Out-of-range engine statuses degrade to 403, never panic.
@@ -198,7 +220,46 @@ mod tests {
                 matches: vec![],
                 decision: WafDecision::Block(999),
             },
+            "/v1/messages",
+            &api_headers,
         );
         assert_eq!(resp.status(), axum::http::StatusCode::FORBIDDEN);
+    }
+
+    /// A block on a page's own stylesheet must reach the browser as the
+    /// branded HTML page, not a JSON document the user cannot read (live
+    /// run 2026-10-22).
+    #[test]
+    fn blocked_browser_asset_gets_html_and_api_call_keeps_json() {
+        let threat = ThreatInfo {
+            total_score: 9,
+            matches: vec![],
+            decision: WafDecision::Block(403),
+        };
+        let mut browser_headers = axum::http::HeaderMap::new();
+        browser_headers.insert(
+            axum::http::header::HeaderName::from_static("sec-fetch-dest"),
+            axum::http::HeaderValue::from_static("style"),
+        );
+        let resp = blocked_response(403, &threat, "/assets/globals.css", &browser_headers);
+        assert_eq!(
+            resp.headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("text/html; charset=utf-8")
+        );
+
+        let mut api_headers = axum::http::HeaderMap::new();
+        api_headers.insert(
+            axum::http::header::HeaderName::from_static("sec-fetch-dest"),
+            axum::http::HeaderValue::from_static("empty"),
+        );
+        let resp = blocked_response(403, &threat, "/v1/messages", &api_headers);
+        assert_eq!(
+            resp.headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("application/json")
+        );
     }
 }

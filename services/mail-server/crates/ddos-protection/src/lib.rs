@@ -304,6 +304,30 @@ impl DdosProtector {
             metric.with_label_values(&["evaluated", "all"]).inc();
         }
 
+        // Layer -1: probe exemption.
+        //
+        // A liveness/readiness/metrics probe must ALWAYS be answered. The
+        // orchestrator reads a non-200 as "this instance is unhealthy" and
+        // restarts a healthy service — and it keeps doing so, because a
+        // restart does not change the client's rate. The same holds for a
+        // load balancer's health check and a Prometheus scrape. These routes
+        // do no database work and return a constant, so exempting them
+        // cannot be turned into amplification.
+        //
+        // This sits before the blocklist on purpose: a probe that a
+        // reputation rule can refuse is still a probe that reports a healthy
+        // service as down, which is the failure this exemption exists to
+        // prevent. The WAF remains a separate layer over these paths.
+        //
+        // Live run 2026-10-22: `/health/live` answered 429 to all 250 polls
+        // at a liveness cadence, `/health/ready` to 150 of 250.
+        if self.config.is_probe_path(&ctx.path) {
+            if let Some(metric) = metrics::REQUESTS_TOTAL.as_ref() {
+                metric.with_label_values(&["allowed", "probe"]).inc();
+            }
+            return ProtectionDecision::Allow;
+        }
+
         // Canonical client key (audit F2d): IPv6 addresses are truncated to
         // their /64 (and IPv4-mapped IPv6 mapped back to IPv4) for every
         // protection table — cost buckets, sessions, reputation and the
@@ -1067,12 +1091,25 @@ pub(crate) fn canonical_client_key(ip: &IpAddr) -> IpAddr {
     }
 }
 
-/// Damped request rate (requests/second) for a session, used by the
-/// adaptive limiter (audit F2c). Young sessions extrapolate wildly
-/// (1 request in 40 ms projects to 1500 RPS), so the estimate never uses
-/// a window shorter than 60 s — the per-IP floor in RPM terms.
+/// Current request rate (requests/second) for a session, used by the
+/// adaptive limiter (audit F2c).
+///
+/// This is the trailing-window rate, NOT `request_count / age`. The old
+/// estimate was a cumulative average over the whole session: monotonically
+/// non-decreasing for any client that keeps making requests, and therefore
+/// useless as an anomaly signal — a Z-score against its own history crosses
+/// any threshold by construction. Live run 2026-10-22: ordinary console
+/// browsing (~12 requests) declared the browser "under attack", collapsed
+/// the threshold to half the baseline rate and 429'd every following
+/// request, including the page's own stylesheet, which left the console
+/// blank and unstyled for a real user on their first page load.
+///
+/// The trailing window also removes the young-session extrapolation the old
+/// 60 s floor was working around: 1 request in 40 ms no longer projects to
+/// 1500 RPS, because the window is a fixed 10 s and the count is bounded by
+/// what actually happened inside it.
 fn session_rate_per_sec(session: &session::SessionInfo) -> f64 {
-    session.request_count as f64 / session.age_secs.max(60) as f64
+    session.recent_rate_per_sec
 }
 
 /// DDoS protection errors
@@ -2064,5 +2101,188 @@ mod tests {
             entry.rate_limit_hits, 1,
             "the throttle must be counted on the reputation entry"
         );
+    }
+
+    fn browser_ctx(ip: IpAddr, path: &str) -> RequestContext {
+        RequestContext {
+            ip,
+            path: path.to_string(),
+            method: "GET".to_string(),
+            tls_fingerprint: None,
+            h2_fingerprint: None,
+            user_agent: Some(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 \
+                 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36"
+                    .to_string(),
+            ),
+            body_size: 0,
+            tenant_id: None,
+            api_key_id: None,
+            challenge_id: None,
+            challenge_solution: None,
+        }
+    }
+
+    /// Live run 2026-10-22 (P0): a real browser opening the console was
+    /// throttled on its FIRST page load. The adaptive per-IP limiter was fed
+    /// `request_count / session_age` — a cumulative average, monotonically
+    /// non-decreasing for any client that keeps requesting. A Z-score against
+    /// a baseline built from that same monotone history crosses any threshold
+    /// by construction, so ordinary browsing was declared "under attack", the
+    /// threshold collapsed to half the baseline rate, and every following
+    /// request got 429 — including the page's own `/assets/globals.css`,
+    /// which the browser then refused as a stylesheet (wrong MIME type),
+    /// leaving the console blank and unstyled.
+    ///
+    /// A page load is one document plus its sub-resources plus the page's own
+    /// API calls. All of it must pass.
+    #[tokio::test]
+    async fn a_real_browser_page_load_is_never_rate_limited() {
+        let protector = DdosProtector::new(ProtectorConfig::default())
+            .await
+            .expect("test should succeed");
+        let ip: IpAddr = "198.51.100.77".parse().expect("hardcoded test IP");
+
+        // Three page loads in a row, each: document, 30 sub-resources, 8 API
+        // calls. That is a heavy but entirely human console session.
+        let mut throttled_at = None;
+        let mut issued = 0usize;
+        for page in 0..3 {
+            let mut paths = vec![format!("/dashboard?page={page}")];
+            for asset in [
+                "/assets/globals.css",
+                "/assets/app.js",
+                "/fonts/inter-var.woff2",
+                "/favicon.ico",
+            ] {
+                for _ in 0..8 {
+                    paths.push(asset.to_string());
+                }
+            }
+            for api in [
+                "/v1/contacts",
+                "/v1/campaigns",
+                "/v1/templates",
+                "/v1/lists",
+                "/v1/analytics/overview",
+                "/v1/messages",
+                "/v1/domains",
+                "/v1/webhooks",
+            ] {
+                paths.push(api.to_string());
+            }
+
+            for path in paths {
+                issued += 1;
+                let decision = protector.evaluate(&browser_ctx(ip, &path)).await;
+                if !matches!(decision, ProtectionDecision::Allow) {
+                    throttled_at = Some(format!("#{issued} {path} -> {decision:?}"));
+                    break;
+                }
+            }
+            if throttled_at.is_some() {
+                break;
+            }
+        }
+
+        assert!(
+            throttled_at.is_none(),
+            "a browser loading the console must never be throttled; first \
+             refusal was on {:?}",
+            throttled_at
+        );
+    }
+
+    /// The inverse: the limiter must still bound a single IP that actually
+    /// floods, so the fix cannot be "delete the limiter".
+    #[tokio::test]
+    async fn a_sustained_single_ip_flood_is_still_limited() {
+        let protector = DdosProtector::new(ProtectorConfig::default())
+            .await
+            .expect("test should succeed");
+        let ip: IpAddr = "198.51.100.99".parse().expect("hardcoded test IP");
+
+        let mut limited = false;
+        for i in 0..5_000 {
+            let path = if i % 3 == 0 {
+                "/v1/contacts"
+            } else {
+                "/dashboard"
+            };
+            if matches!(
+                protector.evaluate(&browser_ctx(ip, path)).await,
+                ProtectionDecision::RateLimit { .. } | ProtectionDecision::Block
+            ) {
+                limited = true;
+                break;
+            }
+        }
+
+        assert!(
+            limited,
+            "a sustained flood from one IP must still be rate limited"
+        );
+    }
+
+    /// Live run 2026-10-22 (P0): the protector throttled its OWN health
+    /// endpoints. `/health/live` answered 429 to all 250 polls of a
+    /// liveness-probe cadence and `/health/ready` to 150 of 250 — an
+    /// orchestrator reads a non-200 as "unhealthy" and restarts a healthy
+    /// service, forever, because a restart does not change the client's rate.
+    ///
+    /// Probes must be answered whatever the client's rate or reputation.
+    #[tokio::test]
+    async fn probe_endpoints_are_never_refused_however_hard_they_are_polled() {
+        let protector = DdosProtector::new(ProtectorConfig::default())
+            .await
+            .expect("test should succeed");
+        let ip: IpAddr = "198.51.100.44".parse().expect("hardcoded test IP");
+
+        for path in [
+            "/health",
+            "/health/live",
+            "/health/ready",
+            "/health/startup",
+            "/healthz",
+            "/livez",
+            "/readyz",
+            "/metrics",
+        ] {
+            for poll in 0..600 {
+                let decision = protector.evaluate(&browser_ctx(ip, path)).await;
+                assert!(
+                    matches!(decision, ProtectionDecision::Allow),
+                    "{path} must answer every probe; poll {poll} got {decision:?}"
+                );
+            }
+        }
+    }
+
+    /// The exemption is exact-or-nested: a NON-probe path must still be
+    /// protected, so the exemption cannot be widened into a blanket bypass
+    /// by a crafted prefix.
+    #[tokio::test]
+    async fn the_probe_exemption_does_not_cover_neighbouring_paths() {
+        let protector = DdosProtector::new(ProtectorConfig::default())
+            .await
+            .expect("test should succeed");
+        let ip: IpAddr = "198.51.100.45".parse().expect("hardcoded test IP");
+
+        for path in ["/healthy", "/health-check", "/metricsx", "/v1/health"] {
+            let mut refused = false;
+            for _ in 0..4_000 {
+                if !matches!(
+                    protector.evaluate(&browser_ctx(ip, path)).await,
+                    ProtectionDecision::Allow
+                ) {
+                    refused = true;
+                    break;
+                }
+            }
+            assert!(
+                refused,
+                "{path} is not a probe and must still be rate limited"
+            );
+        }
     }
 }

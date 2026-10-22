@@ -32,7 +32,39 @@ async fn liveness() -> impl IntoResponse {
 
 // ─── Readiness ─────────────────────────────────────────────────
 
+/// How long the readiness probe may take before it reports the service
+/// degraded.
+///
+/// A health endpoint that can hang is a health endpoint that causes restart
+/// loops: the orchestrator's probe never gets an answer, so it kills the
+/// instance and tries again, forever. The bound makes the endpoint ALWAYS
+/// answer within this window — degraded is a valid, actionable answer;
+/// silence is not.
+const READINESS_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
 async fn readiness(State(state): State<AppState>) -> impl IntoResponse {
+    match tokio::time::timeout(READINESS_DEADLINE, readiness_inner(&state)).await {
+        Ok(response) => response,
+        Err(_) => {
+            tracing::warn!(
+                deadline_secs = READINESS_DEADLINE.as_secs(),
+                "readiness: dependency checks exceeded the deadline; reporting degraded"
+            );
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "status": "degraded",
+                    "db": "unknown",
+                    "redis": "unknown",
+                    "schema": "unknown",
+                    "error": "dependency checks exceeded the readiness deadline",
+                })),
+            )
+        }
+    }
+}
+
+async fn readiness_inner(state: &AppState) -> (StatusCode, Json<serde_json::Value>) {
     // Use circuit breaker for DB check — if the circuit is open, we fail fast
     // instead of waiting for a connection timeout.
     let db_result = state

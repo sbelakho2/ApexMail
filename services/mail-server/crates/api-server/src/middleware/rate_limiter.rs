@@ -76,7 +76,7 @@ pub async fn rate_limit_middleware(
             // F1b: browser surfaces (form posts, SSR pages) get a small
             // branded HTML page instead of a raw JSON error dump; API paths
             // keep the machine-readable envelope.
-            let browser = crate::middleware::is_browser_facing_path(req.uri().path());
+            let browser = crate::middleware::is_browser_request(req.uri().path(), req.headers());
             let mut resp = if browser {
                 crate::middleware::browser_error_page_response(
                     StatusCode::TOO_MANY_REQUESTS,
@@ -106,7 +106,7 @@ pub async fn rate_limit_middleware(
             if state.config.environment == Environment::Production {
                 // F1b: browser surfaces get the branded HTML outage page;
                 // API paths keep the JSON envelope.
-                if crate::middleware::is_browser_facing_path(req.uri().path()) {
+                if crate::middleware::is_browser_request(req.uri().path(), req.headers()) {
                     crate::middleware::browser_error_page_response(
                         StatusCode::SERVICE_UNAVAILABLE,
                         "Service Unavailable",
@@ -452,7 +452,7 @@ pub async fn public_rate_limit_middleware(
             // F1b: browser form posts (/web/auth/*, /consent, detail pages)
             // get a small branded HTML page instead of a raw JSON error
             // dump; API paths keep the machine-readable envelope.
-            let browser = crate::middleware::is_browser_facing_path(req.uri().path());
+            let browser = crate::middleware::is_browser_request(req.uri().path(), req.headers());
             let mut resp = if browser {
                 crate::middleware::browser_error_page_response(
                     StatusCode::TOO_MANY_REQUESTS,
@@ -484,7 +484,7 @@ pub async fn public_rate_limit_middleware(
                 // JSON dump (or, via session resolution, silently to
                 // /login as unauthenticated) — serve the branded HTML
                 // outage page on browser paths; API paths keep JSON.
-                if crate::middleware::is_browser_facing_path(req.uri().path()) {
+                if crate::middleware::is_browser_request(req.uri().path(), req.headers()) {
                     crate::middleware::browser_error_page_response(
                         StatusCode::SERVICE_UNAVAILABLE,
                         "Service Unavailable",

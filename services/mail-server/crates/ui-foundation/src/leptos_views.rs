@@ -5646,10 +5646,21 @@ pub fn api_key_create_form_html() -> String {
 }
 
 /// Team invitation form, composed beside the live membership table.
+///
+/// This is the ONE authority for the invite form's control names. The
+/// handler (`form_team_invite`) reads `userName` for the address and requires
+/// `role` to be `member` or `admin`; a second inline copy of this form used to
+/// exist in the non-data-backed team page and posted `email` with no role at
+/// all, so every invitation submitted through the rendered console was
+/// refused with "Choose a valid role" no matter what the user typed (live run
+/// 2026-10-22). `team_invite_form_matches_the_handler_contract` pins the two
+/// names to the handler.
 pub fn team_invite_form_html() -> String {
     "<form class=\"space-y-4 rounded-sm border border-surface-200 bg-card p-6\" method=\"post\" action=\"/web/team/invite\">\
 <div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"team-invite-email\">Email</label>\
-<input id=\"team-invite-email\" name=\"email\" type=\"email\" required class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px]\" placeholder=\"colleague@company.com\" /></div>\
+<input id=\"team-invite-email\" name=\"userName\" type=\"email\" required autocomplete=\"email\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px]\" placeholder=\"colleague@company.com\" /></div>\
+<div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"team-invite-role\">Role</label>\
+<select id=\"team-invite-role\" name=\"role\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px]\"><option value=\"member\">Member</option><option value=\"admin\">Admin</option></select></div>\
 <button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-primary px-4 py-2 text-sm font-semibold text-white\">Send invitation</button>\
 <p class=\"text-xs text-muted-foreground\">Submitting creates an invitation record and adds the address as <strong>invited</strong>. No invitation email is sent from this page yet — the record alone does not sign anyone in.</p>\
 </form>"
@@ -5657,13 +5668,44 @@ pub fn team_invite_form_html() -> String {
 }
 
 /// Webhook registration form, composed beside the live endpoint table.
+///
+/// The event checkbox group is REQUIRED by the handler (`form_webhook_create`
+/// refuses a subscription with no events), so a form without it can never
+/// succeed. The vocabulary lives here, in
+/// [`crate::WEBHOOK_EVENTS`], and api-server's `KNOWN_WEBHOOK_EVENTS` re-exports it —
+/// one list, so the form can only ever offer names the validator accepts
+/// (live run 2026-10-22: the form posted `url` alone and every registration
+/// was refused with "Pick at least one event").
 pub fn webhook_register_form_html() -> String {
-    "<form class=\"space-y-4 rounded-sm border border-surface-200 bg-card p-6\" method=\"post\" action=\"/web/webhooks\">\
+    let events: String = crate::WEBHOOK_EVENTS
+        .iter()
+        .map(|event| {
+            let id = format!("webhook-event-{}", event.replace('.', "-"));
+            let label = if *event == "*" {
+                "Everything (*)".to_string()
+            } else {
+                html_escape(event)
+            };
+            format!(
+                "<label class=\"flex items-center gap-2 text-sm\" for=\"{id}\">\
+<input id=\"{id}\" name=\"events\" type=\"checkbox\" value=\"{value}\" class=\"h-4 w-4 rounded-sm border-input\" />\
+<span>{label}</span></label>",
+                id = id,
+                value = html_escape(event),
+                label = label,
+            )
+        })
+        .collect();
+    format!(
+        "<form class=\"space-y-4 rounded-sm border border-surface-200 bg-card p-6\" method=\"post\" action=\"/web/webhooks\">\
 <div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"webhook-url\">Endpoint URL</label>\
 <input id=\"webhook-url\" name=\"url\" type=\"url\" required class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px]\" placeholder=\"https://example.com/hooks/apexmail\" /></div>\
+<fieldset class=\"space-y-2\"><legend class=\"text-sm font-medium leading-none\">Events</legend>\
+<p class=\"text-xs text-muted-foreground\">At least one. Each event is delivered to the endpoint as a signed JSON POST.</p>\
+<div class=\"grid grid-cols-1 gap-1.5 sm:grid-cols-2\">{events}</div></fieldset>\
 <button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-primary px-4 py-2 text-sm font-semibold text-white\">Register endpoint</button>\
 </form>"
-        .to_string()
+    )
 }
 
 /// Dedicated-IP request form, composed beside the live IP table.
@@ -5712,14 +5754,9 @@ pub fn web_settings_team_page() -> String {
     format!(
         "<div class=\"space-y-6\">\
 <div class=\"flex items-center justify-between\"><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Team</h1></div>\
-<form class=\"flex flex-col gap-3 sm:flex-row sm:items-end\" method=\"post\" action=\"/web/team/invite\">\
-<div class=\"flex-1 space-y-2\"><label class=\"apex-klabel\" for=\"invite-email\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Email</label>\
-<input id=\"invite-email\" name=\"userName\" type=\"email\" required autocomplete=\"email\" class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary outline-none transition-all bg-background text-sm font-medium text-surface-950\" placeholder=\"teammate@company.com\" /></div>\
-<div class=\"flex-1 space-y-2\"><label class=\"apex-klabel\" for=\"invite-role\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Role</label>\
-<select id=\"invite-role\" name=\"role\" class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary outline-none transition-all bg-background text-sm font-medium text-surface-950\"><option value=\"member\">Member</option><option value=\"admin\">Admin</option></select></div>\
-<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">Invite Member</button>\
-</form>\
+{form}\
 {table}</div>",
+        form = team_invite_form_html(),
         table = table.render_html(),
     )
 }
@@ -10837,12 +10874,20 @@ mod deferred_feature_view_tests {
         let team = team_invite_form_html();
         assert!(team.contains("action=\"/web/team/invite\""));
         assert!(team.contains("Send invitation"));
-        assert!(team.contains("name=\"email\""));
+        // The handler reads `userName` for the address and requires `role`.
+        // This assertion previously pinned `name="email"`, which is exactly
+        // how the broken form stayed broken: the test agreed with the form
+        // instead of with the handler, and every real invitation was refused
+        // (live run 2026-10-22). See `settings_action_forms_supply_every_
+        // field_their_handler_reads`.
+        assert!(team.contains("name=\"userName\""));
+        assert!(team.contains("name=\"role\""));
 
         let hooks = webhook_register_form_html();
         assert!(hooks.contains("action=\"/web/webhooks\""));
         assert!(hooks.contains("Register endpoint"));
         assert!(hooks.contains("name=\"url\""));
+        assert!(hooks.contains("name=\"events\""));
 
         let ips = dedicated_ip_request_form_html();
         assert!(ips.contains("action=\"/web/dedicated-ips/request\""));
@@ -10851,6 +10896,81 @@ mod deferred_feature_view_tests {
         let billing = billing_action_form_html();
         assert!(billing.contains("href=\"/settings/billing\""));
         assert!(billing.contains("Manage billing"));
+    }
+
+    /// Every console create form must supply each control its POST handler
+    /// actually reads. The handler is the contract; a form that omits a
+    /// required control renders a button that cannot work, and the user only
+    /// finds out after submitting.
+    ///
+    /// Live run 2026-10-22: `/settings/team` posted `email` while
+    /// `form_team_invite` read `userName` and required `role`, and
+    /// `/settings/webhooks` posted `url` alone while `form_webhook_create`
+    /// required at least one `events` value. Both buttons were dead, and a
+    /// stale assertion in this very file was what kept the first one dead.
+    #[test]
+    fn settings_action_forms_supply_every_field_their_handler_reads() {
+        // (label, the names the handler reads, the rendered form)
+        let contracts: [(&str, &[&str], String); 4] = [
+            (
+                "team invite",
+                // `field(&form, "userName")` + `field(&form, "role")`
+                &["userName", "role"],
+                team_invite_form_html(),
+            ),
+            (
+                "webhook register",
+                // `field(&form, "url")` + `get_all("events")`
+                &["url", "events"],
+                webhook_register_form_html(),
+            ),
+            (
+                "api key create",
+                // `field(&form, "name")` + `field(&form, "expires_in_days")`
+                // + `get_all("scopes")`
+                &["name", "expires_in_days", "scopes"],
+                api_key_create_form_html(),
+            ),
+            (
+                "dedicated ip request",
+                // `form_dedicated_ip_request` reads no named control beyond
+                // the CSRF token, which the render pass injects into every
+                // form (`axum_router::inject_csrf_and_sign_confirms`) — the
+                // fragments themselves never carry `_csrf`.
+                &[],
+                dedicated_ip_request_form_html(),
+            ),
+        ];
+
+        for (label, fields, form) in contracts {
+            for field in fields {
+                assert!(
+                    form.contains(&format!("name=\"{field}\"")),
+                    "{label} form must supply name=\"{field}\" — its handler reads it. form: {form}"
+                );
+            }
+        }
+    }
+
+    /// The webhook event checkboxes must offer exactly the names the
+    /// validator accepts: a name the form offers but the validator rejects
+    /// makes the form unsubmittable, and one the validator accepts but the
+    /// form omits is unreachable from the console.
+    #[test]
+    fn webhook_form_offers_exactly_the_accepted_event_names() {
+        let form = webhook_register_form_html();
+        for event in crate::WEBHOOK_EVENTS {
+            let hits = form.matches(&format!("value=\"{event}\"")).count();
+            assert_eq!(
+                hits, 1,
+                "event {event} must be offered exactly once by the form: {form}"
+            );
+        }
+        assert_eq!(
+            form.matches("name=\"events\"").count(),
+            crate::WEBHOOK_EVENTS.len(),
+            "the form must offer one checkbox per accepted event"
+        );
     }
 
     /// Row-delete confirmation forms are SIBLINGS of the bulk form and bind

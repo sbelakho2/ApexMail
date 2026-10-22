@@ -74,6 +74,27 @@ pub static ENDPOINT_COSTS: Lazy<HashMap<&'static str, RequestCost>> = Lazy::new(
     m
 });
 
+/// Cost charged for a page's own sub-resource fetch (stylesheet, script,
+/// font, image) when it has no explicit registry entry.
+///
+/// These are the cheapest thing the server does: a static file, no database,
+/// no auth, no rendering. The default "unknown endpoint" cost is 1 020 units
+/// because it models a real handler, and charging a stylesheet that made every
+/// browser page cost ~40 × 1 020 units — two page loads per minute exhausted
+/// the whole per-client budget, and the third request of the second page came
+/// back 429 (live run 2026-10-22: `/assets/globals.css` answered with
+/// `DDOS_RATE_LIMITED`, which the browser then refused as a stylesheet of the
+/// wrong MIME type, leaving the console blank and unstyled).
+///
+/// 64 units ≈ 50 μs CPU + 4 KB memory + 1 IO op, the shape of an
+/// `include_str!`-backed asset served from memory.
+pub const SUBRESOURCE_COST: RequestCost = RequestCost {
+    cpu_us: 50,
+    memory_bytes: 4096,
+    io_ops: 1,
+    external_calls: 0,
+};
+
 /// Configuration for cost-based limiter
 #[derive(Debug, Clone)]
 pub struct CostLimiterConfig {
@@ -141,7 +162,13 @@ impl CostBasedLimiter {
     ) -> CostDecision {
         let cost = override_cost
             .or_else(|| ENDPOINT_COSTS.get(endpoint).cloned())
-            .unwrap_or(RequestCost::new(1000, 10240, 1, 0));
+            .unwrap_or_else(|| {
+                if crate::session::is_subresource_fetch(endpoint) {
+                    SUBRESOURCE_COST
+                } else {
+                    RequestCost::new(1000, 10240, 1, 0)
+                }
+            });
 
         let total_cost = cost.total_cost();
 
@@ -172,11 +199,24 @@ impl CostBasedLimiter {
 
         let mut budget = budget_entry.write();
 
-        // Refill based on time elapsed
+        // Refill based on time elapsed.
+        //
+        // Credit whole cost units and advance the clock by exactly the time
+        // those units represent, so sub-second remainders ACCUMULATE.
+        // Resetting `last_refill` to `now` on every check (the previous
+        // behaviour) meant a continuously-active client never refilled at all:
+        // `elapsed.as_secs()` was 0 for every request more frequent than
+        // 1 Hz, so the budget only ever went down. Live run 2026-10-22: a
+        // browser was throttled after ~98 requests and stayed throttled for
+        // the whole session, because the idle pause needed to trigger a
+        // refill is not something an active client takes.
         let elapsed = budget.last_refill.elapsed();
-        let refill_amount = elapsed.as_secs() * budget.refill_rate;
-        budget.remaining = (budget.remaining + refill_amount).min(budget.capacity);
-        budget.last_refill = Instant::now();
+        let refill_units = (elapsed.as_millis() as u64).saturating_mul(budget.refill_rate) / 1000;
+        if refill_units > 0 {
+            budget.remaining = (budget.remaining + refill_units).min(budget.capacity);
+            let credited_ms = refill_units.saturating_mul(1000) / budget.refill_rate.max(1);
+            budget.last_refill += Duration::from_millis(credited_ms);
+        }
 
         if total_cost > budget.remaining {
             let wait_secs = (total_cost - budget.remaining) / budget.refill_rate.max(1) + 1;
@@ -575,5 +615,100 @@ mod tests {
             );
         }
         assert!(limiter.tracked_tenants() <= cap);
+    }
+
+    /// Live run 2026-10-22: the tenant budget refilled only when
+    /// `elapsed.as_secs()` was non-zero AND reset `last_refill` on every
+    /// check, so a client making requests more often than once per second
+    /// never refilled at all — the budget only ever went down. A browser
+    /// hitting its limit stayed limited for the rest of the session, because
+    /// the idle pause needed to trigger a refill is not something an active
+    /// client takes. Refill must be continuous.
+    #[tokio::test]
+    async fn a_continuously_active_client_keeps_refilling() {
+        // 60 units/second, i.e. 3 600/minute: 600 sustained requests/minute
+        // at the default cost of 6 units below.
+        let limiter = CostBasedLimiter::new(CostLimiterConfig {
+            default_tenant_budget: 3_600,
+            system_capacity: 10_000_000,
+            max_tracked_budgets: 100,
+        });
+
+        // Burn the whole budget.
+        let mut allowed = 0usize;
+        for _ in 0..1_000 {
+            if matches!(
+                limiter.check("tenant", "/v1/contacts", Some(RequestCost::new(6, 0, 0, 0))),
+                CostDecision::Allowed { .. }
+            ) {
+                allowed += 1;
+            } else {
+                break;
+            }
+        }
+        assert_eq!(allowed, 600, "the whole minute budget must be spendable");
+
+        // Now stay continuously active: 10 ms apart, 40 requests. At 60
+        // units/second that credits ~24 units — enough for ~4 more requests.
+        // Under the old whole-second refill this was 0.
+        let mut allowed_after = 0usize;
+        for _ in 0..40 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            if matches!(
+                limiter.check("tenant", "/v1/contacts", Some(RequestCost::new(6, 0, 0, 0))),
+                CostDecision::Allowed { .. }
+            ) {
+                allowed_after += 1;
+            }
+        }
+        assert!(
+            allowed_after >= 2,
+            "a continuously-active client must keep refilling; only {allowed_after} \
+             requests were allowed after the budget was spent"
+        );
+    }
+
+    /// A page's own sub-resource must not be charged the unknown-endpoint
+    /// cost: a browser fetching one document and its ~30 assets otherwise
+    /// spends a whole client budget on two page loads.
+    #[test]
+    fn subresource_fetches_are_charged_the_static_cost() {
+        assert_eq!(SUBRESOURCE_COST.total_cost(), 64);
+        assert!(
+            SUBRESOURCE_COST.total_cost() * 10 < RequestCost::new(1000, 10240, 1, 0).total_cost(),
+            "a static asset must cost an order of magnitude less than a handler"
+        );
+
+        let limiter = CostBasedLimiter::new(CostLimiterConfig {
+            default_tenant_budget: 20_000,
+            system_capacity: 10_000_000,
+            max_tracked_budgets: 100,
+        });
+        // One document plus 30 assets plus 8 API calls — a single page load.
+        let mut spend = 0u64;
+        for path in ["/dashboard"]
+            .into_iter()
+            .chain(std::iter::repeat_n("/assets/globals.css", 30))
+            .chain([
+                "/v1/contacts",
+                "/v1/campaigns",
+                "/v1/templates",
+                "/v1/lists",
+                "/v1/analytics/overview",
+                "/v1/messages",
+                "/v1/domains",
+                "/v1/webhooks",
+            ])
+        {
+            let decision = limiter.check("tenant", path, None);
+            let CostDecision::Allowed { cost, .. } = decision else {
+                panic!("a single page load must fit the budget; {path} was refused");
+            };
+            spend += cost;
+        }
+        assert!(
+            spend < 20_000,
+            "one page load must cost well under the budget, spent {spend}"
+        );
     }
 }

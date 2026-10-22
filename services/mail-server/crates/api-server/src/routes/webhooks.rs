@@ -111,32 +111,11 @@ pub struct ListWebhooksQuery {
 /// wildcard every consumer's selector honours (`events @> '"*"'::jsonb`).
 /// Unknown names previously validated as non-empty only — a typo like
 /// `delivred` registered silently and the webhook never fired.
-pub(crate) const KNOWN_WEBHOOK_EVENTS: &[&str] = &[
-    // Message lifecycle (canonical vocabulary)
-    "message.accepted",
-    "message.queued",
-    "message.attempted",
-    "message.deferred",
-    "message.delivered",
-    "message.bounced",
-    "message.complained",
-    "message.suppressed",
-    "message.opened",
-    "message.clicked",
-    "message.cancelled",
-    // tracking-service
-    "recipient.unsubscribed",
-    // Campaign lifecycle (customer campaigns; produced by the campaign worker)
-    "campaign.started",
-    "campaign.ab_winner_selected",
-    "campaign.completed",
-    // inbox-placement
-    "placement_test.completed",
-    // inbound email pipeline
-    "inbound",
-    // Wildcard honoured by every webhook selector
-    "*",
-];
+///
+/// Re-exported from ui-foundation's [`ui_foundation::WEBHOOK_EVENTS`], which
+/// is also what renders the console's event checkbox group: one list, so the
+/// validator and the form can never disagree about which names are legal.
+pub(crate) const KNOWN_WEBHOOK_EVENTS: &[&str] = ui_foundation::WEBHOOK_EVENTS;
 
 /// Validate a webhook's event subscription list (audit L-2): non-empty, no
 /// blank entries, and every name must be a known event type. The error

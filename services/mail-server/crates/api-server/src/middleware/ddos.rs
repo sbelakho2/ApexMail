@@ -10,6 +10,7 @@ use ddos_protection::{evaluate_request, MiddlewareAction, RequestContextBuilder}
 
 use crate::middleware::auth::AuthUser;
 use crate::middleware::rate_limiter::extract_public_client_ip;
+use crate::middleware::{browser_error_page_response, is_browser_request};
 use crate::state::AppState;
 
 pub async fn ddos_protection_middleware(
@@ -21,41 +22,84 @@ pub async fn ddos_protection_middleware(
 
     match evaluate_request(&state.ddos_protector, &ctx).await {
         MiddlewareAction::Allow => next.run(req).await,
-        MiddlewareAction::Challenge { status, body } => (
-            status_code(status, StatusCode::TOO_MANY_REQUESTS),
-            [(CONTENT_TYPE, "application/json")],
-            body,
-        )
-            .into_response(),
+        MiddlewareAction::Challenge { status, body } => {
+            // The challenge body is a PoW parameter set for a programmatic
+            // client to solve. A browser cannot act on it, and rendering it
+            // as raw JSON left the user on a blank untitled page (live run
+            // 2026-10-22) — so the browser gets an explanation instead.
+            if is_browser_request(req.uri().path(), req.headers()) {
+                browser_error_page_response(
+                    status_code(status, StatusCode::TOO_MANY_REQUESTS),
+                    "Verification required",
+                    "Verification required",
+                    "We need to confirm this browser before continuing. Reload the page to retry.",
+                    "/",
+                    "Reload",
+                )
+            } else {
+                (
+                    status_code(status, StatusCode::TOO_MANY_REQUESTS),
+                    [(CONTENT_TYPE, "application/json")],
+                    body,
+                )
+                    .into_response()
+            }
+        }
         MiddlewareAction::RateLimit {
             status,
             retry_after_secs,
         } => {
-            let mut response = (
-                status_code(status, StatusCode::TOO_MANY_REQUESTS),
-                axum::Json(serde_json::json!({
-                    "error": {
-                        "code": "DDOS_RATE_LIMITED",
-                        "message": "request temporarily rate limited"
-                    }
-                })),
-            )
-                .into_response();
+            let code = status_code(status, StatusCode::TOO_MANY_REQUESTS);
+            let mut response = if is_browser_request(req.uri().path(), req.headers()) {
+                browser_error_page_response(
+                    code,
+                    "Too Many Requests",
+                    "Too many requests",
+                    "You have made too many requests in a short time. Wait a moment, then try again.",
+                    "/",
+                    "Back to ApexMail",
+                )
+            } else {
+                (
+                    code,
+                    axum::Json(serde_json::json!({
+                        "error": {
+                            "code": "DDOS_RATE_LIMITED",
+                            "message": "request temporarily rate limited"
+                        }
+                    })),
+                )
+                    .into_response()
+            };
             response
                 .headers_mut()
                 .insert("Retry-After", retry_after_secs.into());
             response
         }
-        MiddlewareAction::Block { status } => (
-            status_code(status, StatusCode::FORBIDDEN),
-            axum::Json(serde_json::json!({
-                "error": {
-                    "code": "DDOS_BLOCKED",
-                    "message": "request blocked"
-                }
-            })),
-        )
-            .into_response(),
+        MiddlewareAction::Block { status } => {
+            let code = status_code(status, StatusCode::FORBIDDEN);
+            if is_browser_request(req.uri().path(), req.headers()) {
+                browser_error_page_response(
+                    code,
+                    "Request Blocked",
+                    "Request blocked",
+                    "This request was stopped by our security screening. If you believe this is a mistake, contact support.",
+                    "/",
+                    "Back to ApexMail",
+                )
+            } else {
+                (
+                    code,
+                    axum::Json(serde_json::json!({
+                        "error": {
+                            "code": "DDOS_BLOCKED",
+                            "message": "request blocked"
+                        }
+                    })),
+                )
+                    .into_response()
+            }
+        }
     }
 }
 
