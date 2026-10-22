@@ -45,7 +45,8 @@ ensure_full_history() {
 # the object exists locally (ci/check-pr.sh / the pre-push hook pass local
 # shas), so FETCH_HEAD IS <head> and the ancestor test proves nothing (audit
 # P3). A sha ref is therefore proved against the tracked branch tip — the
-# "is it pushed" question branch protection asks. Extracted for the selftest.
+# "is it pushed" question the old branch-protection status asked (the rule
+# is retired; this proof is the substitute). Extracted for the selftest.
 prove_head_pushed() {
     _php_head=$1
     _php_ref=FETCH_HEAD
@@ -116,44 +117,18 @@ stage_main() {
         return "$CI_EXIT_FAIL"
     fi
 
-    # External audit (2026-10-02) item 13: branch protection IS release
-    # evidence — the required `woodpecker` status context, required approvals
-    # and CODEOWNERS enforcement are what make a green run a mechanical merge
-    # blocker instead of a convention. Stage 01 is THE single chokepoint: it
-    # runs on EVERY pipeline run (including --skip-unchanged polls, so a
-    # protection regression is caught within one 5-minute poll even with no
-    # new commits), and it is checked BEFORE the cheap-poll exit below.
-    # Missing-tool policy is ci_have_tool's (ci/lib.sh): gh absent under
-    # CI_MISSING_TOOLS=fail OR on the deploy host fails the stage closed;
-    # elsewhere it degrades to a loud skip. scripts/verify-branch-protection.sh
-    # implements the same policy for standalone runs. Dry-run (selftest)
-    # logs the check and skips it, exactly like every ci_check under ci_dry.
-    if ci_dry; then
-        ci_info "check (dry-run): branch protection on main (woodpecker status, approvals, CODEOWNERS, push restriction)"
-    elif [ ! -f "$REPO_ROOT/scripts/verify-branch-protection.sh" ]; then
-        ci_err "scripts/verify-branch-protection.sh missing — the branch-protection gate cannot be verified (external audit 2026-10-02 item 13)"
-        return "$CI_EXIT_FAIL"
-    elif ! command -v gh >/dev/null 2>&1; then
-        if [ "${CI_MISSING_TOOLS:-auto}" = fail ] || ci_on_deploy_host; then
-            ci_err "gh missing — branch protection cannot be verified and the CI_MISSING_TOOLS policy is fail-closed here (external audit 2026-10-02 item 13). Install gh + a token with push access (GITHUB_TOKEN), see ci/README.md §13"
-            return "$CI_EXIT_FAIL"
-        fi
-        ci_warn "gh missing — branch-protection verification skipped (install gh + GITHUB_TOKEN for the release gate; ci/README.md §13)"
-    else
-        _bp_rc=0
-        # bash, not sh: the script is bash (its own shebang AND a re-exec
-        # guard make `sh` invocation safe too, but invoke it as what it is).
-        bash "$REPO_ROOT/scripts/verify-branch-protection.sh" \
-            --branch "${CI_BRANCH_PROTECTION_BRANCH:-main}" || _bp_rc=$?
-        case $_bp_rc in
-            0) ci_info "PASS: branch protection on main verified (woodpecker status, approvals, CODEOWNERS, push restriction)" ;;
-            "$CI_EXIT_SKIP")
-                ci_warn "branch-protection verification SKIP (gh absent per the script's policy) — the release gate is degraded" ;;
-            *)
-                ci_err "branch protection on main does not meet the release requirements (see the script's table above) — external audit 2026-10-02 item 13"
-                return "$CI_EXIT_FAIL" ;;
-        esac
-    fi
+    # Branch protection is deliberately NOT configured on this repository.
+    # It is a single-owner project, so neither requirement could ever be
+    # satisfied: a required pull-request review needs an approving review
+    # from a code owner (the sole owner cannot approve their own change), and
+    # the required `woodpecker` commit-status context is posted by nothing —
+    # GitHub reported `pending` with zero statuses on every HEAD. The rules
+    # were therefore bypass-only: GitHub printed them as two notices on every
+    # push while `enforce_admins: false` let the admin through. The owner's
+    # decision (2026-10-22) is to keep the repository unprotected and rely on
+    # the evidence this pipeline actually produces — the pushed-HEAD proof
+    # above, the fail-closed stages below, the blessing manifest, and the
+    # deploy host's own gate.
 
     # Cheap-poll support: with CI_SKIP_UNCHANGED=1 (the systemd timer), a
     # sha that already completed a green run ends the run right here in

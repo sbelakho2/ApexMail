@@ -1,33 +1,26 @@
 # =============================================================================
-# CODEOWNERS — review ownership map.
+# CODEOWNERS — review ROUTING map.
 # =============================================================================
-# AUDIT SM14 F15 — READ BEFORE RELYING ON THIS FILE.
+# THIS FILE IS NOT ENFORCED. Branch protection on `main` is not configured
+# (removed 2026-10-22 — see ci/README.md §13): this is a single-owner
+# repository, so a required code-owner review could never be satisfied (the
+# sole owner cannot approve their own change) and the required `woodpecker`
+# commit-status context was posted by nothing. GitHub therefore does not gate
+# on this file today.
 #
-# REQUIRED-REVIEW DEPENDENCY (not verifiable from this repository): a
-# CODEOWNERS file only BITES when branch protection on main requires review
-# from a code owner before merging. If that setting is off, everything below
-# is documentation, not enforcement. OPERATOR CHECKLIST (GitHub → Settings →
-# Branches → main → Protect):
-#   1. "Require a pull request before merging" = ON.
-#   2. "Require review from Code Owners" = ON.
-#   3. (recommended) "Require approval of the most recent reviewable push".
-# The CI system also posts the required "woodpecker" commit status — keep
-# that context required too (ci/README.md §12).
+# What it is still good for: it names the owner of each area, so a future
+# reviewer, an auditor, or a second maintainer can see who is responsible
+# without reading the tree. Keep it current as a routing document.
 #
-# SINGLE-POINT-OF-OWNERSHIP RISK: every path below — including /ci/,
-# /deploy/ and .woodpecker.yml, the exact files that gate everything else —
-# is owned by the SAME single account. One owner means NO review separation
-# for CI/release changes: the person (or a compromised token of the person)
-# who changes a gate can approve their own change. RECOMMENDATION: add a
-# second owner or a team to the release-critical paths, e.g.
-#     /ci/              @sbelakho2 @apexmail-release-engineering
-#     /deploy/          @sbelakho2 @apexmail-release-engineering
-#     /.woodpecker.yml  @sbelakho2 @apexmail-release-engineering
-# (create the team with at least one human who is not the sole deploy
-# admin). Until then, treat CI/release changes as self-reviewed and rely on
-# the mechanical gates: the validate stage's pipeline-config sanity checks,
-# the digest-pinned executor image (audit SM14 F9) and the blessing manifest
-# whose pipelineConfigHash covers every gate script (audit SM14 F10).
+# SINGLE-POINT-OF-OWNERSHIP RISK (unchanged, and real): every path below is
+# owned by the same account that authors every commit. If this repository
+# ever gains a second maintainer, add them to the release-critical paths —
+# /ci/, /deploy/, .woodpecker.yml — AND enable protection as a set (a CI that
+# posts the required status, a non-author code owner, enforce_admins: true).
+# Until then, treat CI/release changes as self-reviewed and rely on the
+# mechanical gates instead: the validate stage's pipeline-config sanity
+# checks, the digest-pinned executor image, and the blessing manifest whose
+# pipelineConfigHash covers every gate script.
 
 # Global fallback owner
 * @sbelakho2

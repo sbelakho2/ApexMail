@@ -3,10 +3,13 @@
 # tools/post_github_status.sh — post a SHA-bound commit status to GitHub.
 # =============================================================================
 # External audit item 6: the repo host must SHOW that a commit passed the
-# mandatory gates. Branch protection on main requires the commit-status
-# context `woodpecker` (see ci/README.md §12); Woodpecker's own built-in
-# status may be absent or named differently, so the pipeline posts the
-# required context EXPLICITLY via this script:
+# mandatory gates. The pipeline posts the commit-status context `woodpecker`
+# EXPLICITLY via this script (Woodpecker's own built-in status may be absent
+# or named differently). The status is ADVISORY: branch protection was
+# removed on 2026-10-22 for this single-owner repository (ci/README.md §13),
+# so nothing gates on this context — it is the GitHub-side record of a
+# pipeline verdict, and the release evidence is the blessing manifest plus
+# the deploy host's gate. The POST is:
 #
 #   POST {GITHUB_API_URL}/repos/{owner}/{repo}/statuses/{sha}
 #   {"state": ..., "context": ..., "description": ..., "target_url": ...}
@@ -19,8 +22,8 @@
 #                          script exits 0 with a loud skip line, so local /
 #                          manual / secret-less runs never fail because of it.
 #   GITHUB_STATUS_STATE    success | failure | pending | error   (required)
-#   GITHUB_STATUS_CONTEXT  status context (default: "woodpecker" — EXACTLY
-#                          the context branch protection requires)
+#   GITHUB_STATUS_CONTEXT  status context (default: "woodpecker", the
+#                          historical name; advisory only)
 #   STATUS_DESCRIPTION     summary line (default derived; truncated to the
 #                          GitHub 140-char limit)
 #   STATUS_TARGET_URL      link shown in the GitHub UI (default: the

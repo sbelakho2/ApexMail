@@ -1,6 +1,6 @@
 #!/bin/sh
 # =============================================================================
-# ci/check-pr.sh — the PR-validation substitute (branch protection, offline).
+# ci/check-pr.sh — the pre-merge validation gate (offline; no GitHub checks exist).
 # =============================================================================
 # GitHub gave every PR a row of required status checks. Without GitHub, the
 # equivalents are:

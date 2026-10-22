@@ -107,8 +107,9 @@ services:
 # OPTIONAL secret for the SHA-bound commit status (external audit item 6 —
 # ci/README.md §12). required: false: without the secret the notify-github
 # steps SKIP LOUDLY instead of failing, so local/manual/secret-less runs stay
-# green. Branch protection on main requires the "woodpecker" status context;
-# the token needs only the classic `repo:status` (or fine-grained
+# green. The status is ADVISORY: branch protection was removed on 2026-10-22
+# (single-owner repository — ci/README.md §13), so nothing requires this
+# context. The token needs only the classic `repo:status` (or fine-grained
 # "commit statuses: read & write") permission.
 secrets:
   - source: github_token
@@ -226,15 +227,16 @@ steps:
       - ./ci/woodpecker/stage.sh security
 
   # --- SHA-bound GitHub commit status (external audit item 6) --------------
-  # Branch protection on main requires the commit-status context
-  # "woodpecker" (exact string — see ci/README.md §12); Woodpecker's own
-  # built-in status may be absent or configured under a different name, so
-  # the required context is posted EXPLICITLY via tools/post_github_status.sh
-  # (curl-only). Two steps so the state is explicit and doesn't depend on
-  # executor-internal status variables; `failure: ignore` keeps a GitHub API
-  # outage from flipping a green pipeline red (the missing status then blocks
-  # the branch VISIBLY instead of lying about a red gate). Without the
-  # GITHUB_TOKEN secret (required: false above) the script skips loudly.
+  # The commit-status context "woodpecker" is posted EXPLICITLY via
+  # tools/post_github_status.sh (curl-only), because Woodpecker's own
+  # built-in status may be absent or named differently. It is ADVISORY
+  # evidence on the commit page — branch protection was removed on
+  # 2026-10-22, so nothing requires it (ci/README.md §13) — but it is still
+  # the only GitHub-side record of a pipeline verdict, so keep posting it
+  # when a token is configured. Two steps so the state is explicit and does
+  # not depend on executor-internal status variables; `failure: ignore`
+  # keeps a GitHub API outage from flipping a green pipeline red. Without
+  # the GITHUB_TOKEN secret (required: false above) the script skips loudly.
   #
   # Audit SM14 F14: the PASS/FAIL counts are computed ONLY from THIS
   # pipeline's run dir (ci/woodpecker/run-dir.sh resolves the same

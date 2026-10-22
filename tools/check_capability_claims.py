@@ -228,9 +228,6 @@ FACT_TREE_VERIFICATIONS = {
         ("docker-compose.prod.yml", "SMTP_ARC_SEAL", False),
         (".env.production.example", "SMTP_ARC_SEAL", False),
     ],
-    "branch_protection_codeowners": [
-        ("scripts/verify-branch-protection.sh", None, True),
-    ],
     "bimi_delivery_verification": [
         ("services/mail-server/crates/mta/src/auth/bimi.rs", None, True),
     ],

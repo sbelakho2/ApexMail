@@ -239,11 +239,11 @@ migrator" (`--build-only` and `--no-build` are all it offers). So:
 
 ---
 
-## 4. The PR / branch-protection substitute
+## 4. The PR-check substitute
 
-GitHub's check-runs API, PR status checks and the branch-protection UI have
-no offline equivalent — nothing can put a red X on a website we do not own.
-The substitutes, in enforcement order:
+GitHub's check-runs API and PR status checks have no offline equivalent —
+nothing can put a red X on a website we do not own. (Branch protection is
+not configured at all: see §5.) The substitutes, in enforcement order:
 
 1. **Before push** — install the hook once:
    ```
@@ -271,7 +271,7 @@ The substitutes, in enforcement order:
 | GitHub feature | Status | Substitute |
 |---|---|---|
 | PR status checks / check runs UI | gone with GitHub | §4: pre-push hook + `check-pr.sh` + host-enforced gating |
-| Branch protection rules | **PARTIAL on `main`** | the branch requires the commit-status context `woodpecker` (exact string; set via the GitHub API in the 24234a5e era) — the `.woodpecker.yml` `notify-github` steps post exactly that context (§12). Required approvals, CODEOWNERS enforcement and direct-push restrictions are NOT (yet) configured — the live truth is one command away: `scripts/verify-branch-protection.sh` (§13, external audit 2026-10-02 item 13), which the `fetch` stage runs as a release gate. The fetch stage's pushed-HEAD guarantee plus the host gate cover what a status alone cannot |
+| Branch protection rules | **NONE by decision (2026-10-22)** | This is a single-owner repository, so neither rule could ever be satisfied: a required PR review needs an approving review from a code owner (the sole owner cannot approve their own change) and the required `woodpecker` commit-status context was posted by nothing (GitHub reported `pending` with zero statuses on every HEAD). Both rules were therefore bypass-only — GitHub printed them as two notices on every push while `enforce_admins: false` let the admin through. The protection was removed by the owner's decision; the release evidence is the `fetch` stage's pushed-HEAD guarantee, the fail-closed stages, the blessing manifest, and the deploy host's gate |
 | Dependabot + auto-merge | gone | manual `cargo update` → `check-pr.sh` full → push |
 | GHCR push + image provenance/SBOM attestation signatures | dropped (no registry by design) | local `:<sha>` tags + a SHA256SUMS digest manifest per run; the deploy stage refuses to bring up images whose digests do not match the manifest the images stage recorded (tamper/regression guard, SLSA-lite); Trivy SPDX SBOMs per run (unsigned — add cosign later if needed) |
 | Semgrep SAST (`p/default`, `p/rust`, …) | **replicated (REQUIRED)** | `security` stage runs `semgrep scan --config p/default --config p/rust --error` fail-closed on the deploy host (`ci_have_tool`; warn-skip on dev machines) since 2026-09-10 — was advisory with a silent skip. Every finding is fixed or triaged with a targeted inline `# nosemgrep: <rule-id>` justification (2026-09-10 sweep: 103 findings → 0, all triaged in-tree; the retired GitHub workflows that used to trip `run-shell-injection` were removed from the tree on 2026-09-13). gitleaks + cargo-audit + cargo-deny + Trivy (images AND fs) run alongside. |
@@ -645,7 +645,8 @@ These are **product defects found by this pipeline**, not pipeline bugs:
 2. Add `ci` to `SYNC_DIRS` in the `Makefile` (one word) so `make deploy*`
    keeps the host's `ci/` current.
 3. Install the pre-push hook (§4) on every dev machine.
-4. Turn off branch protection / required checks in GitHub once confident.
+4. ~~Turn off branch protection / required checks~~ **DONE 2026-10-22**: removed by
+   the owner (single-owner repository; the rules could not be satisfied — §13).
 5. Point a Woodpecker server at the repository and start one agent (§11) to
    get push/PR pipelines back without GitHub-hosted runners.
 
@@ -782,65 +783,52 @@ gate (§4).
 
 ---
 
-## 13. Branch protection as release evidence (external audit 2026-10-02 item 13)
+## 13. Branch protection: retired by decision (2026-10-22)
 
-**Why.** A green pipeline only BLOCKS a merge if GitHub-side enforcement
-makes it blocking. Branch protection on `main` is therefore release
-evidence, and — like every other claim in this repo — it is verified
-mechanically, not assumed:
+**What happened.** External audit 2026-10-02 item 13 made branch protection
+release evidence and added `scripts/verify-branch-protection.sh` as a
+fail-closed `fetch` gate. The gate did its job: it showed the protection it
+was checking could never be satisfied. The live state on 2026-10-22 was
 
-```
-scripts/verify-branch-protection.sh            # [--repo OWNER/REPO] [--branch NAME]
-```
+* `required_status_checks`: context `woodpecker`, `strict: true` — and
+  **nothing posts that context**. `GET /commits/HEAD/status` reported
+  `pending` with `total_count: 0`, and the check-runs endpoint reported
+  zero runs. The `.woodpecker.yml` notify steps that were supposed to post
+  it belong to a self-hosted server this project no longer runs.
+* `required_pull_request_reviews`: one approving review, code-owner review
+  required — while `CODEOWNERS` assigns every path to the **single**
+  account that authors every commit. GitHub does not accept self-approval,
+  so no pull request could ever merge.
+* `enforce_admins: false` — so the sole owner could push regardless, which
+  is exactly what GitHub reported on every push: *"Changes must be made
+  through a pull request"* and *"Required status check `woodpecker` is
+  expected"*, both bypassed.
 
-One `gh api repos/<owner>/<repo>/branches/<branch>/protection` call, then a
-table of VERIFIED / MISSING / UNVERIFIABLE rows. It FAILS (exit 1) unless ALL
-of:
+The protection was therefore **bypass-only**: it blocked nothing, could not
+be satisfied by anyone, and printed two misleading notices on every push.
 
-| # | Requirement | API field consulted |
-|---|---|---|
-| 1 | required status check context `woodpecker` | `required_status_checks.contexts` / `.checks[].context` |
-| 2 | required approving reviews >= 1 | `required_pull_request_reviews.required_approving_review_count` |
-| 3 | CODEOWNERS enforced | `required_pull_request_reviews.require_code_owner_reviews == true` |
-| 4 | a direct-push restriction honestly present | `restrictions` set OR `required_pull_request_reviews.dismiss_stale_reviews == true` |
+**The decision.** This is a single-owner repository; branch protection adds
+no protection here and cannot gate a merge it would always have to bypass.
+The owner removed it on 2026-10-22. The gate script and its `fetch` call
+were retired with it, and `gh` + `GITHUB_TOKEN` are no longer required by any
+stage (`ci/install.sh` installs gh as a convenience only).
 
-Only fields the API actually returns are consulted — nothing is invented.
-Rows that cannot be checked (404 on the protection endpoint: branch not
-protected, or the token cannot read protection) are UNVERIFIABLE and the
-verdict is FAIL — unverifiable is never a pass. Informational rows
-(`enforce_admins`, `required_linear_history`, `required_signatures`,
-`allow_force_pushes`, `allow_deletions`) report the live value without
-affecting the verdict. Repo/branch resolution: `--repo` → `GH_REPO` → the
-`origin` remote; `--branch` → `VERIFY_BRANCH` → `main`.
+**What actually gates a release** (unchanged, and mechanical):
 
-**Where it gates.** `ci/stages/fetch.sh` (stage 01) runs it BEFORE the
-skip-unchanged cheap-poll exit — the single chokepoint every pipeline run
-passes through, so a protection regression fails the release lane within one
-5-minute poll even when no new commits arrive. Missing-tool policy is
-`ci_have_tool`'s: `gh` absent under `CI_MISSING_TOOLS=fail` OR on the deploy
-host fails the stage closed; elsewhere it degrades to a loud skip (the
-script exits 75 for standalone runs under the same policy). `jq` is required
-to parse the response.
+1. `fetch` refuses any commit that is not pushed to `origin/main`
+   (`prove_head_pushed`) — the "is it pushed" question the status check was
+   asked;
+2. every stage is fail-closed on the deploy host, and a red stage stops the
+   line before images or deploy;
+3. the blessing manifest (`.gate-blessing.json`: sha + pipeline-config hash +
+   the stages that passed) is what the deploy host accepts — a partial lane
+   or a different pipeline configuration cannot bless;
+4. `tools/post_github_status.sh` still posts an **advisory** commit status
+   when a token happens to be present, so a commit page shows the pipeline
+   verdict; it skips loudly when there is no token and never fails a run.
 
-**Operator prerequisites (one-time, per environment).**
-
-1. Install the gh CLI (`brew install gh` / apt) on any host that runs the
-   release lane — on the deploy host this is now REQUIRED for `fetch` to
-   pass (fail closed per the policy above).
-2. Authenticate: `GH_TOKEN`/`GITHUB_TOKEN` in the environment (a fine-grained
-   PAT with "Administration: read" on THIS repository, or a classic PAT with
-   `repo` — push access is the floor for reading branch protection; admin
-   always can). Without a readable token the gate fails honestly with
-   UNVERIFIABLE rows, by design.
-3. `CI_BRANCH_PROTECTION_BRANCH` (fetch-stage env) overrides the checked
-   branch if the release branch is ever renamed from `main`.
-
-**Known gaps this gate surfaced on its first run (2026-10-02, the audit's
-finding, not hidden):** the `woodpecker` status context IS required (with
-`strict`), but main has NO required approving reviews, NO CODEOWNERS
-enforcement and NO direct-push restriction (and `enforce_admins` is false,
-so admins bypass even the status requirement). Until those are configured in
-GitHub → Settings → Branches → Branch protection (or via the API), the fetch
-stage fails the release lane with exactly this table. That is the intended
-failure direction: an unverifiable gate blocks the release instead of lying
-about protection.
+**Do not re-enable the old rules.** With one owner they can only be
+bypassed. If this ever becomes a multi-owner repository, configure all three
+together — a reporting CI that posts the required context, a CODEOWNERS
+owner who is not the sole pusher, and `enforce_admins: true` — and restore a
+verifier at that point.
