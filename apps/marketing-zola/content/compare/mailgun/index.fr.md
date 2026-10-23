@@ -75,7 +75,7 @@ sources = [
   { ref = "mg8", n = 8, label = "Page tarifs de Mailgun", url = "https://www.mailgun.com/pricing/" },
   { ref = "mg9", n = 9, label = "Validation d’emails Mailgun", url = "https://www.mailgun.com/email-validation/" }
 ]
-sources_disclaimer = "Dernière vérification : 2026-08-19. Hypothèse de volume : 100 000 emails/mois, facturation mensuelle. Les prix sont indiqués en EUR. Lorsqu’un fournisseur publie uniquement en USD, le montant en EUR est converti à 1 USD = €0.92 (taux de référence, 2026-08-19) et le prix USD publié par le fournisseur est affiché entre parenthèses. Hors taxes applicables. Révisé par : l’ingénierie marketing d’ApexMail. <strong>Migrer depuis Mailgun ?</strong> Le changement d'URL de base et le sous-ensemble exactement pris en charge de son API sont documentés dans le <a href=\"/fr/migrate/mailgun/\" class=\"text-brand-600 hover:text-brand-700 underline\">guide de migration Mailgun</a>."
+sources_disclaimer = "Dernière vérification : 2026-08-19. Hypothèse de volume : 100 000 emails/mois, facturation mensuelle. Les prix sont indiqués en EUR. Lorsqu’un fournisseur publie uniquement en USD, le montant en EUR est converti à 1 USD = €0.92 (taux de référence, 2026-08-19) et le prix USD publié par le fournisseur est affiché entre parenthèses. Hors taxes applicables. Révisé par : l’ingénierie marketing d’ApexMail. <strong>Migrer depuis Mailgun ?</strong> Le changement d'URL de base et le sous-ensemble exactement pris en charge de son API sont documentés dans le <a href=\"/fr/migrate/mailgun/\">guide de migration Mailgun</a>."
 +++
 
 <!-- Comparison rows and sources block are rendered from the

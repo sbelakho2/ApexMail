@@ -135,9 +135,10 @@ pub fn live_tokens(sheet: &str) -> BTreeMap<String, String> {
     block_tokens(sheet, ":root")
 }
 
-/// The authored source's live tokens (`assets/globals.input.css`).
+/// The authored source's live tokens (`assets/ark.css`, the design
+/// authority that globals.input.css and the marketing build both inline).
 pub fn source_tokens() -> BTreeMap<String, String> {
-    live_tokens(crate::GLOBALS_INPUT_CSS)
+    live_tokens(crate::ARK_CSS)
 }
 
 /// The served artifact's live tokens (`assets/globals.css`).
@@ -203,12 +204,12 @@ mod tests {
             Some("16px")
         );
         assert_eq!(
-            token_value("web", "motion", " --motion-duration-180").as_deref(),
-            Some("180ms")
+            token_value("web", "motion", " --motion-duration").as_deref(),
+            Some("130ms")
         );
         assert_eq!(
             token_value("web", "radius", " --radius-lg").as_deref(),
-            Some("4px")
+            Some("0px")
         );
     }
 
@@ -217,35 +218,59 @@ mod tests {
     #[test]
     fn live_tokens_come_from_the_current_authority() {
         let tokens = source_tokens();
-        // Light canvas + the AA-fixed token set (dogfood 2026-10-06/07).
+        // ARK: paper canvas, ink foreground, interaction blue, destruction
+        // red — and interaction is NEVER destruction.
         assert_eq!(
             tokens.get("--background").map(String::as_str),
-            Some("244 244 246")
+            Some("255 255 255")
+        );
+        assert_eq!(
+            tokens.get("--foreground").map(String::as_str),
+            Some("14 20 27")
         );
         assert_eq!(
             tokens.get("--border").map(String::as_str),
-            Some("209 209 213")
+            Some("196 205 213")
         );
-        assert_eq!(
-            tokens.get("--input").map(String::as_str),
-            Some("209 209 213")
-        );
+        assert_eq!(tokens.get("--input").map(String::as_str), Some("14 20 27"));
         assert_eq!(
             tokens.get("--primary").map(String::as_str),
-            Some("185 28 28")
+            Some("29 79 124")
+        );
+        assert_eq!(
+            tokens.get("--destructive").map(String::as_str),
+            Some("142 42 32")
+        );
+        assert_ne!(
+            tokens.get("--primary"),
+            tokens.get("--destructive"),
+            "the brand and the destruction colour must never coincide"
         );
         assert_eq!(
             tokens.get("--muted-foreground").map(String::as_str),
-            Some("82 82 91")
+            Some("61 75 89")
         );
         assert_eq!(
             tokens.get("--accent-text").map(String::as_str),
+            Some("20 58 92")
+        );
+        // The wordmark is the fixed logo artefact: red B91C1C + Mail 09090B.
+        assert_eq!(
+            tokens.get("--wordmark-apex").map(String::as_str),
             Some("185 28 28")
         );
-        // Spiral-Lock arch radii stay authoritative too.
         assert_eq!(
-            tokens.get("--radius-arch").map(String::as_str),
-            Some("9px 9px 7px 7px")
+            tokens.get("--wordmark-mail").map(String::as_str),
+            Some("9 9 11")
+        );
+        // Radius 0 everywhere — the arch tokens are gone.
+        assert_eq!(tokens.get("--radius").map(String::as_str), Some("0px"));
+        assert_eq!(tokens.get("--radius-lg").map(String::as_str), Some("0px"));
+        assert!(tokens.get("--radius-arch").is_none());
+        // Success is blue: no green exists.
+        assert_eq!(
+            tokens.get("--success").map(String::as_str),
+            Some("29 79 124")
         );
     }
 

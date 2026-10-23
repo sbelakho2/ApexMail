@@ -17,32 +17,34 @@ After you submit the form, our enterprise team reviews your requirements and res
 
 ## Enterprise Enquiry Form
 
-<div id="enquiry-submitted" class="form-banner form-banner--success" role="status">
-  <p><strong>Thank you — your submission was received.</strong> Our team reviews submissions and responds within 2 business days.</p>
+<div id="enquiry-submitted" class="apex-notice apex-notice--ok" role="status">
+  <b>Received</b>
+  <p>Thank you — your submission was received. Our team reviews submissions and responds within 2 business days.</p>
 </div>
-<div id="enquiry-error" class="form-banner form-banner--error" role="alert">
-  <p><strong>We could not accept your submission.</strong> Please check the required fields (a valid work email is required) and try again.</p>
+<div id="enquiry-error" class="apex-notice apex-notice--fail" role="alert">
+  <b>Not accepted</b>
+  <p>We could not accept your submission. Please check the required fields (a valid work email is required) and try again.</p>
 </div>
 <form id="enterprise-contact-form" class="space-y-6 max-w-2xl" method="POST" action="https://api.apexmail.ee/v1/contact/enterprise">
   <input type="hidden" name="page_language" value="en" />
-  <div>
-    <label for="work-email" class="block text-xs font-bold tracking-widest text-surface-600 uppercase mb-2">Work Email <span class="text-red-500">*</span></label>
+  <div class="apex-field">
+    <label for="work-email" class="apex-label">Work Email <span class="">*</span></label>
     <input type="email" id="work-email" name="work_email" required autocomplete="email"
-      class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-surface-50 focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none"
+      class="apex-input"
       placeholder="you@company.com" />
   </div>
 
-  <div>
-    <label for="company" class="block text-xs font-bold tracking-widest text-surface-600 uppercase mb-2">Company <span class="text-red-500">*</span></label>
+  <div class="apex-field">
+    <label for="company" class="apex-label">Company <span class="">*</span></label>
     <input type="text" id="company" name="company" required
-      class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-surface-50 focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none"
+      class="apex-input"
       placeholder="Your organisation name" />
   </div>
 
-  <div>
-    <label for="monthly-volume" class="block text-xs font-bold tracking-widest text-surface-600 uppercase mb-2">Approximate Monthly Email Volume <span class="text-red-500">*</span></label>
-    <select id="monthly-volume" name="monthly_volume" required
-      class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-surface-50 focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none">
+  <div class="apex-field">
+    <label for="monthly-volume" class="apex-label">Approximate Monthly Email Volume <span class="">*</span></label>
+    <div class="apex-select-wrap">
+      <select id="monthly-volume" name="monthly_volume" required>
       <option value="" disabled selected>Select volume range</option>
       <option value="lt_100k">Under 100,000</option>
       <option value="100k_500k">100,000 – 500,000</option>
@@ -52,43 +54,42 @@ After you submit the form, our enterprise team reviews your requirements and res
       <option value="10m_50m">10 million – 50 million</option>
       <option value="50m_plus">50 million+</option>
     </select>
+    </div>
   </div>
 
-  <fieldset class="border border-surface-200 p-4">
-    <legend class="text-xs font-bold tracking-widest text-surface-600 uppercase px-2">Deployment Model</legend>
+  <fieldset class="border p-4">
+    <legend class="px-2">Deployment Model</legend>
     <div class="space-y-3 mt-3">
-      <label class="flex items-center gap-3 text-sm text-surface-700">
-        <input type="radio" name="deployment_model" value="shared" checked class="accent-brand-500" />
+      <label class="apex-check">
+        <input type="radio" name="deployment_model" value="shared" checked />
         <span><strong>Shared Cloud</strong> — Multi-tenant EU infrastructure</span>
       </label>
-      <label class="flex items-center gap-3 text-sm text-surface-700">
-        <input type="radio" name="deployment_model" value="dedicated" class="accent-brand-500" />
+      <label class="apex-check">
+        <input type="radio" name="deployment_model" value="dedicated" />
         <span><strong>Dedicated Tenant</strong> — Single-tenant isolated infrastructure, subject to architecture and contract review</span>
       </label>
-      <label class="flex items-center gap-3 text-sm text-surface-700">
-        <input type="radio" name="deployment_model" value="byoc" class="accent-brand-500" />
+      <label class="apex-check">
+        <input type="radio" name="deployment_model" value="byoc" />
         <span><strong>BYOC / Private Deployment</strong> — Managed deployment in your cloud account, subject to architecture and contract review</span>
       </label>
     </div>
   </fieldset>
 
-  <div>
-    <label for="requirements" class="block text-xs font-bold tracking-widest text-surface-600 uppercase mb-2">Requirements & Context</label>
+  <div class="apex-field">
+    <label for="requirements" class="apex-label">Requirements & Context</label>
     <textarea id="requirements" name="requirements" rows="5"
-      class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-surface-50 focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none resize-y"
       placeholder="Compliance requirements, data residency needs, current provider, migration timeline, specific features needed, or any other context that helps us prepare the right recommendation."></textarea>
   </div>
 
   <div>
     <button type="submit"
-      class="btn-primary px-8 py-4 text-base uppercase w-full sm:w-auto">
+      class="apex-btn apex-btn--primary w-full sm:w-auto">
       Submit Enquiry
-      <svg class="w-4 h-4 ml-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
     </button>
   </div>
-  <p class="form-privacy-note">By submitting this form you agree to our <a href="/privacy/">Privacy Policy</a>. We use the details you provide solely to respond to your enquiry, as set out in our GDPR Art. 13 notice at the point of collection.</p>
+  <p class="apex-footnote">By submitting this form you agree to our <a href="/privacy/">Privacy Policy</a>. We use the details you provide solely to respond to your enquiry, as set out in our GDPR Art. 13 notice at the point of collection.</p>
 </form>
 
 ## Direct Contact
 
-Prefer email? Reach the enterprise team at [support@apexmail.ee](mailto:support@apexmail.ee). Include your monthly volume, deployment model preference, and any compliance requirements to help us prepare before the first call.
+You can also reach the enterprise team by email at [support@apexmail.ee](mailto:support@apexmail.ee). Include your monthly volume, deployment model preference, and any compliance requirements to help us prepare before the first call.

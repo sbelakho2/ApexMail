@@ -1,140 +1,51 @@
-{# Hero — 2026-10-16 sovereignty round (owner directive): the EU-sovereign
-   promise is THE headline. Supersedes the 2026-09-08 "built for control"
-   positioning, which kept EEA storage a SUPPORTING pillar; the pre-dating
-   plan's EU-sovereign position is the differentiator, so the hero now leads
-   with it — built in Europe, sovereign by choice — while staying TRUE:
-   the subtitle names the EU company (Bel Consulting OÜ, Tallinn), the EU
-   data centres (Germany/Finland), the one-setting EU-only routing mode and
-   the Ed25519-signed routing receipts. The honest Global-vs-EU-only scope
-   (the Global default delivers through AWS SES in its EU region) is stated
-   on /eu-sovereign/ and in the home sovereignty section directly below —
-   never as a blanket "no US provider" claim. The terminal shows the REAL
-   public HTTP contract (curl against /v1/messages); the fictional
-   @apexmail/node import stays out until the SDK actually ships. The
-   "Run live API request" button POSTs the shown payload to the Rust
-   sandbox executor — the request really queues and delivery is really
-   attempted. #}
-<section aria-label="Introduction" class="relative bg-surface-50 border-b border-surface-200/80">
-  <div class="relative w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-16 lg:py-24">
+{# Hero — ARK Swiss poster (lane T, 2026-10-23). The headline is a stated
+   FACT, not a slogan: every accepted ApexMail message carries an Ed25519-
+   signed routing receipt the sender can verify. The subtitle names the EU
+   company (Bel Consulting OÜ, Tallinn), the EU data centres (Germany and
+   Finland) and the EEA storage default. The honest Global-vs-EU-only scope
+   (the Global default delivers through AWS SES in its EU region) stays on
+   /eu-sovereign/ and in the sovereignty section directly below. #}
+<section aria-label="Introduction" class="apex-mkt-hero">
+  <p class="apex-mkt-hero__title">
+    Every message carries a signed receipt.
+  </p>
+  <p class="apex-mkt-hero__sub">
+    ApexMail is transactional email operated by Bel Consulting OÜ in Tallinn,
+    Estonia, on data centres in Germany and Finland. Core service data is
+    stored in the EEA by default, and every accepted message carries an
+    Ed25519-signed routing receipt you can verify yourself.
+  </p>
+  <div class="flex flex-col sm:flex-row flex-wrap gap-3">
+    <a href="{{ config.extra.app_url }}/signup" class="apex-btn apex-btn--primary">
+      {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_cta_primary"] %}{{ i18n_data[l]["home"]["hero_cta_primary"] }}{% else %}Start free{% endif %}
+    </a>
+    <a href="/api-explorer/" class="apex-btn--link">
+      {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_cta_secondary"] %}{{ i18n_data[l]["home"]["hero_cta_secondary"] }}{% else %}Run a live API request{% endif %}
+    </a>
+  </div>
 
-    {# ── The checksum ribbon: APEXMAIL settling, M solid (the found nonce) ── #}
-    <div class="ribbon mb-8" aria-hidden="true">
-      <span>A</span><span>P</span><span>E</span><span>X</span><span class="m">M</span><span>A</span><span>I</span><span>L</span>
+  {# ── Fact row: the real figures (data/pricing.json is the commercial
+     authority; the launch allowance is the one-time first-30-days grant,
+     not a recurring quota). ── #}
+  {% set pricing_teaser = load_data(path="data/pricing.json", format="json") %}
+  {% set hero_free = pricing_teaser.plans[0] %}
+  {% set launch_allowance = pricing_teaser.free_launch_allowance %}
+  <div class="apex-factrow" aria-label="Platform facts">
+    <div>
+      <div class="apex-factrow__n">{{ hero_free.included_volume_display }}</div>
+      <div class="apex-factrow__l">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["teaser_emails_per_month"] %}{{ i18n_data[l]["home"]["teaser_emails_per_month"] }}{% else %}emails per month, free plan{% endif %}</div>
     </div>
-
-    <div class="grid min-w-0 lg:grid-cols-2 gap-12 lg:gap-16 items-center">
-      <div class="min-w-0">
-        <p class="k-arc-label mb-4">
-          {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_eyebrow"] %}{{ i18n_data[l]["home"]["hero_eyebrow"] }}{% else %}Built in Europe. Sovereign by choice.{% endif %}
-        </p>
-        <h1 class="text-surface-950 leading-[1.02] text-balance text-[44px] sm:text-[52px] lg:text-[64px] font-bold tracking-[-0.03em]">
-          {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_line1"] %}
-            {{ i18n_data[l]["home"]["hero_line1"] }}
-            <em class="not-italic text-brand-500">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_highlight"] %}{{ i18n_data[l]["home"]["hero_highlight"] }}{% else %}Sovereign by choice.{% endif %}</em>
-          {% else %}
-            Email infrastructure built in Europe. <em class="not-italic text-brand-500">Sovereign by choice.</em>
-          {% endif %}
-        </h1>
-        <p class="text-surface-600 text-base lg:text-lg max-w-[48ch] mt-5 mb-6">
-          {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_subtitle"] %}{{ i18n_data[l]["home"]["hero_subtitle"] }}{% else %}Built and operated by Bel Consulting OÜ in Tallinn, Estonia, on EU data centres in Germany and Finland. EU-only routing is a real, one-setting mode: sends leave only through ApexMail's own EU MTAs, and every accepted message carries an Ed25519-signed routing receipt you can verify yourself.{% endif %}
-        </p>
-        <div class="flex flex-col sm:flex-row flex-wrap gap-3 mb-5">
-          <a href="{{ config.extra.app_url }}/signup" class="btn-primary btn-primary--lg">
-            {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_cta_primary"] %}{{ i18n_data[l]["home"]["hero_cta_primary"] }}{% else %}Start free{% endif %}
-            <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 ml-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
-          </a>
-          <a href="/api-explorer/" class="btn-secondary btn-secondary--lg">
-            {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_cta_secondary"] %}{{ i18n_data[l]["home"]["hero_cta_secondary"] }}{% else %}Run live API request{% endif %}
-          </a>
-        </div>
-        <p class="text-[13px] text-surface-500">
-          {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_proof_line"] %}{{ i18n_data[l]["home"]["hero_proof_line"] }}{% else %}No credit card &middot; 3,000 emails/month &middot; 30,000-message launch allowance &middot; <a href="/data-locations/" class="text-brand-500 font-semibold hover:underline">EEA-stored by default</a>{% endif %}
-        </p>
-      </div>
-
-      {# ── The terminal: an EXAMPLE trace of the public HTTP contract, next to
-         the executable sandbox request. The shown payload mirrors the body
-         the form actually submits (the sandbox sender is fixed; no "from"
-         is sent), and the trace is labelled as an example — a sandbox run
-         against RFC 2606 reserved recipients proves queueing/handling, never
-         recipient-MX delivery. ── #}
-      <div class="relative min-w-0 lg:mt-0 mt-10">
-        <div class="term">
-          <div class="term-bar">
-            <span class="term-dot"></span><span class="term-dot"></span><span class="term-dot"></span>
-            <b>POST /v1/messages</b>
-            <span class="ml-auto text-[10px] font-bold tracking-widest uppercase">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_example_label"] %}{{ i18n_data[l]["home"]["hero_example_label"] }}{% else %}Example trace{% endif %}</span>{# inherits .term-bar colour (#a1a1aa) — a dark-on-dark token failed AA on the fixed dark panel #}
-          </div>
-<pre class="term-pre"><span class="term-k">curl</span> -X POST https://api.apexmail.ee/v1/messages \
-  -H <span class="term-s">"X-API-Key: $APEXMAIL_API_KEY"</span> \
-  -d <span class="term-s">'{"to":"customer@example.com",
-       "subject":"Hello from ApexMail",
-       "html":"&lt;h1&gt;Sent with control.&lt;/h1&gt;"}'</span>
-<span class="term-c">&rarr; 202 accepted &middot; id msg_2f9a (example)</span>
-<span class="term-c">&rarr; queued &middot; worker delivery attempt, timeline recorded</span></pre>
-          {# The trace above, made real: a plain form POST to the Rust
-             sandbox executor — the request really queues, the worker
-             really attempts delivery, the result page shows the live
-             status and latency. #}
-          <form method="POST" action="https://api.apexmail.ee/explorer/exec" class="term-run"> {# nosemgrep: python.django.security.django-no-csrf-token.django-no-csrf-token — static Zola/Tera template, not Django; the cross-origin API endpoint owns its own CSRF handling #}
-            <input type="hidden" name="lane" value="send">
-            <input type="hidden" name="body" value='{"to":"customer@example.com","subject":"Hello from ApexMail","html":"&lt;h1&gt;Sent with control.&lt;/h1&gt;"}'>
-            <button type="submit" class="btn-primary">
-              {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_run_cta"] %}{{ i18n_data[l]["home"]["hero_run_cta"] }}{% else %}Run this request{% endif %}
-              <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 ml-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
-            </button>
-            <span class="term-run-note">
-              <svg viewBox="0 0 24 14" width="12" height="8" fill="none" style="display:inline-block;vertical-align:middle;margin-right:4px" aria-hidden="true"><path d="M4 12 A 9 9 0 0 1 20 12" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/></svg>
-              {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_run_note"] %}{{ i18n_data[l]["home"]["hero_run_note"] }}{% else %}executes on the live sandbox{% endif %}
-            </span>
-          </form>
-        </div>
-      </div>
+    <div>
+      <div class="apex-factrow__n">{{ launch_allowance.emails_display }}</div>
+      <div class="apex-factrow__l">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["teaser_launch_allowance"] %}{{ i18n_data[l]["home"]["teaser_launch_allowance"] }}{% else %}one-time launch allowance, first {{ launch_allowance.window_days }} days{% endif %}</div>
     </div>
-
-    {# ── Stats band: mono values + point-meters. Plan A4/B5: every number here
-       is sourced from the public-metrics ARTIFACT
-       (data/public_metrics.json, written by tools/generate_public_metrics.py
-       from production data with its source + window stamped). A metric whose
-       status is not `measured` renders NO number — the label stays (linked to
-       the methodology / live status), and the cell says "not measured yet",
-       so an unmeasured target can never be presented as a measurement. ── #}
-    {% set public_metrics = load_data(path="data/public_metrics.json", format="json", required=false) %}
-    {% set hero_uptime = public_metrics["metrics"] | filter(attribute="id", value="uptime_12mo") | first %}
-    {% set hero_mx = public_metrics["metrics"] | filter(attribute="id", value="recipient_mx_acceptance_seconds") | first %}
-    {% set hero_volume = public_metrics["metrics"] | filter(attribute="id", value="deliveries_30d") | first %}
-    <div class="stats mt-14 lg:mt-20" aria-label="Platform statistics">
-      <div>
-        <span class="k-arc-label"><a href="https://status.apexmail.ee" class="hover:underline" style="color:inherit">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["stat_uptime_label"] %}{{ i18n_data[l]["home"]["stat_uptime_label"] }}{% else %}uptime · 12mo{% endif %}</a></span>
-        {% if hero_uptime and hero_uptime.status == "measured" %}
-        <div class="stats-v">{{ hero_uptime.display }}<span class="stats-v-dim">{{ hero_uptime.unit }}</span></div>
-        <div class="k-meter k-ok"><i style="width:{{ hero_uptime.display | replace(from='%', to='') }}%"></i><b style="left:{{ hero_uptime.display | replace(from='%', to='') }}%"></b></div>
-        {% else %}
-        <div class="stats-v stats-v-unmeasured" style="font-size:0.9rem;letter-spacing:0">not measured yet</div>
-        <div class="k-meter"><i style="width:0"></i><b style="left:0"></b></div>
-        {% endif %}
-      </div>
-      <div>
-        <span class="k-arc-label"><a href="/performance-methodology/" class="hover:underline" style="color:inherit">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["stat_delivery_label"] %}{{ i18n_data[l]["home"]["stat_delivery_label"] }}{% else %}recipient-MX acceptance{% endif %}</a></span>
-        {% if hero_mx and hero_mx.status == "measured" %}
-        <div class="stats-v">{{ hero_mx.display }}<span class="stats-v-dim">{{ hero_mx.unit }}</span></div>
-        <div class="k-meter"><i style="width:62%"></i><b style="left:62%"></b></div>
-        {% else %}
-        <div class="stats-v stats-v-unmeasured" style="font-size:0.9rem;letter-spacing:0">not measured yet</div>
-        <div class="k-meter"><i style="width:0"></i><b style="left:0"></b></div>
-        {% endif %}
-      </div>
-      <div>
-        <span class="k-arc-label"><a href="/performance-methodology/" class="hover:underline" style="color:inherit">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["stat_volume_label"] %}{{ i18n_data[l]["home"]["stat_volume_label"] }}{% else %}deliveries · {{ public_metrics["window"]["end"] | truncate(length=7, end='') }}{% endif %}</a></span>
-        {% if hero_volume and hero_volume.status == "measured" %}
-        <div class="stats-v">{{ hero_volume.display }}</div>
-        <div class="k-meter"><i style="width:78%"></i><b style="left:78%"></b></div>
-        {% else %}
-        <div class="stats-v stats-v-unmeasured" style="font-size:0.9rem;letter-spacing:0">not measured yet</div>
-        <div class="k-meter"><i style="width:0"></i><b style="left:0"></b></div>
-        {% endif %}
-      </div>
+    <div>
+      <div class="apex-factrow__n">EEA</div>
+      <div class="apex-factrow__l">storage default, Germany and Finland</div>
     </div>
-
+    <div>
+      <div class="apex-factrow__n">Signed</div>
+      <div class="apex-factrow__l">receipt on every accepted message</div>
+    </div>
   </div>
 </section>

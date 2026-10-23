@@ -6,7 +6,7 @@
 {# Tera macros cannot read the caller's scope variables          #}
 {# (i18n_data / l). Inline form matches the rest of the site.    #}
 
-<footer class="border-t border-surface-200 bg-surface-50" aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["site_footer"] %}{{ i18n_data[l]["footer"]["site_footer"] }}{% else %}Site footer{% endif %}">
+<footer class="border-t" aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["site_footer"] %}{{ i18n_data[l]["footer"]["site_footer"] }}{% else %}Site footer{% endif %}">
   <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-16 lg:py-20">
     <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-8 lg:gap-12">
       {# At sm/md the grid has TWO tracks — md:col-span-3 created an implicit third track. #}
@@ -15,104 +15,89 @@
           {# ApexMail wordmark lockup (footer variant) #}
           {% include "partials/brand-lockup.html" %}
         </div>
-        <p class="text-surface-500 text-sm mb-6 max-w-xs leading-relaxed">
+        <p class="mb-6 max-w-xs">
           {% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["tagline"] %}{{ i18n_data[l]["footer"]["tagline"] }}{% else %}Transactional email infrastructure for developers and enterprises.{% endif %}
         </p>
         <div class="flex items-center gap-3">
           {% if config.extra.github_url %}
-          <a href="{{ config.extra.github_url }}" target="_blank" rel="noopener noreferrer" class="w-11 h-11 rounded-sm bg-surface-100 border border-surface-200 flex items-center justify-center text-surface-500 hover:text-surface-900 hover:border-surface-300 transition-colors" aria-label="GitHub">
-            <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"/></svg>
-          </a>
+          <a href="{{ config.extra.github_url }}" target="_blank" rel="noopener noreferrer" class="apex-em apex-link">GitHub</a>
           {% endif %}
           {% if config.extra.twitter_url %}
-          <a href="{{ config.extra.twitter_url }}" target="_blank" rel="noopener noreferrer" class="w-11 h-11 rounded-sm bg-surface-100 border border-surface-200 flex items-center justify-center text-surface-500 hover:text-surface-900 hover:border-surface-300 transition-colors" aria-label="Twitter">
-            <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 3a10.9 10.9 0 0 1-3.14 1.53 4.48 4.48 0 0 0-7.86 3v1A10.66 10.66 0 0 1 3 4s-4 9 5 13a11.64 11.64 0 0 1-7 2c9 5 20 0 20-11.5a4.5 4.5 0 0 0-.08-.83A7.72 7.72 0 0 0 23 3z"/></svg>
-          </a>
+          <a href="{{ config.extra.twitter_url }}" target="_blank" rel="noopener noreferrer" class="apex-em apex-link">Twitter</a>
           {% endif %}
-          <a href="{{ config.extra.linkedin_url }}" target="_blank" rel="noopener noreferrer" class="w-11 h-11 rounded-sm bg-surface-100 border border-surface-200 flex items-center justify-center text-surface-500 hover:text-surface-900 hover:border-surface-300 transition-colors" aria-label="LinkedIn">
-            <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 8a6 6 0 0 1 6 6v7h-4v-7a2 2 0 0 0-2-2 2 2 0 0 0-2 2v7h-4v-7a6 6 0 0 1 6-6z"/><rect x="2" y="9" width="4" height="12"/><circle cx="4" cy="4" r="2"/></svg>
-          </a>
-          <a href="mailto:{{ config.extra.support_email }}" class="w-11 h-11 rounded-sm bg-surface-100 border border-surface-200 flex items-center justify-center text-surface-500 hover:text-surface-900 hover:border-surface-300 transition-colors" aria-label="Email">
-            <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
-          </a>
+          <a href="{{ config.extra.linkedin_url }}" target="_blank" rel="noopener noreferrer" class="apex-em apex-link">LinkedIn</a>
+          <a href="mailto:{{ config.extra.support_email }}" class="apex-em apex-link">Email</a>
         </div>
       </div>
       <div>
-        <h3 class="text-xs font-bold uppercase text-surface-950 mb-6 tracking-[0.05em]">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["footer_product_heading"] %}{{ i18n_data[l]["footer"]["footer_product_heading"] }}{% else %}Product{% endif %}</h3>
+        <h3 class="mb-6 apex-h3">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["footer_product_heading"] %}{{ i18n_data[l]["footer"]["footer_product_heading"] }}{% else %}Product{% endif %}</h3>
         <ul class="space-y-4">
-          <li><a href="{{ lp }}/features/" class="text-[13px] font-medium text-surface-600 hover:text-brand-500 transition-colors">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["features"] %}{{ i18n_data[l]["footer"]["features"] }}{% else %}Features{% endif %}</a></li>
-          <li><a href="{{ lp }}/pricing/" class="text-[13px] font-medium text-surface-600 hover:text-brand-500 transition-colors">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["pricing"] %}{{ i18n_data[l]["footer"]["pricing"] }}{% else %}Pricing{% endif %}</a></li>
-          <li><a href="{{ lp }}/security/" class="text-[13px] font-medium text-surface-600 hover:text-brand-500 transition-colors">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["security"] %}{{ i18n_data[l]["footer"]["security"] }}{% else %}Security{% endif %}</a></li>
-          <li><a href="{{ lp }}/solutions/enterprise/" class="text-[13px] font-medium text-surface-600 hover:text-brand-500 transition-colors">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["enterprise"] %}{{ i18n_data[l]["footer"]["enterprise"] }}{% else %}Enterprise{% endif %}</a></li>
+          <li><a href="{{ lp }}/features/" class="apex-em apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["features"] %}{{ i18n_data[l]["footer"]["features"] }}{% else %}Features{% endif %}</a></li>
+          <li><a href="{{ lp }}/pricing/" class="apex-em apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["pricing"] %}{{ i18n_data[l]["footer"]["pricing"] }}{% else %}Pricing{% endif %}</a></li>
+          <li><a href="{{ lp }}/security/" class="apex-em apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["security"] %}{{ i18n_data[l]["footer"]["security"] }}{% else %}Security{% endif %}</a></li>
+          <li><a href="{{ lp }}/solutions/enterprise/" class="apex-em apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["enterprise"] %}{{ i18n_data[l]["footer"]["enterprise"] }}{% else %}Enterprise{% endif %}</a></li>
           {# EU-sovereign argument: footer-linked on every page (2026-10-16). #}
-          <li><a href="{{ lp }}/eu-sovereign/" class="text-[13px] font-medium text-surface-600 hover:text-brand-500 transition-colors">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["sovereignty"] %}{{ i18n_data[l]["footer"]["sovereignty"] }}{% else %}Sovereignty{% endif %}</a></li>
+          <li><a href="{{ lp }}/eu-sovereign/" class="apex-em apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["sovereignty"] %}{{ i18n_data[l]["footer"]["sovereignty"] }}{% else %}Sovereignty{% endif %}</a></li>
           {# email-logs/ exists in EN only (no de/fr/es content pages yet) —
              link it un-prefixed exactly like the other English-only targets
              above (/docs/, /api-explorer/); {{ lp }}/email-logs/ was a 404
              on every locale page (deploy/tests/broken-links.sh finding). #}
-          <li><a href="/email-logs/" class="text-[13px] font-medium text-surface-600 hover:text-brand-500 transition-colors">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["forensic_tools"] %}{{ i18n_data[l]["footer"]["forensic_tools"] }}{% else %}Delivery Diagnostics{% endif %}</a></li>
+          <li><a href="/email-logs/" class="apex-em apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["forensic_tools"] %}{{ i18n_data[l]["footer"]["forensic_tools"] }}{% else %}Delivery Diagnostics{% endif %}</a></li>
         </ul>
       </div>
       <div>
-        <h3 class="text-xs font-bold uppercase text-surface-950 mb-6 tracking-[0.05em]">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["developers_heading"] %}{{ i18n_data[l]["footer"]["developers_heading"] }}{% else %}Developers{% endif %}</h3>
+        <h3 class="mb-6 apex-h3">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["developers_heading"] %}{{ i18n_data[l]["footer"]["developers_heading"] }}{% else %}Developers{% endif %}</h3>
         <ul class="space-y-4">
-          <li><a href="/docs/" class="text-[13px] font-medium text-surface-600 hover:text-brand-500 transition-colors">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["documentation"] %}{{ i18n_data[l]["footer"]["documentation"] }}{% else %}Documentation{% endif %}</a></li>
-          <li><a href="/docs/api/" class="text-[13px] font-medium text-surface-600 hover:text-brand-500 transition-colors">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["api_reference"] %}{{ i18n_data[l]["footer"]["api_reference"] }}{% else %}API Reference{% endif %}</a></li>
-          <li><a href="/docs/sdks/" class="text-[13px] font-medium text-surface-600 hover:text-brand-500 transition-colors">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["sdks"] %}{{ i18n_data[l]["footer"]["sdks"] }}{% else %}SDKs{% endif %}</a></li>
-          <li><a href="/api-explorer/" class="text-[13px] font-medium text-surface-600 hover:text-brand-500 transition-colors">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["api_explorer"] %}{{ i18n_data[l]["footer"]["api_explorer"] }}{% else %}API Explorer{% endif %}</a></li>
-          <li><a href="{{ lp }}/status/" class="text-[13px] font-medium text-surface-600 hover:text-brand-500 transition-colors">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["status_page"] %}{{ i18n_data[l]["footer"]["status_page"] }}{% else %}Status Page{% endif %}</a></li>
+          <li><a href="/docs/" class="apex-em apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["documentation"] %}{{ i18n_data[l]["footer"]["documentation"] }}{% else %}Documentation{% endif %}</a></li>
+          <li><a href="/docs/api/" class="apex-em apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["api_reference"] %}{{ i18n_data[l]["footer"]["api_reference"] }}{% else %}API Reference{% endif %}</a></li>
+          <li><a href="/docs/sdks/" class="apex-em apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["sdks"] %}{{ i18n_data[l]["footer"]["sdks"] }}{% else %}SDKs{% endif %}</a></li>
+          <li><a href="/api-explorer/" class="apex-em apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["api_explorer"] %}{{ i18n_data[l]["footer"]["api_explorer"] }}{% else %}API Explorer{% endif %}</a></li>
+          <li><a href="{{ lp }}/status/" class="apex-em apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["status_page"] %}{{ i18n_data[l]["footer"]["status_page"] }}{% else %}Status Page{% endif %}</a></li>
         </ul>
       </div>
       <div>
-        <h3 class="text-xs font-bold uppercase text-surface-950 mb-6 tracking-[0.05em]">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["footer_company_heading"] %}{{ i18n_data[l]["footer"]["footer_company_heading"] }}{% else %}Company{% endif %}</h3>
+        <h3 class="mb-6 apex-h3">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["footer_company_heading"] %}{{ i18n_data[l]["footer"]["footer_company_heading"] }}{% else %}Company{% endif %}</h3>
         <ul class="space-y-4">
-          <li><a href="{{ lp }}/solutions/" class="text-[13px] font-medium text-surface-600 hover:text-brand-500 transition-colors">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["use_cases"] %}{{ i18n_data[l]["footer"]["use_cases"] }}{% else %}Use Cases{% endif %}</a></li>
-          <li><a href="{{ lp }}/compare/" class="text-[13px] font-medium text-surface-600 hover:text-brand-500 transition-colors">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["compare"] %}{{ i18n_data[l]["footer"]["compare"] }}{% else %}Compare{% endif %}</a></li>
-          <li><a href="{{ lp }}/contact/" class="text-[13px] font-medium text-surface-600 hover:text-brand-500 transition-colors">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["contact"] %}{{ i18n_data[l]["footer"]["contact"] }}{% else %}Contact{% endif %}</a></li>
-          <li><a href="{{ config.extra.app_url }}" target="_blank" rel="noopener noreferrer" class="text-[13px] font-medium text-surface-600 hover:text-brand-500 transition-colors">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["log_in"] %}{{ i18n_data[l]["footer"]["log_in"] }}{% else %}Log In{% endif %}</a></li>
+          <li><a href="{{ lp }}/solutions/" class="apex-em apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["use_cases"] %}{{ i18n_data[l]["footer"]["use_cases"] }}{% else %}Use Cases{% endif %}</a></li>
+          <li><a href="{{ lp }}/compare/" class="apex-em apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["compare"] %}{{ i18n_data[l]["footer"]["compare"] }}{% else %}Compare{% endif %}</a></li>
+          <li><a href="{{ lp }}/contact/" class="apex-em apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["contact"] %}{{ i18n_data[l]["footer"]["contact"] }}{% else %}Contact{% endif %}</a></li>
+          <li><a href="{{ config.extra.app_url }}" target="_blank" rel="noopener noreferrer" class="apex-em apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["log_in"] %}{{ i18n_data[l]["footer"]["log_in"] }}{% else %}Log In{% endif %}</a></li>
         </ul>
       </div>
       <div>
-        <h3 class="text-xs font-bold uppercase text-surface-950 mb-6 tracking-[0.05em]">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["footer_legal_heading"] %}{{ i18n_data[l]["footer"]["footer_legal_heading"] }}{% else %}Legal{% endif %}</h3>
+        <h3 class="mb-6 apex-h3">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["footer_legal_heading"] %}{{ i18n_data[l]["footer"]["footer_legal_heading"] }}{% else %}Legal{% endif %}</h3>
         <ul class="space-y-4">
-          <li><a href="{{ lp }}/privacy/" class="text-[13px] font-medium text-surface-600 hover:text-brand-500 transition-colors">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["privacy"] %}{{ i18n_data[l]["footer"]["privacy"] }}{% else %}Privacy{% endif %}</a></li>
+          <li><a href="{{ lp }}/privacy/" class="apex-em apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["privacy"] %}{{ i18n_data[l]["footer"]["privacy"] }}{% else %}Privacy{% endif %}</a></li>
           {# CCPA notice: deliberately footer-linked on every page (conspicuous placement). #}
           {# The privacy folder is a true Zola section (_index.md), so the leaf page is a #}
           {# section child — `zola check` reports zero orphans. #}
-          <li><a href="/privacy/do-not-sell/" class="text-[13px] font-medium text-surface-600 hover:text-brand-500 transition-colors">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["your_privacy_choices"] %}{{ i18n_data[l]["footer"]["your_privacy_choices"] }}{% else %}Your Privacy Choices{% endif %}</a></li>
-          <li><a href="{{ lp }}/terms/" class="text-[13px] font-medium text-surface-600 hover:text-brand-500 transition-colors">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["terms"] %}{{ i18n_data[l]["footer"]["terms"] }}{% else %}Terms{% endif %}</a></li>
-          <li><a href="{{ lp }}/cookies/" class="text-[13px] font-medium text-surface-600 hover:text-brand-500 transition-colors">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["cookies"] %}{{ i18n_data[l]["footer"]["cookies"] }}{% else %}Cookies{% endif %}</a></li>
-          <li><a href="{{ lp }}/dpa/" class="text-[13px] font-medium text-surface-600 hover:text-brand-500 transition-colors">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["dpa"] %}{{ i18n_data[l]["footer"]["dpa"] }}{% else %}DPA{% endif %}</a></li>
-          <li><a href="{{ lp }}/sla/" class="text-[13px] font-medium text-surface-600 hover:text-brand-500 transition-colors">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["sla"] %}{{ i18n_data[l]["footer"]["sla"] }}{% else %}SLA{% endif %}</a></li>
+          <li><a href="/privacy/do-not-sell/" class="apex-em apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["your_privacy_choices"] %}{{ i18n_data[l]["footer"]["your_privacy_choices"] }}{% else %}Your Privacy Choices{% endif %}</a></li>
+          <li><a href="{{ lp }}/terms/" class="apex-em apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["terms"] %}{{ i18n_data[l]["footer"]["terms"] }}{% else %}Terms{% endif %}</a></li>
+          <li><a href="{{ lp }}/cookies/" class="apex-em apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["cookies"] %}{{ i18n_data[l]["footer"]["cookies"] }}{% else %}Cookies{% endif %}</a></li>
+          <li><a href="{{ lp }}/dpa/" class="apex-em apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["dpa"] %}{{ i18n_data[l]["footer"]["dpa"] }}{% else %}DPA{% endif %}</a></li>
+          <li><a href="{{ lp }}/sla/" class="apex-em apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["sla"] %}{{ i18n_data[l]["footer"]["sla"] }}{% else %}SLA{% endif %}</a></li>
         </ul>
       </div>
     </div>
-    <div class="mt-12 pt-8 border-t border-surface-200">
+    <div class="mt-12 pt-8 border-t">
       <div class="flex flex-col md:flex-row justify-between items-center gap-8">
-        <div class="text-xs text-surface-500 font-medium tracking-wide">
+        <div class="apex-em">
           <p>&copy; {{ now() | date(format="%Y") }} {{ config.extra.company.copyright_entity }}. {% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["copyright"] %}{{ i18n_data[l]["footer"]["copyright"] }}{% else %}All rights reserved.{% endif %}</p>
           <p class="mt-1">{{ config.extra.site_name }}</p>
         </div>
-        <div class="text-xs text-surface-400 font-medium tracking-wide md:text-right">
+        <div class="apex-em">
           <p>{{ config.extra.company.address }}</p>
-          <p class="mt-1">VAT {{ config.extra.company.vat_number }} &middot; Reg. {{ config.extra.company.registry_code }}</p>
+          <p class="mt-1">VAT {{ config.extra.company.vat_number }}, Reg. {{ config.extra.company.registry_code }}</p>
         </div>
       </div>
       <div class="mt-8 flex flex-col md:flex-row justify-between items-center gap-8">
         {# Zero-JS policy: no client-side status polling. The honest static
            presentation is a plain link to the live status page — no dot
            implying a refresh that never happens. #}
-        <div id="footer-status-container" class="flex items-center gap-2 text-xs font-medium tracking-wide text-surface-500">
-          <a href="{{ config.extra.status_url }}" class="hover:text-brand-500 transition-colors">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["status_link"] %}{{ i18n_data[l]["footer"]["status_link"] }}{% else %}Service status{% endif %} &middot; {{ config.extra.status_url | replace(from="https://", to="") }}</a>
+        <div id="footer-status-container" class="flex items-center gap-2 apex-em">
+          <a href="{{ config.extra.status_url }}" class="apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["status_link"] %}{{ i18n_data[l]["footer"]["status_link"] }}{% else %}Service status{% endif %} — {{ config.extra.status_url | replace(from="https://", to="") }}</a>
         </div>
       </div>
     </div>
-  </div>
-
-  {# 2026-09-08 review §47: the footer should be boring and stable — the
-     pseudo-console receipt (challenge issued / work done · eeu) came out.
-     One quiet capability line remains. #}
-  <div class="k-receipt" aria-hidden="true">
-    <div><svg viewBox="0 0 24 14" width="14" height="9" fill="none" aria-hidden="true"><path d="M4 12 A 9 9 0 0 1 20 12" stroke="var(--brand-500, #dc2626)" stroke-width="2.6" stroke-linecap="round"/></svg><span class="ok">✓</span> Full message event history</div>
   </div>
 </footer>

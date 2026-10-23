@@ -22,36 +22,36 @@ og_image = "/images/og-image.png"
 # — see docs/deployment-facts.json mta_sts_enforcement).
 comparison_sections = [
   { title = "DELIVERABILITY", rows = [
-    { feature = "Delivery Rate", apex = '<span class="text-brand-600 font-semibold">High</span>', comp = '<span class="text-surface-600">High</span>', winner = "none" },
-    { feature = "P95 acceptance to first attempt", apex = '<span class="text-brand-600 font-semibold">&le;30s (P95) &mdash; internal engineering target, not an independently verified figure</span>', comp = '<span class="text-surface-600">Not publicly documented</span>', winner = "none" },
-    { feature = "Dedicated IP", apex = '<span class="text-brand-600 font-semibold">Approved add-on on Pro; 1 included on Growth and Business; 3 on Enterprise Cloud</span>', comp = '<span class="text-surface-600">See provider pricing</span>', winner = "none" },
-    { feature = "Automatic IP Warming", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-600">Automatic (Postmark-managed)</span>', winner = "none" },
-    { feature = "BIMI Support", apex = '<span class="text-surface-400">✗</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
-    { feature = "MTA-STS Support", apex = '<span class="text-surface-400">✗</span>', comp = '<span class="text-brand-600">✓</span>', winner = "competitor" }
+    { feature = "Delivery Rate", apex = '<span>High</span>', comp = '<span class="">High</span>', winner = "none" },
+    { feature = "P95 acceptance to first attempt", apex = '<span>&le;30s (P95) &mdash; internal engineering target, not an independently verified figure</span>', comp = '<span class="">Not publicly documented</span>', winner = "none" },
+    { feature = "Dedicated IP", apex = '<span>Approved add-on on Pro; 1 included on Growth and Business; 3 on Enterprise Cloud</span>', comp = '<span class="">See provider pricing</span>', winner = "none" },
+    { feature = "Automatic IP Warming", apex = '<span class="">✓</span>', comp = '<span class="">Automatic (Postmark-managed)</span>', winner = "none" },
+    { feature = "BIMI Support", apex = '<span class="">✗</span>', comp = '<span class="">✗</span>', winner = "none" },
+    { feature = "MTA-STS Support", apex = '<span class="">✗</span>', comp = '<span class="">✓</span>', winner = "competitor" }
   ]},
   { title = "COMPLIANCE", rows = [
-    { feature = "GDPR Automation", apex = '<span class="text-brand-600 font-semibold">Full DSR handling</span>', comp = '<span class="text-surface-600">Self-managed</span>', winner = "none" },
-    { feature = "HIPAA availability", apex = '<span class="text-surface-600 font-semibold">Not currently offered</span>', comp = '<span class="text-surface-600">See provider documentation</span>', winner = "none" },
-    { feature = "Audit Logs", apex = '<span class="text-brand-600 font-semibold">Operator + API audit trail</span>', comp = '<span class="text-surface-600">Event logs only</span>', winner = "none" },
-    { feature = "Consent Management", apex = '<span class="text-brand-600 font-semibold">Built-in</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" }
+    { feature = "GDPR Automation", apex = '<span>Full DSR handling</span>', comp = '<span class="">Self-managed</span>', winner = "none" },
+    { feature = "HIPAA availability", apex = '<span>Not currently offered</span>', comp = '<span class="">See provider documentation</span>', winner = "none" },
+    { feature = "Audit Logs", apex = '<span>Operator + API audit trail</span>', comp = '<span class="">Event logs only</span>', winner = "none" },
+    { feature = "Consent Management", apex = '<span>Built-in</span>', comp = '<span class="">✗</span>', winner = "none" }
   ]},
   { title = "FEATURES", rows = [
-    { feature = "Transactional Email", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-brand-600">✓</span>', winner = "none" },
-    { feature = "Marketing Email", apex = '<span class="text-brand-600 font-semibold">Yes (unified API)</span>', comp = '<span class="text-surface-600">Separate product</span>', winner = "none" },
-    { feature = "Inbound Processing", apex = '<span class="text-brand-600 font-semibold">Business and Enterprise plans</span>', comp = '<span class="text-brand-600">✓</span>', winner = "none" },
-    { feature = "Templates", apex = '<span class="text-brand-600 font-semibold">Stored templates</span>', comp = '<span class="text-surface-600">Proprietary</span>', winner = "none" },
-    { feature = "Scheduled Sending", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" }
+    { feature = "Transactional Email", apex = '<span class="">✓</span>', comp = '<span class="">✓</span>', winner = "none" },
+    { feature = "Marketing Email", apex = '<span>Yes (unified API)</span>', comp = '<span class="">Separate product</span>', winner = "none" },
+    { feature = "Inbound Processing", apex = '<span>Business and Enterprise plans</span>', comp = '<span class="">✓</span>', winner = "none" },
+    { feature = "Templates", apex = '<span>Stored templates</span>', comp = '<span class="">Proprietary</span>', winner = "none" },
+    { feature = "Scheduled Sending", apex = '<span class="">✓</span>', comp = '<span class="">✗</span>', winner = "none" }
   ]},
   { title = "ENTERPRISE", rows = [
-    { feature = "SSO/SAML", apex = '<span class="text-brand-600 font-semibold">Business and Enterprise</span>', comp = '<span class="text-surface-600">Available on request</span>', winner = "none" },
-    { feature = "Custom Deployment Review", apex = '<span class="text-brand-600 font-semibold">Enterprise review</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
-    { feature = "Dedicated Deployment Options", apex = '<span class="text-brand-600 font-semibold">Custom review</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" }
+    { feature = "SSO/SAML", apex = '<span>Business and Enterprise</span>', comp = '<span class="">Available on request</span>', winner = "none" },
+    { feature = "Custom Deployment Review", apex = '<span>Enterprise review</span>', comp = '<span class="">✗</span>', winner = "none" },
+    { feature = "Dedicated Deployment Options", apex = '<span>Custom review</span>', comp = '<span class="">✗</span>', winner = "none" }
   ]},
   { title = "PRICING", rows = [
-    { feature = "Free Tier", apex = '<span class="text-brand-600 font-semibold">3,000/mo + one-time 30,000 launch allowance</span>', comp = '<span class="text-surface-600">100/mo</span>', winner = "none" },
-    { feature = "100K emails/mo", apex = '<span class="text-brand-600 font-semibold">€89 (Pro: 150K)</span>', comp = '<span class="text-surface-600">€122.82 (US$133.50) — Pro: €15.18 (US$16.50)/mo + 90K overage @ €1.20 (US$1.30)/1K</span>', winner = "none" },
-    { feature = "Unlimited team members", apex = '<span class="text-brand-600 font-semibold">Enterprise plan</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
-    { feature = "Custom enterprise terms", apex = '<span class="text-brand-600 font-semibold">Annual contracts</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" }
+    { feature = "Free Tier", apex = '<span>3,000/mo + one-time 30,000 launch allowance</span>', comp = '<span class="">100/mo</span>', winner = "none" },
+    { feature = "100K emails/mo", apex = '<span>€89 (Pro: 150K)</span>', comp = '<span class="">€122.82 (US$133.50) — Pro: €15.18 (US$16.50)/mo + 90K overage @ €1.20 (US$1.30)/1K</span>', winner = "none" },
+    { feature = "Unlimited team members", apex = '<span>Enterprise plan</span>', comp = '<span class="">✗</span>', winner = "none" },
+    { feature = "Custom enterprise terms", apex = '<span>Annual contracts</span>', comp = '<span class="">✗</span>', winner = "none" }
   ]}
 ]
 
@@ -61,7 +61,7 @@ comparison_sections = [
 # quote ("provider's") and double-quoted HTML attributes; the leading \ trims
 # the opening newline and literal newlines collapse to spaces per TOML spec.
 methodology_note = """\
-<strong>Methodology:</strong> Feature comparisons are based on publicly available documentation, pricing pages, and official sources. Plans compared: ApexMail self-service tiers and Postmark standard plans. Pricing and plan details last reviewed: 2026-08-19. Data may change; verify with each provider's current documentation. See our <a href="/compare/methodology/" class="text-brand-600 hover:text-brand-700 underline">comparison methodology</a> for sourcing details. <strong>Migrating from Postmark?</strong> The base-URL swap and the exactly mapped subset of its API are documented in the <a href="/migrate/postmark/" class="text-brand-600 hover:text-brand-700 underline">Postmark migration guide</a>.
+<strong>Methodology:</strong> Feature comparisons are based on publicly available documentation, pricing pages, and official sources. Plans compared: ApexMail self-service tiers and Postmark standard plans. Pricing and plan details last reviewed: 2026-08-19. Data may change; verify with each provider's current documentation. See our <a href="/compare/methodology/">comparison methodology</a> for sourcing details. <strong>Migrating from Postmark?</strong> The base-URL swap and the exactly mapped subset of its API are documented in the <a href="/migrate/postmark/">Postmark migration guide</a>.
 """
 +++
 

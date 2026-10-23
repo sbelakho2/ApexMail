@@ -29,3 +29,6 @@ test.coverage-ratchet
 validate.waivers
 validate.stub-ban
 validate.invariants
+validate.ark-law
+validate.ark-mirror
+validate.ark-artifacts

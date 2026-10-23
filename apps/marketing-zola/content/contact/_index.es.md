@@ -20,7 +20,7 @@ Elija la vía que corresponda a su situación:
 | Abuso | [Informar de abuso](mailto:abuse@apexmail.ee) |
 | Arquitectura Enterprise | [Reservar revisión de arquitectura](/es/contact/enterprise/) |
 
-Consultas generales: [hello@apexmail.ee](mailto:hello@apexmail.ee) · Documentación: [Documentación de ApexMail](/docs/)
+Consultas generales: [hello@apexmail.ee](mailto:hello@apexmail.ee), Documentación: [Documentación de ApexMail](/docs/)
 
 ## Revisión Enterprise
 

@@ -105,6 +105,13 @@ pub const WEBHOOK_EVENTS: &[&str] = &[
 
 pub const GLOBALS_CSS: &str = include_str!("../assets/globals.css");
 pub const GLOBALS_INPUT_CSS: &str = include_str!("../assets/globals.input.css");
+/// The authored design authority (fonts, tokens, base, the apex-*
+/// vocabulary). The single source both the console and marketing builds
+/// inline; tools/check_ark_mirror.py keeps the marketing copy identical.
+pub const ARK_CSS: &str = include_str!("../assets/ark.css");
+/// The marketing build's copy of the authority — must be byte-identical.
+pub const MARKETING_ARK_CSS: &str =
+    include_str!("../../../../../apps/marketing-zola/static/css/ark.css");
 /// Source-of-truth marketing stylesheet (the Zola build compiles it into
 /// static/css/styles.css). Included so the brand palette is pinned at its
 /// source, not only in build output.
@@ -119,33 +126,64 @@ pub const MARKETING_PUBLIC_BUILT: bool = cfg!(marketing_public_built);
 
 #[cfg(test)]
 mod tests {
-    use super::{GLOBALS_CSS, GLOBALS_INPUT_CSS, MARKETING_INPUT_CSS};
+    use super::{GLOBALS_CSS, MARKETING_INPUT_CSS};
 
-    #[test]
-    fn globals_css_keeps_light_background_utilities_legible_in_dark_mode() {
-        assert!(GLOBALS_CSS.contains(".dark .bg-white"));
-        assert!(GLOBALS_CSS.contains("background-color: rgb(var(--card)"));
-        assert!(GLOBALS_CSS.contains("@media (prefers-color-scheme: dark)"));
-        assert!(GLOBALS_CSS.contains(":root:not(.light) .bg-white"));
-        assert!(GLOBALS_CSS.contains("bg-success-300.text-surface-950"));
-        assert!(GLOBALS_CSS.contains(".dark .bg-white\\/90"));
-        assert!(GLOBALS_CSS.contains(".dark .bg-surface-950"));
-        assert!(GLOBALS_CSS.contains("background-color: rgb(9 9 11"));
-        assert!(GLOBALS_CSS.contains(".dark .apex-cp-hero"));
-        assert!(GLOBALS_CSS.contains(".dark .apex-console-main"));
-        assert!(GLOBALS_CSS.contains(".dark .apex-auth-notice"));
-        assert!(GLOBALS_CSS.contains(".dark input.bg-background"));
-        assert!(GLOBALS_CSS.contains("-webkit-text-fill-color: rgb(var(--foreground)"));
+    /// The compiled artifact inlines the authority: fonts, tokens and the
+    /// apex-* vocabulary all resolve to ark.css content — and the artifact
+    /// can never carry elevation, blur, fade gradients or arch radii,
+    /// because cssgen cannot emit them and ark.css does not define them.
+    /// Strip CSS comments so the law scan reads rules, not documentation
+    /// (the authority's header lists banned classes by name).
+    fn css_rules(sheet: &str) -> String {
+        let mut out = String::with_capacity(sheet.len());
+        let mut rest = sheet;
+        while let Some(at) = rest.find("/*") {
+            out.push_str(&rest[..at]);
+            let Some(end) = rest[at..].find("*/") else {
+                break;
+            };
+            rest = &rest[at + end + 2..];
+        }
+        out.push_str(rest);
+        out
     }
 
-    /// The stylesheet is a pure-CSS artifact: dark mode MUST be fully
-    /// functional from `prefers-color-scheme` alone — the zero-JS console
-    /// has no bootstrap script to toggle a `.dark` class at runtime.
+    #[test]
+    fn compiled_artifact_is_the_ark_authority() {
+        let rules = css_rules(GLOBALS_CSS);
+        for marker in [
+            ".apex-wordmark__apex",
+            ".apex-nav-cell .apex-nav-lead",
+            ".apex-notice--fail",
+            ".apex-evidence .apex-evidence__hatch",
+            "--wordmark-apex: 185 28 28",
+            "--engrave: repeating-linear-gradient",
+        ] {
+            assert!(
+                rules.contains(marker),
+                "compiled artifact must carry the ark authority: {marker}"
+            );
+        }
+        for banned in [
+            "shadow-premium",
+            "backdrop-blur",
+            "transition-premium",
+            ".glass",
+            "rounded-[",
+            "linear-gradient(to",
+        ] {
+            assert!(
+                !rules.contains(banned),
+                "compiled artifact must not contain {banned}"
+            );
+        }
+    }
+
+    /// The URL must carry a content-derived query so a changed sheet is a
+    /// changed URL (dogfood 2026-10-06: an unhashed sheet kept open tabs
+    /// on the previous build's CSS).
     #[test]
     fn globals_css_url_is_content_hashed() {
-        // The URL must carry a content-derived query so a changed sheet is a
-        // changed URL (dogfood 2026-10-06: an unhashed sheet kept open tabs
-        // on the previous build's CSS).
         let url = super::globals_css_url();
         assert!(url.starts_with("/assets/globals.css?v="), "{url}");
         let version = url.trim_start_matches("/assets/globals.css?v=");
@@ -153,7 +191,6 @@ mod tests {
             version.len() >= 8 && version.chars().all(|c| c.is_ascii_hexdigit()),
             "version must be a hex hash of the sheet: {version}"
         );
-        // Stable within a build.
         assert_eq!(url, super::globals_css_url());
     }
 
@@ -175,45 +212,79 @@ mod tests {
         }
     }
 
+    /// Dark mode must work from `prefers-color-scheme` alone — the zero-JS
+    /// console has no bootstrap script to toggle a `.dark` class at runtime.
     #[test]
     fn globals_css_dark_mode_needs_no_scripts() {
         assert!(GLOBALS_CSS.contains("@media (prefers-color-scheme: dark)"));
-        // `:root:not(.light)` matches when no class is ever set, which is
-        // exactly the no-JS situation.
-        assert!(GLOBALS_CSS.contains(":root:not(.light) .bg-white"));
+        assert!(GLOBALS_CSS.contains(":root:not(.light)"));
+        // Dark is an inversion, not a second design: every COLOUR token the
+        // light block defines must exist in the dark block (theme-invariant
+        // tokens — rules, radii, motion, fonts — need only light).
+        use crate::tokens::block_tokens;
+        let dark = block_tokens(crate::ARK_CSS, ".dark");
+        let light = block_tokens(crate::ARK_CSS, ":root");
+        assert!(dark.contains_key("--background"));
+        assert!(dark.contains_key("--foreground"));
+        const COLOR_FAMILIES: [&str; 21] = [
+            "--background",
+            "--foreground",
+            "--card",
+            "--popover",
+            "--primary",
+            "--secondary",
+            "--muted",
+            "--accent",
+            "--border",
+            "--input",
+            "--ring",
+            "--destructive",
+            "--warning",
+            "--error",
+            "--surface-",
+            "--brand-",
+            "--success-",
+            "--info-",
+            "--danger-",
+            "--wordmark-",
+            "--engrave",
+        ];
+        let mut colour_tokens = 0;
+        for name in light.keys() {
+            if COLOR_FAMILIES.iter().any(|f| name.starts_with(f)) {
+                colour_tokens += 1;
+                assert!(
+                    dark.contains_key(name),
+                    "the dark block drops the colour token {name}"
+                );
+            }
+        }
+        assert!(colour_tokens >= 80, "colour token count: {colour_tokens}");
     }
 
-    /// Review §5.1 lib.rs: validate the light and dark token blocks
-    /// INDEPENDENTLY. Each block is parsed on its own (never by diffing one
-    /// against the other's text), and the two dark authorities — the `.dark`
-    /// class the toggle uses and the `:root:not(.light)` media twin the
-    /// zero-JS console takes — must agree exactly, so a theme cannot work on
+    /// The light token block and its two dark paths (the `.dark` class the
+    /// toggle uses and the `:root:not(.light)` media twin the zero-JS
+    /// console takes) must agree exactly, so a theme cannot work through
     /// only one of the two paths.
     #[test]
     fn light_and_dark_token_blocks_validate_independently() {
         use crate::tokens::block_tokens;
-        let light = block_tokens(GLOBALS_INPUT_CSS, ":root");
-        let dark = block_tokens(GLOBALS_INPUT_CSS, ".dark");
-        let media = block_tokens(GLOBALS_INPUT_CSS, ":root:not(.light)");
+        let light = block_tokens(crate::ARK_CSS, ":root");
+        let dark = block_tokens(crate::ARK_CSS, ".dark");
+        let media = block_tokens(crate::ARK_CSS, ":root:not(.light)");
 
-        assert!(light.len() >= 50, "light token block: {}", light.len());
-        assert!(dark.len() >= 15, "dark token block: {}", dark.len());
+        assert!(light.len() >= 100, "light token block: {}", light.len());
         assert_eq!(media.len(), dark.len(), "the dark blocks are twins");
 
-        // 1. No dark token may be a name the light block does not define —
-        //    an unknown name would silently never apply.
         for name in dark.keys().chain(media.keys()) {
             assert!(
                 light.contains_key(name),
                 "{name} is defined only in a dark block"
             );
         }
-        // 2. The class twin and the media twin carry the SAME values.
         for (name, value) in &dark {
             assert_eq!(media.get(name), Some(value), "{name} differs between twins");
         }
-        // 3. The core surface tokens are present in every block (a gutted
-        //    dark block would otherwise satisfy the equality check above).
         for core in [
             "--background",
             "--foreground",
@@ -221,12 +292,13 @@ mod tests {
             "--border",
             "--muted-foreground",
             "--surface-100",
+            "--wordmark-mail",
         ] {
             assert!(light.contains_key(core), "light missing {core}");
             assert!(dark.contains_key(core), "dark missing {core}");
             assert!(media.contains_key(core), "media twin missing {core}");
         }
-        // 4. The compiled artifact carries the same light authority.
+        // The compiled artifact carries the same light authority.
         let artifact_light = block_tokens(GLOBALS_CSS, ":root");
         for (name, value) in &light {
             assert_eq!(
@@ -237,45 +309,40 @@ mod tests {
         }
     }
 
-    /// Review §5.2 tailwind.config.js: every authoritative renderer that can
-    /// emit a console/CP class is in the content scan (a renderer outside it
-    /// ships undefined classes that render as nothing).
+    /// Review §5.2, cssgen edition: the cssgen recipe must scan every
+    /// authoritative renderer that can emit a console/CP class, and cssgen
+    /// must be the only CSS build path (all-Rust; no Tailwind, no
+    /// JavaScript anywhere in the pipeline).
     #[test]
-    fn tailwind_content_scan_covers_every_class_emitting_renderer() {
-        let config = include_str!("../tailwind.config.js");
+    fn cssgen_content_scan_covers_every_class_emitting_renderer() {
+        let recipe = include_str!("../../../../../tools/dev-start.sh");
         for required in [
-            "'./src/**/*.rs'",
-            "'./assets/globals.input.css'",
-            "'../../api-server/src/**/*.rs'",
+            "crates/ui-foundation/src/**/*.rs",
+            "crates/api-server/src/**/*.rs",
+            "crates/ui-foundation/assets/globals.input.css",
         ] {
             assert!(
-                config.contains(required),
-                "tailwind.config.js content scan must include {required}"
+                recipe.contains(required),
+                "the cssgen content scan must include {required}"
             );
         }
+        assert!(
+            recipe.contains("--bin cssgen"),
+            "dev-start must build stylesheets through cssgen"
+        );
+        assert!(
+            !recipe.contains("tailwind"),
+            "no Tailwind may remain in the CSS build path"
+        );
     }
 
-    // ─── Brand palette pins (red & black) ─────────────────────────────
-    //
-    // Regression guard for the 2026-08 palette regressions:
-    //   - ffc54b4a (2026-07-31) swapped the console brand from the deep
-    //     red #dc2626 (220 38 38) on zinc to coral #dd524c (221 82 76)
-    //     on blue-tinted slate;
-    //   - b874f4f9 (2026-08-11) swapped the marketing brand from the red
-    //     scale to Apex Indigo #6366F1 (99 102 241).
-    // These tests pin the RESTORED red/black brand token values at their
-    // source (the token block feeds every utility via var()).
-
-    /// Surface-separation policy (owner review 2026-10-06: "lots of grey on
-    /// grey or grey on black"). WCAG ratios are the wrong yardstick for
-    /// large fills — they compress at both ends of the scale — so the ladder
-    /// is pinned in CIE L*: every consecutive surface step and every hairline
-    /// must differ by a just-noticeable amount (ΔL* ≥ 3 for fills, ≥ 2.5 for
-    /// borders), in BOTH themes. Live audit after this policy: low-separation
-    /// fills 1208 → 45 (all card-vs-page pairs whose edge is carried by a
-    /// crisp border), faint borders 216 → 0.
+    /// ARK surface policy: fills sit in a narrow paper band (canvas, rail,
+    /// inset never differ by a jarring step) and HIERARCHY IS CARRIED BY
+    /// RULE WEIGHT (3/2/1px ink), not by fill steps or shadows. The ladder
+    /// is therefore pinned at exact values, and the hairline must still be
+    /// legible against every fill it can touch.
     #[test]
-    fn surface_ladder_steps_are_perceptible_in_both_themes() {
+    fn surface_ladder_is_pinned_and_rule_carried() {
         fn lstar(rgb: &str) -> f64 {
             let parts: Vec<f64> = rgb
                 .split_whitespace()
@@ -297,195 +364,197 @@ mod tests {
                 903.3 * y
             }
         }
-        // Pull a "R G B" token's value out of a stylesheet.
-        fn token(sheet: &str, name: &str) -> String {
-            // The two stylesheets write tokens differently (`--x: 1 2 3` in the
-            // console, `--x:1 2 3` in the marketing sheet), so accept both.
+        let sheet = crate::ARK_CSS;
+        let token = |name: &str| -> String {
             let idx = sheet
-                .find(name)
+                .find(&format!("{name}: "))
                 .unwrap_or_else(|| panic!("missing token {name}"));
-            let rest = &sheet[idx + name.len()..];
-            let rest = rest.trim_start_matches(|c: char| c == ':' || c.is_whitespace());
+            let rest = &sheet[idx + name.len() + 2..];
             rest.split(';')
                 .next()
                 .unwrap_or_default()
                 .trim()
                 .to_string()
+        };
+        // The exact ARK ladder (paper / limestone / mist / hairline / ink).
+        assert_eq!(token("--background"), "255 255 255");
+        assert_eq!(token("--surface-100"), "246 248 250");
+        assert_eq!(token("--surface-200"), "238 242 246");
+        assert_eq!(token("--surface-300"), "196 205 213");
+        assert_eq!(token("--surface-950"), "14 20 27");
+        // The hairline reads on every fill it touches (ΔL* >= 12 vs paper,
+        // limestone and mist; >= 30 vs ink).
+        let hair = lstar("196 205 213");
+        for fill in ["255 255 255", "246 248 250", "238 242 246"] {
+            assert!(
+                (hair - lstar(fill)).abs() >= 12.0,
+                "hairline invisible on {fill}"
+            );
         }
-        let ladders: [(&str, &str, &str, &str, &str, &str); 2] = [
-            // sheet, page, card, inset, border
-            (
-                "console",
-                GLOBALS_CSS,
-                "--background",
-                "--card",
-                "--surface-100",
-                "--border",
-            ),
-            // The marketing sheet has no `--border` token: its hairlines are
-            // the surface-200 step.
-            (
-                "marketing",
-                MARKETING_INPUT_CSS,
-                "--background",
-                "--card",
-                "--surface-100",
-                "--surface-200",
-            ),
-        ];
-        for (name, sheet, page_t, card_t, inset_t, border_t) in ladders {
-            let page = token(sheet, page_t);
-            let card = token(sheet, card_t);
-            let inset = token(sheet, inset_t);
-            let border = token(sheet, border_t);
-            let dl = |a: &str, b: &str| (lstar(a) - lstar(b)).abs();
-            assert!(
-                dl(&page, &card) >= 3.0,
-                "{name}: the card fill must sit a perceptible step off the page (ΔL*={:.1}, page={page:?}, card={card:?})",
-                dl(&page, &card),
-            );
-            assert!(
-                dl(&card, &inset) >= 3.0,
-                "{name}: inset surfaces must sit a perceptible step off the card (ΔL*={:.1})",
-                dl(&card, &inset),
-            );
-            assert!(
-                dl(&border, &card) >= 2.5,
-                "{name}: the hairline must be visible on the card (ΔL*={:.1}, border={border:?})",
-                dl(&border, &card),
-            );
+        assert!((hair - lstar("14 20 27")).abs() >= 30.0);
+        // The rule tokens exist and carry the hierarchy.
+        assert_eq!(token("--rule-3"), "3px");
+        assert_eq!(token("--rule-2"), "2px");
+        assert_eq!(token("--rule-1"), "1px");
+        // No elevation exists in the authority. The single sanctioned
+        // box-shadow is the tab underline (inset 0 -3px 0 — a 3px ink RULE
+        // drawn inside the tab, not an elevation).
+        let rules = css_rules(sheet);
+        for line in rules.lines() {
+            if line.contains("box-shadow") {
+                assert!(
+                    line.contains("inset 0 -3px 0") || line.contains("box-shadow: none"),
+                    "the only sanctioned box-shadows are the tab rule and explicit none: {line}"
+                );
+            }
         }
     }
 
-    /// The palette policy (owner review 2026-10-06), pinned at the source of
-    /// BOTH stylesheets so it cannot drift back:
-    ///
-    /// 1. **No green.** The ApexMail palette is red + near-black/neutral;
-    ///    emerald "success" chips and the terminal's green strings read as a
-    ///    foreign design element on every page.
-    /// 2. **No black-infused two-tone red.** The brand fill is the classic
-    ///    flat red (#dc2626); the maroon gradient/blends (#a81818 → #7f1d1d,
-    ///    brand-950 #450a0a washes) are gone.
-    /// 3. **Surfaces separate.** The dark card fill is 24 24 27 — one clear
-    ///    step above the 9 9 11 page, so cards are not grey-on-grey.
+    /// The palette law, pinned at the authority: ink structure, blue
+    /// interaction, amber caution, red destruction and the wordmark — and
+    /// NO green and NO purple anywhere, in light or dark.
     #[test]
-    fn palette_policy_no_green_no_maroon_and_separating_surfaces() {
-        for (name, sheet) in [
-            ("console globals.css", GLOBALS_CSS),
-            ("console globals.input.css", GLOBALS_INPUT_CSS),
-            ("marketing input.css", MARKETING_INPUT_CSS),
+    fn palette_law_blue_ink_red_no_green_no_purple() {
+        let sheet = crate::ARK_CSS;
+        assert!(sheet.contains("--primary: 29 79 124;"), "interaction blue");
+        assert!(
+            sheet.contains("--destructive: 142 42 32;"),
+            "destruction red"
+        );
+        assert!(sheet.contains("--warning: 138 90 16;"), "caution amber");
+        assert!(sheet.contains("--foreground: 14 20 27;"), "ink");
+        assert_ne!(
+            sheet.find("--primary: ").map(|i| &sheet[i..i + 24]),
+            sheet.find("--destructive: ").map(|i| &sheet[i..i + 24]),
+            "interaction must never share a value with destruction"
+        );
+        for green in [
+            "34 197 94",
+            "22 163 74",
+            "20 83 45",
+            "74 222 128",
+            "#22c55e",
+            "#34d399",
+            "#4ade80",
+            "#86efac",
+            "#10b981",
+            "#059669",
         ] {
-            for green in [
-                "34 197 94",
-                "22 163 74",
-                "20 83 45",
-                "240 253 244",
-                "220 252 231",
-                "187 247 208",
-                "134 239 172",
-                "74 222 128",
-                "#22c55e",
-                "#34d399",
-                "#4ade80",
-                "#86efac",
-                "#10b981",
-                "#059669",
-            ] {
-                assert!(
-                    !sheet.contains(green),
-                    "{name} still carries the green palette value {green:?} — success states are neutral ink, never green",
-                );
-            }
-            for maroon in ["#a81818", "#7f1d1d"] {
-                assert!(
-                    !sheet.contains(maroon),
-                    "{name} still carries the black-infused two-tone red {maroon:?} — the brand fill is the flat classic red",
-                );
-            }
+            assert!(
+                !sheet.contains(green),
+                "green {green:?} must not exist — verified renders blue"
+            );
         }
-        // Surfaces separate in dark mode.
+        for purple in [
+            "99 102 241",
+            "139 92 246",
+            "168 85 247",
+            "126 34 206",
+            "#6366f1",
+            "#4f46e5",
+            "#4338ca",
+            "#8b5cf6",
+            "#a855f7",
+        ] {
+            assert!(
+                !sheet.contains(purple),
+                "purple {purple:?} must not exist — no framework indigo"
+            );
+        }
+        // The old red brand and zinc neutrals must stay gone (the wordmark
+        // keeps 185 28 28 only as --wordmark-apex).
         assert!(
-            GLOBALS_CSS.contains("--card: 24 24 27;"),
-            "the console's dark card fill must sit a clear step above the 9 9 11 page",
+            !sheet.contains("--primary: 185 28 28"),
+            "primary is blue, not the old red"
         );
         assert!(
-            MARKETING_INPUT_CSS.contains("--card: 24 24 27;"),
-            "the marketing dark card fill must sit a clear step above the 9 9 11 page",
+            !sheet.contains("--foreground: 9 9 11"),
+            "foreground is ink, not zinc"
         );
-        // The classic red is what the brand fill uses.
+        // The favicon carries the wordmark red and ARK radius 0.
+        let favicon = crate::leptos_views::FAVICON_SVG;
         assert!(
-            MARKETING_INPUT_CSS
-                .contains("--brand-gradient: linear-gradient(135deg, #dc2626, #dc2626);"),
-            "the marketing brand fill must be the flat classic red",
+            favicon.contains("fill=\"#B91C1C\""),
+            "favicon fill is the wordmark red"
+        );
+        assert!(!favicon.contains("rx="), "favicon is ARK: radius 0");
+        assert!(!favicon.contains("4f46e5") && !favicon.contains("dc2626"));
+    }
+
+    /// The wordmark is a fixed logo artefact (owner pin): Inter 700, 1.5rem,
+    /// tracking -0.05em, "Apex" #B91C1C + "Mail" #09090B (paper in dark),
+    /// pixel-equal to web_auth_logo().
+    #[test]
+    fn the_wordmark_is_pinned() {
+        let sheet = crate::ARK_CSS;
+        assert!(sheet.contains("--wordmark-apex: 185 28 28;"));
+        assert!(sheet.contains("--wordmark-mail: 9 9 11;"));
+        assert!(sheet.contains("--font-wordmark: 'Inter Wordmark'"));
+        let wm = sheet
+            .find(".apex-wordmark {")
+            .expect("the wordmark recipe must exist");
+        let body = &sheet[wm..wm + 400];
+        assert!(body.contains("font-family: var(--font-wordmark)"));
+        assert!(body.contains("font-weight: 700"));
+        assert!(body.contains("font-size: 1.5rem"));
+        assert!(body.contains("letter-spacing: -0.05em"));
+        // Inter ships only as the subset the wordmark renders, and is
+        // referenced only by the wordmark recipe: every "Inter" occurrence
+        // in the authority must be "Inter Wordmark" (the stack or the
+        // @font-face family) or "InterWordmark.woff2" (the src).
+        let mut stray = 0usize;
+        let mut at = 0usize;
+        let rules = css_rules(sheet);
+        let sheet = rules.as_str();
+        while let Some(found) = sheet[at..].find("Inter") {
+            at += found;
+            if !sheet[at..].starts_with("Inter Wordmark")
+                && !sheet[at..].starts_with("InterWordmark.woff2")
+            {
+                stray += 1;
+            }
+            at += "Inter".len();
+        }
+        assert_eq!(stray, 0, "Inter may be referenced only by the wordmark");
+        // And the dark twin flips Mail to paper, never the red.
+        assert!(sheet.contains("--wordmark-mail: 237 241 244"));
+        assert!(sheet.contains("--wordmark-apex: 196 80 70"));
+    }
+
+    /// The marketing build inlines a byte-identical copy of the authority.
+    #[test]
+    fn marketing_carries_the_byte_identical_ark_mirror() {
+        assert_eq!(
+            crate::ARK_CSS, crate::MARKETING_ARK_CSS,
+            "apps/marketing-zola/static/css/ark.css must equal crates/ui-foundation/assets/ark.css (tools/check_ark_mirror.py enforces the same at gate level)"
         );
     }
 
-    /// Bot-surface wrap + hit-target recipes (dogfood 2026-10-06 ui-visual),
-    /// pinned at the source of BOTH stylesheets so the authored sheet and
-    /// the built sheet cannot drift apart:
-    ///
-    /// 1. `.whitespace-pre-wrap` — the assistant transcript turns, the
-    ///    AI-draft reply bodies and the demo result blocks are pre-rendered
-    ///    multi-line text; without the utility a `<p>` collapses the
-    ///    newlines and a `<pre>` keeps `white-space: pre` and scrolls
-    ///    sideways. The class was composed in Rust string literals and the
-    ///    committed build had dropped it.
-    /// 2. the browser `summary` base rule — disclosure summaries are the
-    ///    zero-JS console's only expand/collapse control, so they carry the
-    ///    24px minimum hit target (WCAG 2.5.8) via block padding; the 16px
-    ///    `text-xs` and 20px `text-sm` summary lines sat below it.
+    /// Wrap + hit-target rules: pre-rendered multi-line content wraps, and
+    /// disclosure summaries carry the 24px minimum hit target (WCAG 2.5.8).
     #[test]
-    fn bot_surface_wrap_and_hit_target_rules_are_in_both_sheets() {
+    fn wrap_and_hit_target_rules_are_in_both_sheets() {
         for (name, sheet) in [
             ("console globals.css", GLOBALS_CSS),
-            ("console globals.input.css", GLOBALS_INPUT_CSS),
+            ("console globals.input.css", crate::ARK_CSS),
         ] {
             assert!(
                 sheet.contains(".whitespace-pre-wrap"),
-                "{name} must define .whitespace-pre-wrap — the bot surfaces' multi-line content wraps with it",
+                "{name} must define .whitespace-pre-wrap",
             );
             assert!(
                 sheet.contains("min-height: 1.5rem;") && sheet.contains("padding-block: 0.25rem;"),
-                "{name} must carry the 24px summary hit-target rule (min-height + block padding)",
+                "{name} must carry the 24px summary hit-target rule",
             );
         }
     }
 
-    /// Dark-mode AA pairings for the bot surfaces (dogfood 2026-10-06
-    /// ui-visual, relayed from the mailbot live gate): two recipes carry
-    /// their own color rules that the generic `.text-primary` / token
-    /// remaps never reach —
-    ///
-    /// 1. `.apex-pill--brand` paints `--primary` (the light-mode brand-700
-    ///    red, 185 28 28) which is 2.7:1 on the dark card; dark must step
-    ///    the pill to brand-400 (248 113 113).
-    /// 2. the success flash/notice ink is the near-black success-900; in
-    ///    dark the success-50 wash remaps to 39 39 42, leaving 1.27:1 —
-    ///    dark must step the ink to the near-white success-100.
-    ///
-    /// The zero-JS console takes the `:root:not(.light)` media path, so
-    /// each override must exist in BOTH forms in BOTH sheets.
+    /// Dark AA pairings computed from the shipped token values: every text
+    /// token clears 4.5:1 on its canvas in BOTH themes (muted ink on paper,
+    /// light muted on ink, interaction blue on paper, lightened blue on
+    /// ink, destruction red on both, amber on both).
     #[test]
-    fn bot_surface_dark_aa_overrides_are_in_both_sheets() {
-        for (name, sheet) in [
-            ("console globals.css", GLOBALS_CSS),
-            ("console globals.input.css", GLOBALS_INPUT_CSS),
-        ] {
-            for selector in [
-                ".dark .apex-pill--brand",
-                ":root:not(.light) .apex-pill--brand",
-                ".dark .text-success-900",
-                ":root:not(.light) .text-success-900",
-            ] {
-                assert!(
-                    sheet.contains(selector),
-                    "{name} must carry {selector} — without it the recipe keeps its light pairing in dark",
-                );
-            }
-        }
-
-        // The pairing itself clears AA on the dark card (computed from the
-        // shipped token values, both themes' card fills).
+    fn text_tokens_clear_aa_on_their_canvases() {
         fn luminance(rgb: &str) -> f64 {
             let parts: Vec<f64> = rgb
                 .split_whitespace()
@@ -506,254 +575,32 @@ mod tests {
             let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };
             (hi + 0.05) / (lo + 0.05)
         }
-        let brand_400 = "248 113 113"; // --brand-400
-        let dark_card = "24 24 27"; // --card, dark
-        let light_card = "255 255 255";
-        let light_primary = "185 28 28"; // --primary, light
-        assert!(
-            ratio(light_primary, light_card) >= 4.5,
-            "the light brand pill must clear AA on the light card",
-        );
-        assert!(
-            ratio(brand_400, dark_card) >= 4.5,
-            "the dark brand pill must clear AA on the dark card (brand-400 vs 24 24 27)",
-        );
-        assert!(
-            ratio("244 244 245", "39 39 42") >= 4.5,
-            "the dark success ink (success-100) must clear AA on the remapped success wash (39 39 42)",
-        );
-    }
-
-    /// The last two layout-gate pages (dogfood 2026-10-06 ui-visual,
-    /// residual sweep), pinned at their source:
-    ///
-    /// 1. every sales JSON-mutation `<code>` chip wraps its long endpoint —
-    ///    `POST /v1/admin/autopilot/decisions/:id/review` is one unbreakable
-    ///    token and spilled 72 px out of its card at mobile width;
-    /// 2. `.apex-table-wrap` is a positioned scroll container — without
-    ///    `position: relative` the sr-only labels inside a table header are
-    ///    absolutely positioned against the document and their static
-    ///    position widened `/cp/demos` by 23 px at mobile.
-    #[test]
-    fn sales_code_chips_and_table_wrapper_layout_pins() {
-        let sales = crate::axum_router::render_route("control-plane", "/sales")
-            .expect("the sales route must render");
-        assert!(
-            sales.contains("text-primary break-words"),
-            "sales code chips must carry break-words — the long endpoint tokens spill their card otherwise",
-        );
-        let demos = crate::axum_router::render_route("control-plane", "/cp/demos")
-            .expect("the demos route must render");
-        assert!(
-            demos.contains("apex-table-wrap") && demos.contains("apex-table"),
-            "the demos sessions table must render inside the shared wrapper",
-        );
-        for (name, sheet) in [
-            ("console globals.css", GLOBALS_CSS),
-            ("console globals.input.css", GLOBALS_INPUT_CSS),
+        // (text, canvas) pairs that the primitives actually ship.
+        for (text, canvas, why) in [
+            ("14 20 27", "255 255 255", "ink on paper"),
+            ("61 75 89", "255 255 255", "muted ink on paper"),
+            ("91 107 122", "255 255 255", "tertiary ink on paper"),
+            ("29 79 124", "255 255 255", "interaction blue on paper"),
+            ("20 58 92", "255 255 255", "link blue-deep on paper"),
+            ("142 42 32", "255 255 255", "destruction red on paper"),
+            ("138 90 16", "255 255 255", "caution amber on paper"),
+            ("237 241 244", "14 20 27", "ink-mode text on ink"),
+            ("192 202 211", "14 20 27", "muted text on ink"),
+            ("155 189 220", "14 20 27", "interaction blue on ink"),
+            ("224 138 128", "14 20 27", "destruction red on ink"),
+            ("210 166 94", "14 20 27", "caution amber on ink"),
+            (
+                "91 107 122",
+                "246 248 250",
+                "muted ink on the limestone rail",
+            ),
         ] {
-            // The sheets carry a legacy `.apex-table-wrap` rule (white card,
-            // no scroll) ahead of the canonical one; the canonical rule is
-            // the one carrying the scroll container. At least one must be
-            // positioned too.
-            let positioned = sheet.match_indices(".apex-table-wrap").any(|(at, _)| {
-                sheet[at..(at + 400).min(sheet.len())].contains("position: relative")
-            });
             assert!(
-                positioned,
-                "{name}: a .apex-table-wrap rule must be position: relative so abspos descendants stay inside the scroll container",
-            );
-            let scrolls = sheet
-                .match_indices(".apex-table-wrap")
-                .any(|(at, _)| sheet[at..(at + 400).min(sheet.len())].contains("overflow-x: auto"));
-            assert!(
-                scrolls,
-                "{name}: .apex-table-wrap must keep its horizontal scroll"
+                ratio(text, canvas) >= 4.5,
+                "{why} must clear AA ({text} on {canvas} = {:.2})",
+                ratio(text, canvas)
             );
         }
-    }
-
-    /// Console/CP brand tokens: deep red #dc2626 on near-black zinc #09090b.
-    #[test]
-    fn brand_palette_is_red_and_black() {
-        for source in [GLOBALS_CSS, GLOBALS_INPUT_CSS] {
-            // Deep red brand accent (#dc2626 = 220 38 38).
-            // Light-mode primary is the brand-700 step (#b91c1c): the
-            // #dc2626 fill measured 4.40:1 as TEXT on the 244 244 246 canvas
-            // (dogfood 2026-10-06). White on #b91c1c is 6.35:1 — AA for both
-            // text and fill roles.
-            assert!(
-                source.contains("--primary: 185 28 28;"),
-                "primary must be the brand-700 red #b91c1c"
-            );
-            assert!(
-                source.contains("--destructive: 220 38 38;"),
-                "destructive must be #dc2626"
-            );
-            assert!(
-                source.contains("--ring: 220 38 38;"),
-                "ring must be #dc2626"
-            );
-            assert!(
-                source.contains("--error: 220 38 38;"),
-                "error must be #dc2626"
-            );
-            assert!(
-                source.contains("--brand-500: 220 38 38;"),
-                "brand-500 must be #dc2626"
-            );
-            assert!(
-                source.contains("--brand-600: 185 28 28;"),
-                "brand-600 must be #b91c1c"
-            );
-            assert!(
-                source.contains("--brand-950: 45 10 10;"),
-                "brand-950 must be #2d0a0a"
-            );
-            // Near-black zinc neutrals.
-            assert!(
-                source.contains("--foreground: 9 9 11;"),
-                "foreground must be zinc-950 #09090b"
-            );
-            assert!(
-                source.contains("--surface-950: 9 9 11;"),
-                "surface-950 must be zinc-950 #09090b"
-            );
-            // surface-200 deepened to zinc-300: a zinc-200 hairline on the
-            // 244 244 246 canvas measured ΔL* < 2.5 (invisible) — the
-            // surface-ladder gate pins the perceptible step (2026-10-06).
-            assert!(
-                source.contains("--surface-200: 212 212 216;"),
-                "surface-200 must be zinc-300 #d4d4d8 so hairlines read"
-            );
-            // The coral regression values must stay gone.
-            assert!(
-                !source.contains("221 82 76"),
-                "coral #dd524c (221 82 76) must not appear — the brand is #dc2626"
-            );
-            assert!(
-                !source.contains("15 17 22"),
-                "blue-tinted slate foreground (15 17 22) must not appear — the brand neutrals are zinc"
-            );
-        }
-        // The console favicon must carry the brand red, not the pre-2026-08
-        // indigo (#4f46e5) that survived in the one artifact users see on
-        // every tab (audit SM11 F4).
-        let favicon = crate::leptos_views::FAVICON_SVG;
-        assert!(
-            favicon.contains("fill=\"#dc2626\""),
-            "favicon fill must be the brand token #dc2626"
-        );
-        assert!(
-            !favicon.contains("4f46e5"),
-            "indigo #4f46e5 must not appear in the favicon — the brand is #dc2626"
-        );
-    }
-
-    /// Dark mode is surface-only: the brand red tokens are NOT overridden
-    /// in the dark blocks, so the restored palette works in dark mode
-    /// exactly as before the regression.
-    #[test]
-    fn dark_mode_keeps_the_red_brand() {
-        for source in [GLOBALS_CSS, GLOBALS_INPUT_CSS] {
-            let dark_block_start = source.find(".dark {").expect("dark token block");
-            let dark_block = &source[dark_block_start..dark_block_start + 1200];
-            assert!(
-                !dark_block.contains("--primary:"),
-                "dark mode must not override the brand accent"
-            );
-            assert!(
-                dark_block.contains("--background: 9 9 11;"),
-                "dark background must stay near-black zinc"
-            );
-            assert!(
-                dark_block.contains("--foreground: 250 250 250;"),
-                "dark foreground must stay zinc-50"
-            );
-        }
-    }
-
-    /// Marketing brand tokens: red scale (accent #EF4444, deep #DC2626)
-    /// with the #DC2626 → #991B1B gradient.
-    #[test]
-    fn marketing_palette_is_red() {
-        assert!(
-            MARKETING_INPUT_CSS.contains("--brand-500: 239 68 68;"),
-            "marketing brand-500 must be #ef4444"
-        );
-        assert!(
-            // brand-600 is the TEXT step for prose links and receipts; on the
-            // 244 244 246 canvas #dc2626 measured 4.40:1, so it deepens to the
-            // brand-700 red (5.9:1) — the same AA-driven step as the console.
-            MARKETING_INPUT_CSS.contains("--brand-600:185 28 28"),
-            "marketing brand-600 must be the brand-700 red #b91c1c"
-        );
-        assert!(
-            MARKETING_INPUT_CSS.contains("--brand-950: 69 10 10;"),
-            "marketing brand-950 must be #450a0a"
-        );
-        // The marketing sheet writes tokens without a space after the colon.
-        assert!(
-            MARKETING_INPUT_CSS.contains("--primary:185 28 28"),
-            "marketing primary must be the brand-700 red #b91c1c (AA as text on the light canvas)"
-        );
-        // The brand fill is the CLASSIC flat red: white on #dc2626 measures
-        // 4.76:1 (AA for normal text), so the old maroon two-tone gradient's
-        // rationale ("white needs 4.5+ on every stop") is met by the flat
-        // fill — and the black-infused maroon is gone (owner review
-        // 2026-10-06).
-        assert!(
-            MARKETING_INPUT_CSS.contains("linear-gradient(135deg, #dc2626, #dc2626)"),
-            "brand fill must be the flat classic red (#dc2626), white text at 4.76:1"
-        );
-        for maroon in ["#a81818", "#7f1d1d"] {
-            assert!(
-                !MARKETING_INPUT_CSS.contains(maroon),
-                "the black-infused maroon {maroon} must not return to the brand fill"
-            );
-        }
-        // The indigo regression values must stay gone.
-        assert!(
-            !MARKETING_INPUT_CSS.contains("99 102 241"),
-            "indigo #6366f1 (99 102 241) must not appear — the brand is red"
-        );
-        assert!(
-            !MARKETING_INPUT_CSS.contains("30 27 75"),
-            "indigo brand-950 (30 27 75) must not appear — dark brand tints are red"
-        );
-        assert!(
-            !MARKETING_INPUT_CSS.contains("#6366f1") && !MARKETING_INPUT_CSS.contains("#4338ca"),
-            "indigo gradient hexes must not appear"
-        );
-    }
-
-    /// The views reference the brand tokens through the utility classes
-    /// that compile against them (bg-primary / text-primary /
-    /// bg-brand-*), proving the served markup carries the red brand.
-    #[test]
-    fn views_reference_the_brand_tokens() {
-        let dashboard =
-            crate::axum_router::render_route("web", "/dashboard").expect("web dashboard renders");
-        assert!(
-            dashboard.contains("bg-primary") || dashboard.contains("text-primary"),
-            "console views must reference the primary token utilities"
-        );
-        assert!(
-            GLOBALS_CSS.contains(".bg-primary"),
-            "globals.css must emit .bg-primary"
-        );
-        assert!(
-            GLOBALS_CSS.contains(".bg-brand-500"),
-            "globals.css must emit .bg-brand-500"
-        );
-        assert!(
-            GLOBALS_CSS.contains(".text-primary"),
-            "globals.css must emit .text-primary"
-        );
-        // The emitted utilities must bind to the token variables (so the
-        // pinned token values are what actually renders).
-        assert!(GLOBALS_CSS.contains("background-color: rgb(var(--primary)"));
-        assert!(GLOBALS_CSS.contains("color: rgb(var(--brand-400)"));
     }
 
     /// The marketing cookie banner (served from the Zola build output)
@@ -781,8 +628,6 @@ mod tests {
             home.contains("/consent?choice=all"),
             "banner must link the accept-all choice to /consent"
         );
-        // The old JS hook attributes may remain as inert data-* markers,
-        // but no <button> may sit inside the banner's action row anymore.
         let banner_start = home
             .find("cookie-consent-banner")
             .unwrap_or_else(|| panic!("banner element found"));

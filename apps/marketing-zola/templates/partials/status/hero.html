@@ -3,47 +3,46 @@
 {# The static export links to the live status surface instead of #}
 {# asserting component health at build time.                     #}
 
-<section class="relative overflow-hidden bg-surface-50 pt-32 lg:pt-40 pb-20">
+<section class="relative overflow-hidden pt-32 lg:pt-40 pb-20">
   <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-    <div class="text-center mb-16">
-      <div class="inline-flex items-center gap-2 px-4 py-2 rounded-sm bg-brand-100 text-brand-700 text-sm font-semibold mb-6 animate-in">
-        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+    <div class="mb-16">
+      <div class="inline-flex items-center gap-2 px-4 py-2 mb-6 apex-em">
         {% if i18n_data and i18n_data[l] and i18n_data[l]["status"] and i18n_data[l]["status"]["title"] %}{{ i18n_data[l]["status"]["title"] }}{% else %}System Status{% endif %}
       </div>
-      <h1 class="animate-in delay-100 text-4xl md:text-5xl lg:text-6xl font-bold text-surface-950 tracking-tight mb-6">
+      <h1 class="mb-6 apex-page-title">
         ApexMail<br />
-        <span class="text-brand-500">{% if i18n_data and i18n_data[l] and i18n_data[l]["status"] and i18n_data[l]["status"]["hero_title"] %}{{ i18n_data[l]["status"]["hero_title"] }}{% else %}System Status{% endif %}</span>
+        <span class="">{% if i18n_data and i18n_data[l] and i18n_data[l]["status"] and i18n_data[l]["status"]["hero_title"] %}{{ i18n_data[l]["status"]["hero_title"] }}{% else %}System Status{% endif %}</span>
       </h1>
-      <p class="animate-in delay-200 text-lg lg:text-xl text-surface-600 max-w-2xl mx-auto leading-relaxed">
+      <p class="max-w-2xl mx-auto">
         {% if i18n_data and i18n_data[l] and i18n_data[l]["status"] and i18n_data[l]["status"]["hero_subtitle"] %}{{ i18n_data[l]["status"]["hero_subtitle"] }}{% else %}Live incident updates, component health, and maintenance notices are maintained on the dedicated ApexMail status surface.{% endif %}
       </p>
     </div>
 
     {# ── Live Status Display ─────────────────────────────── #}
-    <div id="status-island" class="animate-in delay-300">
+    <div id="status-island" class="">
       {# Static status display #}
       <div class="max-w-3xl mx-auto">
-        <div class="flex flex-col items-center justify-center gap-4 p-6 bg-brand-50 border border-brand-200 rounded-lg mb-8 text-center">
-          <span class="text-lg font-semibold text-brand-800">View live ApexMail status</span>
-          <a href="{{ config.extra.status_url }}" class="btn-primary--invert inline-flex items-center justify-center">
+        <div class="flex flex-col items-center justify-center gap-4 p-6 border mb-8">
+          <span class="apex-em">View live ApexMail status</span>
+          <a href="{{ config.extra.status_url }}" class="inline-flex items-center justify-center apex-btn apex-btn--primary">
             Open Status Page
           </a>
         </div>
 
         {# One neutral handoff replaces the stacked amber warning panels: the
            static export names what it tracks and points at the live host. #}
-        <div class="p-5 rounded-lg border border-surface-200 bg-surface-50 mb-6">
-          <p class="text-sm text-surface-600 font-medium">
+        <div class="p-5 border mb-6">
+          <p class="apex-em">
             {% if i18n_data and i18n_data[l] and i18n_data[l]["status"] and i18n_data[l]["status"]["description"] %}{{ i18n_data[l]["status"]["description"] }}{% else %}This is a static export. It lists the services ApexMail tracks for monitoring — it does not assert
             component health. Live health, incidents and maintenance notices are on{% endif %}
-            <a href="{{ config.extra.status_url }}" class="font-semibold text-surface-950 underline">status.apexmail.ee</a>.
+            <a href="{{ config.extra.status_url }}" class="apex-em apex-link">status.apexmail.ee</a>.
           </p>
         </div>
 
         {# The declared monitored-service list is rendered (it used to be set
            in the template and never shown, while the copy claimed it was). #}
-        <div class="p-6 rounded-lg bg-surface-50 border border-surface-200">
-          <h2 class="text-sm font-bold uppercase tracking-widest text-surface-500 mb-4">Services tracked for monitoring</h2>
+        <div class="p-6 border">
+          <h2 class="mb-4 apex-section-head">Services tracked for monitoring</h2>
           {% set services = [
             "Email API",
             "SMTP Relay",
@@ -56,7 +55,7 @@
           ] %}
           <ul class="flex flex-wrap gap-2" role="list">
             {% for service in services %}
-            <li class="rounded-sm border border-surface-200 bg-surface-100 px-3 py-1.5 text-xs font-bold tracking-wide text-surface-700">{{ service }}</li>
+            <li class="border px-3 py-1.5 apex-em">{{ service }}</li>
             {% endfor %}
           </ul>
         </div>

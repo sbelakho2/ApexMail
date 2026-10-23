@@ -1,94 +1,53 @@
 {# Security Section #}
 {# DORMANT SNAPSHOT (review §8.3): no current template includes this partial.
    It is kept as a maintained snapshot — availability must not be presented as
-   operational status. The HIPAA row below carries a neutral "Not offered"
-   chip, never an Active badge. #}
-<section class="py-20 lg:py-32 bg-surface-100 border-y border-surface-200">
-  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-    <div class="grid lg:grid-cols-2 gap-20 items-center">
-      <div>
-        <span class="inline-block px-2 py-0.5 text-xs font-bold tracking-widest text-surface-600 border border-surface-200 rounded-sm mb-6 uppercase">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["eyebrow"] %}{{ i18n_data[l]["security"]["eyebrow"] }}{% else %}Security Architecture{% endif %}</span>
-        <h2 class="text-surface-950 mb-8 tracking-tighter">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["heading_1"] %}{{ i18n_data[l]["security"]["heading_1"] }}{% else %}Security designed for{% endif %}<br /><span class="text-brand-500">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["heading_2"] %}{{ i18n_data[l]["security"]["heading_2"] }}{% else %}audit readiness.{% endif %}</span></h2>
-        <p class="text-surface-600 mb-12 text-lg leading-[1.5]">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["subtitle"] %}{{ i18n_data[l]["security"]["subtitle"] }}{% else %}Security built into every layer: tenant isolation, TLS everywhere, full audit trails.{% endif %}</p>
-        <ul class="space-y-8">
-          <li class="flex items-start gap-4">
-            <div class="w-1.5 h-1.5 bg-brand-500 flex-shrink-0 mt-2"></div>
-            <div>
-              <span class="font-bold text-surface-950 text-sm tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["item1_title"] %}{{ i18n_data[l]["security"]["item1_title"] }}{% else %}Enterprise Security Controls{% endif %}</span>
-              <p class="text-[13px] text-surface-600 mt-1">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["item1_desc"] %}{{ i18n_data[l]["security"]["item1_desc"] }}{% else %}Security and audit features vary by plan.{% endif %}</p>
-            </div>
-          </li>
-          <li class="flex items-start gap-4">
-            <div class="w-1.5 h-1.5 bg-brand-500 flex-shrink-0 mt-2"></div>
-            <div>
-              <span class="font-bold text-surface-950 text-sm tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["item2_title"] %}{{ i18n_data[l]["security"]["item2_title"] }}{% else %}GDPR &amp; Compliance{% endif %}</span>
-              <p class="text-[13px] text-surface-600 mt-1">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["item2_desc"] %}{{ i18n_data[l]["security"]["item2_desc"] }}{% else %}GDPR-oriented processing in EU data centers. HIPAA availability is not currently offered.{% endif %}</p>
-            </div>
-          </li>
-          <li class="flex items-start gap-4">
-            <div class="w-1.5 h-1.5 bg-brand-500 flex-shrink-0 mt-2"></div>
-            <div>
-              <span class="font-bold text-surface-950 text-sm tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["item3_title"] %}{{ i18n_data[l]["security"]["item3_title"] }}{% else %}AES-256 Encryption{% endif %}</span>
-              <p class="text-[13px] text-surface-600 mt-1">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["item3_desc"] %}{{ i18n_data[l]["security"]["item3_desc"] }}{% else %}All data encrypted at rest and in transit via TLS 1.2+ (TLS 1.3 preferred).{% endif %}</p>
-            </div>
-          </li>
-          <li class="flex items-start gap-4">
-            <div class="w-1.5 h-1.5 bg-brand-500 flex-shrink-0 mt-2"></div>
-            <div>
-              <span class="font-bold text-surface-950 text-sm tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["item4_title"] %}{{ i18n_data[l]["security"]["item4_title"] }}{% else %}Complete Audit Trail{% endif %}</span>
-              <p class="text-[13px] text-surface-600 mt-1">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["item4_desc"] %}{{ i18n_data[l]["security"]["item4_desc"] }}{% else %}Audit logging with integrity verification across all system interactions.{% endif %}</p>
-            </div>
-          </li>
-        </ul>
-      </div>
-      <div class="relative">
-        <div class="apex-card bg-surface-50 p-10">
-          <div class="text-center mb-10 relative">
-            <div class="w-16 h-16 rounded-sm bg-surface-100 flex items-center justify-center mx-auto mb-6 border border-surface-200">
-              <svg xmlns="http://www.w3.org/2000/svg" class="w-8 h-8 text-surface-950" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-            </div>
-            <h3 class="text-base font-bold text-surface-950 mb-1 tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["compliance_status"] %}{{ i18n_data[l]["security"]["compliance_status"] }}{% else %}Compliance Status{% endif %}</h3>
-            <p class="text-[11px] font-bold tracking-tighter text-surface-400">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["system_integrity_label"] %}{{ i18n_data[l]["security"]["system_integrity_label"] }}{% else %}System Integrity Controls{% endif %}</p>
-          </div>
-          <div class="space-y-2">
-            <div class="flex items-center justify-between p-3 border border-surface-200 bg-surface-100 hover:bg-surface-200 transition-colors">
-              <span class="text-[11px] font-bold text-surface-700 tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["compliance_check_1"] %}{{ i18n_data[l]["security"]["compliance_check_1"] }}{% else %}GDPR-aligned processing (EEA-hosted){% endif %}</span>
-              <span class="inline-flex items-center gap-1.5 px-2 py-0.5 bg-surface-50 text-surface-950 text-xs font-bold border border-surface-300 tracking-widest">
-                <div class="w-1.5 h-1.5 bg-success-500"></div>
-                {% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["active"] %}{{ i18n_data[l]["security"]["active"] }}{% else %}Active{% endif %}
-              </span>
-            </div>
-            <div class="flex items-center justify-between p-3 border border-surface-200 bg-surface-100 hover:bg-surface-200 transition-colors">
-              <span class="text-[11px] font-bold text-surface-700 tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["compliance_check_2"] %}{{ i18n_data[l]["security"]["compliance_check_2"] }}{% else %}HIPAA availability not currently offered{% endif %}</span>
-              {# Availability, not operational status: neutral chip, no green dot. #}
-              <span class="inline-flex items-center gap-1.5 px-2 py-0.5 bg-surface-50 text-surface-600 text-xs font-bold border border-surface-300 tracking-widest">
-                {% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["not_offered"] %}{{ i18n_data[l]["security"]["not_offered"] }}{% else %}Not offered{% endif %}
-              </span>
-            </div>
-            <div class="flex items-center justify-between p-3 border border-surface-200 bg-surface-100 hover:bg-surface-200 transition-colors">
-              <span class="text-[11px] font-bold text-surface-700 tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["compliance_check_3"] %}{{ i18n_data[l]["security"]["compliance_check_3"] }}{% else %}Data residency (EU){% endif %}</span>
-              <span class="inline-flex items-center gap-1.5 px-2 py-0.5 bg-surface-50 text-surface-950 text-xs font-bold border border-surface-300 tracking-widest">
-                <div class="w-1.5 h-1.5 bg-success-500"></div>
-                {% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["active"] %}{{ i18n_data[l]["security"]["active"] }}{% else %}Active{% endif %}
-              </span>
-            </div>
-            <div class="flex items-center justify-between p-3 border border-surface-200 bg-surface-100 hover:bg-surface-200 transition-colors">
-              <span class="text-[11px] font-bold text-surface-700 tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["compliance_check_4"] %}{{ i18n_data[l]["security"]["compliance_check_4"] }}{% else %}Encryption at rest{% endif %}</span>
-              <span class="inline-flex items-center gap-1.5 px-2 py-0.5 bg-surface-50 text-surface-950 text-xs font-bold border border-surface-300 tracking-widest">
-                <div class="w-1.5 h-1.5 bg-success-500"></div>
-                {% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["active"] %}{{ i18n_data[l]["security"]["active"] }}{% else %}Active{% endif %}
-              </span>
-            </div>
-            <div class="flex items-center justify-between p-3 border border-surface-200 bg-surface-100 hover:bg-surface-200 transition-colors">
-              <span class="text-[11px] font-bold text-surface-700 tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["compliance_check_5"] %}{{ i18n_data[l]["security"]["compliance_check_5"] }}{% else %}TLS 1.2+ in transit{% endif %}</span>
-              <span class="inline-flex items-center gap-1.5 px-2 py-0.5 bg-surface-50 text-surface-950 text-xs font-bold border border-surface-300 tracking-widest">
-                <div class="w-1.5 h-1.5 bg-success-500"></div>
-                {% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["active"] %}{{ i18n_data[l]["security"]["active"] }}{% else %}Active{% endif %}
-              </span>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
+   operational status. The HIPAA row carries a neutral "Not offered" status,
+   never an Active badge. ARK round: the checklist is an apex-table with the
+   word-and-square status vocabulary. #}
+<section class="apex-mkt-section" aria-label="Security architecture">
+  <div class="apex-section-head">
+    <h2 class="apex-h2">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["heading_1"] %}{{ i18n_data[l]["security"]["heading_1"] }}{% else %}Security designed for audit readiness.{% endif %}</h2>
+    <span class="apex-section-aside">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["eyebrow"] %}{{ i18n_data[l]["security"]["eyebrow"] }}{% else %}Security Architecture{% endif %}</span>
+  </div>
+  <p class="apex-lead max-w-2xl mt-2">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["subtitle"] %}{{ i18n_data[l]["security"]["subtitle"] }}{% else %}Security built into every layer: tenant isolation, TLS everywhere, full audit trails.{% endif %}</p>
+
+  <div class="apex-table-wrap mt-8">
+    <table class="apex-table">
+      <caption class="sr-only">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["compliance_status"] %}{{ i18n_data[l]["security"]["compliance_status"] }}{% else %}Compliance status{% endif %}</caption>
+      <thead>
+        <tr>
+          <th scope="col">Control</th>
+          <th scope="col">Detail</th>
+          <th scope="col">Status</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="apex-key">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["item1_title"] %}{{ i18n_data[l]["security"]["item1_title"] }}{% else %}Enterprise Security Controls{% endif %}</td>
+          <td class="break-words">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["item1_desc"] %}{{ i18n_data[l]["security"]["item1_desc"] }}{% else %}Security and audit features vary by plan.{% endif %}</td>
+          <td><span class="apex-status">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["active"] %}{{ i18n_data[l]["security"]["active"] }}{% else %}Active{% endif %}</span></td>
+        </tr>
+        <tr>
+          <td class="apex-key">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["item2_title"] %}{{ i18n_data[l]["security"]["item2_title"] }}{% else %}GDPR &amp; Compliance{% endif %}</td>
+          <td class="break-words">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["item2_desc"] %}{{ i18n_data[l]["security"]["item2_desc"] }}{% else %}GDPR-oriented processing in EU data centers. HIPAA availability is not currently offered.{% endif %}</td>
+          <td><span class="apex-status">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["active"] %}{{ i18n_data[l]["security"]["active"] }}{% else %}Active{% endif %}</span></td>
+        </tr>
+        <tr>
+          <td class="apex-key">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["item3_title"] %}{{ i18n_data[l]["security"]["item3_title"] }}{% else %}AES-256 Encryption{% endif %}</td>
+          <td class="break-words">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["item3_desc"] %}{{ i18n_data[l]["security"]["item3_desc"] }}{% else %}All data encrypted at rest and in transit via TLS 1.2+ (TLS 1.3 preferred).{% endif %}</td>
+          <td><span class="apex-status">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["active"] %}{{ i18n_data[l]["security"]["active"] }}{% else %}Active{% endif %}</span></td>
+        </tr>
+        <tr>
+          <td class="apex-key">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["item4_title"] %}{{ i18n_data[l]["security"]["item4_title"] }}{% else %}Complete Audit Trail{% endif %}</td>
+          <td class="break-words">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["item4_desc"] %}{{ i18n_data[l]["security"]["item4_desc"] }}{% else %}Audit logging with integrity verification across all system interactions.{% endif %}</td>
+          <td><span class="apex-status">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["active"] %}{{ i18n_data[l]["security"]["active"] }}{% else %}Active{% endif %}</span></td>
+        </tr>
+        <tr>
+          <td class="apex-key">HIPAA</td>
+          <td class="break-words">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["compliance_check_2"] %}{{ i18n_data[l]["security"]["compliance_check_2"] }}{% else %}HIPAA availability not currently offered{% endif %}</td>
+          <td><span class="apex-status">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["not_offered"] %}{{ i18n_data[l]["security"]["not_offered"] }}{% else %}Not offered{% endif %}</span></td>
+        </tr>
+      </tbody>
+    </table>
   </div>
 </section>

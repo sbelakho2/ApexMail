@@ -30,7 +30,9 @@ fn ui_icon(name: &str, class_name: &str) -> String {
 // ─── Root layouts ───────────────────────────────────────────
 
 pub(crate) const WEB_ROOT_HTML_CLASSES: &str = "__variable_712c26 __variable_60443c";
-pub(crate) const WEB_ROOT_BODY_CLASSES: &str = "font-apex antialiased text-[16px] leading-[1.55]";
+// Body type is the authority's (ark.css: Overpass 15px/1.55); the shell
+// emits no per-page font/size classes.
+pub(crate) const WEB_ROOT_BODY_CLASSES: &str = "";
 
 /// Deferred-feature 8: the console favicon. A single inline SVG (the ApexMail
 /// wordmark's "A" chevron on the brand color) served BOTH as a data: URL in
@@ -40,7 +42,7 @@ pub(crate) const WEB_ROOT_BODY_CLASSES: &str = "font-apex antialiased text-[16px
 /// `#dc2626` (audit SM11 F4: this was indigo `#4f46e5`, the one indigo
 /// artifact left in the red/black brand — pinned by
 /// `brand_palette_is_red_and_black` in lib.rs).
-pub const FAVICON_SVG: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 32 32\"><rect width=\"32\" height=\"32\" rx=\"7\" fill=\"#dc2626\"/><path d=\"M16 7 26 25h-5.4L16 16.6 11.4 25H6L16 7Z\" fill=\"#ffffff\"/></svg>";
+pub const FAVICON_SVG: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 32 32\"><rect width=\"32\" height=\"32\" fill=\"#B91C1C\"/><path d=\"M16 7 26 25h-5.4L16 16.6 11.4 25H6L16 7Z\" fill=\"#ffffff\"/></svg>";
 
 /// The favicon as an HTML `href` value: percent-encoded `data:image/svg+xml`
 /// (no base64 — keeps the encoded form byte-stable across renders).
@@ -114,7 +116,7 @@ pub fn web_root_layout_with_branding(
 <link rel=\"stylesheet\" href=\"{globals_css}\" data-globals-css>\
 {branding_style}\
 </head>\
-    <body class=\"{body_classes} min-h-screen bg-background\"><a href=\"#app-main\" class=\"sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded-sm focus:bg-card focus:px-4 focus:py-2 focus:text-sm focus:font-bold focus:text-surface-950 focus:border focus:border-surface-950\">Skip to content</a>{child_html}\
+    <body class=\"{body_classes} min-h-screen\"><a href=\"#app-main\" class=\"apex-skip-link\">Skip to content</a>{child_html}\
 </body>\
 </html>",
         html_classes = WEB_ROOT_HTML_CLASSES,
@@ -158,7 +160,7 @@ pub fn control_plane_root_layout_with_title(child_html: &str, title: &str) -> St
 {favicon_link}\
 <link rel=\"stylesheet\" href=\"{globals_css}\" data-globals-css>\
 </head>\
-<body class=\"antialiased bg-background text-surface-950\"><a href=\"#app-main\" class=\"sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded-sm focus:bg-card focus:px-4 focus:py-2 focus:text-sm focus:font-bold focus:text-surface-950 focus:border focus:border-surface-950\">Skip to content</a>{child_html}</body>\
+<body class=\"\"><a href=\"#app-main\" class=\"apex-skip-link\">Skip to content</a>{child_html}</body>\
 </html>",
         title = html_escape(title),
         favicon_link = favicon_link_html(),
@@ -298,24 +300,24 @@ pub fn control_plane_app_layout_with_session(
 pub fn web_home_page() -> String {
     // The page's own <main> is the document's single landmark (batch-2
     // single-main fix — the root layout no longer adds one).
-    "<main id=\"app-main\" class=\"min-h-screen bg-surface-50 text-surface-950\">\
+    "<main id=\"app-main\" class=\"min-h-screen\">\
 <section class=\"mx-auto flex min-h-screen w-full max-w-7xl flex-col justify-center px-6 py-16 lg:px-8\">\
 <div class=\"grid gap-10 lg:grid-cols-[1.05fr_0.95fr] lg:items-center\">\
 <div class=\"max-w-3xl\">\
-<p class=\"text-xs font-bold uppercase tracking-[0.28em] text-primary\">ApexMail Application</p>\
-<h1 class=\"mt-5 text-5xl font-bold tracking-tighter text-surface-950 sm:text-6xl\">ApexMail</h1>\
-<p class=\"mt-5 max-w-2xl text-xl font-medium leading-8 text-surface-600\">Modern email infrastructure for developers</p>\
-<p class=\"mt-4 max-w-2xl text-sm leading-6 text-surface-500\">Open the product console to manage campaigns, domains, analytics, team access, and delivery operations from the same Rust-rendered surface used by the live app.</p>\
+<p class=\"apex-em\">ApexMail Application</p>\
+<h1 class=\"mt-5 apex-page-title\">ApexMail</h1>\
+<p class=\"mt-5 max-w-2xl apex-em\">Modern email infrastructure for developers</p>\
+<p class=\"mt-4 max-w-2xl\">Open the product console to manage campaigns, domains, analytics, team access, and delivery operations from the same Rust-rendered surface used by the live app.</p>\
 <div class=\"mt-10 flex flex-col gap-3 sm:flex-row\">\
 <a href=\"/dashboard\" class=\"apex-btn\">Go to Dashboard</a>\
 <a href=\"/login\" class=\"apex-btn apex-btn--secondary\">Sign In</a>\
 </div></div>\
-<div class=\"border border-surface-200 bg-card shadow-premium\">\
-<div class=\"border-b border-surface-200 px-5 py-4\"><p class=\"text-[10px] font-bold uppercase tracking-[0.24em] text-surface-500\">Workspace Snapshot</p></div>\
-<div class=\"grid divide-y divide-surface-200\">\
-<div class=\"flex items-center justify-between gap-4 px-5 py-5\"><div><p class=\"text-sm font-bold text-surface-950\">Campaign workbench</p><p class=\"mt-1 text-xs text-surface-500\">Drafts, audiences, templates, and scheduling.</p></div><span class=\"text-xs font-bold uppercase tracking-widest text-primary\">Ready</span></div>\
-<div class=\"flex items-center justify-between gap-4 px-5 py-5\"><div><p class=\"text-sm font-bold text-surface-950\">Domain operations</p><p class=\"mt-1 text-xs text-surface-500\">Authentication, tracking, dedicated IPs, and webhooks.</p></div><span class=\"text-xs font-bold uppercase tracking-widest text-primary\">Live</span></div>\
-<div class=\"flex items-center justify-between gap-4 px-5 py-5\"><div><p class=\"text-sm font-bold text-surface-950\">Delivery analytics</p><p class=\"mt-1 text-xs text-surface-500\">Events, reports, inbox placement, and billing controls.</p></div><span class=\"text-xs font-bold uppercase tracking-widest text-primary\">Current</span></div>\
+<div class=\"border\">\
+<div class=\"border-b px-5 py-4\"><p class=\"apex-em\">Workspace Snapshot</p></div>\
+<div class=\"grid\">\
+<div class=\"flex items-center justify-between gap-4 px-5 py-5\"><div><p class=\"apex-em\">Campaign workbench</p><p class=\"mt-1\">Drafts, audiences, templates, and scheduling.</p></div><span class=\"apex-em apex-section-head\">Ready</span></div>\
+<div class=\"flex items-center justify-between gap-4 px-5 py-5\"><div><p class=\"apex-em\">Domain operations</p><p class=\"mt-1\">Authentication, tracking, dedicated IPs, and webhooks.</p></div><span class=\"apex-em apex-section-head\">Live</span></div>\
+<div class=\"flex items-center justify-between gap-4 px-5 py-5\"><div><p class=\"apex-em\">Delivery analytics</p><p class=\"mt-1\">Events, reports, inbox placement, and billing controls.</p></div><span class=\"apex-em apex-section-head\">Current</span></div>\
 </div></div>\
 </div></section></main>".to_string()
 }
@@ -324,11 +326,11 @@ pub fn web_home_page() -> String {
 pub fn web_not_found_page() -> String {
     // The page's own <main> is the document's single landmark (batch-2
     // single-main fix — the root layout no longer adds one).
-    "<main id=\"app-main\" class=\"flex min-h-screen flex-col items-center justify-center bg-surface-50\">\
-<div class=\"text-center\">\
-<h1 class=\"text-8xl font-bold text-surface-950 tracking-tighter\">404</h1>\
-<p class=\"mt-4 text-xl text-surface-600 font-medium\">Page not found</p>\
-<a href=\"/\" class=\"mt-10 inline-block rounded-sm bg-primary px-8 py-4 text-sm font-bold text-white hover:bg-brand-700 transition-all shadow-premium\">Go Home</a>\
+    "<main id=\"app-main\" class=\"flex min-h-screen flex-col items-center justify-center\">\
+<div class=\"\">\
+<h1 class=\"apex-page-title\">404</h1>\
+<p class=\"mt-4 apex-em\">Page not found</p>\
+<a href=\"/\" class=\"mt-10 inline-block px-8 py-4 apex-em apex-btn apex-btn--primary\">Go Home</a>\
 </div></main>"
         .to_string()
 }
@@ -435,7 +437,7 @@ fn pagination_storage_key(scope: &str) -> String {
 
 fn render_page_breadcrumbs(current_page: &str) -> String {
     format!(
-        "<nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\"><li><a href=\"/\" class=\"hover:text-surface-900 transition-colors\">Dashboard</a></li><li class=\"text-surface-500\">/</li><li class=\"text-surface-900 font-medium\" aria-current=\"page\">{}</li></ol></nav>",
+        "<nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2\"><li><a href=\"/\" class=\"apex-link\">Dashboard</a></li><li class=\"\">/</li><li class=\"apex-em\" aria-current=\"page\">{}</li></ol></nav>",
         current_page,
     )
 }
@@ -454,7 +456,7 @@ fn render_debounced_filter_bar(
 ) -> String {
     let search_icon = ui_icon("search", "h-4 w-4");
     format!(
-        "<section class=\"rounded-sm border border-surface-200 bg-card/80 p-6\"><form method=\"get\" action=\"{action}\" class=\"flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between\" role=\"search\"><div class=\"min-w-0 flex-1\"><label class=\"sr-only\" for=\"{input_id}\">{search_label}</label><div class=\"relative\"><span class=\"pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground\">{search_icon}</span><input id=\"{input_id}\" type=\"search\" name=\"query\" aria-label=\"{search_label}\" value=\"{search_value}\" placeholder=\"{search_placeholder}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background pl-10 pr-4 text-[14px] ring-offset-background transition-all duration-200 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\" /></div><p class=\"mt-2 text-xs text-muted-foreground\">Results update when you apply the filters.</p></div><div class=\"flex w-full flex-col gap-3 sm:flex-row lg:w-auto\">{filters_html}<div class=\"flex flex-col gap-2 sm:flex-row\"><button type=\"submit\" class=\"inline-flex w-full items-center justify-center rounded-sm bg-primary px-4 py-2 text-sm font-bold text-white transition-colors hover:bg-brand-700 sm:w-auto\">Apply filters</button><a href=\"{clear_href}\" class=\"inline-flex w-full items-center justify-center rounded-sm border border-input bg-background px-4 py-2 text-sm font-bold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground sm:w-auto\">Clear filters</a></div></div></form></section>",
+        "<section class=\"border p-6\"><form method=\"get\" action=\"{action}\" class=\"flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between\" role=\"search\"><div class=\"min-w-0 flex-1\"><label class=\"sr-only apex-label\" for=\"{input_id}\">{search_label}</label><div class=\"relative\"><span class=\"pointer-events-none absolute left-3\">{search_icon}</span><input id=\"{input_id}\" type=\"search\" name=\"query\" aria-label=\"{search_label}\" value=\"{search_value}\" placeholder=\"{search_placeholder}\" class=\"flex h-12 w-full border pl-10 pr-4 apex-input\" /></div><p class=\"mt-2\">Results update when you apply the filters.</p></div><div class=\"flex w-full flex-col gap-3 sm:flex-row lg:w-auto\">{filters_html}<div class=\"flex flex-col gap-2 sm:flex-row\"><button type=\"submit\" class=\"inline-flex w-full items-center justify-center px-4 py-2 sm:w-auto apex-btn apex-btn--primary\">Apply filters</button><a href=\"{clear_href}\" class=\"inline-flex w-full items-center justify-center border px-4 py-2 sm:w-auto apex-em apex-btn\">Clear filters</a></div></div></form></section>",
         action = clear_href,
         input_id = input_id,
         search_label = search_label,
@@ -500,7 +502,7 @@ fn render_native_select(
         .collect::<Vec<_>>()
         .join("");
     format!(
-        "<div class=\"min-w-[10rem]\"><label class=\"sr-only\" for=\"{id}\">{label}</label><select id=\"{id}\" name=\"{name}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\">{opts}</select></div>",
+        "<div class=\"min-w-[10rem]\"><label class=\"sr-only apex-label\" for=\"{id}\">{label}</label><select id=\"{id}\" name=\"{name}\" class=\"flex h-12 w-full border px-3 apex-select\">{opts}</select></div>",
         id = html_escape(id),
         label = html_escape(label),
         name = html_escape(name),
@@ -573,7 +575,7 @@ fn render_stat_tile(kpi: &crate::view_data::KpiCardData) -> String {
     let help = kpi
         .hint
         .as_deref()
-        .map(|text| format!("<p class=\"apex-cp-stat-help\">{}</p>", html_escape(text)))
+        .map(|text| format!("<p class=\"apex-kpi__d\">{}</p>", html_escape(text)))
         .unwrap_or_default();
     let sparkline = kpi
         .trend
@@ -588,7 +590,7 @@ fn render_stat_tile(kpi: &crate::view_data::KpiCardData) -> String {
         })
         .unwrap_or_default();
     format!(
-        "<article class=\"apex-cp-stat-tile\"{tone_attr}><p class=\"apex-cp-stat-label\">{label}</p><p class=\"apex-cp-stat-value\"{title_attr}>{value}</p>{help}{sparkline}</article>",
+        "<article class=\"apex-kpi\"{tone_attr}><p class=\"apex-kpi__l\">{label}</p><p class=\"apex-kpi__n\"{title_attr}>{value}</p>{help}{sparkline}</article>",
         tone_attr = tone_attr,
         label = html_escape(&kpi.label),
         title_attr = title_attr,
@@ -643,12 +645,12 @@ fn domain_detail_section(data: &ListPageData) -> String {
         .map(|table| table.rows.as_slice())
         .unwrap_or(&[]);
     let verify_form = format!(
-        "<form method=\"post\" action=\"/web{base}/verify\" class=\"inline\"><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] border border-surface-200 bg-background px-4 py-2 text-sm font-semibold text-foreground transition-all duration-200 ease-premium active:scale-[0.98] hover:border-surface-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Verify DNS now</button><p class=\"mt-2 text-xs text-muted-foreground max-w-md\">Verification re-probes every record and (on the first run) provisions the DKIM keys that generate the full record set below.</p></form>",
+        "<form method=\"post\" action=\"/web{base}/verify\" class=\"inline\"><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap border px-4 py-2 apex-btn\">Verify DNS now</button><p class=\"mt-2 max-w-md\">Verification re-probes every record and (on the first run) provisions the DKIM keys that generate the full record set below.</p></form>",
         base = html_escape(&data.base_path),
     );
     if records.is_empty() {
         return format!(
-            "<section class=\"space-y-4\" data-page=\"domain-detail\"><div class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium\">{empty}<div class=\"mt-4\">{verify_form}</div></div></section>",
+            "<section class=\"space-y-4\" data-page=\"domain-detail\"><div class=\"border p-6\">{empty}<div class=\"mt-4\">{verify_form}</div></div></section>",
             empty = EmptyState {
                 title: &data.empty_title,
                 description: Some(&data.empty_description),
@@ -671,7 +673,7 @@ fn domain_detail_section(data: &ListPageData) -> String {
                     .unwrap_or_default()
             };
             format!(
-                "<div class=\"rounded-sm border border-surface-200 bg-card p-4 shadow-premium\"><div class=\"flex flex-wrap items-center justify-between gap-3\"><p class=\"text-xs font-bold uppercase tracking-widest text-surface-500\">{record_type} · {host}</p>{state}</div><div class=\"mt-3 space-y-2\"><div><p class=\"text-[10px] font-bold uppercase tracking-[0.18em] text-surface-500\">Value — select to copy</p><code class=\"mt-1 block font-mono text-xs bg-muted/40 rounded px-2 py-1.5 break-all select-text text-surface-800\">{value}</code></div></div></div>",
+                "<div class=\"border p-4\"><div class=\"flex flex-wrap items-center justify-between gap-3\"><p class=\"apex-em\">{record_type}, {host}</p>{state}</div><div class=\"mt-3 space-y-2\"><div><p class=\"apex-em\">Value — select to copy</p><code class=\"mt-1 block px-2 py-1.5 break-all apex-select\">{value}</code></div></div></div>",
                 record_type = cell(0),
                 host = cell(1),
                 state = cell(3),
@@ -682,7 +684,7 @@ fn domain_detail_section(data: &ListPageData) -> String {
         .join("");
     format!(
         "<section class=\"space-y-4\" data-page=\"domain-detail\">\
-        <div class=\"rounded-sm border border-primary/30 bg-primary/5 p-4\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div><p class=\"text-xs font-bold uppercase tracking-[0.18em] text-primary\">DNS setup</p><p class=\"mt-1 text-sm text-muted-foreground\">Add each record at your DNS provider, then verify. Values are selectable — copy them straight from this page.</p></div>{verify_form}</div></div>\
+        <div class=\"border p-4\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div><p class=\"apex-em\">DNS setup</p><p class=\"mt-1\">Add each record at your DNS provider, then verify. Values are selectable — copy them straight from this page.</p></div>{verify_form}</div></div>\
         <div class=\"space-y-3\">{rows}</div>\
         </section>",
         verify_form = verify_form,
@@ -715,7 +717,7 @@ fn campaign_detail_section(data: &ListPageData) -> String {
                 .collect::<Vec<_>>()
                 .join("");
             format!(
-                "<form method=\"post\" action=\"/web/campaigns/{id}/recipients\" class=\"space-y-3\" data-form-id=\"campaign-recipients\"><label class=\"text-sm font-medium leading-none\" for=\"campaign-recipients-list\">Recipients list</label><select id=\"campaign-recipients-list\" name=\"list_id\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">{options}</select><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-primary px-4 py-2 text-sm font-semibold text-white transition-all duration-200 ease-premium active:scale-[0.98] hover:bg-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Wire recipients</button><p class=\"text-xs text-muted-foreground\">The checked list becomes this campaign's audience; counts refresh on the next page load.</p></form>",
+                "<form method=\"post\" action=\"/web/campaigns/{id}/recipients\" class=\"space-y-3\" data-form-id=\"campaign-recipients\"><label class=\"apex-em apex-label\" for=\"campaign-recipients-list\">Recipients list</label><select id=\"campaign-recipients-list\" name=\"list_id\" class=\"flex h-12 w-full border px-3 apex-select\">{options}</select><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap px-4 py-2 apex-btn apex-btn--primary\">Wire recipients</button><p class=\"\">The checked list becomes this campaign's audience; counts refresh on the next page load.</p></form>",
                 id = urlencode_path(data.base_path.trim_start_matches("/campaigns/")),
                 options = options,
             )
@@ -744,13 +746,13 @@ fn campaign_detail_section(data: &ListPageData) -> String {
             }
             let button = if available {
                 format!(
-                    "<form method=\"post\" action=\"{target}\" class=\"inline\"><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-primary px-4 py-2 text-sm font-semibold text-white transition-all duration-200 ease-premium active:scale-[0.98] hover:bg-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">{label}</button></form>",
+                    "<form method=\"post\" action=\"{target}\" class=\"inline\"><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap px-4 py-2 apex-btn apex-btn--primary\">{label}</button></form>",
                     target = html_escape(&target),
                     label = html_escape(&label),
                 )
             } else {
                 format!(
-                    "<button type=\"button\" disabled aria-disabled=\"true\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] border border-surface-200 bg-background px-4 py-2 text-sm font-semibold text-surface-500 cursor-not-allowed\" title=\"Not available in this campaign's current status\">{label}</button>",
+                    "<button type=\"button\" disabled aria-disabled=\"true\" class=\"inline-flex items-center justify-center whitespace-nowrap border px-4 py-2 apex-btn\" title=\"Not available in this campaign's current status\">{label}</button>",
                     label = html_escape(&label),
                 )
             };
@@ -761,15 +763,15 @@ fn campaign_detail_section(data: &ListPageData) -> String {
 
     format!(
         "<section class=\"space-y-4\" data-page=\"campaign-detail\">\
-        <div class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium\"><h2 class=\"text-xs font-bold uppercase tracking-widest text-surface-500 mb-4\">Lifecycle</h2><div class=\"flex flex-wrap gap-3\">{actions}</div><p class=\"mt-3 text-xs text-muted-foreground\">Each action applies only when the campaign's current status allows it.</p></div>\
+        <div class=\"border p-6\"><h2 class=\"mb-4 apex-section-head\">Lifecycle</h2><div class=\"flex flex-wrap gap-3\">{actions}</div><p class=\"mt-3\">Each action applies only when the campaign's current status allows it.</p></div>\
         {recipients}\
-        <div class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium\"><h2 class=\"text-xs font-bold uppercase tracking-widest text-surface-500 mb-2\">Monitor</h2><p class=\"text-sm text-muted-foreground\">While the campaign sends, reload this page to watch counts update. Scheduled campaigns start automatically when their time arrives.</p></div>\
+        <div class=\"border p-6\"><h2 class=\"mb-2 apex-section-head\">Monitor</h2><p class=\"\">While the campaign sends, reload this page to watch counts update. Scheduled campaigns start automatically when their time arrives.</p></div>\
         </section>",
         actions = actions,
         recipients = recipients_form.map(|form| format!(
-            "<div class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium\"><h2 class=\"text-xs font-bold uppercase tracking-widest text-surface-500 mb-4\">Audience</h2>{form}</div>",
+            "<div class=\"border p-6\"><h2 class=\"mb-4 apex-section-head\">Audience</h2>{form}</div>",
             form = form
-        )).unwrap_or_else(|| "<div class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium\"><h2 class=\"text-xs font-bold uppercase tracking-widest text-surface-500 mb-2\">Audience</h2><p class=\"text-sm text-muted-foreground\">No lists exist yet — create a list, then wire this campaign's recipients.</p><a href=\"/lists/new\" class=\"mt-3 inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold border border-input bg-background hover:bg-accent h-10 px-4 py-2\">Create list</a></div>".to_string()),
+        )).unwrap_or_else(|| "<div class=\"border p-6\"><h2 class=\"mb-2 apex-section-head\">Audience</h2><p class=\"\">No lists exist yet — create a list, then wire this campaign's recipients.</p><a href=\"/lists/new\" class=\"mt-3 inline-flex items-center justify-center whitespace-nowrap border h-10 px-4 py-2 apex-em apex-btn\">Create list</a></div>".to_string()),
     )
 }
 
@@ -791,12 +793,12 @@ fn domain_transfer_section(data: &ListPageData) -> String {
         .unwrap_or_default();
     let expected = format!("transfer {domain}");
     format!(
-        "<section class=\"space-y-4\" data-page=\"domain-transfer\"><div class=\"rounded-sm border border-warning/25 bg-warning/10 p-4\"><p class=\"text-xs font-bold uppercase tracking-[0.18em] text-warning\">Typed confirmation required</p><p class=\"mt-1 text-sm text-muted-foreground\">Transferring a domain re-binds DKIM and resets verification. Type <code class=\"font-mono text-xs bg-muted/40 rounded px-1.5 py-0.5\">{expected}</code> exactly to confirm — the browser checks the pattern before anything is submitted.</p></div>\
-        <form method=\"post\" action=\"/web/admin/domains/transfer\" class=\"space-y-4 rounded-sm border border-surface-200 bg-card p-6 shadow-premium\" data-form-id=\"domain-transfer\">\
-        <div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"transfer-domain\">Domain</label><input id=\"transfer-domain\" name=\"domain\" type=\"text\" required value=\"{domain}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] font-mono ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\" /></div>\
-        <div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"transfer-target\">Target tenant id</label><input id=\"transfer-target\" name=\"to_tenant_id\" type=\"text\" required placeholder=\"tenant UUID\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] font-mono ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\" /></div>\
-        <div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"transfer-confirmation\">Confirmation</label><input id=\"transfer-confirmation\" name=\"confirmation\" type=\"text\" required pattern=\"{pattern}\" title=\"Type {expected} exactly.\" placeholder=\"{expected}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] font-mono ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\" /><p class=\"text-xs text-muted-foreground\">The exact string is checked again before the transfer runs.</p></div>\
-        <button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-destructive px-4 py-2 text-sm font-semibold text-destructive-foreground transition-all duration-200 ease-premium active:scale-[0.98] hover:bg-destructive/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Transfer domain</button>\
+        "<section class=\"space-y-4\" data-page=\"domain-transfer\"><div class=\"border p-4\"><p class=\"apex-em\">Typed confirmation required</p><p class=\"mt-1\">Transferring a domain re-binds DKIM and resets verification. Type <code class=\"px-1.5 py-0.5\">{expected}</code> exactly to confirm — the browser checks the pattern before anything is submitted.</p></div>\
+        <form method=\"post\" action=\"/web/admin/domains/transfer\" class=\"space-y-4 border p-6\" data-form-id=\"domain-transfer\">\
+        <div class=\"space-y-2\"><label class=\"apex-em apex-label\" for=\"transfer-domain\">Domain</label><input id=\"transfer-domain\" name=\"domain\" type=\"text\" required value=\"{domain}\" class=\"flex h-12 w-full border px-3 apex-input\" /></div>\
+        <div class=\"space-y-2\"><label class=\"apex-em apex-label\" for=\"transfer-target\">Target tenant id</label><input id=\"transfer-target\" name=\"to_tenant_id\" type=\"text\" required placeholder=\"tenant UUID\" class=\"flex h-12 w-full border px-3 apex-input\" /></div>\
+        <div class=\"space-y-2\"><label class=\"apex-em apex-label\" for=\"transfer-confirmation\">Confirmation</label><input id=\"transfer-confirmation\" name=\"confirmation\" type=\"text\" required pattern=\"{pattern}\" title=\"Type {expected} exactly.\" placeholder=\"{expected}\" class=\"flex h-12 w-full border px-3 apex-input\" /><p class=\"\">The exact string is checked again before the transfer runs.</p></div>\
+        <button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap px-4 py-2 apex-btn apex-btn--danger\">Transfer domain</button>\
         </form></section>",
         expected = html_escape(&expected),
         domain = html_escape(&domain),
@@ -828,9 +830,9 @@ fn cp_row_actions(
     // the button lands in the row cell.
     let make_action = |forms: &mut Vec<String>, label: &str, target: &str, destructive: bool| {
         let classes = if destructive {
-            "rounded-sm border border-destructive/30 bg-destructive/5 px-2.5 py-1 text-xs font-bold text-destructive transition-colors hover:bg-destructive/10"
+            "apex-btn apex-btn--danger apex-btn--sm"
         } else {
-            "rounded-sm border border-surface-200 bg-background px-2.5 py-1 text-xs font-bold text-foreground transition-colors hover:border-surface-300 hover:bg-accent"
+            "apex-btn apex-btn--sm"
         };
         let form_id = format!(
             "cp-row-{}-{}",
@@ -845,7 +847,7 @@ fn cp_row_actions(
                 base = html_escape(base_path),
             ));
         format!(
-                "<button type=\"submit\" form=\"{form_id}\" class=\"inline-flex items-center justify-center whitespace-nowrap {classes} focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">{label}</button>",
+                "<button type=\"submit\" form=\"{form_id}\" class=\"inline-flex items-center justify-center whitespace-nowrap {classes}\">{label}</button>",
                 form_id = form_id,
                 classes = classes,
                 label = html_escape(label),
@@ -864,7 +866,7 @@ fn cp_row_actions(
             return_to = html_escape(return_to),
         ));
         buttons.push(format!(
-            "<button type=\"submit\" form=\"{form_id}\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm border border-destructive/30 bg-destructive/5 px-2.5 py-1 text-xs font-bold text-destructive transition-colors hover:bg-destructive/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Delete</button>",
+            "<button type=\"submit\" form=\"{form_id}\" class=\"inline-flex items-center justify-center whitespace-nowrap border px-2.5 py-1 apex-error apex-btn apex-btn--danger apex-btn--sm\">Delete</button>",
             form_id = form_id,
         ));
     };
@@ -995,7 +997,7 @@ fn gdpr_transition_button(
         base = html_escape(base_path),
     ));
     format!(
-        "<button type=\"submit\" form=\"{form_id}\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm border border-surface-200 bg-background px-2.5 py-1 text-xs font-bold text-foreground transition-colors hover:border-surface-300 hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">{label}</button>",
+        "<button type=\"submit\" form=\"{form_id}\" class=\"inline-flex items-center justify-center whitespace-nowrap border px-2.5 py-1 apex-btn apex-btn--sm\">{label}</button>",
         form_id = form_id,
         label = html_escape(label),
     )
@@ -1032,7 +1034,7 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
     } else {
         match &data.primary_action {
             Some((label, href)) => format!(
-                "<a href=\"{}\" class=\"inline-flex w-full items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3 sm:w-auto\">{}</a>",
+                "<a href=\"{}\" class=\"inline-flex w-full items-center justify-center whitespace-nowrap h-12 px-6 py-3 sm:w-auto apex-em apex-btn apex-btn--primary\">{}</a>",
                 html_escape(href),
                 html_escape(label)
             ),
@@ -1049,7 +1051,7 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
             .secondary_actions
             .iter()
             .map(|action| {
-                let classes = "inline-flex w-full items-center justify-center whitespace-nowrap rounded-sm border border-input bg-background px-4 py-2 text-sm font-bold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground h-12 sm:w-auto";
+                let classes = "apex-btn min-h-[44px] w-full sm:w-auto";
                 if action.method.eq_ignore_ascii_case("post") {
                     format!(
                         "<form method=\"post\" action=\"{action}\" class=\"inline\"><button type=\"submit\" class=\"{classes}\">{label}</button></form>",
@@ -1059,7 +1061,7 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
                     )
                 } else {
                     format!(
-                        "<a href=\"{action}\" class=\"{classes}\">{label}</a>",
+                        "<a href=\"{action}\" class=\"{classes} apex-link\">{label}</a>",
                         action = html_escape(&action.action),
                         classes = classes,
                         label = html_escape(&action.label),
@@ -1083,17 +1085,9 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
         format!("<div class=\"grid gap-4 sm:grid-cols-2 lg:grid-cols-4\">{cards}</div>")
     };
 
-    // CP chrome (design report structural #14): operator pages get the
-    // eyebrow + dense-table/scroll-container treatment.
+    // CP chrome: operator pages get the dense-table/scroll-container
+    // treatment. ARK: no eyebrow kicker — the page band carries the title.
     let cp = cp_flavored(&data.base_path);
-    let eyebrow = if cp {
-        format!(
-            "<p class=\"apex-eyebrow text-[11px] font-bold uppercase tracking-[0.18em] text-surface-500\"><span>{}</span></p>",
-            html_escape(&data.title)
-        )
-    } else {
-        String::new()
-    };
 
     // Native GET filter form: search input + selects + Apply/Clear.
     let filters_html = if (data.search_label.is_empty() && data.filters.is_empty())
@@ -1118,7 +1112,7 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
                     .collect::<Vec<_>>()
                     .join("");
                 format!(
-                    "<div class=\"min-w-[10rem]\"><label class=\"sr-only\" for=\"filter-{}\">{}</label><select id=\"filter-{}\" name=\"{}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\">{}</select></div>",
+                    "<div class=\"min-w-[10rem]\"><label class=\"sr-only apex-label\" for=\"filter-{}\">{}</label><select id=\"filter-{}\" name=\"{}\" class=\"flex h-12 w-full border px-3 apex-select\">{}</select></div>",
                     html_escape(&filter.name),
                     html_escape(&filter.label),
                     html_escape(&filter.name),
@@ -1133,7 +1127,7 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
         } else {
             let search_icon = ui_icon("search", "h-4 w-4");
             format!(
-                "<div class=\"min-w-0 flex-1\"><label class=\"sr-only\" for=\"{id}-search\">{label}</label><div class=\"relative\"><span class=\"pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground\">{search_icon}</span><input id=\"{id}-search\" type=\"search\" name=\"query\" aria-label=\"{label}\" value=\"{value}\" placeholder=\"{placeholder}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background pl-10 pr-4 text-[14px] ring-offset-background transition-all duration-200 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\" /></div></div>",
+                "<div class=\"min-w-0 flex-1\"><label class=\"sr-only apex-label\" for=\"{id}-search\">{label}</label><div class=\"relative\"><span class=\"pointer-events-none absolute left-3\">{search_icon}</span><input id=\"{id}-search\" type=\"search\" name=\"query\" aria-label=\"{label}\" value=\"{value}\" placeholder=\"{placeholder}\" class=\"flex h-12 w-full border pl-10 pr-4 apex-input\" /></div></div>",
                 id = html_escape(&data.base_path.replace('/', "-")),
                 label = html_escape(&data.search_label),
                 search_icon = search_icon,
@@ -1142,7 +1136,7 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
             )
         };
         format!(
-            "<section class=\"rounded-sm border border-surface-200 bg-card/80 p-6\"><form method=\"get\" action=\"{action}\" class=\"flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between\" role=\"search\">{search}<div class=\"flex w-full flex-col gap-3 sm:flex-row lg:w-auto\">{selects}<div class=\"flex flex-col gap-2 sm:flex-row\"><button type=\"submit\" class=\"inline-flex w-full items-center justify-center rounded-sm bg-primary px-4 py-2 text-sm font-bold text-white transition-colors hover:bg-brand-700 sm:w-auto\">Apply filters</button><a href=\"{action}\" class=\"inline-flex w-full items-center justify-center rounded-sm border border-input bg-background px-4 py-2 text-sm font-bold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground sm:w-auto\">Clear filters</a></div></div></form></section>",
+            "<section class=\"border p-6\"><form method=\"get\" action=\"{action}\" class=\"flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between\" role=\"search\">{search}<div class=\"flex w-full flex-col gap-3 sm:flex-row lg:w-auto\">{selects}<div class=\"flex flex-col gap-2 sm:flex-row\"><button type=\"submit\" class=\"inline-flex w-full items-center justify-center px-4 py-2 sm:w-auto apex-btn apex-btn--primary\">Apply filters</button><a href=\"{action}\" class=\"inline-flex w-full items-center justify-center border px-4 py-2 sm:w-auto apex-em apex-btn\">Clear filters</a></div></div></form></section>",
             action = html_escape(&data.base_path),
             search = search,
             selects = selects,
@@ -1248,14 +1242,14 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
                                 &data.detail_label
                             };
                             actions.push(format!(
-                            "<a href=\"{prefix}{id}\" class=\"inline-flex items-center justify-center rounded-sm border border-input bg-background px-3 py-2 text-sm font-bold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground\">{label}</a>",
+                            "<a href=\"{prefix}{id}\" class=\"inline-flex items-center justify-center border px-3 py-2 apex-em apex-btn\">{label}</a>",
                             prefix = html_escape(prefix),
                             id = html_escape(&row.id),
                             label = html_escape(label),
                         ));
                             if let Some(suffix) = &data.edit_path_suffix {
                                 actions.push(format!(
-                                "<a href=\"{prefix}{id}{suffix}\" class=\"inline-flex items-center justify-center rounded-sm border border-input bg-background px-3 py-2 text-sm font-bold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground\">Edit</a>",
+                                "<a href=\"{prefix}{id}{suffix}\" class=\"inline-flex items-center justify-center border px-3 py-2 apex-em apex-btn\">Edit</a>",
                                 prefix = html_escape(prefix),
                                 id = html_escape(&row.id),
                                 suffix = html_escape(suffix),
@@ -1277,7 +1271,7 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
                             return_to = urlencode_path(&data.base_path),
                         ));
                             actions.push(format!(
-                            "<button type=\"submit\" form=\"{form_id}\" class=\"inline-flex items-center justify-center rounded-sm border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm font-bold text-destructive transition-colors hover:bg-destructive/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Delete</button>",
+                            "<button type=\"submit\" form=\"{form_id}\" class=\"inline-flex items-center justify-center border px-3 py-2 apex-error apex-btn apex-btn--danger\">Delete</button>",
                             form_id = form_id,
                         ));
                         }
@@ -1287,7 +1281,7 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
                         // no dead "View" link ships alongside it.
                         if let Some(prefix) = &data.edit_path_prefix {
                             actions.push(format!(
-                            "<a href=\"{prefix}{id}/edit\" class=\"inline-flex items-center justify-center rounded-sm border border-input bg-background px-3 py-2 text-sm font-bold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground\">Edit</a>",
+                            "<a href=\"{prefix}{id}/edit\" class=\"inline-flex items-center justify-center border px-3 py-2 apex-em apex-btn\">Edit</a>",
                             prefix = html_escape(prefix),
                             id = html_escape(&row.id),
                         ));
@@ -1357,7 +1351,7 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
                         .iter()
                         .map(|action| {
                             format!(
-                                "<button type=\"submit\" formaction=\"{action}\" formmethod=\"{method}\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] border border-surface-200 bg-background px-4 py-2 text-sm font-semibold text-foreground transition-all duration-200 ease-premium active:scale-[0.98] hover:border-surface-300 hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">{label}</button>",
+                                "<button type=\"submit\" formaction=\"{action}\" formmethod=\"{method}\" class=\"inline-flex items-center justify-center whitespace-nowrap border px-4 py-2 apex-btn\">{label}</button>",
                                 action = html_escape(&action.action),
                                 method = if action.method.eq_ignore_ascii_case("post") { "post" } else { "get" },
                                 label = html_escape(&action.label),
@@ -1366,7 +1360,7 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
                         .collect::<Vec<_>>()
                         .join("");
                     format!(
-                    "{row_forms}<form method=\"post\" action=\"{action}\" data-bulk-form=\"{noun}\"><section class=\"rounded-sm border border-surface-200 bg-card/80 p-6\" data-bulk-scope=\"{noun}\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div><p class=\"text-sm font-bold text-foreground\">Select rows to act on them in bulk</p><p class=\"text-xs text-muted-foreground\">Select the rows you want to act on, then choose an action.</p></div><div class=\"flex flex-col gap-2 sm:flex-row\">{bulk_secondary}<button type=\"submit\" formaction=\"{action}\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-destructive px-4 py-2 text-sm font-semibold text-destructive-foreground transition-all duration-200 ease-premium active:scale-[0.98] hover:bg-destructive/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">{label}</button></div></div></section><section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"text-sm text-muted-foreground\">{summary}</p>{pagination}</div></section></form>",
+                    "{row_forms}<form method=\"post\" action=\"{action}\" data-bulk-form=\"{noun}\"><section class=\"border p-6\" data-bulk-scope=\"{noun}\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div><p class=\"apex-em\">Select rows to act on them in bulk</p><p class=\"\">Select the rows you want to act on, then choose an action.</p></div><div class=\"flex flex-col gap-2 sm:flex-row\">{bulk_secondary}<button type=\"submit\" formaction=\"{action}\" class=\"inline-flex items-center justify-center whitespace-nowrap px-4 py-2 apex-btn apex-btn--danger\">{label}</button></div></div></section><section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"\">{summary}</p>{pagination}</div></section></form>",
                     row_forms = row_forms_html,
                     action = html_escape(&bulk.action),
                     noun = html_escape(noun),
@@ -1378,7 +1372,7 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
                 )
                 } else {
                     format!(
-                    "{row_forms}<section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"text-sm text-muted-foreground\">{summary}</p>{pagination}</div></section>",
+                    "{row_forms}<section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"\">{summary}</p>{pagination}</div></section>",
                     row_forms = row_forms_html,
                     table = rendered_table,
                     summary = html_escape(&summary),
@@ -1390,9 +1384,8 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
     };
 
     format!(
-        "<div class=\"space-y-6\">{breadcrumbs}<div class=\"flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between\"><div>{eyebrow}<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">{title}</h1><p class=\"text-sm text-muted-foreground\">{description}</p></div><div class=\"flex flex-col gap-2 sm:flex-row\">{secondary_actions}{primary_action}</div></div>{kpis}{filters}{action_form}{table_section}</div>",
+        "<div class=\"space-y-6\">{breadcrumbs}<header class=\"apex-page-heading\"><h1>{title}</h1><div class=\"flex flex-col gap-2 sm:flex-row\">{secondary_actions}{primary_action}</div></header><p class=\"apex-statusline\">{description}</p>{kpis}{filters}{action_form}{table_section}</div>",
         breadcrumbs = breadcrumbs,
-        eyebrow = eyebrow,
         title = html_escape(&data.title),
         description = html_escape(&data.description),
         primary_action = primary_action,
@@ -1451,14 +1444,14 @@ fn render_campaign_editor_page_with_data(
     use crate::primitives::{Input, Label, NativeCheckbox, NativeSelect, SelectOption, Textarea};
 
     let breadcrumbs = format!(
-        "<nav aria-label=\"Breadcrumb\" class=\"mb-6\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\"><li><a href=\"{}\" class=\"hover:text-surface-900 transition-colors\">Campaigns</a></li><li class=\"text-surface-500\">/</li><li class=\"text-surface-900 font-medium\">{}</li></ol></nav>",
+        "<nav aria-label=\"Breadcrumb\" class=\"mb-6\"><ol class=\"flex items-center gap-2\"><li><a href=\"{}\" class=\"apex-link\">Campaigns</a></li><li class=\"\">/</li><li class=\"apex-em\">{}</li></ol></nav>",
         return_href, breadcrumb_label,
     );
     // Audit #16: a failed storage read renders a service-problem notice, so
     // the operator never sees "no lists" as if the workspace were empty.
     // Review §4.2: user-centered wording, no store/implementation lesson.
     let outage_notice = if editor.unavailable {
-        "<div class=\"apex-callout apex-callout--warning mb-6\" role=\"status\">\
+        "<div class=\"apex-notice apex-notice--warn mb-6\" role=\"status\">\
          <strong>Some of this form could not be loaded</strong>\
          <span>Lists, segments, or the current audience may be missing. This information is temporarily unavailable — reload before saving.</span></div>"
     } else {
@@ -1571,12 +1564,12 @@ fn render_campaign_editor_page_with_data(
     }
     .render_html();
 
-    let save_button = format!("<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-primary px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">{}</button>", primary_action_label);
+    let save_button = format!("<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap px-4 py-2 apex-btn apex-btn--primary\">{}</button>", primary_action_label);
     // Review §4.11: saving is save-as-configured, and "Save as draft" is a
     // distinct native submit that authorizes nothing — the named button
     // value reaches the handler, which clears any schedule instead of
     // arming an automatic send.
-    let save_draft_button = "<button type=\"submit\" name=\"as_draft\" value=\"1\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] border border-surface-200 bg-background px-4 py-2 text-sm font-semibold text-foreground transition-colors hover:border-surface-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Save as draft</button>";
+    let save_draft_button = "<button type=\"submit\" name=\"as_draft\" value=\"1\" class=\"inline-flex items-center justify-center whitespace-nowrap border px-4 py-2 apex-btn\">Save as draft</button>";
 
     let hidden_id = campaign_id
         .map(|id| {
@@ -1597,20 +1590,20 @@ fn render_campaign_editor_page_with_data(
     format!(
         "{breadcrumbs}{outage_notice}\
 <div class=\"w-full max-w-3xl space-y-6\">\
-<section class=\"rounded-sm border border-surface-200 bg-card/80 p-4\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div><p class=\"text-xs font-bold uppercase tracking-[0.24em] text-surface-500\">Campaign state</p><h1 class=\"mt-1 text-2xl font-bold text-surface-950 tracking-tight\">{title}</h1><p class=\"mt-2 text-sm text-muted-foreground\">Your work is saved when you press {primary_action_label}.</p></div><div class=\"flex flex-col items-start gap-2 md:items-end\"><div class=\"flex items-center gap-2\">{status_badge}<span class=\"text-xs font-medium text-muted-foreground\">Saving keeps this status unless the schedule changes it</span></div><p class=\"text-xs text-muted-foreground\">Use Preview to see a sanitized structural view of the HTML.</p></div></div></section>\
+<section class=\"border p-4\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div><p class=\"apex-em\">Campaign state</p><h1 class=\"mt-1 apex-page-title\">{title}</h1><p class=\"mt-2\">Your work is saved when you press {primary_action_label}.</p></div><div class=\"flex flex-col items-start gap-2 md:items-end\"><div class=\"flex items-center gap-2\">{status_badge}<span class=\"apex-em\">Saving keeps this status unless the schedule changes it</span></div><p class=\"\">Use Preview to see a sanitized structural view of the HTML.</p></div></div></section>\
 <form class=\"space-y-6\" method=\"post\" action=\"{form_action}\" enctype=\"application/x-www-form-urlencoded\">{hidden_id}\
 <div class=\"space-y-2\">{name_label}{name_input}</div>\
 <div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{subject_label}{subject_input}</div><div class=\"space-y-2\">{preview_label}{preview_input}</div></div>\
 <div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{from_label}{from_input}</div><div class=\"space-y-2\">{from_name_label}{from_name_input}</div></div>\
-<div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{reply_to_label}{reply_to_input}</div><div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"campaign-scheduled-at\">Schedule (optional, UTC)</label><input id=\"campaign-scheduled-at\" name=\"scheduled_at\" type=\"datetime-local\" value=\"{scheduled_value}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\" /><p class=\"text-xs text-muted-foreground\">Enter the send time in UTC. Scheduled campaigns start automatically at the selected time — saving a schedule authorizes that automatic send. Leave blank to keep the campaign as a draft you start yourself.</p></div></div>\
-<div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{audience_label}{audience_select}<p class=\"text-xs text-muted-foreground\">Ctrl/Cmd-click to select several lists. The audience is their subscribed members.</p></div><div class=\"space-y-2\">{segment_label}{segment_select}<p class=\"text-xs text-muted-foreground\">Optional saved segment narrows the audience by its tag and status rules.</p></div></div>\
+<div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{reply_to_label}{reply_to_input}</div><div class=\"space-y-2\"><label class=\"apex-em apex-label\" for=\"campaign-scheduled-at\">Schedule (optional, UTC)</label><input id=\"campaign-scheduled-at\" name=\"scheduled_at\" type=\"datetime-local\" value=\"{scheduled_value}\" class=\"flex h-12 w-full border px-3 apex-input\" /><p class=\"\">Enter the send time in UTC. Scheduled campaigns start automatically at the selected time — saving a schedule authorizes that automatic send. Leave blank to keep the campaign as a draft you start yourself.</p></div></div>\
+<div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{audience_label}{audience_select}<p class=\"\">Ctrl/Cmd-click to select several lists. The audience is their subscribed members.</p></div><div class=\"space-y-2\">{segment_label}{segment_select}<p class=\"\">Optional saved segment narrows the audience by its tag and status rules.</p></div></div>\
 <div class=\"space-y-2\">{content_label}{content_input}</div>\
-<div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{variables_label}{variables_input}<p class=\"text-xs text-muted-foreground\">One <code>key=value</code> per line, usable as {{{{key}}}} in the subject and body.</p></div><div class=\"space-y-2\"><p class=\"text-sm font-medium leading-none\">Tracking</p>{track_opens_box}{track_clicks_box}<p class=\"text-xs text-muted-foreground\">The unsubscribe link is always included.</p></div></div>\
+<div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{variables_label}{variables_input}<p class=\"\">One <code>key=value</code> per line, usable as {{{{key}}}} in the subject and body.</p></div><div class=\"space-y-2\"><p class=\"apex-em\">Tracking</p>{track_opens_box}{track_clicks_box}<p class=\"\">The unsubscribe link is always included.</p></div></div>\
 <div class=\"grid gap-6 md:grid-cols-3\"><div class=\"space-y-2\">{utm_source_label}{utm_source_input}</div><div class=\"space-y-2\">{utm_medium_label}{utm_medium_input}</div><div class=\"space-y-2\">{utm_campaign_label}{utm_campaign_input}</div></div>\
-<div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{throttle_label}{throttle_input}<p class=\"text-xs text-muted-foreground\">Maximum emails per hour for this campaign (0 = unlimited).</p></div><div class=\"space-y-2\">{ip_pool_label}{ip_pool_input}<p class=\"text-xs text-muted-foreground\">Optional dedicated-IP pool name to route this campaign through.</p></div></div>\
-<div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{timezone_label}{timezone_input}</div><div class=\"space-y-2\"><p class=\"text-sm font-medium leading-none\">Send-time optimization</p>{sto_box}<p class=\"text-xs text-muted-foreground\">Schedule each recipient at their optimal engagement hour.</p></div></div>\
-<section class=\"rounded-sm border border-surface-200 bg-card/80 p-4\"><p class=\"text-xs font-bold uppercase tracking-[0.18em] text-surface-500\">Before you save</p><p class=\"mt-1 text-sm text-muted-foreground\">With a schedule set, scheduled delivery will begin automatically at that time (UTC) — saving the schedule authorizes that send. Without one, the campaign stays a draft until you start it. Save as draft always clears the schedule.</p></section>\
-<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"text-xs text-muted-foreground\">Your changes take effect when you submit this form.</p><div class=\"flex flex-col gap-3 sm:flex-row\">{preview_button}{save_draft_button}{save_button}</div></div>\
+<div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{throttle_label}{throttle_input}<p class=\"\">Maximum emails per hour for this campaign (0 = unlimited).</p></div><div class=\"space-y-2\">{ip_pool_label}{ip_pool_input}<p class=\"\">Optional dedicated-IP pool name to route this campaign through.</p></div></div>\
+<div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{timezone_label}{timezone_input}</div><div class=\"space-y-2\"><p class=\"apex-em\">Send-time optimization</p>{sto_box}<p class=\"\">Schedule each recipient at their optimal engagement hour.</p></div></div>\
+<section class=\"border p-4\"><p class=\"apex-em\">Before you save</p><p class=\"mt-1\">With a schedule set, scheduled delivery will begin automatically at that time (UTC) — saving the schedule authorizes that send. Without one, the campaign stays a draft until you start it. Save as draft always clears the schedule.</p></section>\
+<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"\">Your changes take effect when you submit this form.</p><div class=\"flex flex-col gap-3 sm:flex-row\">{preview_button}{save_draft_button}{save_button}</div></div>\
 </form></div>",
         breadcrumbs = breadcrumbs,
         title = title,
@@ -1655,7 +1648,7 @@ fn render_campaign_editor_page_with_data(
         timezone_label = Label { html_for: Some("campaign-timezone"), text: "Timezone", variant: "default", size: "default", required: false, optional: true }.render_html(),
         timezone_input = Input { id: Some("campaign-timezone"), input_type: "text", variant: "default", size: "default", placeholder: "Europe/Tallinn", value: &editor.timezone, left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: false, name: Some("timezone") }.render_html(),
         sto_box = NativeCheckbox { id: "campaign-sto", name: "send_time_optimization", checked: editor.send_time_optimization, label: "Optimize send time per recipient" }.render_html(),
-        preview_button = "<button type=\"submit\" formaction=\"/web/campaigns/preview\" formtarget=\"_blank\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] border border-surface-200 bg-background px-4 py-2 text-sm font-semibold text-foreground transition-colors hover:border-surface-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Preview</button>",
+        preview_button = "<button type=\"submit\" formaction=\"/web/campaigns/preview\" formtarget=\"_blank\" class=\"inline-flex items-center justify-center whitespace-nowrap border px-4 py-2 apex-btn\">Preview</button>",
         save_draft_button = save_draft_button,
         save_button = save_button,
     )
@@ -1666,7 +1659,7 @@ fn render_campaign_editor_page_with_data(
 pub fn web_campaign_preview_page(html_body: &str) -> String {
     let safe_html = sanitize_preview_html(html_body);
     format!(
-        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Campaign Preview — ApexMail</title><link rel=\"stylesheet\" href=\"{globals_css}\" data-globals-css></head><body class=\"font-apex antialiased bg-surface-50\"><header class=\"border-b border-surface-200 bg-card px-6 py-4\"><p class=\"text-xs font-bold uppercase tracking-[0.24em] text-primary\">Sanitized structural preview</p><p class=\"mt-1 text-sm text-muted-foreground\">Styles, scripts, and remote assets are removed, so this is the content structure — not how the email will look in a recipient's client. Close this tab to return to the editor.</p></header><main class=\"mx-auto max-w-2xl px-6 py-8\"><div class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium\">{safe_html}</div></main></body></html>",
+        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Campaign Preview — ApexMail</title><link rel=\"stylesheet\" href=\"{globals_css}\" data-globals-css></head><body class=\"\"><header class=\"border-b px-6 py-4\"><p class=\"apex-em\">Sanitized structural preview</p><p class=\"mt-1\">Styles, scripts, and remote assets are removed, so this is the content structure — not how the email will look in a recipient's client. Close this tab to return to the editor.</p></header><main class=\"mx-auto max-w-2xl px-6 py-8\"><div class=\"border p-6\">{safe_html}</div></main></body></html>",
         globals_css = crate::globals_css_url(),
         safe_html = safe_html,
     )
@@ -2055,9 +2048,9 @@ pub fn web_campaigns_new_page_with_data(editor: &crate::view_data::CampaignEdito
 /// Pixel-identical reproduction of the dedicated-IP settings page contract.
 pub fn web_dedicated_ips_page() -> String {
     let header_html = "<div class=\"flex items-center justify-between mb-6\">\
-<div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Dedicated IPs</h1>\
-<p class=\"text-sm text-surface-500 mt-1\">Manage your dedicated sending IP addresses</p></div>\
-<form method=\"post\" action=\"/web/dedicated-ips\" class=\"inline\"><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">Provision New IP</button></form></div>";
+<div><h1 class=\"apex-page-title\">Dedicated IPs</h1>\
+<p class=\"mt-1\">Manage your dedicated sending IP addresses</p></div>\
+<form method=\"post\" action=\"/web/dedicated-ips\" class=\"inline\"><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap h-12 px-6 py-3 apex-btn apex-btn--primary\">Provision New IP</button></form></div>";
 
     format!(
         "{header}\
@@ -2080,33 +2073,33 @@ pub fn web_dedicated_ips_page() -> String {
 pub fn control_plane_home_page() -> String {
     r#"
 <section class="space-y-6">
-    <section class="rounded-sm border border-surface-200 bg-card shadow-premium overflow-hidden">
+    <section class="border overflow-hidden">
         <div class="grid gap-0 lg:grid-cols-[1.25fr_0.75fr]">
             <div class="px-6 py-6 md:px-8 md:py-8">
-                <p class="text-[11px] font-bold uppercase tracking-[0.28em] text-primary">Operator Command Center</p>
-                <h1 class="mt-3 text-3xl font-bold tracking-tight text-surface-950 sm:text-4xl">Control Plane</h1>
-                <p class="mt-4 max-w-3xl text-sm leading-6 text-surface-600">ApexMail administration and monitoring across trust evidence, tenant readiness, incident response, and expansion pipeline. This command deck is tuned for fast escalation, not static reporting.</p>
-                <p class="mt-3 max-w-3xl text-xs leading-5 text-surface-500">Every figure on this page is read from the database at request time. Counts live on the pages below rather than being summarised here, so nothing on this screen can drift from the underlying record.</p>
+                <p class="apex-em">Operator Command Center</p>
+                <h1 class="mt-3 apex-page-title">Control Plane</h1>
+                <p class="mt-4 max-w-3xl">ApexMail administration and monitoring across trust evidence, tenant readiness, incident response, and expansion pipeline. This command deck is tuned for fast escalation, not static reporting.</p>
+                <p class="mt-3 max-w-3xl">Every figure on this page is read from the database at request time. Counts live on the pages below rather than being summarised here, so nothing on this screen can drift from the underlying record.</p>
                 <div class="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-                    <a href="/tenants" class="rounded-sm border border-surface-200 bg-surface-50 p-4 transition-colors hover:border-surface-950">
-                        <p class="text-[10px] font-bold uppercase tracking-[0.22em] text-surface-500">Tenant readiness</p>
-                        <p class="mt-2 text-sm font-bold tracking-tight text-surface-950">Tenants and provisioning state</p>
-                        <p class="mt-1 text-xs text-surface-500 break-words">Live tenant counts, plans, and readiness.</p>
+                    <a href="/tenants" class="border p-4 apex-btn">
+                        <p class="apex-em">Tenant readiness</p>
+                        <p class="mt-2 apex-em">Tenants and provisioning state</p>
+                        <p class="mt-1 break-words">Live tenant counts, plans, and readiness.</p>
                     </a>
-                    <a href="/alerts" class="rounded-sm border border-surface-200 bg-surface-50 p-4 transition-colors hover:border-surface-950">
-                        <p class="text-[10px] font-bold uppercase tracking-[0.22em] text-surface-500">Incident response</p>
-                        <p class="mt-2 text-sm font-bold tracking-tight text-surface-950">Alert rail</p>
-                        <p class="mt-1 text-xs text-surface-500 break-words">Active system alerts with acknowledgement.</p>
+                    <a href="/alerts" class="border p-4 apex-btn">
+                        <p class="apex-em">Incident response</p>
+                        <p class="mt-2 apex-em">Alert rail</p>
+                        <p class="mt-1 break-words">Active system alerts with acknowledgement.</p>
                     </a>
-                    <a href="/sales" class="rounded-sm border border-surface-200 bg-surface-50 p-4 transition-colors hover:border-surface-950">
-                        <p class="text-[10px] font-bold uppercase tracking-[0.22em] text-surface-500">Sales autopilot</p>
-                        <p class="mt-2 text-sm font-bold tracking-tight text-surface-950">Autonomy and exceptions</p>
-                        <p class="mt-1 text-xs text-surface-500 break-words">What the engine decided, and what needs a human.</p>
+                    <a href="/sales" class="border p-4 apex-btn">
+                        <p class="apex-em">Sales autopilot</p>
+                        <p class="mt-2 apex-em">Autonomy and exceptions</p>
+                        <p class="mt-1 break-words">What the engine decided, and what needs a human.</p>
                     </a>
-                    <a href="/analytics" class="rounded-sm border border-surface-200 bg-surface-50 p-4 transition-colors hover:border-surface-950">
-                        <p class="text-[10px] font-bold uppercase tracking-[0.22em] text-surface-500">Delivery and revenue</p>
-                        <p class="mt-2 text-sm font-bold tracking-tight text-surface-950">Analytics</p>
-                        <p class="mt-1 text-xs text-surface-500 break-words">Distinct-message delivery and revenue metrics.</p>
+                    <a href="/analytics" class="border p-4 apex-btn">
+                        <p class="apex-em">Delivery and revenue</p>
+                        <p class="mt-2 apex-em">Analytics</p>
+                        <p class="mt-1 break-words">Distinct-message delivery and revenue metrics.</p>
                     </a>
                 </div>
                 <div class="mt-6 flex flex-wrap gap-3">
@@ -2116,25 +2109,25 @@ pub fn control_plane_home_page() -> String {
                     <a href="mailto:security@apexmail.ee" class=\"apex-btn apex-btn--sm apex-btn--secondary\">Contact Security</a>
                 </div>
             </div>
-            <aside class="border-t border-surface-200 bg-surface-950 px-6 py-6 text-white lg:border-l lg:border-t-0 md:px-8 md:py-8">
-                <p class="text-[11px] font-bold uppercase tracking-[0.28em] text-white/60">Incident Rail</p>
-                <h2 class="mt-3 text-2xl font-bold tracking-tight">Active Escalations</h2>
-                <p class="mt-3 text-sm leading-6 text-white/70">Escalations are read from the alert store, not summarised here. Open the rail to see the current incidents, their severity, and their acknowledgement state.</p>
-                <div class="mt-5 space-y-3 text-sm">
-                    <a href="/alerts" class="block rounded-sm border border-white/15 bg-black/15 p-4 transition-colors hover:border-white/40">
-                        <p class="text-[10px] font-bold uppercase tracking-[0.2em] text-white/55">Incident rail</p>
-                        <p class="mt-2 text-sm font-bold text-white">Open active alerts</p>
-                        <p class="mt-1 text-xs text-white/70">Live severity, acknowledgement, and routing.</p>
+            <aside class="border-t px-6 py-6 lg:border-l lg:border-t-0 md:px-8 md:py-8">
+                <p class="apex-em">Incident Rail</p>
+                <h2 class="mt-3 apex-h2">Active Escalations</h2>
+                <p class="mt-3">Escalations are read from the alert store, not summarised here. Open the rail to see the current incidents, their severity, and their acknowledgement state.</p>
+                <div class="mt-5 space-y-3">
+                    <a href="/alerts" class="block border p-4 apex-btn">
+                        <p class="apex-em">Incident rail</p>
+                        <p class="mt-2 apex-em">Open active alerts</p>
+                        <p class="mt-1">Live severity, acknowledgement, and routing.</p>
                     </a>
-                    <a href="/infrastructure/queues" class="block rounded-sm border border-white/15 bg-black/15 p-4 transition-colors hover:border-white/40">
-                        <p class="text-[10px] font-bold uppercase tracking-[0.2em] text-white/55">Delivery health</p>
-                        <p class="mt-2 text-sm font-bold text-white">Queue depth and backlog health</p>
-                        <p class="mt-1 text-xs text-white/70">Per-queue depth, age, and health classification.</p>
+                    <a href="/infrastructure/queues" class="block border p-4 apex-btn">
+                        <p class="apex-em">Delivery health</p>
+                        <p class="mt-2 apex-em">Queue depth and backlog health</p>
+                        <p class="mt-1">Per-queue depth, age, and health classification.</p>
                     </a>
-                    <a href="/audit" class="block rounded-sm border border-white/15 bg-black/15 p-4 transition-colors hover:border-white/40">
-                        <p class="text-[10px] font-bold uppercase tracking-[0.2em] text-white/55">Evidence</p>
-                        <p class="mt-2 text-sm font-bold text-white">Audit trail</p>
-                        <p class="mt-1 text-xs text-white/70">Who changed what, and when.</p>
+                    <a href="/audit" class="block border p-4 apex-btn">
+                        <p class="apex-em">Evidence</p>
+                        <p class="mt-2 apex-em">Audit trail</p>
+                        <p class="mt-1">Who changed what, and when.</p>
                     </a>
                 </div>
             </aside>
@@ -2142,47 +2135,47 @@ pub fn control_plane_home_page() -> String {
     </section>
 
     <section class="grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
-        <article class="rounded-sm border border-surface-200 bg-card shadow-premium">
-            <div class="border-b border-surface-200 px-5 py-4">
-                <p class="text-[10px] font-bold uppercase tracking-[0.22em] text-surface-500">Operational Lanes</p>
-                <h2 class="mt-1 text-lg font-bold tracking-tight text-surface-950">Enterprise readiness · Launch choreography</h2>
+        <article class="border">
+            <div class="border-b px-5 py-4">
+                <p class="apex-em">Operational Lanes</p>
+                <h2 class="mt-1 apex-h2">Enterprise readiness, Launch choreography</h2>
             </div>
-            <div class="divide-y divide-surface-200">
+            <div class="">
                 <div class="px-5 py-5">
-                    <p class="text-xs font-bold uppercase tracking-[0.2em] text-surface-500">01 · Tenant readiness</p>
-                    <p class="mt-2 text-sm font-bold text-surface-950">Provision workspace, verify operators, bind billing plan</p>
-                    <p class="mt-1 text-xs leading-5 text-surface-500">Includes role policy, API scope checks, and mandatory MFA posture.</p>
+                    <p class="apex-em">01, Tenant readiness</p>
+                    <p class="mt-2 apex-em">Provision workspace, verify operators, bind billing plan</p>
+                    <p class="mt-1">Includes role policy, API scope checks, and mandatory MFA posture.</p>
                 </div>
                 <div class="px-5 py-5">
-                    <p class="text-xs font-bold uppercase tracking-[0.2em] text-surface-500">02 · Fleet checkpoint</p>
-                    <p class="mt-2 text-sm font-bold text-surface-950">Validate domain health, queue depth, and node distribution</p>
-                    <p class="mt-1 text-xs leading-5 text-surface-500">Blocks promotion if regional queue pressure exceeds threshold.</p>
+                    <p class="apex-em">02, Fleet checkpoint</p>
+                    <p class="mt-2 apex-em">Validate domain health, queue depth, and node distribution</p>
+                    <p class="mt-1">Blocks promotion if regional queue pressure exceeds threshold.</p>
                 </div>
                 <div class="px-5 py-5">
-                    <p class="text-xs font-bold uppercase tracking-[0.2em] text-surface-500">03 · Trust evidence gate</p>
+                    <p class="apex-em">03, Trust evidence gate</p>
                     
-                    <p class="mt-1 text-xs leading-5 text-surface-500">Route security questionnaire manifests to legal and procurement reviewers.</p>
+                    <p class="mt-1">Route security questionnaire manifests to legal and procurement reviewers.</p>
                 </div>
                 <div class="px-5 py-5">
-                    <p class="text-xs font-bold uppercase tracking-[0.2em] text-surface-500">04 · Expansion motion</p>
-                    <p class="mt-2 text-sm font-bold text-surface-950">Trigger operator outreach, approvals, and conversion sequence</p>
-                    <p class="mt-1 text-xs leading-5 text-surface-500">Runs through sales cockpit with deterministic approval loop.</p>
+                    <p class="apex-em">04, Expansion motion</p>
+                    <p class="mt-2 apex-em">Trigger operator outreach, approvals, and conversion sequence</p>
+                    <p class="mt-1">Runs through sales cockpit with deterministic approval loop.</p>
                 </div>
             </div>
         </article>
 
-        <article class="rounded-sm border border-surface-200 bg-card shadow-premium">
-            <div class="border-b border-surface-200 px-5 py-4">
-                <p class="text-[10px] font-bold uppercase tracking-[0.22em] text-surface-500">Command Actions</p>
-                <h2 class="mt-1 text-lg font-bold tracking-tight text-surface-950">Shortcuts by desk</h2>
+        <article class="border">
+            <div class="border-b px-5 py-4">
+                <p class="apex-em">Command Actions</p>
+                <h2 class="mt-1 apex-h2">Shortcuts by desk</h2>
             </div>
-            <div class="grid gap-3 p-5 text-xs font-bold">
-                <a href="/tenants" class="rounded-sm border border-surface-300 bg-surface-50 px-4 py-3 text-surface-900 transition-colors hover:border-surface-950">Tenant Inventory</a>
-                <a href="/infrastructure" class="rounded-sm border border-surface-300 bg-surface-50 px-4 py-3 text-surface-900 transition-colors hover:border-surface-950">Infrastructure Matrix</a>
-                <a href="/alerts/rules" class="rounded-sm border border-surface-300 bg-surface-50 px-4 py-3 text-surface-900 transition-colors hover:border-surface-950">Alert Rulebook</a>
-                <a href="/settings/security" class="rounded-sm border border-surface-300 bg-surface-50 px-4 py-3 text-surface-900 transition-colors hover:border-surface-950">Security Policy</a>
-                <a href="/audit" class="rounded-sm border border-surface-300 bg-surface-50 px-4 py-3 text-surface-900 transition-colors hover:border-surface-950">Audit Stream</a>
-                <a href="/sales" class="rounded-sm border border-primary bg-primary px-4 py-3 text-white transition-colors hover:bg-brand-700">Sales Autopilot</a>
+            <div class="grid gap-3 p-5 apex-em">
+                <a href="/tenants" class="border px-4 py-3 apex-btn">Tenant Inventory</a>
+                <a href="/infrastructure" class="border px-4 py-3 apex-btn">Infrastructure Matrix</a>
+                <a href="/alerts/rules" class="border px-4 py-3 apex-btn">Alert Rulebook</a>
+                <a href="/settings/security" class="border px-4 py-3 apex-btn">Security Policy</a>
+                <a href="/audit" class="border px-4 py-3 apex-btn">Audit Stream</a>
+                <a href="/sales" class="border px-4 py-3 apex-btn apex-btn--primary">Sales Autopilot</a>
             </div>
         </article>
     </section>
@@ -2195,11 +2188,11 @@ pub fn control_plane_home_page() -> String {
 /// Pixel-identical reproduction of the control-plane not-found contract.
 pub fn control_plane_not_found_page() -> String {
     // Review §7 (CP 404): the recovery destination is named explicitly.
-    "<main class=\"flex min-h-screen flex-col items-center justify-center bg-surface-950 text-surface-100\">\
-<div class=\"text-center\">\
-<h1 class=\"text-6xl font-bold tracking-tighter\">404</h1>\
-<p class=\"mt-4 text-lg text-surface-500\">That control-plane page does not exist.</p>\
-<a href=\"/\" class=\"mt-6 inline-block rounded-sm bg-primary px-6 py-3 text-sm font-bold text-white hover:bg-brand-700\">Control-plane home</a>\
+    "<main class=\"flex min-h-screen flex-col items-center justify-center\">\
+<div class=\"\">\
+<h1 class=\"apex-page-title\">404</h1>\
+<p class=\"mt-4\">That control-plane page does not exist.</p>\
+<a href=\"/\" class=\"mt-6 inline-block px-6 py-3 apex-em apex-btn apex-btn--primary\">Control-plane home</a>\
 </div></main>"
         .to_string()
 }
@@ -2235,13 +2228,13 @@ pub fn control_plane_audit_page() -> String {
 
     format!(
         "<div class=\"space-y-6\">\
-<div class=\"apex-page-heading flex flex-col gap-2\"><p class=\"apex-eyebrow\"><span>Control Plane Audit</span></p>\
-<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Audit Logs</h1></div>\
+<div class=\"apex-page-heading flex flex-col gap-2\"><p class=\"\"><span>Control Plane Audit</span></p>\
+<h1 class=\"apex-page-title\">Audit Logs</h1></div>\
 <div class=\"flex items-center gap-3\">\
-<a href=\"/web/admin/audit/export\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] border border-surface-200 bg-background px-4 py-2 text-sm font-semibold text-foreground transition-colors hover:border-surface-300\">Export audit log (CSV)</a>\
+<a href=\"/web/admin/audit/export\" class=\"inline-flex items-center justify-center whitespace-nowrap border px-4 py-2 apex-em apex-btn\">Export audit log (CSV)</a>\
 </div>\
 <form method=\"get\" action=\"/audit\" role=\"search\" class=\"flex items-center gap-4\">\
-<div class=\"flex-1\"><label class=\"sr-only\" for=\"audit-search\">Search audit logs</label><input id=\"audit-search\" type=\"search\" name=\"query\" placeholder=\"Search audit logs...\" class=\"flex h-12 w-full rounded-[8px_8px_7px_7px] border border-surface-200 bg-background px-4 text-[14px] outline-none transition focus-visible:ring-2 focus-visible:ring-primary/20\" /></div><button type=\"submit\" class=\"rounded-sm border border-surface-200 bg-card px-4 py-2 text-sm font-bold text-surface-950\">Search</button>\
+<div class=\"flex-1\"><label class=\"sr-only apex-label\" for=\"audit-search\">Search audit logs</label><input id=\"audit-search\" type=\"search\" name=\"query\" placeholder=\"Search audit logs...\" class=\"flex h-12 w-full border px-4 apex-input\" /></div><button type=\"submit\" class=\"border px-4 py-2 apex-btn\">Search</button>\
 </form>\
 <section data-view-state=\"ready\">{table}</section>\
 \
@@ -2280,7 +2273,7 @@ fn autonomy_mode_meaning(mode: &str) -> Option<&'static str> {
 /// Dark-panel section wrapper shared by every sales section.
 fn sales_panel(id: &str, eyebrow: &str, title: &str, body: &str) -> String {
     format!(
-        r#"<section id="{id}" class="apex-panel"><p class="text-xs uppercase tracking-[0.28em] text-surface-500">{eyebrow}</p><h2 class="apex-panel-title mt-2 text-xl break-words">{title}</h2>{body}</section>"#,
+        r#"<section id="{id}" class="apex-panel"><p class="">{eyebrow}</p><h2 class="apex-panel-title mt-2 break-words">{title}</h2>{body}</section>"#,
         id = id,
         eyebrow = html_escape(eyebrow),
         title = html_escape(title),
@@ -2291,7 +2284,7 @@ fn sales_panel(id: &str, eyebrow: &str, title: &str, body: &str) -> String {
 /// Honest empty/unavailable statement — never a fake row.
 fn sales_note(text: &str) -> String {
     format!(
-        r#"<p class="mt-5 rounded-sm border border-border bg-surface-50 p-4 text-sm leading-6 text-surface-600">{}</p>"#,
+        r#"<p class="mt-5 border border-border p-4">{}</p>"#,
         html_escape(text)
     )
 }
@@ -2302,7 +2295,7 @@ fn sales_warning_note(text: &str) -> String {
     // legible only on a permanently-black panel, and the panel is a flat
     // surface now (contrast gate: 1.08:1 in light mode).
     format!(
-        r#"<p class="apex-callout apex-callout--warning mt-5" role="status">{}</p>"#,
+        r#"<p class="apex-notice apex-notice--warn mt-5" role="status">{}</p>"#,
         html_escape(text)
     )
 }
@@ -2310,7 +2303,7 @@ fn sales_warning_note(text: &str) -> String {
 /// One hero KPI tile (same classes as the previous revision).
 fn sales_kpi_tile(label: &str, value: &str, hint: &str) -> String {
     format!(
-        r#"<article class="apex-panel apex-panel--flush p-4"><p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">{label}</p><p class="mt-2 text-2xl font-bold tracking-tight text-foreground break-words">{value}</p><p class="mt-1 text-xs text-surface-500 break-words">{hint}</p></article>"#,
+        r#"<article class="apex-panel apex-panel--flush p-4"><p class="">{label}</p><p class="mt-2 break-words apex-em">{value}</p><p class="mt-1 break-words">{hint}</p></article>"#,
         label = html_escape(label),
         value = html_escape(value),
         hint = html_escape(hint),
@@ -2400,10 +2393,10 @@ fn sales_decision_action(decision: &SalesDecisionData) -> String {
 fn sales_decision_stream_row(decision: &SalesDecisionData) -> String {
     let time = match decision.created_at.as_deref().and_then(rfc3339_clock) {
         Some(clock) => format!(
-            r#"<time datetime="{}" class="font-mono text-surface-500">{clock}</time>"#,
+            r#"<time datetime="{}" class="">{clock}</time>"#,
             escape_attribute_value(decision.created_at.as_deref().unwrap_or_default()),
         ),
-        None => r#"<span class="text-surface-500">time unavailable</span>"#.to_string(),
+        None => r#"<span class="">time unavailable</span>"#.to_string(),
     };
     let scheduled = decision
         .execute_after
@@ -2424,7 +2417,7 @@ fn sales_decision_stream_row(decision: &SalesDecisionData) -> String {
         "allowed"
     };
     let blocked_marker = if decision.blocked {
-        r#"<span class="font-bold text-warning-700">BLOCKED</span>"#
+        r#"<span class="apex-em">BLOCKED</span>"#
     } else {
         ""
     };
@@ -2440,16 +2433,12 @@ fn sales_decision_stream_row(decision: &SalesDecisionData) -> String {
         }
     }
     let reason_line = if reasons.is_empty() {
-        r#"<p class="mt-1 text-xs leading-5 text-surface-500">Reason: no rationale recorded.</p>"#
-            .to_string()
+        r#"<p class="mt-1">Reason: no rationale recorded.</p>"#.to_string()
     } else {
-        format!(
-            r#"<p class="mt-1 text-xs leading-5 text-surface-600">Reason: {}</p>"#,
-            reasons.join(" · ")
-        )
+        format!(r#"<p class="mt-1">Reason: {}</p>"#, reasons.join(", "))
     };
     format!(
-        r#"<li class="apex-panel apex-panel--flush p-3"><p class="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-xs text-surface-600">{time}<span class="font-bold text-foreground">{account}</span><span class="font-mono font-bold text-primary">{action}</span><span class="text-surface-500">&rarr; {contact}</span><span>Confidence {confidence}</span><span>Variant: {variant}</span><span>Sender: {sender}</span><span>Legal policy: {legal}</span>{expected}{scheduled}{blocked_marker}</p>{reason_line}</li>"#,
+        r#"<li class="apex-panel apex-panel--flush p-3"><p class="flex flex-wrap items-baseline gap-x-3 gap-y-1">{time}<span class="apex-em">{account}</span><span class="apex-em">{action}</span><span class="">&rarr; {contact}</span><span>Confidence {confidence}</span><span>Variant: {variant}</span><span>Sender: {sender}</span><span>Legal policy: {legal}</span>{expected}{scheduled}{blocked_marker}</p>{reason_line}</li>"#,
         time = time,
         account = sales_value_or(decision.account_id.as_deref(), "unidentified account"),
         action = sales_decision_action(decision),
@@ -2489,7 +2478,7 @@ fn sales_decision_table_row(decision: &SalesDecisionData) -> String {
     let offer = sales_value_or(decision.selected_offer.as_deref(), "none");
     let sequence = sales_value_or(decision.selected_sequence.as_deref(), "none");
     format!(
-        r#"<tr class="align-top"><td class="px-4 py-3 font-mono text-xs font-bold text-surface-100">{action}</td><td class="px-4 py-3 text-xs text-surface-600">{account}</td><td class="px-4 py-3 text-xs text-surface-600">{confidence}</td><td class="px-4 py-3 text-xs text-surface-600">{expected}</td><td class="px-4 py-3 text-xs text-surface-600">{variant}</td><td class="px-4 py-3 text-xs text-surface-600">{sender}</td><td class="px-4 py-3 text-xs text-surface-500">{offer} / {sequence}</td><td class="px-4 py-3 text-xs leading-5 text-surface-500">{rationale}</td></tr>"#,
+        r#"<tr class="align-top"><td class="px-4 py-3 apex-em">{action}</td><td class="px-4 py-3">{account}</td><td class="px-4 py-3">{confidence}</td><td class="px-4 py-3">{expected}</td><td class="px-4 py-3">{variant}</td><td class="px-4 py-3">{sender}</td><td class="px-4 py-3">{offer} / {sequence}</td><td class="px-4 py-3">{rationale}</td></tr>"#,
         action = sales_decision_action(decision),
         account = sales_value_or(decision.account_id.as_deref(), "unidentified account"),
         confidence = format_confidence(decision.confidence),
@@ -2513,9 +2502,7 @@ fn sales_exception_item(decision: &SalesDecisionData) -> String {
             .map(|reason| format!("<li>{}</li>", html_escape(reason.trim())))
             .collect::<Vec<_>>()
             .join("");
-        format!(
-            r#"<ul class="mt-3 list-disc space-y-1 pl-5 text-xs leading-5 text-warning-100">{items}</ul>"#
-        )
+        format!(r#"<ul class="mt-3 list-disc space-y-1 pl-5">{items}</ul>"#)
     } else {
         String::new()
     };
@@ -2525,7 +2512,7 @@ fn sales_exception_item(decision: &SalesDecisionData) -> String {
             "text-warning-100",
         )
     } else {
-        ("border-border bg-surface-50", "text-surface-500")
+        ("apex-notice", "apex-status")
     };
     let heading = if decision.blocked {
         "Blocked decision"
@@ -2548,13 +2535,13 @@ fn sales_exception_item(decision: &SalesDecisionData) -> String {
     } else {
         let note_id = format!("decision-note-{}", decision.id);
         format!(
-            r#"<form method="post" action="/web/admin/autopilot/decisions/{id}/review" class="mt-3 flex flex-wrap items-end gap-3"><div class="min-w-[12rem] flex-1 space-y-1"><label class="apex-klabel" for="{note_id}">Review note (recorded)</label><input id="{note_id}" name="note" type="text" maxlength="500" placeholder="Why this decision is approved or rejected" class="w-full rounded-sm border border-surface-200 bg-background px-3 py-2 text-sm text-surface-950 outline-none transition-all focus:border-primary" /></div><button type="submit" name="outcome" value="approved" class="apex-btn apex-btn--sm">Approve</button><button type="submit" name="outcome" value="rejected" class="inline-flex items-center justify-center whitespace-nowrap rounded-sm bg-destructive px-4 py-2 text-sm font-bold text-destructive-foreground transition-all hover:bg-destructive/90">Reject</button><input type="hidden" name="return_to" value="/sales" /></form><p class="mt-2 text-xs leading-5 text-surface-500">Approval re-runs every gate before releasing the linked action; a gate refusal records the rejection with its reasons. The note is kept on the decision.</p>"#,
+            r#"<form method="post" action="/web/admin/autopilot/decisions/{id}/review" class="mt-3 flex flex-wrap items-end gap-3"><div class="min-w-[12rem] flex-1 space-y-1"><label class="apex-label" for="{note_id}">Review note (recorded)</label><input id="{note_id}" name="note" type="text" maxlength="500" placeholder="Why this decision is approved or rejected" class="w-full border px-3 py-2 apex-input" /></div><button type="submit" name="outcome" value="approved" class="apex-btn apex-btn--sm">Approve</button><button type="submit" name="outcome" value="rejected" class="inline-flex items-center justify-center whitespace-nowrap px-4 py-2 apex-btn apex-btn--danger">Reject</button><input type="hidden" name="return_to" value="/sales" /></form><p class="mt-2">Approval re-runs every gate before releasing the linked action; a gate refusal records the rejection with its reasons. The note is kept on the decision.</p>"#,
             id = html_escape(&decision.id),
             note_id = html_escape(&note_id),
         )
     };
     format!(
-        r#"<li class="rounded-sm border {tone} p-4"><p class="text-[10px] font-bold uppercase tracking-[0.2em] {badge}">{heading} · {action}</p><p class="mt-2 text-sm font-bold text-foreground">{account} &rarr; {contact}</p>{reasons}<p class="mt-2 text-xs leading-5 text-surface-600">Rationale: {rationale}</p>{review_control}</li>"#,
+        r#"<li class="border {tone} p-4"><p class="{badge} apex-em">{heading}, {action}</p><p class="mt-2 apex-em">{account} &rarr; {contact}</p>{reasons}<p class="mt-2">Rationale: {rationale}</p>{review_control}</li>"#,
         tone = tone,
         badge = badge,
         heading = heading,
@@ -2570,7 +2557,7 @@ fn sales_exception_item(decision: &SalesDecisionData) -> String {
 /// Compact dead-letter row (Exceptions section).
 fn sales_dead_letter_summary(letter: &SalesDeadLetterData) -> String {
     format!(
-        r#"<li class="rounded-sm border border-border bg-surface-50 p-4"><p class="font-mono text-xs text-surface-600">{id}</p><p class="mt-1 text-xs text-surface-600">{action_type} · {entity_type} {entity_id} · attempt {attempt} of {max_attempts}</p><p class="mt-1 text-xs text-surface-600">Last error: {last_error}</p></li>"#,
+        r#"<li class="border border-border p-4"><p class="">{id}</p><p class="mt-1">{action_type}, {entity_type} {entity_id}, attempt {attempt} of {max_attempts}</p><p class="mt-1">Last error: {last_error}</p></li>"#,
         id = html_escape(&letter.id),
         action_type = html_escape(&letter.action_type),
         entity_type = html_escape(&letter.entity_type),
@@ -2592,7 +2579,7 @@ fn sales_dead_letter_replay_control(letter: &SalesDeadLetterData) -> String {
         .and_then(rfc3339_utc_label)
         .unwrap_or_else(|| "not recorded".to_string());
     format!(
-        r#"<li class="rounded-sm border border-border bg-surface-50 p-4"><p class="font-mono text-xs text-surface-600">{id}</p><p class="mt-1 text-xs text-surface-600">{action_type} · {entity_type} {entity_id} · attempt {attempt} of {max_attempts}</p><p class="mt-1 text-xs text-surface-600">Last error: {last_error}</p><p class="mt-1 text-xs text-surface-500">Due: {due}</p><form method="post" action="/web/admin/autopilot/actions/{id}/replay" class="mt-3 flex flex-wrap items-center gap-3"><input type="hidden" name="return_to" value="/sales"><button type="submit" class="apex-btn apex-btn--sm">Replay</button><p class="text-xs leading-5 text-surface-500">Requeues this action with a fresh attempt budget — it runs when the engine next polls.</p></form></li>"#,
+        r#"<li class="border border-border p-4"><p class="">{id}</p><p class="mt-1">{action_type}, {entity_type} {entity_id}, attempt {attempt} of {max_attempts}</p><p class="mt-1">Last error: {last_error}</p><p class="mt-1">Due: {due}</p><form method="post" action="/web/admin/autopilot/actions/{id}/replay" class="mt-3 flex flex-wrap items-center gap-3"><input type="hidden" name="return_to" value="/sales"><button type="submit" class="apex-btn apex-btn--sm">Replay</button><p class="">Requeues this action with a fresh attempt budget — it runs when the engine next polls.</p></form></li>"#,
         id = html_escape(&letter.id),
         action_type = html_escape(&letter.action_type),
         entity_type = html_escape(&letter.entity_type),
@@ -2658,9 +2645,9 @@ fn sales_hero(data: &SalesPageData) -> String {
     } else {
         String::new()
     };
-    let session = r#"<section class="apex-panel"><p class="text-xs uppercase tracking-[0.24em] text-surface-500">Session</p><h2 class="mt-2 text-xl font-bold text-foreground">Same-origin operator session</h2><p class="mt-4 text-xs leading-5 text-surface-500">This console uses your signed-in operator session; system-tenant access is enforced on every action. No API keys are handled in the browser.</p><p class="mt-4 text-xs uppercase tracking-[0.2em] text-surface-500">Status · Cookie session</p></section>"#;
+    let session = r#"<section class="apex-panel"><p class="">Session</p><h2 class="mt-2 apex-h2">Same-origin operator session</h2><p class="mt-4">This console uses your signed-in operator session; system-tenant access is enforced on every action. No API keys are handled in the browser.</p><p class="mt-4">Status, Cookie session</p></section>"#;
     format!(
-        r#"<header class="apex-cp-dark-hero p-6"><div class="grid gap-6 xl:grid-cols-[1.2fr_0.8fr]"><div><p class="text-[11px] font-bold uppercase tracking-[0.32em] text-primary">Autonomous Sales</p><h1 class="mt-3 text-4xl font-bold tracking-tight text-foreground">Sales Autopilot</h1><p class="mt-3 max-w-3xl text-sm leading-6 text-surface-600">Is the machine generating qualified pipeline profitably and safely right now? This surface reports the live sales-autopilot control state — revenue outcomes, autonomy, decisions, exceptions, queue health, enrollments, and the hard compliance gate. Every value is served by the engine; when the control API does not answer, the section says so instead of estimating. Every action below takes effect when you submit it.</p>{gap_banner}<div class="mt-5 grid gap-3 break-words sm:grid-cols-2 xl:grid-cols-4">{revenue_tile}{meetings_tile}{decisions_tile}{blocked_tile}</div></div>{session}</div></header>"#,
+        r#"<header class="apex-panel p-6"><div class="grid gap-6 xl:grid-cols-[1.2fr_0.8fr]"><div><p class="apex-em">Autonomous Sales</p><h1 class="mt-3 apex-page-title">Sales Autopilot</h1><p class="mt-3 max-w-3xl">Is the machine generating qualified pipeline profitably and safely right now? This surface reports the live sales-autopilot control state — revenue outcomes, autonomy, decisions, exceptions, queue health, enrollments, and the hard compliance gate. Every value is served by the engine; when the control API does not answer, the section says so instead of estimating. Every action below takes effect when you submit it.</p>{gap_banner}<div class="mt-5 grid gap-3 break-words sm:grid-cols-2 xl:grid-cols-4">{revenue_tile}{meetings_tile}{decisions_tile}{blocked_tile}</div></div>{session}</div></header>"#,
         gap_banner = gap_banner,
         revenue_tile = sales_kpi_tile("Revenue (30d)", &revenue_value, revenue_hint),
         meetings_tile = sales_kpi_tile("Meetings booked (30d)", &meetings_value, meetings_hint),
@@ -2676,7 +2663,7 @@ fn sales_revenue_section(overview: Option<&SalesOverviewData>) -> String {
         None => sales_note("Revenue is temporarily unavailable. No figure is estimated."),
         Some(overview) => {
             let window = format!(
-                r#"<p class="mt-4 text-sm leading-6 text-surface-600">Meetings booked (30d): <span class="font-bold text-foreground">{meetings}</span> · Decisions in the window (24h): <span class="font-bold text-foreground">{decisions}</span> · Blocked by a hard gate (24h): <span class="font-bold text-foreground">{blocked}</span></p>"#,
+                r#"<p class="mt-4">Meetings booked (30d): <span class="apex-em">{meetings}</span>, Decisions in the window (24h): <span class="apex-em">{decisions}</span>, Blocked by a hard gate (24h): <span class="apex-em">{blocked}</span></p>"#,
                 meetings = overview.meetings_booked,
                 decisions = overview.decisions_last_24h,
                 blocked = overview.blocked_last_24h,
@@ -2695,7 +2682,7 @@ fn sales_revenue_section(overview: Option<&SalesOverviewData>) -> String {
                     .iter()
                     .map(|row| {
                         format!(
-                            r#"<tr><td class="px-4 py-3 font-mono text-xs text-surface-600">{outcome}</td><td class="px-4 py-3 text-xs font-bold text-foreground">{eur}</td></tr>"#,
+                            r#"<tr><td class="px-4 py-3">{outcome}</td><td class="px-4 py-3 apex-em">{eur}</td></tr>"#,
                             outcome = html_escape(&row.outcome),
                             eur = format_eur_amount(row.eur),
                         )
@@ -2704,7 +2691,7 @@ fn sales_revenue_section(overview: Option<&SalesOverviewData>) -> String {
                     .join("");
                 let total = format_eur_amount(overview.revenue.iter().map(|row| row.eur).sum());
                 format!(
-                    r#"<div class="mt-5 overflow-x-auto rounded-sm border border-border"><table class="min-w-full divide-y divide-border text-left text-sm"><caption class="sr-only">Revenue outcomes for the last 30 days</caption><thead class="bg-surface-50 text-surface-600"><tr><th scope="col" class="px-4 py-3 font-medium">Outcome</th><th scope="col" class="px-4 py-3 font-medium">Revenue (EUR)</th></tr></thead><tbody class="divide-y divide-border text-surface-600">{rows}<tr class="bg-surface-50"><td class="px-4 py-3 text-xs font-bold text-foreground">Total</td><td class="px-4 py-3 text-xs font-bold text-foreground">{total}</td></tr></tbody></table></div>{window}"#,
+                    r#"<div class="mt-5 overflow-x-auto border border-border"><table class="min-w-full apex-table"><caption class="sr-only">Revenue outcomes for the last 30 days</caption><thead class=""><tr><th scope="col" class="px-4 py-3">Outcome</th><th scope="col" class="px-4 py-3">Revenue (EUR)</th></tr></thead><tbody class="">{rows}<tr class=""><td class="px-4 py-3 apex-em">Total</td><td class="px-4 py-3 apex-em">{total}</td></tr></tbody></table></div>{window}"#,
                     rows = rows,
                     total = total,
                     window = window,
@@ -2753,7 +2740,7 @@ fn sales_autonomy_body(autonomy: &SalesAutonomyData) -> String {
         .map(|label| html_escape(&label))
         .unwrap_or_else(|| "not recorded".to_string());
     format!(
-        r#"<p class="mt-4 text-sm leading-6 text-surface-600">Current mode: <span class="font-mono font-bold text-foreground">{mode}</span></p><p class="mt-2 text-sm leading-6 text-surface-600">{meaning}</p>{kill_switch}<dl class="mt-5 grid gap-3 break-words text-xs sm:grid-cols-2 xl:grid-cols-4"><div class="apex-panel apex-panel--flush p-4"><dt class="uppercase tracking-[0.2em] text-surface-500">Decision brain</dt><dd class="mt-2 text-sm font-bold text-foreground">{brain}</dd></div><div class="apex-panel apex-panel--flush p-4"><dt class="uppercase tracking-[0.2em] text-surface-500">Execution authority</dt><dd class="mt-2 text-sm font-bold text-foreground">{execute}</dd></div><div class="apex-panel apex-panel--flush p-4"><dt class="uppercase tracking-[0.2em] text-surface-500">Last autonomy action</dt><dd class="mt-2 break-words text-sm font-bold text-foreground">{last_action}</dd></div><div class="apex-panel apex-panel--flush p-4"><dt class="uppercase tracking-[0.2em] text-surface-500">Last action at</dt><dd class="mt-2 text-sm font-bold text-foreground">{last_action_at}</dd></div></dl><p class="mt-5 text-xs leading-5 text-surface-500">Mode changes, pause/resume, and the kill switch are JSON control-API mutations (<code class="rounded bg-surface-50 px-1.5 py-0.5 text-primary break-words">POST /v1/admin/autopilot/mode</code>, <code class="rounded bg-surface-50 px-1.5 py-0.5 text-primary break-words">/pause</code>, <code class="rounded bg-surface-50 px-1.5 py-0.5 text-primary break-words">/resume</code>, <code class="rounded bg-surface-50 px-1.5 py-0.5 text-primary break-words">/kill-switch</code>). This zero-JavaScript console mounts no SSR form handler for them, so they are read-only here; the control API is the mutation path.</p>"#,
+        r#"<p class="mt-4">Current mode: <span class="apex-em">{mode}</span></p><p class="mt-2">{meaning}</p>{kill_switch}<dl class="mt-5 grid gap-3 break-words sm:grid-cols-2 xl:grid-cols-4"><div class="apex-panel apex-panel--flush p-4"><dt class="">Decision brain</dt><dd class="mt-2">{brain}</dd></div><div class="apex-panel apex-panel--flush p-4"><dt class="">Execution authority</dt><dd class="mt-2">{execute}</dd></div><div class="apex-panel apex-panel--flush p-4"><dt class="">Last autonomy action</dt><dd class="mt-2 break-words">{last_action}</dd></div><div class="apex-panel apex-panel--flush p-4"><dt class="">Last action at</dt><dd class="mt-2">{last_action_at}</dd></div></dl><p class="mt-5">Mode changes, pause/resume, and the kill switch are JSON control-API mutations (<code class="px-1.5 py-0.5 break-words">POST /v1/admin/autopilot/mode</code>, <code class="px-1.5 py-0.5 break-words">/pause</code>, <code class="px-1.5 py-0.5 break-words">/resume</code>, <code class="px-1.5 py-0.5 break-words">/kill-switch</code>). This zero-JavaScript console mounts no SSR form handler for them, so they are read-only here; the control API is the mutation path.</p>"#,
         mode = mode,
         meaning = meaning,
         kill_switch = kill_switch,
@@ -2789,7 +2776,7 @@ fn sales_decision_stream_section(data: &SalesPageData) -> String {
             "No decisions yet — the engine has not recorded a decision for this tenant. The stream fills as soon as the engine decides.",
         ),
         Some(decisions) => format!(
-            r#"<p class="mt-4 text-xs leading-5 text-surface-500">Chronological, newest first. Action vocabulary: <span class="font-mono text-surface-600">ENRICH</span> gathers evidence, <span class="font-mono text-surface-600">CONTACT</span> starts or advances outreach, <span class="font-mono text-surface-600">SKIP</span> refuses the decision and sends nothing.</p><ol class="mt-4 space-y-3">{rows}</ol>"#,
+            r#"<p class="mt-4">Chronological, newest first. Action vocabulary: <span class="">ENRICH</span> gathers evidence, <span class="">CONTACT</span> starts or advances outreach, <span class="">SKIP</span> refuses the decision and sends nothing.</p><ol class="mt-4 space-y-3">{rows}</ol>"#,
             rows = sales_decisions_newest_first(decisions)
                 .into_iter()
                 .map(sales_decision_stream_row)
@@ -2820,7 +2807,7 @@ fn sales_decisions_section(data: &SalesPageData) -> String {
                 .collect::<Vec<_>>()
                 .join("");
             format!(
-                r#"<div class="mt-5 overflow-x-auto rounded-sm border border-border"><table class="min-w-full divide-y divide-border text-left text-sm"><caption class="sr-only">Recent sales-autopilot decisions</caption><thead class="bg-surface-50 text-surface-600"><tr><th scope="col" class="px-4 py-3 font-medium">Action</th><th scope="col" class="px-4 py-3 font-medium">Account</th><th scope="col" class="px-4 py-3 font-medium">Confidence</th><th scope="col" class="px-4 py-3 font-medium">Expected value</th><th scope="col" class="px-4 py-3 font-medium">Variant</th><th scope="col" class="px-4 py-3 font-medium">Sender</th><th scope="col" class="px-4 py-3 font-medium">Offer / sequence</th><th scope="col" class="px-4 py-3 font-medium">Rationale</th></tr></thead><tbody class="divide-y divide-border text-surface-600">{rows}</tbody></table></div>"#,
+                r#"<div class="mt-5 overflow-x-auto border border-border"><table class="min-w-full apex-table"><caption class="sr-only">Recent sales-autopilot decisions</caption><thead class=""><tr><th scope="col" class="px-4 py-3">Action</th><th scope="col" class="px-4 py-3">Account</th><th scope="col" class="px-4 py-3">Confidence</th><th scope="col" class="px-4 py-3">Expected value</th><th scope="col" class="px-4 py-3">Variant</th><th scope="col" class="px-4 py-3">Sender</th><th scope="col" class="px-4 py-3">Offer / sequence</th><th scope="col" class="px-4 py-3">Rationale</th></tr></thead><tbody class="">{rows}</tbody></table></div>"#,
                 rows = rows,
             )
         }
@@ -2848,10 +2835,10 @@ fn sales_exceptions_section(data: &SalesPageData) -> String {
             parts.push(format!(r#"<ul class="mt-5 space-y-3">{items}</ul>"#));
         }
     }
-    parts.push(r#"<p class="mt-5 text-xs leading-5 text-surface-500">Approve or reject a pending decision with the form on its row: the review records you, your note and the gate re-run in one transaction. Blocked decisions are hard-gate refusals with nothing to release.</p>"#.to_string());
+    parts.push(r#"<p class="mt-5">Approve or reject a pending decision with the form on its row: the review records you, your note and the gate re-run in one transaction. Blocked decisions are hard-gate refusals with nothing to release.</p>"#.to_string());
     // Review §4.2: the raw endpoint lesson belongs in expandable technical
     // reference material, not in the operator's primary reading flow.
-    parts.push(r#"<details class="mt-2"><summary class="cursor-pointer text-xs font-medium text-surface-500">Technical reference</summary><p class="mt-2 text-xs leading-5 text-surface-500">The row forms post <code class="rounded bg-surface-50 px-1.5 py-0.5 text-primary break-words">outcome=approved|rejected</code> + <code class="rounded bg-surface-50 px-1.5 py-0.5 text-primary break-words">note</code> to <code class="rounded bg-surface-50 px-1.5 py-0.5 text-primary break-words">POST /web/admin/autopilot/decisions/:id/review</code>; the JSON twin is <code class="rounded bg-surface-50 px-1.5 py-0.5 text-primary break-words">POST /v1/admin/autopilot/decisions/:id/review</code>.</p></details>"#.to_string());
+    parts.push(r#"<details class="mt-2"><summary class="">Technical reference</summary><p class="mt-2">The row forms post <code class="px-1.5 py-0.5 break-words">outcome=approved|rejected</code> + <code class="px-1.5 py-0.5 break-words">note</code> to <code class="px-1.5 py-0.5 break-words">POST /web/admin/autopilot/decisions/:id/review</code>; the JSON twin is <code class="px-1.5 py-0.5 break-words">POST /v1/admin/autopilot/decisions/:id/review</code>.</p></details>"#.to_string());
     match data.dead_letters.as_ref() {
         None => parts.push(sales_note(
             "The dead-letter feed is temporarily unavailable.",
@@ -2866,7 +2853,7 @@ fn sales_exceptions_section(data: &SalesPageData) -> String {
                 .collect::<Vec<_>>()
                 .join("");
             parts.push(format!(
-                r#"<h3 class="mt-6 text-sm font-bold uppercase tracking-[0.2em] text-surface-500">Dead letters</h3><ul class="mt-3 space-y-3">{items}</ul>"#,
+                r#"<h3 class="mt-6 apex-h3">Dead letters</h3><ul class="mt-3 space-y-3">{items}</ul>"#,
             ));
         }
     }
@@ -2891,7 +2878,7 @@ fn sales_actions_section(data: &SalesPageData) -> String {
     };
     let stats = &overview.action_stats;
     let tiles = format!(
-        r#"<dl class="mt-5 grid gap-3 break-words text-xs sm:grid-cols-2 xl:grid-cols-4"><div class="apex-panel apex-panel--flush p-4"><dt class="uppercase tracking-[0.2em] text-surface-500">Total actions</dt><dd class="mt-2 text-2xl font-bold text-foreground">{total}</dd></div><div class="apex-panel apex-panel--flush p-4"><dt class="uppercase tracking-[0.2em] text-surface-500">Due now</dt><dd class="mt-2 text-2xl font-bold text-warning-700">{due_now}</dd></div><div class="apex-panel apex-panel--flush p-4"><dt class="uppercase tracking-[0.2em] text-surface-500">Dead-lettered</dt><dd class="mt-2 text-2xl font-bold text-warning-700">{dead_lettered}</dd></div><div class="apex-panel apex-panel--flush p-4"><dt class="uppercase tracking-[0.2em] text-surface-500">States reported</dt><dd class="mt-2 text-2xl font-bold text-foreground">{states}</dd></div></dl>"#,
+        r#"<dl class="mt-5 grid gap-3 break-words sm:grid-cols-2 xl:grid-cols-4"><div class="apex-panel apex-panel--flush p-4"><dt class="">Total actions</dt><dd class="mt-2">{total}</dd></div><div class="apex-panel apex-panel--flush p-4"><dt class="">Due now</dt><dd class="mt-2">{due_now}</dd></div><div class="apex-panel apex-panel--flush p-4"><dt class="">Dead-lettered</dt><dd class="mt-2">{dead_lettered}</dd></div><div class="apex-panel apex-panel--flush p-4"><dt class="">States reported</dt><dd class="mt-2">{states}</dd></div></dl>"#,
         total = stats.total,
         due_now = stats.due_now,
         dead_lettered = stats.dead_lettered,
@@ -2905,7 +2892,7 @@ fn sales_actions_section(data: &SalesPageData) -> String {
             .iter()
             .map(|(state, count)| {
                 format!(
-                    r#"<tr><td class="px-4 py-3 font-mono text-xs text-surface-600">{state}</td><td class="px-4 py-3 text-xs font-bold text-foreground">{count}</td></tr>"#,
+                    r#"<tr><td class="px-4 py-3">{state}</td><td class="px-4 py-3 apex-em">{count}</td></tr>"#,
                     state = html_escape(state),
                     count = count,
                 )
@@ -2913,7 +2900,7 @@ fn sales_actions_section(data: &SalesPageData) -> String {
             .collect::<Vec<_>>()
             .join("");
         format!(
-            r#"<div class="mt-5 overflow-x-auto rounded-sm border border-border"><table class="min-w-full divide-y divide-border text-left text-sm"><caption class="sr-only">Action queue counts by state</caption><thead class="bg-surface-50 text-surface-600"><tr><th scope="col" class="px-4 py-3 font-medium">State</th><th scope="col" class="px-4 py-3 font-medium">Count</th></tr></thead><tbody class="divide-y divide-border text-surface-600">{rows}</tbody></table></div>"#,
+            r#"<div class="mt-5 overflow-x-auto border border-border"><table class="min-w-full apex-table"><caption class="sr-only">Action queue counts by state</caption><thead class=""><tr><th scope="col" class="px-4 py-3">State</th><th scope="col" class="px-4 py-3">Count</th></tr></thead><tbody class="">{rows}</tbody></table></div>"#,
         )
     };
     let replay = match data.dead_letters.as_ref() {
@@ -2928,11 +2915,11 @@ fn sales_actions_section(data: &SalesPageData) -> String {
                 .collect::<Vec<_>>()
                 .join("");
             format!(
-                r#"<h3 class="mt-6 text-sm font-bold uppercase tracking-[0.2em] text-surface-500">Dead letters · replay</h3><ul class="mt-3 space-y-3">{items}</ul>"#,
+                r#"<h3 class="mt-6 apex-h3">Dead letters, replay</h3><ul class="mt-3 space-y-3">{items}</ul>"#,
             )
         }
     };
-    let enrichment = r#"<form method="post" action="/web/admin/sales/discovery/run" class="mt-6 grid gap-4 rounded-sm border border-border bg-surface-50 p-4"><div class="space-y-2 text-sm"><label for="sales-enrich-sources" class="block text-surface-600">Source domains (comma-separated)</label><input id="sales-enrich-sources" name="sources" required class="apex-input w-full" /></div><div><button type="submit" class="apex-btn">Run enrichment</button></div><p class="text-xs leading-5 text-surface-500">Manual enrichment trigger — normal discovery is engine-driven; this asks the engine to enrich the listed domains now.</p></form>"#;
+    let enrichment = r#"<form method="post" action="/web/admin/sales/discovery/run" class="mt-6 grid gap-4 border border-border p-4"><div class="space-y-2"><label for="sales-enrich-sources" class="block apex-label">Source domains (comma-separated)</label><input id="sales-enrich-sources" name="sources" required class="apex-input w-full" /></div><div><button type="submit" class="apex-btn">Run enrichment</button></div><p class="">Manual enrichment trigger — normal discovery is engine-driven; this asks the engine to enrich the listed domains now.</p></form>"#;
     sales_panel(
         "sales-actions",
         "Queue",
@@ -2955,7 +2942,7 @@ fn sales_enrollments_section(data: &SalesPageData) -> String {
                 .iter()
                 .map(|row| {
                     format!(
-                        r#"<tr><td class="px-4 py-3 font-mono text-xs text-surface-600">{state}</td><td class="px-4 py-3 text-xs font-bold text-foreground">{count}</td></tr>"#,
+                        r#"<tr><td class="px-4 py-3">{state}</td><td class="px-4 py-3 apex-em">{count}</td></tr>"#,
                         state = html_escape(&row.state),
                         count = row.count,
                     )
@@ -2963,11 +2950,11 @@ fn sales_enrollments_section(data: &SalesPageData) -> String {
                 .collect::<Vec<_>>()
                 .join("");
             format!(
-                r#"<div class="mt-5 overflow-x-auto rounded-sm border border-border"><table class="min-w-full divide-y divide-border text-left text-sm"><caption class="sr-only">Contact enrollments by state</caption><thead class="bg-surface-50 text-surface-600"><tr><th scope="col" class="px-4 py-3 font-medium">State</th><th scope="col" class="px-4 py-3 font-medium">Enrolled</th></tr></thead><tbody class="divide-y divide-border text-surface-600">{rows}</tbody></table></div>"#,
+                r#"<div class="mt-5 overflow-x-auto border border-border"><table class="min-w-full apex-table"><caption class="sr-only">Contact enrollments by state</caption><thead class=""><tr><th scope="col" class="px-4 py-3">State</th><th scope="col" class="px-4 py-3">Enrolled</th></tr></thead><tbody class="">{rows}</tbody></table></div>"#,
             )
         }
     };
-    let form = r#"<form method="post" action="/web/admin/sales/outreach/launch" class="mt-6 grid gap-4 rounded-sm border border-border bg-surface-50 p-4"><h3 class="text-sm font-bold uppercase tracking-[0.2em] text-surface-500">Enroll contacts into a sequence</h3><div class="space-y-2 text-sm"><label for="sales-enroll-sequence" class="block text-surface-600">Sequence id</label><input id="sales-enroll-sequence" name="sequence_id" required class="apex-input w-full" /></div><div class="space-y-2 text-sm"><label for="sales-enroll-policy" class="block text-surface-600">Autonomy policy id</label><input id="sales-enroll-policy" name="autonomy_policy_id" required class="apex-input w-full" /></div><div class="space-y-2 text-sm"><label for="sales-enroll-contacts" class="block text-surface-600">Contact ids (comma-separated, 1-100)</label><input id="sales-enroll-contacts" name="contact_ids" required class="apex-input w-full" /></div><div><button type="submit" class="apex-btn apex-btn--secondary">Enqueue enrollment</button></div><p class="text-xs leading-5 text-surface-500">Enrollment is an engine command: the control plane creates no campaign and no recipient row. The engine's accepted/rejected counts return as a flash.</p></form>"#;
+    let form = r#"<form method="post" action="/web/admin/sales/outreach/launch" class="mt-6 grid gap-4 border border-border p-4"><h3 class="apex-h3">Enroll contacts into a sequence</h3><div class="space-y-2"><label for="sales-enroll-sequence" class="block apex-label">Sequence id</label><input id="sales-enroll-sequence" name="sequence_id" required class="apex-input w-full" /></div><div class="space-y-2"><label for="sales-enroll-policy" class="block apex-label">Autonomy policy id</label><input id="sales-enroll-policy" name="autonomy_policy_id" required class="apex-input w-full" /></div><div class="space-y-2"><label for="sales-enroll-contacts" class="block apex-label">Contact ids (comma-separated, 1-100)</label><input id="sales-enroll-contacts" name="contact_ids" required class="apex-input w-full" /></div><div><button type="submit" class="apex-btn apex-btn--secondary">Enqueue enrollment</button></div><p class="">Enrollment is an engine command: the control plane creates no campaign and no recipient row. The engine's accepted/rejected counts return as a flash.</p></form>"#;
     sales_panel(
         "sales-enrollments",
         "Pipeline",
@@ -2983,7 +2970,7 @@ fn sales_compliance_section() -> String {
         "sales-compliance",
         "Governance",
         "Compliance",
-        r#"<p class="mt-4 text-sm leading-6 text-surface-600">Legal policy is a hard gate, not a warning: every decision resolves the recipient's jurisdiction against the approved policy before anything is sent. A jurisdiction that is unknown, unlisted, or below the country-confidence floor blocks the decision.</p><p class="mt-3 text-sm leading-6 text-surface-600">Blocked decisions and their block reasons appear under Exceptions. An unapproved jurisdiction cannot send — there is no override on this page or in the control API's review flow.</p>"#,
+        r#"<p class="mt-4">Legal policy is a hard gate, not a warning: every decision resolves the recipient's jurisdiction against the approved policy before anything is sent. A jurisdiction that is unknown, unlisted, or below the country-confidence floor blocks the decision.</p><p class="mt-3">Blocked decisions and their block reasons appear under Exceptions. An unapproved jurisdiction cannot send — there is no override on this page or in the control API's review flow.</p>"#,
     )
 }
 
@@ -2993,7 +2980,7 @@ fn sales_costs_section() -> String {
         "sales-costs",
         "Unit Economics",
         "Costs",
-        r#"<p class="mt-4 text-sm leading-6 text-surface-600">Enrichment and sending cost are not yet instrumented: the sales-autopilot control API exposes no spend or cost counter. This console renders an explicit not-yet-instrumented note rather than a fabricated figure. A cost section ships when the engine reports actual spend per action.</p>"#,
+        r#"<p class="mt-4">Enrichment and sending cost are not yet instrumented: the sales-autopilot control API exposes no spend or cost counter. This console renders an explicit not-yet-instrumented note rather than a fabricated figure. A cost section ships when the engine reports actual spend per action.</p>"#,
     )
 }
 
@@ -3006,7 +2993,7 @@ fn sales_costs_section() -> String {
 pub fn control_plane_sales_page_with_data(data: &SalesPageData) -> String {
     let overview = data.overview.as_ref();
     format!(
-        r#"<section class="apex-cp-sales rounded-sm bg-background px-4 py-6 text-foreground md:px-6 md:py-8"><div class="mx-auto max-w-7xl space-y-6">{hero}{first_response}{revenue}{autonomy}{stream}{decisions}{exceptions}{actions}{enrollments}{compliance}{costs}</div></section>"#,
+        r#"<section class="px-4 py-6 md:px-6 md:py-8"><div class="mx-auto max-w-7xl space-y-6">{hero}{first_response}{revenue}{autonomy}{stream}{decisions}{exceptions}{actions}{enrollments}{compliance}{costs}</div></section>"#,
         hero = sales_hero(data),
         first_response = sales_first_response_section(data),
         revenue = sales_revenue_section(overview),
@@ -3026,7 +3013,7 @@ pub fn control_plane_sales_page_with_data(data: &SalesPageData) -> String {
 /// the honest unavailable contract — never zeros.
 fn sales_first_response_section(data: &SalesPageData) -> String {
     let Some(kpi) = data.first_response.as_ref() else {
-        return "<section aria-label=\"First response\" class=\"rounded-sm border border-border p-5\"><h3 class=\"text-xs font-bold uppercase tracking-[0.16em] text-foreground/60\">First response</h3><p class=\"mt-2 text-sm text-foreground/70\">Latency unavailable — the first-response store could not be read. The figures are unknown, not zero.</p></section>".to_string();
+        return "<section aria-label=\"First response\" class=\"border border-border p-5\"><h3 class=\"apex-h3\">First response</h3><p class=\"mt-2\">Latency unavailable — the first-response store could not be read. The figures are unknown, not zero.</p></section>".to_string();
     };
     let pct = |value: Option<f64>| -> String {
         match value {
@@ -3040,15 +3027,15 @@ fn sales_first_response_section(data: &SalesPageData) -> String {
         .map(|ok| if ok { "within target" } else { "above target" })
         .unwrap_or("no closed requests in the window");
     format!(
-        "<section aria-label=\"First response\" class=\"rounded-sm border border-border p-5\">\
-         <h3 class=\"text-xs font-bold uppercase tracking-[0.16em] text-foreground/60\">First response</h3>\
+        "<section aria-label=\"First response\" class=\"border border-border p-5\">\
+         <h3 class=\"apex-h3\">First response</h3>\
          <div class=\"mt-3 grid gap-4 sm:grid-cols-4\">\
-         <div><p class=\"text-2xl font-bold\">{pending}</p><p class=\"text-xs text-foreground/60\">waiting for a draft</p></div>\
-         <div><p class=\"text-2xl font-bold\">{queued}</p><p class=\"text-xs text-foreground/60\">queued, last {window}h</p></div>\
-         <div><p class=\"text-2xl font-bold\">{p50}</p><p class=\"text-xs text-foreground/60\">p50 to queue</p></div>\
-         <div><p class=\"text-2xl font-bold\">{p95}</p><p class=\"text-xs text-foreground/60\">p95 to queue ({within})</p></div>\
+         <div><p class=\"apex-em\">{pending}</p><p class=\"\">waiting for a draft</p></div>\
+         <div><p class=\"apex-em\">{queued}</p><p class=\"\">queued, last {window}h</p></div>\
+         <div><p class=\"apex-em\">{p50}</p><p class=\"\">p50 to queue</p></div>\
+         <div><p class=\"apex-em\">{p95}</p><p class=\"\">p95 to queue ({within})</p></div>\
          </div>\
-         <p class=\"mt-3 text-xs text-muted-foreground\">Automated path only: accept to queued reply. Human review time is excluded; the target is {target:.0}s (docs/operations/first-response-slo.md).</p>\
+         <p class=\"mt-3\">Automated path only: accept to queued reply. Human review time is excluded; the target is {target:.0}s (docs/operations/first-response-slo.md).</p>\
          </section>",
         pending = kpi.pending,
         queued = kpi.queued,
@@ -3085,8 +3072,8 @@ pub fn marketing_page(child_html: &str) -> String {
 <title>Transactional Email API &amp; SMTP Infrastructure | ApexMail</title>\
 <link rel=\"stylesheet\" href=\"/assets/marketing.css\">\
 <link rel=\"stylesheet\" href=\"/css/styles.css\"></head>\
-<body class=\"font-apex antialiased\">{header}<main class=\"flex-1\">{child}</main>\
-<footer class=\"marketing-footer\" data-marketing-shell=\"footer\"></footer></body></html>",
+<body class=\"\">{header}<main class=\"flex-1\">{child}</main>\
+<footer class=\"apex-mkt-footer\" data-marketing-shell=\"footer\"></footer></body></html>",
         header = header.render_html(),
         child = child_html,
     )
@@ -3097,10 +3084,10 @@ pub fn marketing_page(child_html: &str) -> String {
 /// the page they asked for exists. Consumed by the api-server's marketing
 /// not-found render path.
 pub fn marketing_not_found_page() -> String {
-    let inner = "<section class=\"py-24 px-4 text-center\">\
-<p class=\"text-xs font-bold uppercase tracking-[0.28em] text-primary\">404</p>\
-<h1 class=\"mt-4 text-4xl font-bold tracking-tighter text-surface-950\">Page not found</h1>\
-<p class=\"mt-4 text-sm font-medium text-surface-600\">The page you are looking for does not exist or has moved.</p>\
+    let inner = "<section class=\"py-24 px-4\">\
+<p class=\"apex-em\">404</p>\
+<h1 class=\"mt-4 apex-page-title\">Page not found</h1>\
+<p class=\"mt-4 apex-em\">The page you are looking for does not exist or has moved.</p>\
 <a href=\"/\" class=\"apex-btn\">Back to the homepage</a>\
 </section>";
     let header = crate::marketing::MarketingHeader {
@@ -3114,7 +3101,7 @@ pub fn marketing_not_found_page() -> String {
 <head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
 <title>Page not found | ApexMail</title>\
 <link rel=\"stylesheet\" href=\"/assets/marketing.css\"></head>\
-<body class=\"font-apex antialiased\">{header}<main class=\"flex-1\">{child}</main>\
+<body class=\"\">{header}<main class=\"flex-1\">{child}</main>\
 <footer data-marketing-shell=\"footer\"></footer></body></html>",
         header = header.render_html(),
         child = inner,
@@ -3133,8 +3120,8 @@ pub fn marketing_api_console_page() -> String {
     format!(
         "<section class=\"py-20 px-4\">\
 <div class=\"max-w-5xl mx-auto\">\
-<h1 class=\"text-4xl font-bold text-surface-900 mb-4\">API Sandbox Console</h1>\
-<p class=\"text-lg text-surface-600 mb-8\">Test the ApexMail API directly from your browser.</p>\
+<h1 class=\"mb-4 apex-page-title\">API Sandbox Console</h1>\
+<p class=\"mb-8\">Test the ApexMail API directly from your browser.</p>\
 {console}</div></section>",
         console = console.render_html(),
     )
@@ -3151,21 +3138,21 @@ fn web_auth_google_icon() -> &'static str {
 }
 
 fn web_auth_github_icon() -> &'static str {
-    "<svg aria-hidden=\"true\" class=\"w-5 h-5 text-foreground\" fill=\"currentColor\" viewBox=\"0 0 24 24\"><path d=\"M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.03.555-3.885-1.425-3.885-1.425-.546-1.38-1.335-1.755-1.335-1.755-1.005-.69.075-.675.075-.675 1.11.075 1.695 1.14 1.695 1.14 1.005 1.725 2.64 1.23 3.285.945.105-.72.39-1.215.705-1.485-2.565-.285-5.265-1.29-5.265-5.73 0-1.26.45-2.295 1.185-3.09-.12-.285-.525-1.455.105-3.045 0 0 .96-.3 3.15 1.2A10.965 10.965 0 0 1 12 5.805c.9.015 1.785.12 2.64.24 2.19-1.5 3.15-1.2 3.15-1.2.63 1.59.225 2.76.105 3.045.735.795 1.185 1.83 1.185 3.09 0 4.455-2.715 5.43-5.295 5.715.39.345.735 1.02.735 2.055 0 1.485-.015 2.685-.015 3.045 0 .315.225.69.84.57C20.565 21.795 24 17.31 24 12c0-6.63-5.37-12-12-12\"></path></svg>"
+    "<svg aria-hidden=\"true\" class=\"w-5 h-5\" fill=\"currentColor\" viewBox=\"0 0 24 24\"><path d=\"M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.03.555-3.885-1.425-3.885-1.425-.546-1.38-1.335-1.755-1.335-1.755-1.005-.69.075-.675.075-.675 1.11.075 1.695 1.14 1.695 1.14 1.005 1.725 2.64 1.23 3.285.945.105-.72.39-1.215.705-1.485-2.565-.285-5.265-1.29-5.265-5.73 0-1.26.45-2.295 1.185-3.09-.12-.285-.525-1.455.105-3.045 0 0 .96-.3 3.15 1.2A10.965 10.965 0 0 1 12 5.805c.9.015 1.785.12 2.64.24 2.19-1.5 3.15-1.2 3.15-1.2.63 1.59.225 2.76.105 3.045.735.795 1.185 1.83 1.185 3.09 0 4.455-2.715 5.43-5.295 5.715.39.345.735 1.02.735 2.055 0 1.485-.015 2.685-.015 3.045 0 .315.225.69.84.57C20.565 21.795 24 17.31 24 12c0-6.63-5.37-12-12-12\"></path></svg>"
 }
 
 fn web_auth_social_footer(agreement_prefix: &str) -> String {
     format!(
-        "<div class=\"px-8 pb-8 bg-white\">\
+        "<div class=\"px-8 pb-8\">\
 <div class=\"relative mb-6\">\
-<div class=\"absolute inset-0 flex items-center\"><div class=\"w-full border-t border-surface-200/60\"></div></div>\
-<div class=\"relative flex justify-center text-[10px] uppercase font-bold tracking-[0.2em]\"><span class=\"bg-white px-4 text-surface-500\">Or continue with</span></div>\
+<div class=\"absolute inset-0 flex items-center\"><div class=\"w-full border-t\"></div></div>\
+<div class=\"relative flex justify-center apex-em apex-section-head\"><span class=\"px-4\">Or continue with</span></div>\
 </div>\
 <div class=\"flex flex-col gap-3\">\
-<a href=\"/v1/auth/sso/google\" aria-label=\"Continue with Google\" class=\"flex items-center justify-center gap-3 px-4 py-3 rounded-[8px_8px_7px_7px] border border-surface-200 bg-white hover:bg-surface-50 transition-all shadow-sm active:scale-[0.98]\">{google}<span class=\"text-sm font-semibold text-surface-950\">Google</span></a>\
-<a href=\"/v1/auth/sso/github\" aria-label=\"Continue with GitHub\" class=\"flex items-center justify-center gap-3 px-4 py-3 rounded-[8px_8px_7px_7px] border border-surface-200 bg-white hover:bg-surface-50 transition-all shadow-sm active:scale-[0.98]\">{github}<span class=\"text-sm font-semibold text-surface-950\">GitHub</span></a>\
+<a href=\"/v1/auth/sso/google\" aria-label=\"Continue with Google\" class=\"flex items-center justify-center gap-3 px-4 py-3 border apex-btn\">{google}<span class=\"apex-em\">Google</span></a>\
+<a href=\"/v1/auth/sso/github\" aria-label=\"Continue with GitHub\" class=\"flex items-center justify-center gap-3 px-4 py-3 border apex-btn\">{github}<span class=\"apex-em\">GitHub</span></a>\
 </div>\
-<p class=\"mt-6 text-center text-[11px] text-surface-500 font-medium leading-relaxed px-4\">{agreement_prefix} <a href=\"/terms\" class=\"text-primary font-bold hover:underline\">Terms of Service</a> and <a href=\"/privacy\" class=\"text-primary font-bold hover:underline\">Privacy Policy</a>.</p></div>",
+<p class=\"mt-6 px-4 apex-em\">{agreement_prefix} <a href=\"/terms\" class=\"apex-em apex-link\">Terms of Service</a> and <a href=\"/privacy\" class=\"apex-em apex-link\">Privacy Policy</a>.</p></div>",
         google = web_auth_google_icon(),
         github = web_auth_github_icon(),
     )
@@ -3173,19 +3160,19 @@ fn web_auth_social_footer(agreement_prefix: &str) -> String {
 
 fn web_auth_logo() -> String {
     // Two-tone wordmark matching marketing: "Apex" brand red, "Mail" near-black.
-    "<span class=\"text-2xl font-bold tracking-tighter\"><span class=\"text-brand-600\">Apex</span><span class=\"text-surface-950\">Mail</span></span>".to_string()
+    "<span class=\"apex-wordmark\"><span class=\"apex-wordmark__apex\">Apex</span><span class=\"apex-wordmark__mail\">Mail</span></span>".to_string()
 }
 
 fn web_auth_shell(title: &str, subtitle: &str, form_html: &str, footer_html: &str) -> String {
     let logo = web_auth_logo();
     let header = if title.is_empty() && subtitle.is_empty() {
-        format!("<div class=\"p-8 pb-0\"><a href=\"/\" class=\"inline-block mb-6 group transition-all hover:opacity-80\">{logo}</a></div>")
+        format!("<div class=\"p-8 pb-0\"><a href=\"/\" class=\"inline-block mb-6 apex-link\">{logo}</a></div>")
     } else {
         format!(
             "<div class=\"p-8 pb-0\">\
-            <a href=\"/\" class=\"inline-block mb-6 group transition-all hover:opacity-80\">{logo}</a>\
-            <h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">{title}</h1>\
-            <p class=\"text-surface-500 mt-2 text-sm font-medium\">{subtitle}</p>\
+            <a href=\"/\" class=\"inline-block mb-6 apex-link\">{logo}</a>\
+            <h1 class=\"apex-page-title\">{title}</h1>\
+            <p class=\"mt-2 apex-em\">{subtitle}</p>\
             </div>",
             logo = logo,
             title = html_escape(title),
@@ -3200,10 +3187,9 @@ fn web_auth_shell(title: &str, subtitle: &str, form_html: &str, footer_html: &st
     // single-main fix — the root layout no longer adds one); the id keeps
     // the skip link and the #flash anchor targeted at it.
     format!(
-        "<main id=\"app-main\" class=\"min-h-screen bg-surface-50 relative flex items-center justify-center p-6\">\
-        <div class=\"absolute inset-0 z-0 opacity-[0.03] pointer-events-none ui-dot-grid\"></div>\
-        <div class=\"relative z-10 w-full max-w-[400px]\">\
-        <div class=\"bg-white rounded-xl shadow-premium border border-surface-200/60 overflow-hidden\">\
+        "<main id=\"app-main\" class=\"min-h-screen relative flex items-center justify-center p-6\">\
+                <div class=\"relative z-10 w-full max-w-[400px]\">\
+        <div class=\"border overflow-hidden\">\
         {header}\
         {form_html}{footer_html}\
         </div>\
@@ -3236,7 +3222,7 @@ fn password_requirements_text() -> &'static str {
 /// read as clutter (user review 2026-09-09).
 fn password_requirements_hint(id: &str) -> String {
     format!(
-        "<p id=\"{id}\" class=\"apex-pwd-hint text-xs text-muted-foreground leading-relaxed\">{}</p>",
+        "<p id=\"{id}\" class=\"apex-pwd-hint\">{}</p>",
         password_requirements_text()
     )
 }
@@ -3284,14 +3270,14 @@ fn web_auth_notice_rich(intent: &str, title: &str, body_html: &str) -> String {
     let classes = match intent {
         "success" => "border-success-200 bg-success-50/80 text-success-900",
         "warning" => "border-warning-200 bg-warning-50/80 text-warning-900",
-        "error" => "border-rose-200 bg-rose-50/80 text-rose-900",
+        "error" => "apex-notice apex-notice--fail",
         _ => "border-brand-200 bg-brand-50/80 text-brand-900",
     };
 
     format!(
-        "<div class=\"apex-auth-notice rounded-xl border px-4 py-4 {classes}\" data-intent=\"{}\">\
-<p class=\"text-sm font-bold\">{}</p>\
-<p class=\"mt-1 text-sm leading-relaxed\">{}</p></div>",
+        "<div class=\"apex-auth-notice border px-4 py-4 {classes}\" data-intent=\"{}\">\
+<p class=\"apex-em\">{}</p>\
+<p class=\"mt-1\">{}</p></div>",
         html_escape(intent),
         html_escape(title),
         body_html,
@@ -3322,7 +3308,7 @@ pub fn web_signup_page_with_plan(csrf_token: &str, selected_plan: Option<&str>) 
     let plan_input = web_auth_hidden_input("plan", plan_id);
     let plan_notice = plan_display_name.map_or_else(String::new, |display_name| {
         format!(
-            "<p class=\"text-xs leading-relaxed text-surface-500\" data-signup-plan-intent=\"{plan_id}\">You selected {display_name}. Your workspace starts on Free; activate {display_name} after email verification through secure billing setup.</p>"
+            "<p class=\"\" data-signup-plan-intent=\"{plan_id}\">You selected {display_name}. Your workspace starts on Free; activate {display_name} after email verification through secure billing setup.</p>"
         )
     });
     let password_hint = password_requirements_hint("signup-password-hint");
@@ -3333,29 +3319,29 @@ pub fn web_signup_page_with_plan(csrf_token: &str, selected_plan: Option<&str>) 
 {plan_notice}\
 <div class=\"grid grid-cols-1 sm:grid-cols-2 gap-4\">\
 <div class=\"space-y-2\">\
-<label class=\"apex-klabel\" for=\"signup-name\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Full name</label>\
-<input id=\"signup-name\" name=\"name\" type=\"text\" required autocomplete=\"name\" placeholder=\"Jane Doe\" class=\"apex-input w-full px-4 py-3 border border-surface-200 focus-visible:outline-none transition-all placeholder:text-muted-foreground bg-surface-50 text-sm font-medium text-surface-950\" />\
+<label class=\"apex-label\" for=\"signup-name\"><svg class=\"\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Full name</label>\
+<input id=\"signup-name\" name=\"name\" type=\"text\" required autocomplete=\"name\" placeholder=\"Jane Doe\" class=\"apex-input w-full px-4 py-3 border\" />\
 </div>\
 <div class=\"space-y-2\">\
-<label class=\"apex-klabel\" for=\"signup-company\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Company</label>\
-<input id=\"signup-company\" name=\"company_name\" type=\"text\" required autocomplete=\"organization\" placeholder=\"Acme Inc.\" maxlength=\"100\" class=\"apex-input w-full px-4 py-3 border border-surface-200 focus-visible:outline-none transition-all placeholder:text-muted-foreground bg-surface-50 text-sm font-medium text-surface-950\" />\
+<label class=\"apex-label\" for=\"signup-company\"><svg class=\"\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Company</label>\
+<input id=\"signup-company\" name=\"company_name\" type=\"text\" required autocomplete=\"organization\" placeholder=\"Acme Inc.\" maxlength=\"100\" class=\"apex-input w-full px-4 py-3 border\" />\
 </div>\
 </div>\
 <div class=\"space-y-2\">\
-<label class=\"apex-klabel\" for=\"signup-email\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Email</label>\
-<input id=\"signup-email\" name=\"email\" type=\"email\" required autocomplete=\"email\" placeholder=\"you@example.com\" class=\"apex-input w-full px-4 py-3 border border-surface-200 focus-visible:outline-none transition-all placeholder:text-muted-foreground bg-surface-50 text-sm font-medium text-surface-950\" />\
+<label class=\"apex-label\" for=\"signup-email\"><svg class=\"\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Email</label>\
+<input id=\"signup-email\" name=\"email\" type=\"email\" required autocomplete=\"email\" placeholder=\"you@example.com\" class=\"apex-input w-full px-4 py-3 border\" />\
 </div>\
 <div class=\"space-y-2\">\
 <div class=\"flex items-center justify-between\">\
-<label class=\"apex-klabel\" for=\"signup-password\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Password</label>\
+<label class=\"apex-label\" for=\"signup-password\"><svg class=\"\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Password</label>\
 </div>\
 <div class=\"relative apex-pwd-wrap\">\
-<input id=\"signup-password\" name=\"password\" type=\"password\" required autocomplete=\"new-password\" minlength=\"15\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" aria-describedby=\"signup-password-hint\" placeholder=\"At least 15 characters\" class=\"apex-input w-full px-4 py-3 border border-surface-200 focus-visible:outline-none transition-all bg-surface-50 text-surface-950\" />\
+<input id=\"signup-password\" name=\"password\" type=\"password\" required autocomplete=\"new-password\" minlength=\"15\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" aria-describedby=\"signup-password-hint\" placeholder=\"At least 15 characters\" class=\"apex-input w-full px-4 py-3 border\" />\
 </div>\
 {password_hint}\
 </div>\
-<button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white text-sm font-semibold flex items-center justify-center gap-3 py-3 rounded-[8px_8px_7px_7px] shadow-premium transition-all active:scale-[0.99] group mt-2\"><span>Create Account</span>{arrow}</button>\
-<div class=\"text-center text-xs font-medium text-surface-500\">Already have an account? <a href=\"/login\" class=\"text-primary font-bold hover:underline\">Sign in</a></div>\
+<button type=\"submit\" class=\"w-full flex items-center justify-center gap-3 py-3 mt-2 apex-btn apex-btn--primary\"><span>Create Account</span>{arrow}</button>\
+<div class=\"apex-em\">Already have an account? <a href=\"/login\" class=\"apex-em apex-link\">Sign in</a></div>\
 </form>",
         csrf = csrf,
         plan_input = plan_input,
@@ -3380,17 +3366,17 @@ pub fn web_forgot_password_page(csrf_token: &str) -> String {
         "<form class=\"p-8 space-y-6\" action=\"/web/auth/forgot-password\" method=\"POST\">\
 {csrf}\
 <div class=\"space-y-2\">\
-<label class=\"apex-klabel\" for=\"reset-email\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Email</label>\
-<input id=\"reset-email\" name=\"email\" type=\"email\" required autocomplete=\"email\" placeholder=\"you@example.com\" class=\"apex-input w-full px-4 py-3 border border-surface-200 focus-visible:outline-none transition-all placeholder:text-muted-foreground bg-surface-50 text-sm font-medium text-surface-950\" />\
+<label class=\"apex-label\" for=\"reset-email\"><svg class=\"\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Email</label>\
+<input id=\"reset-email\" name=\"email\" type=\"email\" required autocomplete=\"email\" placeholder=\"you@example.com\" class=\"apex-input w-full px-4 py-3 border\" />\
 </div>\
-<button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white text-sm font-semibold flex items-center justify-center gap-3 py-3 rounded-[8px_8px_7px_7px] shadow-premium transition-all active:scale-[0.99] group mt-2\"><span>Send Reset Link</span>{arrow}</button>\
-<div class=\"text-center text-xs font-medium text-surface-500\"><a href=\"/login\" class=\"text-primary font-bold hover:underline\">Back to sign in</a></div>\
+<button type=\"submit\" class=\"w-full flex items-center justify-center gap-3 py-3 mt-2 apex-btn apex-btn--primary\"><span>Send Reset Link</span>{arrow}</button>\
+<div class=\"apex-em\"><a href=\"/login\" class=\"apex-em apex-link\">Back to sign in</a></div>\
 </form>",
         csrf = csrf,
         arrow = web_auth_arrow_icon(),
     );
 
-    let footer_html = "<div class=\"px-8 pb-8\"><p class=\"text-center text-[11px] text-surface-500 font-medium leading-relaxed px-4\">Need help with account recovery? <a href=\"mailto:support@apexmail.ee\" class=\"text-primary font-bold hover:underline\">Contact support</a>.</p></div>";
+    let footer_html = "<div class=\"px-8 pb-8\"><p class=\"px-4 apex-em\">Need help with account recovery? <a href=\"mailto:support@apexmail.ee\" class=\"apex-em apex-link\">Contact support</a>.</p></div>";
 
     web_auth_shell(
         "Reset your password",
@@ -3442,7 +3428,7 @@ pub fn web_reset_password_page_with_state(
     let request_link = if token.is_some() {
         String::new()
     } else {
-        "<div class=\"text-center text-xs font-medium text-surface-500\">Need a fresh link? <a href=\"/forgot-password\" class=\"text-primary font-bold hover:underline\">Request another reset link</a></div>".to_string()
+        "<div class=\"apex-em\">Need a fresh link? <a href=\"/forgot-password\" class=\"apex-em apex-link\">Request another reset link</a></div>".to_string()
     };
 
     let csrf = csrf_hidden_input(csrf_token);
@@ -3454,20 +3440,20 @@ pub fn web_reset_password_page_with_state(
 {header_notice}\
 {request_link}\
 <div class=\"space-y-2\">\
-<label class=\"apex-klabel\" for=\"new-password\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>New password</label>\
+<label class=\"apex-label\" for=\"new-password\"><svg class=\"\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>New password</label>\
 <div class=\"relative apex-pwd-wrap\">\
-<input id=\"new-password\" name=\"password\" type=\"password\" required autocomplete=\"new-password\" minlength=\"15\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" aria-describedby=\"new-password-hint\" placeholder=\"Choose a strong password\" class=\"apex-input w-full px-4 py-3 border border-surface-200 focus-visible:outline-none transition-all bg-surface-50 text-surface-950\" />\
+<input id=\"new-password\" name=\"password\" type=\"password\" required autocomplete=\"new-password\" minlength=\"15\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" aria-describedby=\"new-password-hint\" placeholder=\"Choose a strong password\" class=\"apex-input w-full px-4 py-3 border\" />\
 </div>\
 {password_hint}\
 </div>\
 <div class=\"space-y-2\">\
-<label class=\"apex-klabel\" for=\"confirm-password\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Confirm password</label>\
+<label class=\"apex-label\" for=\"confirm-password\"><svg class=\"\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Confirm password</label>\
 <div class=\"relative\">\
-<input id=\"confirm-password\" name=\"confirmPassword\" type=\"password\" required autocomplete=\"new-password\" minlength=\"15\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"Confirm your new password\" class=\"apex-input w-full px-4 py-3 border border-surface-200 focus-visible:outline-none transition-all bg-surface-50 text-surface-950\" />\
+<input id=\"confirm-password\" name=\"confirmPassword\" type=\"password\" required autocomplete=\"new-password\" minlength=\"15\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"Confirm your new password\" class=\"apex-input w-full px-4 py-3 border\" />\
 </div>\
 </div>\
-<button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white text-sm font-semibold flex items-center justify-center gap-3 py-3 rounded-[8px_8px_7px_7px] shadow-premium transition-all active:scale-[0.99] group mt-2 disabled:opacity-50 disabled:cursor-not-allowed\"{submit_state}><span>Reset Password</span>{arrow}</button>\
-<div class=\"text-center text-xs font-medium text-surface-500\">Remembered your password? <a href=\"/login\" class=\"text-primary font-bold hover:underline\">Back to sign in</a></div>\
+<button type=\"submit\" class=\"w-full flex items-center justify-center gap-3 py-3 mt-2 apex-btn apex-btn--primary\"{submit_state}><span>Reset Password</span>{arrow}</button>\
+<div class=\"apex-em\">Remembered your password? <a href=\"/login\" class=\"apex-em apex-link\">Back to sign in</a></div>\
 </form>",
         csrf = csrf,
         token_input = web_auth_hidden_input("token", token_value),
@@ -3481,7 +3467,7 @@ pub fn web_reset_password_page_with_state(
         password_hint = password_hint,
     );
 
-    let footer_html = "<div class=\"px-8 pb-8\"><p class=\"text-center text-[11px] text-surface-500 font-medium leading-relaxed px-4\">Still having trouble? <a href=\"mailto:support@apexmail.ee\" class=\"text-primary font-bold hover:underline\">Contact support</a>.</p></div>";
+    let footer_html = "<div class=\"px-8 pb-8\"><p class=\"px-4 apex-em\">Still having trouble? <a href=\"mailto:support@apexmail.ee\" class=\"apex-em apex-link\">Contact support</a>.</p></div>";
 
     web_auth_shell(
         "Set your new password",
@@ -3512,8 +3498,8 @@ pub fn web_verify_email_page_with_state(
             // Batch-2 dead-link fix: /pricing is a marketing-only route that
             // does not resolve on the web surface — point at the absolute
             // marketing URL instead.
-            "<div class=\"space-y-4\"><a href=\"/login\" class=\"flex w-full items-center justify-center gap-3 py-3 rounded-[8px_8px_7px_7px] bg-primary text-white text-sm font-semibold shadow-premium transition-all hover:bg-brand-700 active:scale-[0.99] group\"><span>Continue to sign in</span></a><a href=\"https://apexmail.ee/pricing\" class=\"flex w-full items-center justify-center gap-3 py-3 rounded-[8px_8px_7px_7px] border border-surface-200 text-surface-700 text-sm font-semibold transition-all hover:bg-surface-50 active:scale-[0.99]\"><span>Explore plans</span></a></div>".to_string(),
-            "<div class=\"px-8 pb-8\"><p class=\"text-center text-[11px] text-surface-500 font-medium leading-relaxed px-4\">Need help getting started? <a href=\"mailto:support@apexmail.ee\" class=\"text-primary font-bold hover:underline\">Contact support</a>.</p></div>".to_string(),
+            "<div class=\"space-y-4\"><a href=\"/login\" class=\"flex w-full items-center justify-center gap-3 py-3 apex-em apex-btn apex-btn--primary\"><span>Continue to sign in</span></a><a href=\"https://apexmail.ee/pricing\" class=\"flex w-full items-center justify-center gap-3 py-3 border apex-em apex-btn\"><span>Explore plans</span></a></div>".to_string(),
+            "<div class=\"px-8 pb-8\"><p class=\"px-4 apex-em\">Need help getting started? <a href=\"mailto:support@apexmail.ee\" class=\"apex-em apex-link\">Contact support</a>.</p></div>".to_string(),
         ),
         Some("error") => (
             "Verification link unavailable",
@@ -3531,15 +3517,15 @@ pub fn web_verify_email_page_with_state(
             format!(
                 "<div class=\"space-y-4\">\
 <form class=\"space-y-3\" action=\"/web/auth/resend-verification\" method=\"post\">\
-<label class=\"apex-klabel\" for=\"resend-email\">Email address</label>\
-<input id=\"resend-email\" name=\"email\" type=\"email\" required value=\"{email_value}\" autocomplete=\"email\" placeholder=\"you@company.com\" class=\"apex-input flex h-12 w-full border border-surface-200 bg-surface-50 px-4 py-2 text-sm font-medium focus-visible:outline-none transition-all\" />\
-<button type=\"submit\" class=\"flex w-full items-center justify-center gap-3 py-3 rounded-[8px_8px_7px_7px] bg-primary text-white text-sm font-semibold shadow-premium transition-all hover:bg-brand-700 active:scale-[0.99]\"><span>Send a fresh verification link</span></button>\
-<p class=\"text-xs text-surface-500 leading-relaxed\">If this address needs verification, a new link arrives shortly. Limited to a few emails per quarter hour.</p>\
+<label class=\"apex-label\" for=\"resend-email\">Email address</label>\
+<input id=\"resend-email\" name=\"email\" type=\"email\" required value=\"{email_value}\" autocomplete=\"email\" placeholder=\"you@company.com\" class=\"apex-input flex h-12 w-full border px-4 py-2\" />\
+<button type=\"submit\" class=\"flex w-full items-center justify-center gap-3 py-3 apex-btn apex-btn--primary\"><span>Send a fresh verification link</span></button>\
+<p class=\"\">If this address needs verification, a new link arrives shortly. Limited to a few emails per quarter hour.</p>\
 </form>\
-<div class=\"grid grid-cols-2 gap-3\"><a href=\"/login\" class=\"flex w-full items-center justify-center gap-3 py-3 rounded-[8px_8px_7px_7px] border border-surface-200 text-surface-700 text-sm font-semibold transition-all hover:bg-surface-50 active:scale-[0.99]\"><span>Back to sign in</span></a><a href=\"/signup\" class=\"flex w-full items-center justify-center gap-3 py-3 rounded-[8px_8px_7px_7px] border border-surface-200 text-surface-700 text-sm font-semibold transition-all hover:bg-surface-50 active:scale-[0.99]\"><span>Create a new account</span></a></div></div>",
+<div class=\"grid grid-cols-2 gap-3\"><a href=\"/login\" class=\"flex w-full items-center justify-center gap-3 py-3 border apex-em apex-btn\"><span>Back to sign in</span></a><a href=\"/signup\" class=\"flex w-full items-center justify-center gap-3 py-3 border apex-em apex-btn\"><span>Create a new account</span></a></div></div>",
                 email_value = html_escape(email_value),
             ),
-            "<div class=\"px-8 pb-8\"><p class=\"text-center text-[11px] text-surface-500 font-medium leading-relaxed px-4\">Still stuck? <a href=\"mailto:support@apexmail.ee\" class=\"text-primary font-bold hover:underline\">Contact support</a>.</p></div>".to_string(),
+            "<div class=\"px-8 pb-8\"><p class=\"px-4 apex-em\">Still stuck? <a href=\"mailto:support@apexmail.ee\" class=\"apex-em apex-link\">Contact support</a>.</p></div>".to_string(),
         ),
         _ if token.is_some() => (
             "Verify your email",
@@ -3552,12 +3538,12 @@ pub fn web_verify_email_page_with_state(
             format!(
                 "<form class=\"space-y-4\" action=\"/v1/auth/verify-email\" method=\"GET\">\
 {token_input}{email_input}\
-<button type=\"submit\" class=\"flex w-full items-center justify-center gap-3 py-3 rounded-[8px_8px_7px_7px] bg-primary text-white text-sm font-semibold shadow-premium transition-all hover:bg-brand-700 active:scale-[0.99] group\">Verify Email</button>\
-<div class=\"text-center text-xs font-medium text-surface-500\">Need another path in? <a href=\"/login\" class=\"text-primary font-bold hover:underline\">Back to sign in</a></div></form>",
+<button type=\"submit\" class=\"flex w-full items-center justify-center gap-3 py-3 apex-btn apex-btn--primary\">Verify Email</button>\
+<div class=\"apex-em\">Need another path in? <a href=\"/login\" class=\"apex-em apex-link\">Back to sign in</a></div></form>",
                 token_input = web_auth_hidden_input("token", token_value),
                 email_input = web_auth_hidden_input("email", email_value),
             ),
-            "<div class=\"px-8 pb-8\"><p class=\"text-center text-[11px] text-surface-500 font-medium leading-relaxed px-4\">This verification link is single-use. If it fails, open the newest email from ApexMail.</p></div>".to_string(),
+            "<div class=\"px-8 pb-8\"><p class=\"px-4 apex-em\">This verification link is single-use. If it fails, open the newest email from ApexMail.</p></div>".to_string(),
         ),
         _ => {
             let description = if let Some(address) = email {
@@ -3570,8 +3556,8 @@ pub fn web_verify_email_page_with_state(
                 "Verify your email",
                 "Activate your account to start sending with ApexMail.",
                 web_auth_notice("info", "Verification pending", &description),
-                "<div class=\"space-y-4\"><a href=\"/login\" class=\"flex w-full items-center justify-center gap-3 py-3 rounded-[8px_8px_7px_7px] bg-primary text-white text-sm font-semibold shadow-premium transition-all hover:bg-brand-700 active:scale-[0.99] group\"><span>Back to sign in</span></a><a href=\"/signup\" class=\"flex w-full items-center justify-center gap-3 py-3 rounded-[8px_8px_7px_7px] border border-surface-200 text-surface-700 text-sm font-semibold transition-all hover:bg-surface-50 active:scale-[0.99]\"><span>Create another account</span></a></div>".to_string(),
-                "<div class=\"px-8 pb-8\"><p class=\"text-center text-[11px] text-surface-500 font-medium leading-relaxed px-4\">If the email does not arrive, check spam or <a href=\"mailto:support@apexmail.ee\" class=\"text-primary font-bold hover:underline\">Contact support</a>.</p></div>".to_string(),
+                "<div class=\"space-y-4\"><a href=\"/login\" class=\"flex w-full items-center justify-center gap-3 py-3 apex-em apex-btn apex-btn--primary\"><span>Back to sign in</span></a><a href=\"/signup\" class=\"flex w-full items-center justify-center gap-3 py-3 border apex-em apex-btn\"><span>Create another account</span></a></div>".to_string(),
+                "<div class=\"px-8 pb-8\"><p class=\"px-4 apex-em\">If the email does not arrive, check spam or <a href=\"mailto:support@apexmail.ee\" class=\"apex-em apex-link\">Contact support</a>.</p></div>".to_string(),
             )
         }
     };
@@ -3601,7 +3587,7 @@ pub fn web_dashboard_page() -> String {
     // fabricated reading: the dial draws its track with no value arc and
     // reads "—", the monoline draws no strokes. The elements are present,
     // the data is honestly absent.
-    let delivery_dial = crate::charts::render_dial(0.0, "delivery · 30d", "—", false);
+    let delivery_dial = crate::charts::render_dial(0.0, "delivery, 30d", "—", false);
     let volume_chart = format!(
         // Mobile clipping fix (review §4.8 / R2's filed /dashboard flag): the
         // fallback chart is the widest content in this card. The wrapper must
@@ -3616,56 +3602,53 @@ pub fn web_dashboard_page() -> String {
         )
     );
     let dna_block = format!(
-        "<div class=\"max-w-full rounded-sm border border-surface-200 bg-surface-50 p-4\">\
+        "<div class=\"max-w-full border p-4\">\
 <div class=\"flex flex-col sm:flex-row items-center gap-6\">{delivery_dial}{volume_chart}</div>\
-<p class=\"mt-3 text-xs text-surface-500 max-w-md leading-relaxed\">Delivery health is unavailable and the chart has no strokes until your first send — an absent figure is not zero.</p>\
+<p class=\"mt-3 max-w-md\">Delivery health is unavailable and the chart has no strokes until your first send — an absent figure is not zero.</p>\
 </div>"
     );
     "<div class=\"space-y-8\">\
 <section data-view-state=\"ready\" class=\"space-y-8\">\
-<header class=\"flex flex-col gap-2\">\
-<h1 class=\"text-2xl font-bold tracking-tight text-surface-950\">Overview</h1>\
-<p class=\"text-surface-500 font-medium\">Monitor your campaign performance and delivery health.</p>\
+<header class=\"apex-page-heading\">\
+<h1 class=\"apex-page-title\">Overview</h1>\
 </header>\
+<p class=\"apex-statusline\">Monitor your campaign performance and delivery health.</p>\
 <div class=\"grid grid-cols-1 sm:grid-cols-3 gap-6\" aria-label=\"Plan usage\">\
-<div class=\"bg-white rounded-[16px_16px_9px_9px] border border-surface-200/60 px-6 py-5 shadow-sm\">\
-<p class=\"apex-klabel mb-2\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>sends · month</p>\
-<p class=\"text-lg font-bold text-surface-950 tracking-tight mb-3\">0 <span class=\"text-sm font-medium text-surface-500\">/ 3,000</span></p>\
-<div class=\"apex-meter\"><div class=\"apex-meter-fill\" style=\"width:2%\"></div><span class=\"apex-meter-point\" style=\"left:2%\"></span></div>\
+<div class=\"apex-kpi\">\
+<p class=\"apex-kpi__n\">0 <span class=\"apex-meta\">of 3,000</span></p>\
+<p class=\"apex-kpi__l\">sends, month</p>\
 </div>\
-<div class=\"bg-white rounded-[16px_16px_9px_9px] border border-surface-200/60 px-6 py-5 shadow-sm\">\
-<p class=\"apex-klabel mb-2\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>api · month</p>\
-<p class=\"text-lg font-bold text-surface-950 tracking-tight mb-3\">0 <span class=\"text-sm font-medium text-surface-500\">/ 300,000</span></p>\
-<div class=\"apex-meter\"><div class=\"apex-meter-fill\" style=\"width:1%\"></div><span class=\"apex-meter-point\" style=\"left:1%\"></span></div>\
+<div class=\"apex-kpi\">\
+<p class=\"apex-kpi__n\">0 <span class=\"apex-meta\">of 300,000</span></p>\
+<p class=\"apex-kpi__l\">api, month</p>\
 </div>\
-<div class=\"bg-white rounded-[16px_16px_9px_9px] border border-surface-200/60 px-6 py-5 shadow-sm\">\
-<p class=\"apex-klabel mb-2\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>recipients · msg</p>\
-<p class=\"text-lg font-bold text-surface-950 tracking-tight mb-3\">&mdash; <span class=\"text-sm font-medium text-surface-500\">/ 1,000</span></p>\
-<div class=\"apex-meter\"><div class=\"apex-meter-fill\" style=\"width:0%\"></div><span class=\"apex-meter-point\" style=\"left:0%\"></span></div>\
+<div class=\"apex-kpi\">\
+<p class=\"apex-kpi__n\">&mdash; <span class=\"apex-meta\">of 1,000</span></p>\
+<p class=\"apex-kpi__l\">recipients, msg</p>\
 </div>\
 </div>\
-<div class=\"bg-white rounded-[16px_16px_9px_9px] border border-surface-200/60 shadow-sm overflow-hidden\">\
-<div class=\"px-8 py-6 border-b border-surface-100 flex items-center justify-between\">\
-<h2 class=\"text-xs font-bold text-surface-950 uppercase tracking-[0.2em]\">Send Volume</h2>\
-<span class=\"text-[10px] font-bold text-surface-500 uppercase tracking-widest\">Last 30 days</span>\
+<div class=\"border overflow-hidden\">\
+<div class=\"px-8 py-6 border-b flex items-center justify-between\">\
+<h2 class=\"apex-section-head\">Send Volume</h2>\
+<span class=\"apex-em apex-section-head\">Last 30 days</span>\
 </div>\
-<div class=\"px-8 pt-6 pb-2 flex flex-col items-center justify-center text-center\">{DNA_DASH}<div class=\"py-14 flex flex-col items-center justify-center text-center\">\
-<p class=\"text-xs text-surface-500 mt-2 max-w-xs leading-relaxed\">Once you send your first campaign, detailed metrics and performance charts will appear here.</p>\
-<a href=\"/campaigns/new\" class=\"mt-6 inline-flex items-center justify-center px-6 py-2.5 rounded-xl bg-primary text-white text-xs font-bold hover:bg-brand-700 transition-all active:scale-[0.98]\">Create Campaign</a>\
+<div class=\"px-8 pt-6 pb-2 flex flex-col items-center justify-center\">{DNA_DASH}<div class=\"py-14 flex flex-col items-center justify-center\">\
+<p class=\"mt-2 max-w-xs\">Once you send your first campaign, detailed metrics and performance charts will appear here.</p>\
+<a href=\"/campaigns/new\" class=\"mt-6 inline-flex items-center justify-center px-6 py-2.5 apex-em apex-btn apex-btn--primary apex-btn--sm\">Create Campaign</a>\
 </div>\
 </div>\
 </div>\
 <div class=\"grid grid-cols-1 md:grid-cols-2 gap-6\">\
-<article class=\"bg-white rounded-[16px_16px_9px_9px] border border-surface-200/60 p-8 shadow-sm\">\
-<h3 class=\"text-xs font-bold text-surface-500 uppercase tracking-[0.2em] mb-6\">Delivery Health</h3>\
-<p class=\"text-sm leading-6 text-surface-600\">Per-message delivery rates are computed from your own send events. Open Analytics for the current window.</p>\
+<article class=\"border p-8\">\
+<h3 class=\"mb-6 apex-h3\">Delivery Health</h3>\
+<p class=\"\">Per-message delivery rates are computed from your own send events. Open Analytics for the current window.</p>\
 <a href=\"/analytics\" class=\"apex-btn apex-btn--sm apex-btn--secondary\">Open Analytics</a>\
 </article>\
-<article class=\"bg-white rounded-[16px_16px_9px_9px] border border-surface-200/60 p-8 shadow-sm\">\
-<h3 class=\"text-xs font-bold text-surface-500 uppercase tracking-[0.2em] mb-6\">Account Status</h3>\
+<article class=\"border p-8\">\
+<h3 class=\"mb-6 apex-h3\">Account Status</h3>\
 <div class=\"flex items-center gap-3\">\
-<span class=\"w-2 h-2 rounded-full bg-success-500 animate-pulse\"></span>\
-<span class=\"text-sm font-bold text-surface-950\">All systems operational</span>\
+<span class=\"w-2 h-2\"></span>\
+<span class=\"apex-em\">All systems operational</span>\
 </div>\
 </article>\
 </div>\
@@ -3712,8 +3695,8 @@ pub fn web_campaigns_page() -> String {
     .render_html();
     // Destructive actions route through the signed GET /confirm page —
     // axum_router appends the HMAC signature at render time.
-    let spring_actions = "<div class=\"flex flex-wrap justify-end gap-2\"><a href=\"/campaigns/c_spring?returnTo=%2Fcampaigns%3Fpage%3D2%26status%3Ddraft%26query%3Dspring\" class=\"inline-flex items-center justify-center rounded-sm border border-input bg-background px-3 py-2 text-sm font-bold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground\">Review</a><a href=\"/confirm?intent=delete-campaign&amp;id=c_spring&amp;return_to=%2Fcampaigns\" class=\"inline-flex items-center justify-center rounded-sm border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm font-bold text-destructive transition-colors hover:bg-destructive/10\">Delete</a></div>";
-    let launch_actions = "<div class=\"flex flex-wrap justify-end gap-2\"><a href=\"/campaigns/c_launch?returnTo=%2Fcampaigns%3Fpage%3D2%26status%3Ddraft%26query%3Dspring\" class=\"inline-flex items-center justify-center rounded-sm border border-input bg-background px-3 py-2 text-sm font-bold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground\">Review</a><a href=\"/campaigns/c_launch/edit?returnTo=%2Fcampaigns%3Fpage%3D2%26status%3Ddraft%26query%3Dspring\" class=\"inline-flex items-center justify-center rounded-sm border border-input bg-background px-3 py-2 text-sm font-bold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground\">Edit</a></div>";
+    let spring_actions = "<div class=\"flex flex-wrap justify-end gap-2\"><a href=\"/campaigns/c_spring?returnTo=%2Fcampaigns%3Fpage%3D2%26status%3Ddraft%26query%3Dspring\" class=\"inline-flex items-center justify-center border px-3 py-2 apex-em apex-btn\">Review</a><a href=\"/confirm?intent=delete-campaign&amp;id=c_spring&amp;return_to=%2Fcampaigns\" class=\"inline-flex items-center justify-center border px-3 py-2 apex-error apex-em apex-btn apex-btn--danger\">Delete</a></div>";
+    let launch_actions = "<div class=\"flex flex-wrap justify-end gap-2\"><a href=\"/campaigns/c_launch?returnTo=%2Fcampaigns%3Fpage%3D2%26status%3Ddraft%26query%3Dspring\" class=\"inline-flex items-center justify-center border px-3 py-2 apex-em apex-btn\">Review</a><a href=\"/campaigns/c_launch/edit?returnTo=%2Fcampaigns%3Fpage%3D2%26status%3Ddraft%26query%3Dspring\" class=\"inline-flex items-center justify-center border px-3 py-2 apex-em apex-btn\">Edit</a></div>";
     let table = Table {
         caption: Some("Campaigns"),
         columns: vec![
@@ -3728,7 +3711,7 @@ pub fn web_campaigns_page() -> String {
         rows: vec![
             vec![
                 spring_checkbox,
-                "<a href=\"/campaigns/c_spring?returnTo=%2Fcampaigns%3Fpage%3D2%26status%3Ddraft%26query%3Dspring\" class=\"font-bold text-foreground hover:text-primary\">Spring Winback</a>",
+                "<a href=\"/campaigns/c_spring?returnTo=%2Fcampaigns%3Fpage%3D2%26status%3Ddraft%26query%3Dspring\" class=\"apex-em apex-link\">Spring Winback</a>",
                 spring_status.as_str(),
                 "VIP Customers",
                 "41.2%",
@@ -3737,7 +3720,7 @@ pub fn web_campaigns_page() -> String {
             ],
             vec![
                 launch_checkbox,
-                "<a href=\"/campaigns/c_launch?returnTo=%2Fcampaigns%3Fpage%3D2%26status%3Ddraft%26query%3Dspring\" class=\"font-bold text-foreground hover:text-primary\">Launch Sequence</a>",
+                "<a href=\"/campaigns/c_launch?returnTo=%2Fcampaigns%3Fpage%3D2%26status%3Ddraft%26query%3Dspring\" class=\"apex-em apex-link\">Launch Sequence</a>",
                 launch_status.as_str(),
                 "Trial Accounts",
                 "28.4%",
@@ -3747,8 +3730,8 @@ pub fn web_campaigns_page() -> String {
         ],
     };
     let bulk_bar = format!(
-        "<section class=\"rounded-sm border border-surface-200 bg-card/80 p-6\" data-bulk-scope=\"campaigns\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div class=\"flex items-start gap-3\"><div aria-live=\"polite\"><p class=\"text-sm font-bold text-foreground\">Select rows to act on them in bulk</p><p class=\"text-xs text-muted-foreground\">Select the rows you want to act on, then choose an action.</p></div></div><div class=\"flex flex-col gap-2 sm:flex-row\">{delete_button}</div></div></section>",
-        delete_button = "<button type=\"submit\" formaction=\"/web/campaigns/delete-bulk\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-destructive px-4 py-2 text-sm font-semibold text-destructive-foreground transition-colors hover:bg-destructive/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Delete selected</button>",
+        "<section class=\"border p-6\" data-bulk-scope=\"campaigns\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div class=\"flex items-start gap-3\"><div aria-live=\"polite\"><p class=\"apex-em\">Select rows to act on them in bulk</p><p class=\"\">Select the rows you want to act on, then choose an action.</p></div></div><div class=\"flex flex-col gap-2 sm:flex-row\">{delete_button}</div></div></section>",
+        delete_button = "<button type=\"submit\" formaction=\"/web/campaigns/delete-bulk\" class=\"inline-flex items-center justify-center whitespace-nowrap px-4 py-2 apex-btn apex-btn--danger\">Delete selected</button>",
     );
     let pagination_key = pagination_storage_key("campaigns");
     let pagination = PaginationControls {
@@ -3762,7 +3745,7 @@ pub fn web_campaigns_page() -> String {
     );
     let breadcrumbs = render_page_breadcrumbs("Campaigns");
     format!(
-        "<div class=\"space-y-6\">{breadcrumbs}<div class=\"flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Campaigns</h1><p class=\"text-sm text-muted-foreground\">Search, filter, and batch-manage campaigns and their audiences in one place.</p></div><a href=\"/campaigns/new\" class=\"inline-flex w-full items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3 sm:w-auto\">New Campaign</a></div>{filters}<form method=\"post\" action=\"/web/campaigns/delete-bulk\" data-bulk-form=\"campaigns\">{bulk_bar}<section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"text-sm text-muted-foreground\">Showing 11-20 of 42 campaigns. Returning from detail pages restores page 2 and the active filters.</p>{pagination}</div></section></form></div>",
+        "<div class=\"space-y-6\">{breadcrumbs}<div class=\"flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"apex-page-title\">Campaigns</h1><p class=\"\">Search, filter, and batch-manage campaigns and their audiences in one place.</p></div><a href=\"/campaigns/new\" class=\"inline-flex w-full items-center justify-center whitespace-nowrap h-12 px-6 py-3 sm:w-auto apex-em apex-btn apex-btn--primary\">New Campaign</a></div>{filters}<form method=\"post\" action=\"/web/campaigns/delete-bulk\" data-bulk-form=\"campaigns\">{bulk_bar}<section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"\">Showing 11-20 of 42 campaigns. Returning from detail pages restores page 2 and the active filters.</p>{pagination}</div></section></form></div>",
         breadcrumbs = breadcrumbs,
         filters = render_debounced_filter_bar(
             "campaign-search",
@@ -3781,7 +3764,7 @@ pub fn web_campaigns_page() -> String {
 /// Campaign detail page.
 pub fn web_campaign_detail_page() -> String {
     format!(
-        "<div class=\"space-y-6\"><nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\"><li><a href=\"{}\" class=\"hover:text-surface-900 transition-colors\">Campaigns</a></li><li class=\"text-surface-500\">/</li><li class=\"text-surface-900 font-medium\">Campaign Detail</li></ol></nav><div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Campaign Detail</h1><p class=\"text-sm text-muted-foreground\">Breadcrumbs preserve the active list page and filter query when you navigate back.</p></div><div class=\"flex flex-col gap-3 sm:flex-row\"><a href=\"/campaigns/c_spring/edit?returnTo=%2Fcampaigns%3Fpage%3D2%26status%3Ddraft%26query%3Dspring\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold border border-input bg-background hover:bg-accent h-12 px-6 py-3\">Edit</a><a href=\"/confirm?intent=delete-campaign&amp;id=c_spring&amp;return_to=%2Fcampaigns\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold bg-destructive text-destructive-foreground hover:bg-destructive/90 h-12 px-6 py-3\">Delete Campaign</a></div></div><div class=\"grid gap-6 md:grid-cols-3\"><div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Recipients</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\">4,280</p></div><div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Open Rate</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\">41.2%</p></div><div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Click Rate</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\">8.6%</p></div></div></div>",
+        "<div class=\"space-y-6\"><nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2\"><li><a href=\"{}\" class=\"apex-link\">Campaigns</a></li><li class=\"\">/</li><li class=\"apex-em\">Campaign Detail</li></ol></nav><div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"apex-page-title\">Campaign Detail</h1><p class=\"\">Breadcrumbs preserve the active list page and filter query when you navigate back.</p></div><div class=\"flex flex-col gap-3 sm:flex-row\"><a href=\"/campaigns/c_spring/edit?returnTo=%2Fcampaigns%3Fpage%3D2%26status%3Ddraft%26query%3Dspring\" class=\"inline-flex items-center justify-center whitespace-nowrap border h-12 px-6 py-3 apex-em apex-btn\">Edit</a><a href=\"/confirm?intent=delete-campaign&amp;id=c_spring&amp;return_to=%2Fcampaigns\" class=\"inline-flex items-center justify-center whitespace-nowrap h-12 px-6 py-3 apex-em apex-btn apex-btn--danger\">Delete Campaign</a></div></div><div class=\"grid gap-6 md:grid-cols-3\"><div class=\"border p-6 md:p-8\"><h3 class=\"apex-h3\">Recipients</h3><p class=\"apex-em\">4,280</p></div><div class=\"border p-6 md:p-8\"><h3 class=\"apex-h3\">Open Rate</h3><p class=\"apex-em\">41.2%</p></div><div class=\"border p-6 md:p-8\"><h3 class=\"apex-h3\">Click Rate</h3><p class=\"apex-em\">8.6%</p></div></div></div>",
         CAMPAIGNS_RETURN_HREF,
     )
 }
@@ -3792,12 +3775,12 @@ pub fn web_campaign_detail_page() -> String {
 /// the route inventory and is the honest empty state if it is ever reached
 /// without data — it never fabricates a transition.
 pub fn web_message_timeline_page() -> String {
-    "<div class=\"space-y-6\"><nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\"><li><a href=\"/events\" class=\"hover:text-surface-900 transition-colors\">Events</a></li><li class=\"text-surface-500\">/</li><li class=\"text-surface-900 font-medium\">Message Timeline</li></ol></nav>\
-     <div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Message Timeline</h1>\
-     <p class=\"text-sm text-muted-foreground\">Replay a message's state as of a timestamp from the append-only delivery sources.</p></div>\
-     <div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">No message selected</h3>\
-     <p class=\"text-sm text-muted-foreground\">Open a message from the events table to reconstruct its state at a specific time.</p>\
-     <a href=\"/events\" class=\"mt-4 inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold border border-input bg-background hover:bg-accent h-12 px-6 py-3\">Back to events</a></div></div>"
+    "<div class=\"space-y-6\"><nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2\"><li><a href=\"/events\" class=\"apex-link\">Events</a></li><li class=\"\">/</li><li class=\"apex-em\">Message Timeline</li></ol></nav>\
+     <div><h1 class=\"apex-page-title\">Message Timeline</h1>\
+     <p class=\"\">Replay a message's state as of a timestamp from the append-only delivery sources.</p></div>\
+     <div class=\"border p-6 md:p-8\"><h3 class=\"apex-h3\">No message selected</h3>\
+     <p class=\"\">Open a message from the events table to reconstruct its state at a specific time.</p>\
+     <a href=\"/events\" class=\"mt-4 inline-flex items-center justify-center whitespace-nowrap border h-12 px-6 py-3 apex-em apex-btn\">Back to events</a></div></div>"
         .to_string()
 }
 
@@ -3852,14 +3835,14 @@ pub fn web_campaign_edit_page_with_values(edit: &crate::view_data::CampaignEditD
     let breadcrumbs = render_page_breadcrumbs("Campaigns");
     format!(
         "<div class=\"w-full max-w-3xl space-y-6\">{breadcrumbs}\
-<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Edit Campaign</h1><p class=\"text-sm text-muted-foreground\">Saving updates this campaign in place.</p></div><a href=\"/campaigns\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm border border-input bg-background px-4 py-2 text-sm font-bold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground\">Back to campaigns</a></div>\
+<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"apex-page-title\">Edit Campaign</h1><p class=\"\">Saving updates this campaign in place.</p></div><a href=\"/campaigns\" class=\"inline-flex items-center justify-center whitespace-nowrap border px-4 py-2 apex-em apex-btn\">Back to campaigns</a></div>\
 <form class=\"space-y-6\" method=\"post\" action=\"/web/campaigns/update\">\
 <input type=\"hidden\" name=\"id\" value=\"{id}\" />\
-<div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"campaign-name\">Campaign Name</label><input id=\"campaign-name\" name=\"name\" type=\"text\" required value=\"{name}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\" /></div>\
-<div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"campaign-subject\">Subject Line</label><input id=\"campaign-subject\" name=\"subject\" type=\"text\" required value=\"{subject}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\" /></div>\
-<div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"campaign-content\">HTML Content</label><textarea id=\"campaign-content\" name=\"html_body\" rows=\"10\" maxlength=\"25000\" class=\"flex min-h-[160px] w-full rounded-sm border border-input bg-background px-3 py-2 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\">{html_body}</textarea></div>\
-<div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"campaign-scheduled-at\">Schedule (optional, UTC)</label><input id=\"campaign-scheduled-at\" name=\"scheduled_at\" type=\"datetime-local\" value=\"{scheduled_at}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\" /><p class=\"text-xs text-muted-foreground\">Enter the send time in UTC. A scheduled time starts the send automatically when it arrives — saving a schedule authorizes that automatic send. Keep the field empty to store the campaign as a draft.</p></div>\
-<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"text-xs text-muted-foreground\">Your changes take effect when you submit this form.</p><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-primary px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Save Changes</button></div>\
+<div class=\"space-y-2\"><label class=\"apex-em apex-label\" for=\"campaign-name\">Campaign Name</label><input id=\"campaign-name\" name=\"name\" type=\"text\" required value=\"{name}\" class=\"flex h-12 w-full border px-3 apex-input\" /></div>\
+<div class=\"space-y-2\"><label class=\"apex-em apex-label\" for=\"campaign-subject\">Subject Line</label><input id=\"campaign-subject\" name=\"subject\" type=\"text\" required value=\"{subject}\" class=\"flex h-12 w-full border px-3 apex-input\" /></div>\
+<div class=\"space-y-2\"><label class=\"apex-em apex-label\" for=\"campaign-content\">HTML Content</label><textarea id=\"campaign-content\" name=\"html_body\" rows=\"10\" maxlength=\"25000\" class=\"flex min-h-[160px] w-full border px-3 py-2 apex-input apex-textarea\">{html_body}</textarea></div>\
+<div class=\"space-y-2\"><label class=\"apex-em apex-label\" for=\"campaign-scheduled-at\">Schedule (optional, UTC)</label><input id=\"campaign-scheduled-at\" name=\"scheduled_at\" type=\"datetime-local\" value=\"{scheduled_at}\" class=\"flex h-12 w-full border px-3 apex-input\" /><p class=\"\">Enter the send time in UTC. A scheduled time starts the send automatically when it arrives — saving a schedule authorizes that automatic send. Keep the field empty to store the campaign as a draft.</p></div>\
+<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"\">Your changes take effect when you submit this form.</p><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap px-4 py-2 apex-btn apex-btn--primary\">Save Changes</button></div>\
 </form></div>",
         breadcrumbs = breadcrumbs,
         id = html_escape(&edit.id),
@@ -3958,7 +3941,7 @@ pub fn web_contacts_page() -> String {
             ],
         ],
     };
-    let bulk_bar = "<section class=\"rounded-sm border border-surface-200 bg-card/80 p-6\" data-bulk-scope=\"contacts\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div aria-live=\"polite\"><p class=\"text-sm font-bold text-foreground\">Select rows to act on them in bulk</p><p class=\"text-xs text-muted-foreground\">Select the contacts you want to act on, then choose an action.</p></div><div class=\"flex flex-col gap-2 sm:flex-row\"><button type=\"submit\" formaction=\"/web/contacts/export.csv\" formmethod=\"get\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] border border-surface-200 bg-background px-4 py-2 text-sm font-semibold text-foreground transition-colors hover:border-surface-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Export selected</button><button type=\"submit\" formaction=\"/web/contacts/delete-bulk\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-destructive px-4 py-2 text-sm font-semibold text-destructive-foreground transition-colors hover:bg-destructive/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Delete selected</button></div></div></section>";
+    let bulk_bar = "<section class=\"border p-6\" data-bulk-scope=\"contacts\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div aria-live=\"polite\"><p class=\"apex-em\">Select rows to act on them in bulk</p><p class=\"\">Select the contacts you want to act on, then choose an action.</p></div><div class=\"flex flex-col gap-2 sm:flex-row\"><button type=\"submit\" formaction=\"/web/contacts/export.csv\" formmethod=\"get\" class=\"inline-flex items-center justify-center whitespace-nowrap border px-4 py-2 apex-btn\">Export selected</button><button type=\"submit\" formaction=\"/web/contacts/delete-bulk\" class=\"inline-flex items-center justify-center whitespace-nowrap px-4 py-2 apex-btn apex-btn--danger\">Delete selected</button></div></div></section>";
     let pagination_key = pagination_storage_key("contacts");
     let pagination = PaginationControls {
         page: 3,
@@ -3971,7 +3954,7 @@ pub fn web_contacts_page() -> String {
     );
     let breadcrumbs = render_page_breadcrumbs("Contacts");
     format!(
-        "<div class=\"space-y-6\">{breadcrumbs}<div class=\"flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Contacts</h1><p class=\"text-sm text-muted-foreground\">Server-rendered filters, deterministic states, and batch actions keep list management fast at scale.</p></div><a href=\"/contacts/new\" class=\"inline-flex w-full items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3 sm:w-auto\">Add Contact</a></div>{filters}<form method=\"post\" action=\"/web/contacts/delete-bulk\" data-bulk-form=\"contacts\">{bulk_bar}<section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"text-sm text-muted-foreground\">Showing 41-60 of 148 contacts. Page state persists while you review individual records and come back.</p>{pagination}</div></section></form></div>",
+        "<div class=\"space-y-6\">{breadcrumbs}<div class=\"flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"apex-page-title\">Contacts</h1><p class=\"\">Server-rendered filters, deterministic states, and batch actions keep list management fast at scale.</p></div><a href=\"/contacts/new\" class=\"inline-flex w-full items-center justify-center whitespace-nowrap h-12 px-6 py-3 sm:w-auto apex-em apex-btn apex-btn--primary\">Add Contact</a></div>{filters}<form method=\"post\" action=\"/web/contacts/delete-bulk\" data-bulk-form=\"contacts\">{bulk_bar}<section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"\">Showing 41-60 of 148 contacts. Page state persists while you review individual records and come back.</p>{pagination}</div></section></form></div>",
         breadcrumbs = breadcrumbs,
         filters = render_debounced_filter_bar(
             "contact-search",
@@ -4021,31 +4004,28 @@ pub fn web_contact_edit_page_with_values(contact: &crate::view_data::ContactEdit
         .collect::<Vec<_>>()
         .join("");
     let membership = if contact.lists.is_empty() {
-        "<p class=\"text-sm text-muted-foreground\">Not a member of any list yet.</p>".to_string()
+        "<p class=\"\">Not a member of any list yet.</p>".to_string()
     } else {
         format!(
-            "<p class=\"text-sm text-muted-foreground\">Member of {}</p>",
+            "<p class=\"\">Member of {}</p>",
             contact
                 .lists
                 .iter()
-                .map(|name| format!(
-                    "<span class=\"font-medium text-foreground\">{}</span>",
-                    html_escape(name)
-                ))
+                .map(|name| format!("<span class=\"apex-em\">{}</span>", html_escape(name)))
                 .collect::<Vec<_>>()
                 .join(", ")
         )
     };
     format!(
         "<div class=\"w-full max-w-3xl space-y-6\">{breadcrumbs}\
-<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Edit Contact</h1><p class=\"text-sm text-muted-foreground\">Saving updates this contact in place.</p></div><a href=\"/contacts\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm border border-input bg-background px-4 py-2 text-sm font-bold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground\">Back to contacts</a></div>\
-<section class=\"rounded-sm border border-surface-200 bg-card/80 p-4\"><p class=\"text-xs font-bold uppercase tracking-[0.18em] text-surface-500\">Audience membership</p>{membership}<p class=\"mt-1 text-xs text-muted-foreground\">Membership is managed from each list's page — this editor changes identity and subscription status only.</p></section>\
+<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"apex-page-title\">Edit Contact</h1><p class=\"\">Saving updates this contact in place.</p></div><a href=\"/contacts\" class=\"inline-flex items-center justify-center whitespace-nowrap border px-4 py-2 apex-em apex-btn\">Back to contacts</a></div>\
+<section class=\"border p-4\"><p class=\"apex-em\">Audience membership</p>{membership}<p class=\"mt-1\">Membership is managed from each list's page — this editor changes identity and subscription status only.</p></section>\
 <form class=\"space-y-6\" method=\"post\" action=\"/web/contacts/update\">\
 <input type=\"hidden\" name=\"id\" value=\"{id}\" />\
-<div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"contact-email\">Email address</label><input id=\"contact-email\" type=\"text\" value=\"{email}\" readonly disabled class=\"flex h-12 w-full rounded-sm border border-input bg-muted/40 px-3 text-[14px] text-surface-500\" /><p class=\"text-xs text-muted-foreground\">The address is the contact's identity and cannot be changed — delete the contact and add the new address instead.</p></div>\
-<div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"contact-name\">Name</label><input id=\"contact-name\" name=\"name\" type=\"text\" value=\"{name}\" maxlength=\"120\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\" /></div>\
-<div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"contact-status\">Subscription status</label><select id=\"contact-status\" name=\"status\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\">{options}</select></div>\
-<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"text-xs text-muted-foreground\">Your changes take effect when you submit this form.</p><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-primary px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Save Contact</button></div>\
+<div class=\"space-y-2\"><label class=\"apex-em apex-label\" for=\"contact-email\">Email address</label><input id=\"contact-email\" type=\"text\" value=\"{email}\" readonly disabled class=\"flex h-12 w-full border px-3 apex-input\" /><p class=\"\">The address is the contact's identity and cannot be changed — delete the contact and add the new address instead.</p></div>\
+<div class=\"space-y-2\"><label class=\"apex-em apex-label\" for=\"contact-name\">Name</label><input id=\"contact-name\" name=\"name\" type=\"text\" value=\"{name}\" maxlength=\"120\" class=\"flex h-12 w-full border px-3 apex-input\" /></div>\
+<div class=\"space-y-2\"><label class=\"apex-em apex-label\" for=\"contact-status\">Subscription status</label><select id=\"contact-status\" name=\"status\" class=\"flex h-12 w-full border px-3 apex-select\">{options}</select></div>\
+<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"\">Your changes take effect when you submit this form.</p><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap px-4 py-2 apex-btn apex-btn--primary\">Save Contact</button></div>\
 </form></div>",
         breadcrumbs = breadcrumbs,
         membership = membership,
@@ -4062,32 +4042,32 @@ pub fn web_contact_edit_page_with_values(contact: &crate::view_data::ContactEdit
 pub fn web_contacts_new_page() -> String {
     format!(
         "<div class=\"max-w-2xl\">\
-<nav aria-label=\"Breadcrumb\" class=\"mb-6\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\">\
-<li><a href=\"/contacts\" class=\"hover:text-surface-900 transition-colors\">Contacts</a></li>\
-<li class=\"text-surface-500\">/</li>\
-<li class=\"text-surface-900 font-medium\">New Contact</li></ol></nav>\
-<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Add Contact</h1>\
-<p class=\"mt-1 mb-6 text-sm text-muted-foreground\">Add one address here, or use the CSV import below to add many at once.</p>\
+<nav aria-label=\"Breadcrumb\" class=\"mb-6\"><ol class=\"flex items-center gap-2\">\
+<li><a href=\"/contacts\" class=\"apex-link\">Contacts</a></li>\
+<li class=\"\">/</li>\
+<li class=\"apex-em\">New Contact</li></ol></nav>\
+<h1 class=\"apex-page-title\">Add Contact</h1>\
+<p class=\"mt-1 mb-6\">Add one address here, or use the CSV import below to add many at once.</p>\
 <form class=\"space-y-6\" method=\"post\" action=\"/web/contacts\">\
-<h2 class=\"text-sm font-bold uppercase tracking-[0.18em] text-surface-500\">Single contact</h2>\
+<h2 class=\"apex-section-head\">Single contact</h2>\
 <div class=\"space-y-2\">{email_label}{email_input}</div>\
 <div class=\"space-y-2\">{name_label}{name_input}</div>\
 <div class=\"flex flex-col gap-3 sm:flex-row\">{save_button}</div>\
 </form>\
-<section class=\"mt-10 rounded-sm border border-surface-200 bg-card p-6 shadow-premium\" aria-labelledby=\"contacts-import-title\">\
-<h2 id=\"contacts-import-title\" class=\"text-lg font-bold text-surface-950\">Import contacts from CSV</h2>\
-<p class=\"mt-1 text-sm text-muted-foreground\">Paste CSV rows or attach a file — one contact per line with a header row (<code class=\"font-mono text-xs bg-muted/40 rounded px-1.5 py-0.5\">email,name</code>). Quoted fields with commas follow RFC 4180. Duplicates are skipped and every row's outcome is reported.</p>\
+<section class=\"mt-10 border p-6\" aria-labelledby=\"contacts-import-title\">\
+<h2 id=\"contacts-import-title\" class=\"apex-h2\">Import contacts from CSV</h2>\
+<p class=\"mt-1\">Paste CSV rows or attach a file — one contact per line with a header row (<code class=\"px-1.5 py-0.5\">email,name</code>). Quoted fields with commas follow RFC 4180. Duplicates are skipped and every row's outcome is reported.</p>\
 <form class=\"mt-4 space-y-4\" method=\"post\" action=\"/web/contacts/import\" enctype=\"multipart/form-data\" data-form-id=\"contacts-import\">\
 <div class=\"space-y-2\">\
-<label class=\"text-sm font-medium leading-none\" for=\"contacts-import-csv\">Paste CSV</label>\
-<textarea id=\"contacts-import-csv\" name=\"csv\" rows=\"6\" placeholder=\"email,name&#10;jane@example.com,Jane Doe\" class=\"flex min-h-[120px] w-full rounded-sm border border-input bg-background px-3 py-2 text-sm font-mono ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\"></textarea>\
+<label class=\"apex-em apex-label\" for=\"contacts-import-csv\">Paste CSV</label>\
+<textarea id=\"contacts-import-csv\" name=\"csv\" rows=\"6\" placeholder=\"email,name&#10;jane@example.com,Jane Doe\" class=\"flex min-h-[120px] w-full border px-3 py-2 apex-input apex-textarea\"></textarea>\
 </div>\
 <div class=\"space-y-2\">\
-<label class=\"text-sm font-medium leading-none\" for=\"contacts-import-file\">…or upload a .csv file</label>\
-<input id=\"contacts-import-file\" name=\"file\" type=\"file\" accept=\".csv,text/csv\" class=\"flex w-full rounded-sm border border-input bg-background px-3 py-2 text-sm ring-offset-background transition-all file:border-0 file:bg-transparent file:text-sm file:font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\" />\
-<p class=\"text-xs text-muted-foreground\">When both are provided the file wins. The import result arrives as a summary after you submit.</p>\
+<label class=\"apex-em apex-label\" for=\"contacts-import-file\">…or upload a .csv file</label>\
+<input id=\"contacts-import-file\" name=\"file\" type=\"file\" accept=\".csv,text/csv\" class=\"flex w-full border px-3 py-2 apex-input\" />\
+<p class=\"\">When both are provided the file wins. The import result arrives as a summary after you submit.</p>\
 </div>\
-<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] border border-surface-200 bg-background px-4 py-2 text-sm font-semibold text-foreground transition-all duration-200 ease-premium active:scale-[0.98] hover:border-surface-300 hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Import contacts</button>\
+<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap border px-4 py-2 apex-btn\">Import contacts</button>\
 </form>\
 </section>\
 </div>",
@@ -4122,8 +4102,8 @@ pub fn web_lists_page() -> String {
             ],
         ),
     );
-    let vip_actions = "<div class=\"flex flex-wrap justify-end gap-2\"><a href=\"/lists/l_vip\" class=\"inline-flex items-center justify-center rounded-sm border border-input bg-background px-3 py-2 text-sm font-bold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground\">Open</a><a href=\"/confirm?intent=delete-list&amp;id=l_vip&amp;return_to=%2Flists\" class=\"inline-flex items-center justify-center rounded-sm border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm font-bold text-destructive transition-colors hover:bg-destructive/10\">Delete</a></div>";
-    let launch_actions = "<div class=\"flex flex-wrap justify-end gap-2\"><a href=\"/lists/l_launch\" class=\"inline-flex items-center justify-center rounded-sm border border-input bg-background px-3 py-2 text-sm font-bold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground\">Open</a><a href=\"/lists/l_launch/edit\" class=\"inline-flex items-center justify-center rounded-sm border border-input bg-background px-3 py-2 text-sm font-bold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground\">Edit</a></div>";
+    let vip_actions = "<div class=\"flex flex-wrap justify-end gap-2\"><a href=\"/lists/l_vip\" class=\"inline-flex items-center justify-center border px-3 py-2 apex-em apex-btn\">Open</a><a href=\"/confirm?intent=delete-list&amp;id=l_vip&amp;return_to=%2Flists\" class=\"inline-flex items-center justify-center border px-3 py-2 apex-error apex-em apex-btn apex-btn--danger\">Delete</a></div>";
+    let launch_actions = "<div class=\"flex flex-wrap justify-end gap-2\"><a href=\"/lists/l_launch\" class=\"inline-flex items-center justify-center border px-3 py-2 apex-em apex-btn\">Open</a><a href=\"/lists/l_launch/edit\" class=\"inline-flex items-center justify-center border px-3 py-2 apex-em apex-btn\">Edit</a></div>";
     let table = Table {
         caption: Some("Contact lists"),
         columns: vec![
@@ -4161,7 +4141,7 @@ pub fn web_lists_page() -> String {
     );
     let breadcrumbs = render_page_breadcrumbs("Lists");
     format!(
-        "<div class=\"space-y-6\">{breadcrumbs}<div class=\"flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Lists</h1><p class=\"text-sm text-muted-foreground\">List actions run through a signed confirmation page and preserve the active list page when you navigate away and back.</p></div><a href=\"/lists/new\" class=\"inline-flex w-full items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3 sm:w-auto\">New List</a></div>{filters}<section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"text-sm text-muted-foreground\">Showing 1-20 of 44 lists. Query parameters stay attached to pagination links for back/forward restoration.</p>{pagination}</div></section></div>",
+        "<div class=\"space-y-6\">{breadcrumbs}<div class=\"flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"apex-page-title\">Lists</h1><p class=\"\">List actions run through a signed confirmation page and preserve the active list page when you navigate away and back.</p></div><a href=\"/lists/new\" class=\"inline-flex w-full items-center justify-center whitespace-nowrap h-12 px-6 py-3 sm:w-auto apex-em apex-btn apex-btn--primary\">New List</a></div>{filters}<section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"\">Showing 1-20 of 44 lists. Query parameters stay attached to pagination links for back/forward restoration.</p>{pagination}</div></section></div>",
         breadcrumbs = breadcrumbs,
         filters = render_debounced_filter_bar(
             "list-search",
@@ -4183,21 +4163,21 @@ pub fn web_lists_page() -> String {
 /// `web_list_detail` handler) and never shows this page.
 pub fn web_list_detail_page() -> String {
     "<div class=\"space-y-6\" data-page=\"list-detail\">\
-<nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\">\
-<li><a href=\"/lists\" class=\"hover:text-surface-900 transition-colors\">Lists</a></li>\
-<li class=\"text-surface-500\">/</li>\
-<li class=\"text-surface-900 font-medium\" aria-current=\"page\">List Detail</li></ol></nav>\
+<nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2\">\
+<li><a href=\"/lists\" class=\"apex-link\">Lists</a></li>\
+<li class=\"\">/</li>\
+<li class=\"apex-em\" aria-current=\"page\">List Detail</li></ol></nav>\
 <div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\">\
-<div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\" data-list-name>List</h1>\
-<p class=\"text-sm text-muted-foreground\">Subscribers and settings for this list. Reload the page to see fresh counts.</p></div>\
+<div><h1 class=\"apex-page-title\" data-list-name>List</h1>\
+<p class=\"\">Subscribers and settings for this list. Reload the page to see fresh counts.</p></div>\
 <div class=\"flex flex-col gap-3 sm:flex-row\">\
-<a href=\"/lists/l_launch/edit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold border border-input bg-background hover:bg-accent h-12 px-6 py-3\">Edit</a>\
-<a href=\"/confirm?intent=delete-list&amp;id=l_launch&amp;return_to=%2Flists\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold bg-destructive text-destructive-foreground hover:bg-destructive/90 h-12 px-6 py-3\">Delete List</a>\
+<a href=\"/lists/l_launch/edit\" class=\"inline-flex items-center justify-center whitespace-nowrap border h-12 px-6 py-3 apex-em apex-btn\">Edit</a>\
+<a href=\"/confirm?intent=delete-list&amp;id=l_launch&amp;return_to=%2Flists\" class=\"inline-flex items-center justify-center whitespace-nowrap h-12 px-6 py-3 apex-em apex-btn apex-btn--danger\">Delete List</a>\
 </div></div>\
 <div class=\"grid gap-6 md:grid-cols-3\">\
-<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Subscribers</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\">—</p><a href=\"/lists/l_launch/members\" class=\"mt-2 inline-flex items-center text-sm font-bold text-primary hover:underline\">Inspect members &rarr;</a></div>\
-<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Subscribed</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\">—</p></div>\
-<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Unsubscribed</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\">—</p></div>\
+<div class=\"border p-6 md:p-8\"><h3 class=\"apex-h3\">Subscribers</h3><p class=\"apex-em\">—</p><a href=\"/lists/l_launch/members\" class=\"mt-2 inline-flex items-center apex-em apex-link\">Inspect members &rarr;</a></div>\
+<div class=\"border p-6 md:p-8\"><h3 class=\"apex-h3\">Subscribed</h3><p class=\"apex-em\">—</p></div>\
+<div class=\"border p-6 md:p-8\"><h3 class=\"apex-h3\">Unsubscribed</h3><p class=\"apex-em\">—</p></div>\
 </div></div>".to_string()
 }
 
@@ -4209,7 +4189,7 @@ pub fn web_list_detail_page() -> String {
 pub fn web_list_edit_page() -> String {
     format!(
         "<div class=\"max-w-2xl\" data-page=\"list-edit\">\
-<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight mb-6\">Edit List</h1>\
+<h1 class=\"mb-6 apex-page-title\">Edit List</h1>\
 <form class=\"space-y-6\" method=\"post\" action=\"/web/lists/update\">\
 <div class=\"space-y-2\">{name_label}{name_input}</div>\
 <div class=\"flex flex-col gap-3 sm:flex-row\">{save_button}</div>\
@@ -4260,11 +4240,11 @@ pub fn web_list_edit_page() -> String {
 pub fn web_list_edit_page_with_values(edit: &crate::view_data::ListEditData) -> String {
     format!(
         "<div class=\"max-w-2xl\" data-page=\"list-edit\">\
-<nav aria-label=\"Breadcrumb\" class=\"mb-6\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\">\
-<li><a href=\"/lists\" class=\"hover:text-surface-900 transition-colors\">Lists</a></li>\
-<li class=\"text-surface-500\">/</li>\
-<li class=\"text-surface-900 font-medium\">Edit List</li></ol></nav>\
-<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight mb-6\">Edit List</h1>\
+<nav aria-label=\"Breadcrumb\" class=\"mb-6\"><ol class=\"flex items-center gap-2\">\
+<li><a href=\"/lists\" class=\"apex-link\">Lists</a></li>\
+<li class=\"\">/</li>\
+<li class=\"apex-em\">Edit List</li></ol></nav>\
+<h1 class=\"mb-6 apex-page-title\">Edit List</h1>\
 <form class=\"space-y-6\" method=\"post\" action=\"/web/lists/update\">\
 <input type=\"hidden\" name=\"id\" value=\"{id}\" />\
 <div class=\"space-y-2\">{name_label}{name_input}</div>\
@@ -4317,21 +4297,21 @@ pub fn web_list_edit_page_with_values(edit: &crate::view_data::ListEditData) -> 
 pub fn web_list_detail_page_with_values(detail: &crate::view_data::ListDetailData) -> String {
     format!(
         "<div class=\"space-y-6\" data-page=\"list-detail\">\
-<nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\">\
-<li><a href=\"/lists\" class=\"hover:text-surface-900 transition-colors\">Lists</a></li>\
-<li class=\"text-surface-500\">/</li>\
-<li class=\"text-surface-900 font-medium\" aria-current=\"page\">List Detail</li></ol></nav>\
+<nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2\">\
+<li><a href=\"/lists\" class=\"apex-link\">Lists</a></li>\
+<li class=\"\">/</li>\
+<li class=\"apex-em\" aria-current=\"page\">List Detail</li></ol></nav>\
 <div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\">\
-<div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\" data-list-name>{name}</h1>\
-<p class=\"text-sm text-muted-foreground\">Subscribers and settings for this list. Reload the page to see fresh counts.</p></div>\
+<div><h1 class=\"apex-page-title\" data-list-name>{name}</h1>\
+<p class=\"\">Subscribers and settings for this list. Reload the page to see fresh counts.</p></div>\
 <div class=\"flex flex-col gap-3 sm:flex-row\">\
-<a href=\"/lists/{id}/edit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold border border-input bg-background hover:bg-accent h-12 px-6 py-3\">Edit</a>\
-<a href=\"/confirm?intent=delete-list&amp;id={id}&amp;return_to=%2Flists\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold bg-destructive text-destructive-foreground hover:bg-destructive/90 h-12 px-6 py-3\">Delete List</a>\
+<a href=\"/lists/{id}/edit\" class=\"inline-flex items-center justify-center whitespace-nowrap border h-12 px-6 py-3 apex-em apex-btn\">Edit</a>\
+<a href=\"/confirm?intent=delete-list&amp;id={id}&amp;return_to=%2Flists\" class=\"inline-flex items-center justify-center whitespace-nowrap h-12 px-6 py-3 apex-em apex-btn apex-btn--danger\">Delete List</a>\
 </div></div>\
 <div class=\"grid gap-6 md:grid-cols-3\">\
-<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Subscribers</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\">{subscribers}</p><a href=\"/lists/{id}/members\" class=\"mt-2 inline-flex items-center text-sm font-bold text-primary hover:underline\">Inspect members &rarr;</a></div>\
-<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Subscribed</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\">{subscribed}</p></div>\
-<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Unsubscribed</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\">{unsubscribed}</p></div>\
+<div class=\"border p-6 md:p-8\"><h3 class=\"apex-h3\">Subscribers</h3><p class=\"apex-em\">{subscribers}</p><a href=\"/lists/{id}/members\" class=\"mt-2 inline-flex items-center apex-em apex-link\">Inspect members &rarr;</a></div>\
+<div class=\"border p-6 md:p-8\"><h3 class=\"apex-h3\">Subscribed</h3><p class=\"apex-em\">{subscribed}</p></div>\
+<div class=\"border p-6 md:p-8\"><h3 class=\"apex-h3\">Unsubscribed</h3><p class=\"apex-em\">{unsubscribed}</p></div>\
 </div></div>",
         name = html_escape(&detail.name),
         id = html_escape(&detail.id),
@@ -4357,7 +4337,7 @@ pub fn web_list_members_page_with_values(members: &crate::view_data::ListMembers
                 .and_then(rfc3339_utc_label)
                 .unwrap_or_else(|| "not recorded".to_string());
             format!(
-                "<tr class=\"border-b border-surface-100\"><td class=\"px-4 py-3 font-medium text-surface-950\">{identity}</td><td class=\"px-4 py-3 font-mono text-xs text-surface-600\">{email}</td><td class=\"px-4 py-3\"><span class=\"inline-grid place-items-center rounded-sm border border-surface-300 bg-surface-50 px-2 py-0.5 text-[10px] font-bold uppercase tracking-widest text-surface-600\">{status}</span></td><td class=\"px-4 py-3 text-surface-600\">{added}</td></tr>",
+                "<tr class=\"border-b\"><td class=\"px-4 py-3 apex-em\">{identity}</td><td class=\"px-4 py-3\">{email}</td><td class=\"px-4 py-3\"><span class=\"inline-grid place-items-center border px-2 py-0.5 apex-em apex-section-head\">{status}</span></td><td class=\"px-4 py-3\">{added}</td></tr>",
                 identity = html_escape(&member.identity),
                 email = html_escape(&member.email),
                 status = html_escape(&member.status),
@@ -4367,30 +4347,30 @@ pub fn web_list_members_page_with_values(members: &crate::view_data::ListMembers
         .collect::<Vec<_>>()
         .join("");
     let body = if members.members.is_empty() {
-        "<div data-view-state=\"empty\" class=\"rounded-sm border border-surface-200 bg-card p-8 text-center shadow-premium\">\
-<h3 class=\"text-lg font-bold text-surface-950\">No subscribers on this list yet</h3>\
-<p class=\"mx-auto mt-2 max-w-md text-sm leading-6 text-surface-500\">Members are contacts you add to this list. Add the contacts you want to reach, then choose this list as a campaign audience.</p>\
-<div class=\"mt-5 flex flex-wrap items-center justify-center gap-3\"><a href=\"/contacts/new\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm bg-primary px-6 py-3 text-sm font-bold text-white transition-all hover:bg-brand-700\">Add a contact</a><a href=\"/contacts\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm border border-surface-200 px-6 py-3 text-sm font-semibold text-surface-700 transition-all hover:bg-surface-50\">View contacts</a></div>\
+        "<div data-view-state=\"empty\" class=\"border p-8\">\
+<h3 class=\"apex-h3\">No subscribers on this list yet</h3>\
+<p class=\"mx-auto mt-2 max-w-md\">Members are contacts you add to this list. Add the contacts you want to reach, then choose this list as a campaign audience.</p>\
+<div class=\"mt-5 flex flex-wrap items-center justify-center gap-3\"><a href=\"/contacts/new\" class=\"inline-flex items-center justify-center whitespace-nowrap px-6 py-3 apex-em apex-btn apex-btn--primary\">Add a contact</a><a href=\"/contacts\" class=\"inline-flex items-center justify-center whitespace-nowrap border px-6 py-3 apex-em apex-btn\">View contacts</a></div>\
 </div>".to_string()
     } else {
         format!(
-            "<div class=\"overflow-x-auto rounded-sm border border-surface-200 bg-card shadow-premium\"><table class=\"min-w-full divide-y divide-surface-100 text-left text-sm\"><caption class=\"sr-only\">Subscribers of {name}</caption><thead class=\"bg-surface-50 text-[10px] font-bold uppercase tracking-widest text-surface-500\"><tr><th scope=\"col\" class=\"px-4 py-3\">Member</th><th scope=\"col\" class=\"px-4 py-3\">Email</th><th scope=\"col\" class=\"px-4 py-3\">Status</th><th scope=\"col\" class=\"px-4 py-3\">Added</th></tr></thead><tbody>{rows}</tbody></table></div>",
+            "<div class=\"overflow-x-auto border\"><table class=\"min-w-full apex-table\"><caption class=\"sr-only\">Subscribers of {name}</caption><thead class=\"\"><tr><th scope=\"col\" class=\"px-4 py-3\">Member</th><th scope=\"col\" class=\"px-4 py-3\">Email</th><th scope=\"col\" class=\"px-4 py-3\">Status</th><th scope=\"col\" class=\"px-4 py-3\">Added</th></tr></thead><tbody>{rows}</tbody></table></div>",
             name = html_escape(&members.name),
             rows = rows,
         )
     };
     format!(
         "<div class=\"space-y-6\" data-page=\"list-members\">\
-<nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\">\
-<li><a href=\"/lists\" class=\"hover:text-surface-900 transition-colors\">Lists</a></li>\
-<li class=\"text-surface-500\">/</li>\
-<li><a href=\"/lists/{id}\" class=\"hover:text-surface-900 transition-colors\">{name}</a></li>\
-<li class=\"text-surface-500\">/</li>\
-<li class=\"text-surface-900 font-medium\" aria-current=\"page\">Members</li></ol></nav>\
+<nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2\">\
+<li><a href=\"/lists\" class=\"apex-link\">Lists</a></li>\
+<li class=\"\">/</li>\
+<li><a href=\"/lists/{id}\" class=\"apex-link\">{name}</a></li>\
+<li class=\"\">/</li>\
+<li class=\"apex-em\" aria-current=\"page\">Members</li></ol></nav>\
 <div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\">\
-<div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Members — {name}</h1>\
-<p class=\"text-sm text-muted-foreground\">{total} subscriber(s) on this list, newest first.</p></div>\
-<a href=\"/lists/{id}\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm border border-surface-200 px-6 py-3 text-sm font-semibold text-surface-700 transition-all hover:bg-surface-50\">Back to list</a>\
+<div><h1 class=\"apex-page-title\">Members — {name}</h1>\
+<p class=\"\">{total} subscriber(s) on this list, newest first.</p></div>\
+<a href=\"/lists/{id}\" class=\"inline-flex items-center justify-center whitespace-nowrap border px-6 py-3 apex-em apex-btn\">Back to list</a>\
 </div>\
 {body}\
 </div>",
@@ -4406,26 +4386,26 @@ pub fn web_list_members_page_with_values(members: &crate::view_data::ListMembers
 /// will show — it never fabricates a member.
 pub fn web_list_members_page() -> String {
     "<div class=\"space-y-6\" data-page=\"list-members\">\
-<nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\">\
-<li><a href=\"/lists\" class=\"hover:text-surface-900 transition-colors\">Lists</a></li>\
-<li class=\"text-surface-500\">/</li>\
-<li class=\"text-surface-900 font-medium\" aria-current=\"page\">Members</li></ol></nav>\
-<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">List members</h1>\
-<p class=\"text-sm text-muted-foreground\">Subscribers load with the list you open.</p>\
-<div data-view-state=\"empty\" class=\"rounded-sm border border-surface-200 bg-card p-8 text-center shadow-premium\">\
-<h3 class=\"text-lg font-bold text-surface-950\">Open a list to see its members</h3>\
-<p class=\"mx-auto mt-2 max-w-md text-sm leading-6 text-surface-500\">This route shows one list's subscribers. Pick a list first.</p>\
-<div class=\"mt-5 flex flex-wrap items-center justify-center gap-3\"><a href=\"/lists\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm bg-primary px-6 py-3 text-sm font-bold text-white transition-all hover:bg-brand-700\">View lists</a></div>\
+<nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2\">\
+<li><a href=\"/lists\" class=\"apex-link\">Lists</a></li>\
+<li class=\"\">/</li>\
+<li class=\"apex-em\" aria-current=\"page\">Members</li></ol></nav>\
+<h1 class=\"apex-page-title\">List members</h1>\
+<p class=\"\">Subscribers load with the list you open.</p>\
+<div data-view-state=\"empty\" class=\"border p-8\">\
+<h3 class=\"apex-h3\">Open a list to see its members</h3>\
+<p class=\"mx-auto mt-2 max-w-md\">This route shows one list's subscribers. Pick a list first.</p>\
+<div class=\"mt-5 flex flex-wrap items-center justify-center gap-3\"><a href=\"/lists\" class=\"inline-flex items-center justify-center whitespace-nowrap px-6 py-3 apex-em apex-btn apex-btn--primary\">View lists</a></div>\
 </div></div>".to_string()
 }
 
 pub fn web_lists_new_page() -> String {
     format!(
         "<div class=\"max-w-2xl\">\
-<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight mb-6\">Create List</h1>\
+<h1 class=\"mb-6 apex-page-title\">Create List</h1>\
 <form class=\"space-y-6\" method=\"post\" action=\"/web/lists\">\
 <div class=\"space-y-2\">{name_label}{name_input}</div>\
-<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center\">{save_button}<a href=\"/lists\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] border border-surface-200 bg-background px-4 py-2 text-sm font-semibold text-foreground transition-colors hover:border-surface-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Cancel</a></div>\
+<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center\">{save_button}<a href=\"/lists\" class=\"inline-flex items-center justify-center whitespace-nowrap border px-4 py-2 apex-em apex-btn\">Cancel</a></div>\
 </form></div>",
         name_label = Label {
             html_for: Some("list-new-name"),
@@ -4488,8 +4468,8 @@ pub fn web_templates_page() -> String {
     };
     format!(
         "<div class=\"space-y-6\">\
-<div class=\"flex items-center justify-between\"><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Templates</h1>\
-<a href=\"/templates/new\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">New Template</a></div>\
+<div class=\"apex-page-heading\"><h1 class=\"apex-page-title\">Templates</h1>\
+<a href=\"/templates/new\" class=\"inline-flex items-center justify-center whitespace-nowrap h-12 px-6 py-3 apex-em apex-btn apex-btn--primary\">New Template</a></div>\
 <section data-view-state=\"ready\">{table}</section></div>",
         table = table.render_html(),
     )
@@ -4499,15 +4479,15 @@ pub fn web_templates_page() -> String {
 pub fn web_templates_new_page() -> String {
     format!(
         "<div class=\"max-w-3xl\">\
-<div class=\"mb-6\"><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Create Template</h1>\
-<p class=\"mt-1 text-sm text-muted-foreground\">Write or paste HTML directly — this is an HTML editor, not a visual builder.</p></div>\
+<div class=\"apex-page-heading\"><h1 class=\"apex-page-title\">Create Template</h1>\
+<p class=\"mt-1\">Write or paste HTML directly — this is an HTML editor, not a visual builder.</p></div>\
 <form class=\"space-y-6\" method=\"post\" action=\"/web/templates\">\
 <div class=\"space-y-2\">{name_label}{name_input}</div>\
 <div class=\"space-y-2\">{subject_label}{subject_input}</div>\
 <div class=\"space-y-2\">\
-<label class=\"text-sm font-medium leading-none\" for=\"template-new-content\">HTML Content</label>\
-<textarea id=\"template-new-content\" name=\"html_body\" class=\"flex min-h-[300px] w-full rounded-sm border border-input bg-background px-3 py-2 text-sm font-mono resize-vertical\" placeholder=\"&lt;h1&gt;Hello {{{{name}}}}&lt;/h1&gt;&#10;&lt;p&gt;Your message goes here.&lt;/p&gt;&#10;&lt;a href=&quot;{{{{cta_url}}}}&quot;&gt;Get started&lt;/a&gt;\"></textarea>\
-<p class=\"text-xs text-muted-foreground\">The placeholder above is a working starter — replace the text and keep the {{{{key}}}} variables you want to fill per campaign.</p>\
+<label class=\"apex-em apex-label\" for=\"template-new-content\">HTML Content</label>\
+<textarea id=\"template-new-content\" name=\"html_body\" class=\"flex min-h-[300px] w-full border px-3 py-2 resize-vertical apex-input apex-textarea\" placeholder=\"&lt;h1&gt;Hello {{{{name}}}}&lt;/h1&gt;&#10;&lt;p&gt;Your message goes here.&lt;/p&gt;&#10;&lt;a href=&quot;{{{{cta_url}}}}&quot;&gt;Get started&lt;/a&gt;\"></textarea>\
+<p class=\"\">The placeholder above is a working starter — replace the text and keep the {{{{key}}}} variables you want to fill per campaign.</p>\
 </div>\
 <div class=\"flex gap-3\">{save_button}</div>\
 </form></div>",
@@ -4537,18 +4517,18 @@ pub fn web_template_edit_page(template_id: &str) -> String {
 /// template's id (hidden) and prefilled name/subject/html_body so Save
 /// updates the row and blank body keeps the stored content.
 pub fn web_template_edit_page_with_values(edit: &crate::view_data::TemplateEditData) -> String {
-    let breadcrumbs = "<nav aria-label=\"Breadcrumb\" class=\"mb-6\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\"><li><a href=\"/templates\" class=\"hover:text-surface-900 transition-colors\">Templates</a></li><li class=\"text-surface-500\">/</li><li class=\"text-surface-900 font-medium\" aria-current=\"page\">Edit Template</li></ol></nav>".to_string();
+    let breadcrumbs = "<nav aria-label=\"Breadcrumb\" class=\"mb-6\"><ol class=\"flex items-center gap-2\"><li><a href=\"/templates\" class=\"apex-link\">Templates</a></li><li class=\"\">/</li><li class=\"apex-em\" aria-current=\"page\">Edit Template</li></ol></nav>".to_string();
     format!(
         "{breadcrumbs}<div class=\"w-full max-w-3xl space-y-6\">\
-<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Edit Template</h1><p class=\"text-sm text-muted-foreground\">Saving creates a new version snapshot — the previous one can be restored.</p></div><a href=\"/templates\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm border border-input bg-background px-4 py-2 text-sm font-bold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground\">Back to templates</a></div>\
+<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"apex-page-title\">Edit Template</h1><p class=\"\">Saving creates a new version snapshot — the previous one can be restored.</p></div><a href=\"/templates\" class=\"inline-flex items-center justify-center whitespace-nowrap border px-4 py-2 apex-em apex-btn\">Back to templates</a></div>\
 <form class=\"space-y-6\" method=\"post\" action=\"/web/templates/update\" data-form-id=\"template-update\">\
 <input type=\"hidden\" name=\"id\" value=\"{id}\" />\
-<div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"template-name\">Template Name</label><input id=\"template-name\" name=\"name\" type=\"text\" required value=\"{name}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\" /></div>\
-<div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"template-subject\">Default Subject</label><input id=\"template-subject\" name=\"subject\" type=\"text\" value=\"{subject}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\" /></div>\
-<div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"template-content\">HTML Content</label><textarea id=\"template-content\" name=\"html_body\" rows=\"14\" class=\"flex min-h-[240px] w-full rounded-sm border border-input bg-background px-3 py-2 text-sm font-mono ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">{html_body}</textarea><p class=\"text-xs text-muted-foreground\">Leave the content empty to keep the stored body. Preview with an empty field renders the stored version.</p></div>\
-<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"text-xs text-muted-foreground\">Your changes take effect when you submit this form.</p><div class=\"flex flex-col gap-3 sm:flex-row\">\
-<button type=\"submit\" formaction=\"/web/templates/preview\" formtarget=\"_blank\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] border border-surface-200 bg-background px-4 py-2 text-sm font-semibold text-foreground transition-all duration-200 ease-premium active:scale-[0.98] hover:border-surface-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Preview</button>\
-<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-primary px-4 py-2 text-sm font-semibold text-white transition-all duration-200 ease-premium active:scale-[0.98] hover:bg-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Save Changes</button>\
+<div class=\"space-y-2\"><label class=\"apex-em apex-label\" for=\"template-name\">Template Name</label><input id=\"template-name\" name=\"name\" type=\"text\" required value=\"{name}\" class=\"flex h-12 w-full border px-3 apex-input\" /></div>\
+<div class=\"space-y-2\"><label class=\"apex-em apex-label\" for=\"template-subject\">Default Subject</label><input id=\"template-subject\" name=\"subject\" type=\"text\" value=\"{subject}\" class=\"flex h-12 w-full border px-3 apex-input\" /></div>\
+<div class=\"space-y-2\"><label class=\"apex-em apex-label\" for=\"template-content\">HTML Content</label><textarea id=\"template-content\" name=\"html_body\" rows=\"14\" class=\"flex min-h-[240px] w-full border px-3 py-2 apex-input apex-textarea\">{html_body}</textarea><p class=\"\">Leave the content empty to keep the stored body. Preview with an empty field renders the stored version.</p></div>\
+<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"\">Your changes take effect when you submit this form.</p><div class=\"flex flex-col gap-3 sm:flex-row\">\
+<button type=\"submit\" formaction=\"/web/templates/preview\" formtarget=\"_blank\" class=\"inline-flex items-center justify-center whitespace-nowrap border px-4 py-2 apex-btn\">Preview</button>\
+<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap px-4 py-2 apex-btn apex-btn--primary\">Save Changes</button>\
 </div></div>\
 </form></div>",
         id = html_escape(&edit.id),
@@ -4560,12 +4540,42 @@ pub fn web_template_edit_page_with_values(edit: &crate::view_data::TemplateEditD
 
 /// Reports page.
 pub fn web_reports_page() -> String {
-    let card_delivery = format!("<article aria-label=\"Delivery Report – Track email delivery metrics\">{}</article>", Card { title: "Delivery Report", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">View</p><p class=\"text-sm text-muted-foreground\">Track email delivery metrics</p>", variant: "default", padding: "default", interactive: false }.render_html());
-    let card_engage = format!("<article aria-label=\"Engagement Report – Opens, clicks, and conversions\">{}</article>", Card { title: "Engagement Report", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">View</p><p class=\"text-sm text-muted-foreground\">Opens, clicks, and conversions</p>", variant: "default", padding: "default", interactive: false }.render_html());
-    let card_bounce = format!("<article aria-label=\"Bounce Report – Bounce reasons and trends\">{}</article>", Card { title: "Bounce Report", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">View</p><p class=\"text-sm text-muted-foreground\">Bounce reasons and trends</p>", variant: "default", padding: "default", interactive: false }.render_html());
+    let card_delivery = format!(
+        "<article aria-label=\"Delivery Report – Track email delivery metrics\">{}</article>",
+        Card {
+            title: "Delivery Report",
+            body: "<p class=\"apex-em\">View</p><p class=\"\">Track email delivery metrics</p>",
+            variant: "default",
+            padding: "default",
+            interactive: false
+        }
+        .render_html()
+    );
+    let card_engage = format!(
+        "<article aria-label=\"Engagement Report – Opens, clicks, and conversions\">{}</article>",
+        Card {
+            title: "Engagement Report",
+            body: "<p class=\"apex-em\">View</p><p class=\"\">Opens, clicks, and conversions</p>",
+            variant: "default",
+            padding: "default",
+            interactive: false
+        }
+        .render_html()
+    );
+    let card_bounce = format!(
+        "<article aria-label=\"Bounce Report – Bounce reasons and trends\">{}</article>",
+        Card {
+            title: "Bounce Report",
+            body: "<p class=\"apex-em\">View</p><p class=\"\">Bounce reasons and trends</p>",
+            variant: "default",
+            padding: "default",
+            interactive: false
+        }
+        .render_html()
+    );
     format!(
         "<div class=\"space-y-6\">\
-<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Reports</h1>\
+<h1 class=\"apex-page-title\">Reports</h1>\
 <div class=\"grid gap-4 md:grid-cols-2 lg:grid-cols-3\">\
 {card_delivery}{card_engage}{card_bounce}\
 </div></div>",
@@ -4577,21 +4587,61 @@ pub fn web_reports_page() -> String {
 
 /// Deliverability report page.
 pub fn web_reports_deliverability_page() -> String {
-    let inbox = format!("<article aria-label=\"Inbox placement: 0%\">{}</article>", Card { title: "Inbox", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">0%</p><p class=\"text-sm text-muted-foreground\">Inbox placement</p>", variant: "default", padding: "default", interactive: false }.render_html());
-    let spam = format!("<article aria-label=\"Spam folder rate: 0%\">{}</article>", Card { title: "Spam", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">0%</p><p class=\"text-sm text-muted-foreground\">Spam folder</p>", variant: "default", padding: "default", interactive: false }.render_html());
-    let bounced = format!("<article aria-label=\"Bounce rate: 0% hard and soft\">{}</article>", Card { title: "Bounced", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">0%</p><p class=\"text-sm text-muted-foreground\">Hard + soft</p>", variant: "default", padding: "default", interactive: false }.render_html());
-    let deferred = format!("<article aria-label=\"Deferred in retry queue: 0\">{}</article>", Card { title: "Deferred", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">0</p><p class=\"text-sm text-muted-foreground\">Retry queue</p>", variant: "default", padding: "default", interactive: false }.render_html());
+    let inbox = format!(
+        "<article aria-label=\"Inbox placement: 0%\">{}</article>",
+        Card {
+            title: "Inbox",
+            body: "<p class=\"apex-em\">0%</p><p class=\"\">Inbox placement</p>",
+            variant: "default",
+            padding: "default",
+            interactive: false
+        }
+        .render_html()
+    );
+    let spam = format!(
+        "<article aria-label=\"Spam folder rate: 0%\">{}</article>",
+        Card {
+            title: "Spam",
+            body: "<p class=\"apex-em\">0%</p><p class=\"\">Spam folder</p>",
+            variant: "default",
+            padding: "default",
+            interactive: false
+        }
+        .render_html()
+    );
+    let bounced = format!(
+        "<article aria-label=\"Bounce rate: 0% hard and soft\">{}</article>",
+        Card {
+            title: "Bounced",
+            body: "<p class=\"apex-em\">0%</p><p class=\"\">Hard + soft</p>",
+            variant: "default",
+            padding: "default",
+            interactive: false
+        }
+        .render_html()
+    );
+    let deferred = format!(
+        "<article aria-label=\"Deferred in retry queue: 0\">{}</article>",
+        Card {
+            title: "Deferred",
+            body: "<p class=\"apex-em\">0</p><p class=\"\">Retry queue</p>",
+            variant: "default",
+            padding: "default",
+            interactive: false
+        }
+        .render_html()
+    );
     format!(
         "<div class=\"space-y-6\">\
-<nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\">\
-<li><a href=\"/reports\" class=\"hover:text-surface-900 transition-colors\">Reports</a></li>\
-<li class=\"text-surface-500\">/</li>\
-<li class=\"text-surface-900 font-medium\">Deliverability</li></ol></nav>\
-<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Deliverability Report</h1>\
+<nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2\">\
+<li><a href=\"/reports\" class=\"apex-link\">Reports</a></li>\
+<li class=\"\">/</li>\
+<li class=\"apex-em\">Deliverability</li></ol></nav>\
+<h1 class=\"apex-page-title\">Deliverability Report</h1>\
 <div class=\"grid gap-4 md:grid-cols-4\">\
 {inbox}{spam}{bounced}{deferred}\
 </div>\
-<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-500 mb-6\">Deliverability Trend</h3><div class=\"h-64\">{chart}</div></div>\
+<div class=\"border p-6 md:p-8\"><h3 class=\"mb-6 apex-h3\">Deliverability Trend</h3><div class=\"h-64\">{chart}</div></div>\
 </div>",
         inbox = inbox,
         spam = spam,
@@ -4606,25 +4656,25 @@ pub fn web_reports_deliverability_page() -> String {
 /// Lists historical placement tests for the current tenant and exposes a
 /// "Run new test" CTA. Backed by `GET /v1/placement/tests`.
 pub fn web_inbox_placement_page() -> String {
-    let kpi_total = format!("<article aria-label=\"Total placement tests: 0 all time\">{}</article>", Card { title: "Total tests", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\" data-metric=\"placement.total\">0</p><p class=\"text-sm text-muted-foreground\">All time</p>", variant: "default", padding: "default", interactive: false }.render_html());
-    let kpi_inbox = format!("<article aria-label=\"Average inbox rate: — last 30 days\">{}</article>", Card { title: "Avg inbox rate", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\" data-metric=\"placement.inbox_rate\">—</p><p class=\"text-sm text-muted-foreground\">Last 30 days</p>", variant: "default", padding: "default", interactive: false }.render_html());
-    let kpi_spam = format!("<article aria-label=\"Average spam rate: — last 30 days\">{}</article>", Card { title: "Avg spam rate", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\" data-metric=\"placement.spam_rate\">—</p><p class=\"text-sm text-muted-foreground\">Last 30 days</p>", variant: "default", padding: "default", interactive: false }.render_html());
-    let kpi_recent = format!("<article aria-label=\"Last placement test: — most recent run\">{}</article>", Card { title: "Last test", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\" data-metric=\"placement.last_run\">—</p><p class=\"text-sm text-muted-foreground\">Most recent run</p>", variant: "default", padding: "default", interactive: false }.render_html());
+    let kpi_total = format!("<article aria-label=\"Total placement tests: 0 all time\">{}</article>", Card { title: "Total tests", body: "<p class=\"apex-em\" data-metric=\"placement.total\">0</p><p class=\"\">All time</p>", variant: "default", padding: "default", interactive: false }.render_html());
+    let kpi_inbox = format!("<article aria-label=\"Average inbox rate: — last 30 days\">{}</article>", Card { title: "Avg inbox rate", body: "<p class=\"apex-em\" data-metric=\"placement.inbox_rate\">—</p><p class=\"\">Last 30 days</p>", variant: "default", padding: "default", interactive: false }.render_html());
+    let kpi_spam = format!("<article aria-label=\"Average spam rate: — last 30 days\">{}</article>", Card { title: "Avg spam rate", body: "<p class=\"apex-em\" data-metric=\"placement.spam_rate\">—</p><p class=\"\">Last 30 days</p>", variant: "default", padding: "default", interactive: false }.render_html());
+    let kpi_recent = format!("<article aria-label=\"Last placement test: — most recent run\">{}</article>", Card { title: "Last test", body: "<p class=\"apex-em\" data-metric=\"placement.last_run\">—</p><p class=\"\">Most recent run</p>", variant: "default", padding: "default", interactive: false }.render_html());
     format!(
         "<div class=\"space-y-6\" data-page=\"inbox-placement\">\
-<nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\">\
-<li><a href=\"/dashboard\" class=\"hover:text-surface-900 transition-colors\">Dashboard</a></li>\
-<li class=\"text-surface-500\">/</li>\
-<li class=\"text-surface-900 font-medium\">Inbox Placement</li></ol></nav>\
+<nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2\">\
+<li><a href=\"/dashboard\" class=\"apex-link\">Dashboard</a></li>\
+<li class=\"\">/</li>\
+<li class=\"apex-em\">Inbox Placement</li></ol></nav>\
 <div class=\"flex items-center justify-between\">\
-<div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Inbox Placement</h1>\
-<p class=\"text-sm text-surface-600\">Send a probe email to seed accounts at major mailbox providers and measure where your messages land.</p></div>\
-<a href=\"/inbox-placement/new\" class=\"inline-flex items-center justify-center rounded-sm bg-primary px-4 py-2 text-sm font-bold text-white hover:bg-brand-700 transition-colors\" data-cta=\"new-placement-test\">Run new test</a>\
+<div><h1 class=\"apex-page-title\">Inbox Placement</h1>\
+<p class=\"\">Send a probe email to seed accounts at major mailbox providers and measure where your messages land.</p></div>\
+<a href=\"/inbox-placement/new\" class=\"inline-flex items-center justify-center px-4 py-2 apex-em apex-btn apex-btn--primary\" data-cta=\"new-placement-test\">Run new test</a>\
 </div>\
 <div class=\"grid gap-4 md:grid-cols-4\">{kpi_total}{kpi_inbox}{kpi_spam}{kpi_recent}</div>\
-<section data-view-state=\"empty\" class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium\">\
-<h3 class=\"text-lg font-bold mb-1\">Recent tests</h3>\
-<p class=\"text-xs text-muted-foreground mb-2\" data-test-list-meta>Loaded from your placement history when the database is connected.</p>\
+<section data-view-state=\"empty\" class=\"border p-6\">\
+<h3 class=\"mb-1 apex-h3\">Recent tests</h3>\
+<p class=\"mb-2\" data-test-list-meta>Loaded from your placement history when the database is connected.</p>\
 {empty_state}\
 </section>\
 </div>",
@@ -4647,12 +4697,12 @@ pub fn web_inbox_placement_page() -> String {
 pub fn web_inbox_placement_new_page() -> String {
     format!(
         "<div class=\"space-y-6\" data-page=\"inbox-placement-new\">\
-<nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\">\
-<li><a href=\"/inbox-placement\" class=\"hover:text-surface-900 transition-colors\">Inbox Placement</a></li>\
-<li class=\"text-surface-500\">/</li>\
-<li class=\"text-surface-900 font-medium\">New test</li></ol></nav>\
-<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Run a new placement test</h1>\
-<p class=\"text-sm text-surface-600\">We'll send your message to active seed inboxes at the providers you select and report inbox vs. spam folder placement.</p>\
+<nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2\">\
+<li><a href=\"/inbox-placement\" class=\"apex-link\">Inbox Placement</a></li>\
+<li class=\"\">/</li>\
+<li class=\"apex-em\">New test</li></ol></nav>\
+<h1 class=\"apex-page-title\">Run a new placement test</h1>\
+<p class=\"\">We'll send your message to active seed inboxes at the providers you select and report inbox vs. spam folder placement.</p>\
 {form}\
 </div>",
         form = Card {
@@ -4669,15 +4719,15 @@ pub fn web_inbox_placement_new_page() -> String {
 <div class=\"apex-field\"><label for=\"placement-subject\">Subject</label>\
 <input id=\"placement-subject\" name=\"subject\" type=\"text\" required maxlength=\"200\" /></div>\
 <div class=\"apex-field\"><label for=\"placement-html\">HTML body</label>\
-<textarea id=\"placement-html\" name=\"html_body\" rows=\"10\" required class=\"font-mono\"></textarea></div>\
-<fieldset><legend class=\"block text-sm font-medium text-surface-700 mb-2\">Target providers</legend>\
+<textarea id=\"placement-html\" name=\"html_body\" rows=\"10\" required class=\"apex-input apex-textarea\"></textarea></div>\
+<fieldset><legend class=\"block mb-2\">Target providers</legend>\
 <div class=\"grid gap-2 md:grid-cols-3\">\
-<label class=\"inline-flex items-center gap-2 text-sm\"><input type=\"checkbox\" name=\"providers\" value=\"gmail\" checked class=\"rounded border-surface-300 text-primary focus:ring-primary\" /> Gmail</label>\
-<label class=\"inline-flex items-center gap-2 text-sm\"><input type=\"checkbox\" name=\"providers\" value=\"outlook\" checked class=\"rounded border-surface-300 text-primary focus:ring-primary\" /> Outlook / Hotmail</label>\
-<label class=\"inline-flex items-center gap-2 text-sm\"><input type=\"checkbox\" name=\"providers\" value=\"yahoo\" checked class=\"rounded border-surface-300 text-primary focus:ring-primary\" /> Yahoo</label>\
-<label class=\"inline-flex items-center gap-2 text-sm\"><input type=\"checkbox\" name=\"providers\" value=\"icloud\" class=\"rounded border-surface-300 text-primary focus:ring-primary\" /> iCloud</label>\
-<label class=\"inline-flex items-center gap-2 text-sm\"><input type=\"checkbox\" name=\"providers\" value=\"aol\" class=\"rounded border-surface-300 text-primary focus:ring-primary\" /> AOL</label>\
-<label class=\"inline-flex items-center gap-2 text-sm\"><input type=\"checkbox\" name=\"providers\" value=\"protonmail\" class=\"rounded border-surface-300 text-primary focus:ring-primary\" /> ProtonMail</label>\
+<label class=\"inline-flex items-center gap-2 apex-label\"><input type=\"checkbox\" name=\"providers\" value=\"gmail\" checked class=\"apex-input\" /> Gmail</label>\
+<label class=\"inline-flex items-center gap-2 apex-label\"><input type=\"checkbox\" name=\"providers\" value=\"outlook\" checked class=\"apex-input\" /> Outlook / Hotmail</label>\
+<label class=\"inline-flex items-center gap-2 apex-label\"><input type=\"checkbox\" name=\"providers\" value=\"yahoo\" checked class=\"apex-input\" /> Yahoo</label>\
+<label class=\"inline-flex items-center gap-2 apex-label\"><input type=\"checkbox\" name=\"providers\" value=\"icloud\" class=\"apex-input\" /> iCloud</label>\
+<label class=\"inline-flex items-center gap-2 apex-label\"><input type=\"checkbox\" name=\"providers\" value=\"aol\" class=\"apex-input\" /> AOL</label>\
+<label class=\"inline-flex items-center gap-2 apex-label\"><input type=\"checkbox\" name=\"providers\" value=\"protonmail\" class=\"apex-input\" /> ProtonMail</label>\
 </div></fieldset>\
 <div class=\"flex items-center justify-end gap-3 pt-4 border-t\">\
 <a href=\"/inbox-placement\" class=\"apex-btn apex-btn--secondary\">Cancel</a>\
@@ -4697,18 +4747,18 @@ pub fn web_inbox_placement_new_page() -> String {
 pub fn web_inbox_placement_detail_page() -> String {
     format!(
         "<div class=\"space-y-6\" data-page=\"inbox-placement-detail\">\
-<nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\">\
-<li><a href=\"/inbox-placement\" class=\"hover:text-surface-900 transition-colors\">Inbox Placement</a></li>\
-<li class=\"text-surface-500\">/</li>\
-<li class=\"text-surface-900 font-medium\">Test detail</li></ol></nav>\
+<nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2\">\
+<li><a href=\"/inbox-placement\" class=\"apex-link\">Inbox Placement</a></li>\
+<li class=\"\">/</li>\
+<li class=\"apex-em\">Test detail</li></ol></nav>\
 <div class=\"flex flex-col md:flex-row md:items-center md:justify-between gap-4\">\
-<div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Placement test</h1>\
-<p class=\"text-sm text-surface-600\">Per-provider breakdown and score render from the recorded test results.</p></div>\
+<div><h1 class=\"apex-page-title\">Placement test</h1>\
+<p class=\"\">Per-provider breakdown and score render from the recorded test results.</p></div>\
 <div class=\"flex items-center gap-3\">\
-<a href=\"/inbox-placement\" class=\"text-sm text-surface-600 hover:text-surface-900\">← Back to tests</a>\
+<a href=\"/inbox-placement\" class=\"apex-link\">← Back to tests</a>\
 </div></div>\
 {empty_state}\
-<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-500 mb-6\">Inbox rate over time</h3><div class=\"h-64\">{chart}</div></div>\
+<div class=\"border p-6 md:p-8\"><h3 class=\"mb-6 apex-h3\">Inbox rate over time</h3><div class=\"h-64\">{chart}</div></div>\
 </div>",
         empty_state = EmptyState {
             title: "Results appear once the test completes",
@@ -4758,7 +4808,7 @@ pub fn web_inbox_placement_detail_page_with_data(
                 .iter()
                 .map(|p| {
                     format!(
-                        "<tr class=\"border-b border-surface-100\"><td class=\"py-2 pr-4 text-sm font-medium text-surface-950\">{provider}</td><td class=\"py-2 pr-4 text-sm text-surface-700\">{tested}</td><td class=\"py-2 pr-4 text-sm text-surface-700\">{inbox}</td><td class=\"py-2 pr-4 text-sm text-surface-700\">{promotions}</td><td class=\"py-2 pr-4 text-sm text-surface-700\">{spam}</td><td class=\"py-2 text-sm text-surface-700\">{absent}</td></tr>",
+                        "<tr class=\"border-b\"><td class=\"py-2 pr-4 apex-em\">{provider}</td><td class=\"py-2 pr-4\">{tested}</td><td class=\"py-2 pr-4\">{inbox}</td><td class=\"py-2 pr-4\">{promotions}</td><td class=\"py-2 pr-4\">{spam}</td><td class=\"py-2\">{absent}</td></tr>",
                         provider = html_escape(&p.provider),
                         tested = p.accounts_tested,
                         inbox = p.inbox,
@@ -4769,7 +4819,7 @@ pub fn web_inbox_placement_detail_page_with_data(
                 })
                 .collect();
             format!(
-                "<div class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium\"><h2 class=\"text-xs font-bold uppercase tracking-widest text-surface-500 mb-4\">Per-provider results</h2><table class=\"w-full\"><thead><tr class=\"border-b border-surface-200 text-left text-xs font-bold uppercase tracking-widest text-surface-500\"><th class=\"py-2 pr-4\">Provider</th><th class=\"py-2 pr-4\">Tested</th><th class=\"py-2 pr-4\">Inbox</th><th class=\"py-2 pr-4\">Promotions</th><th class=\"py-2 pr-4\">Spam</th><th class=\"py-2\">Absent</th></tr></thead><tbody>{rows}</tbody></table><p class=\"mt-4 text-xs text-muted-foreground\">{completed} of {total} seed accounts reported.</p></div>",
+                "<div class=\"border p-6\"><h2 class=\"mb-4 apex-section-head\">Per-provider results</h2><table class=\"w-full apex-table\"><thead><tr class=\"border-b\"><th class=\"py-2 pr-4\">Provider</th><th class=\"py-2 pr-4\">Tested</th><th class=\"py-2 pr-4\">Inbox</th><th class=\"py-2 pr-4\">Promotions</th><th class=\"py-2 pr-4\">Spam</th><th class=\"py-2\">Absent</th></tr></thead><tbody>{rows}</tbody></table><p class=\"mt-4\">{completed} of {total} seed accounts reported.</p></div>",
                 rows = rows.join(""),
                 completed = detail.completed_accounts,
                 total = detail.total_accounts,
@@ -4802,15 +4852,15 @@ pub fn web_inbox_placement_detail_page_with_data(
     };
     format!(
         "<div class=\"space-y-6\" data-page=\"inbox-placement-detail\">\
-<nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\">\
-<li><a href=\"/inbox-placement\" class=\"hover:text-surface-900 transition-colors\">Inbox Placement</a></li>\
-<li class=\"text-surface-500\">/</li>\
-<li class=\"text-surface-900 font-medium\">{name}</li></ol></nav>\
+<nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2\">\
+<li><a href=\"/inbox-placement\" class=\"apex-link\">Inbox Placement</a></li>\
+<li class=\"\">/</li>\
+<li class=\"apex-em\">{name}</li></ol></nav>\
 <div class=\"flex flex-col md:flex-row md:items-center md:justify-between gap-4\">\
-<div><div class=\"flex items-center gap-3\"><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">{name}</h1>{status_badge}</div>\
-<p class=\"text-sm text-surface-600 mt-1\">{completed} of {total} seed accounts · created {created}</p></div>\
+<div><div class=\"apex-page-heading\"><h1 class=\"apex-page-title\">{name}</h1>{status_badge}</div>\
+<p class=\"mt-1\">{completed} of {total} seed accounts, created {created}</p></div>\
 <div class=\"flex items-center gap-3\">\
-<a href=\"/inbox-placement\" class=\"text-sm text-surface-600 hover:text-surface-900\">← Back to tests</a>\
+<a href=\"/inbox-placement\" class=\"apex-link\">← Back to tests</a>\
 </div></div>\
 {body}\
 </div>",
@@ -4828,16 +4878,16 @@ pub fn web_analytics_page() -> String {
     format!(
         "<div class=\"space-y-6\">\
 <section data-view-state=\"ready\" class=\"space-y-6\">\
-<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Analytics</h1>\
+<h1 class=\"apex-page-title\">Analytics</h1>\
 <div class=\"grid gap-4 md:grid-cols-2 lg:grid-cols-4\">\
 {card_sent}{card_opens}{card_clicks}{card_unsubs}\
 </div>\
-<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-500 mb-6\">Engagement Over Time</h3><div class=\"h-64\">{chart}</div></div>\
+<div class=\"border p-6 md:p-8\"><h3 class=\"mb-6 apex-h3\">Engagement Over Time</h3><div class=\"h-64\">{chart}</div></div>\
 </section></div>",
-        card_sent = Card { title: "Total Sent", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">0</p><p class=\"text-sm text-muted-foreground\">All time</p>", variant: "default", padding: "default", interactive: false }.render_html(),
-        card_opens = Card { title: "Unique Opens", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">0</p><p class=\"text-sm text-muted-foreground\">All time</p>", variant: "default", padding: "default", interactive: false }.render_html(),
-        card_clicks = Card { title: "Unique Clicks", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">0</p><p class=\"text-sm text-muted-foreground\">All time</p>", variant: "default", padding: "default", interactive: false }.render_html(),
-        card_unsubs = Card { title: "Unsubscribes", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">0</p><p class=\"text-sm text-muted-foreground\">All time</p>", variant: "default", padding: "default", interactive: false }.render_html(),
+        card_sent = Card { title: "Total Sent", body: "<p class=\"apex-em\">0</p><p class=\"\">All time</p>", variant: "default", padding: "default", interactive: false }.render_html(),
+        card_opens = Card { title: "Unique Opens", body: "<p class=\"apex-em\">0</p><p class=\"\">All time</p>", variant: "default", padding: "default", interactive: false }.render_html(),
+        card_clicks = Card { title: "Unique Clicks", body: "<p class=\"apex-em\">0</p><p class=\"\">All time</p>", variant: "default", padding: "default", interactive: false }.render_html(),
+        card_unsubs = Card { title: "Unsubscribes", body: "<p class=\"apex-em\">0</p><p class=\"\">All time</p>", variant: "default", padding: "default", interactive: false }.render_html(),
         chart = ApexLineChart { title: None, description: None, last_updated_label: None, height: 256, series: vec![], data_count: 0, empty_state_reason: "No data" }.render_html(),
     )
 }
@@ -4868,12 +4918,12 @@ pub fn web_events_page() -> String {
         rows: vec![],
     };
     let search = format!(
-        "<form method=\"get\" action=\"/events\" role=\"search\" class=\"flex flex-col gap-2 sm:flex-row\"><label class=\"sr-only\" for=\"events-search\">Filter events</label><div class=\"relative flex-1\"><span class=\"pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground\">{icon}</span><input id=\"events-search\" type=\"search\" name=\"query\" placeholder=\"Filter events...\" class=\"flex h-12 w-full rounded-[8px_8px_7px_7px] border border-surface-200 bg-background pl-10 pr-4 text-[14px] outline-none transition focus-visible:ring-2 focus-visible:ring-primary/20\" /></div><button type=\"submit\" class=\"rounded-sm border border-surface-200 bg-card px-4 py-2 text-sm font-bold text-surface-950 hover:border-surface-950\">Apply</button></form>",
+        "<form method=\"get\" action=\"/events\" role=\"search\" class=\"flex flex-col gap-2 sm:flex-row\"><label class=\"sr-only apex-label\" for=\"events-search\">Filter events</label><div class=\"relative flex-1\"><span class=\"pointer-events-none absolute left-3\">{icon}</span><input id=\"events-search\" type=\"search\" name=\"query\" placeholder=\"Filter events...\" class=\"flex h-12 w-full border pl-10 pr-4 apex-input\" /></div><button type=\"submit\" class=\"border px-4 py-2 apex-btn\">Apply</button></form>",
         icon = search_icon,
     );
     format!(
         "<div class=\"space-y-6\">\
-<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Events</h1>\
+<h1 class=\"apex-page-title\">Events</h1>\
 {search}\
 <section data-view-state=\"ready\">{table}</section>\
 </div>",
@@ -4886,8 +4936,8 @@ pub fn web_events_page() -> String {
 pub fn web_domains_page() -> String {
     format!(
         "<div class=\"space-y-6\">\
-<div class=\"flex items-center justify-between\"><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Domains</h1>\
-<a href=\"/domains/new\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">Add Domain</a></div>\
+<div class=\"apex-page-heading\"><h1 class=\"apex-page-title\">Domains</h1>\
+<a href=\"/domains/new\" class=\"inline-flex items-center justify-center whitespace-nowrap h-12 px-6 py-3 apex-em apex-btn apex-btn--primary\">Add Domain</a></div>\
 {empty}</div>",
         empty = EmptyState {
             title: "No domains configured",
@@ -4929,7 +4979,7 @@ pub fn web_ai_drafts_page(data: Option<&AiDraftsPageData>) -> String {
     let mut cards = String::new();
     if unavailable {
         cards.push_str(
-            "<div class=\"apex-callout apex-callout--warning\" role=\"status\">\
+            "<div class=\"apex-notice apex-notice--warn\" role=\"status\">\
              <strong>The review queue is unavailable</strong>\
              <span>The draft store could not be read just now. This is a service problem, not an empty queue.</span></div>",
         );
@@ -4937,7 +4987,7 @@ pub fn web_ai_drafts_page(data: Option<&AiDraftsPageData>) -> String {
         cards.push_str(
             "<div class=\"apex-panel\" role=\"status\">\
              <p class=\"apex-panel-title\">No drafts need review</p>\
-             <p class=\"mt-1 text-sm text-surface-600\">Drafts appear here when the assistant answers an inbound message and a human must approve the reply.</p></div>",
+             <p class=\"mt-1\">Drafts appear here when the assistant answers an inbound message and a human must approve the reply.</p></div>",
         );
     } else {
         for draft in drafts {
@@ -4945,12 +4995,12 @@ pub fn web_ai_drafts_page(data: Option<&AiDraftsPageData>) -> String {
                 .classification
                 .as_deref()
                 .map(|value| match draft.objection_class.as_deref() {
-                    Some(objection) => format!("{} · objection: {objection}", html_escape(value)),
+                    Some(objection) => format!("{}, objection: {objection}", html_escape(value)),
                     None => html_escape(value),
                 })
                 .unwrap_or_else(|| "not classified".to_string());
             let first_response = if draft.first_response {
-                " <span class=\"apex-pill apex-pill--brand\">first response</span>"
+                " <span class=\"apex-status\">first response</span>"
             } else {
                 ""
             };
@@ -4958,11 +5008,11 @@ pub fn web_ai_drafts_page(data: Option<&AiDraftsPageData>) -> String {
                 "<article class=\"apex-panel\">\
                  <div class=\"flex items-baseline justify-between gap-4\">\
                  <h2 class=\"apex-panel-title\">{subject}</h2>\
-                 <span class=\"text-xs text-surface-500\">{received_at}</span>\
+                 <span class=\"\">{received_at}</span>\
                  </div>\
-                 <p class=\"mt-1 text-xs text-surface-500 break-words\">From {from} · Workspace {tenant} · {classification}{first_response}</p>\
-                 <details class=\"mt-3 text-sm text-surface-800\"><summary class=\"cursor-pointer font-bold\">Draft reply</summary>\
-                 <pre class=\"mt-2 whitespace-pre-wrap break-words rounded-[9px_9px_7px_7px] bg-surface-100 p-3 text-xs\">{reply}</pre></details>\
+                 <p class=\"mt-1 break-words\">From {from}, Workspace {tenant}, {classification}{first_response}</p>\
+                 <details class=\"mt-3\"><summary class=\"\">Draft reply</summary>\
+                 <pre class=\"mt-2 whitespace-pre-wrap break-words p-3\">{reply}</pre></details>\
                  <div class=\"mt-4 grid gap-4 md:grid-cols-2\">\
                  <form class=\"flex flex-col gap-2 lg:flex-row lg:items-end\" method=\"post\" action=\"/web/admin/ai/drafts/{id}/approve\">\
                  <div class=\"apex-field flex-1\"><label for=\"note-approve-{id}\">Approval note</label>\
@@ -4990,8 +5040,8 @@ pub fn web_ai_drafts_page(data: Option<&AiDraftsPageData>) -> String {
 
     format!(
         "<div class=\"space-y-6\">
-<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">AI drafts</h1>\
-<p class=\"text-sm text-surface-600\">Every drafted reply is written by the assistant, verified against the published documentation, and held here until a human approves or rejects it. Nothing sends itself.</p>\
+<h1 class=\"apex-page-title\">AI drafts</h1>\
+<p class=\"\">Every drafted reply is written by the assistant, verified against the published documentation, and held here until a human approves or rejects it. Nothing sends itself.</p>\
 <div class=\"space-y-4\">{cards}</div>\
 </div>",
         cards = cards,
@@ -5022,11 +5072,11 @@ pub fn web_demos_page(data: Option<&DemosPageData>) -> String {
         .and_then(|d| d.viewer_url.as_deref())
         .map(|url| {
             format!(
-                "<div class=\"apex-callout apex-callout--success\" role=\"status\">\
+                "<div class=\"apex-notice apex-notice--ok\" role=\"status\">\
                  <strong>Viewer link — shown once</strong>\
                  <span>Share this with the prospect. It is not stored in plaintext, so copy it now.</span>\
                  <code class=\"apex-mono mt-2 block break-all\">{url}</code>\
-                 <a href=\"{url}\" class=\"mt-3 inline-flex items-center justify-center whitespace-nowrap rounded-sm border border-input bg-background px-4 py-2 text-sm font-bold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground\">Open viewer</a>\
+                 <a href=\"{url}\" class=\"mt-3 inline-flex items-center justify-center whitespace-nowrap border px-4 py-2 apex-em apex-btn\">Open viewer</a>\
                  </div>",
                 url = html_escape(url)
             )
@@ -5036,11 +5086,11 @@ pub fn web_demos_page(data: Option<&DemosPageData>) -> String {
     let mut rows = String::new();
     if unavailable {
         rows.push_str(
-            "<tr><td colspan=\"5\" class=\"text-surface-600\">The demo list is unavailable right now — this is a service problem, not an empty list.</td></tr>",
+            "<tr><td colspan=\"5\" class=\"\">The demo list is unavailable right now — this is a service problem, not an empty list.</td></tr>",
         );
     } else if sessions.is_empty() {
         rows.push_str(
-            "<tr><td colspan=\"5\" class=\"text-surface-600\">No demo sessions yet. Create one above.</td></tr>",
+            "<tr><td colspan=\"5\" class=\"\">No demo sessions yet. Create one above.</td></tr>",
         );
     } else {
         for session in sessions {
@@ -5049,7 +5099,7 @@ pub fn web_demos_page(data: Option<&DemosPageData>) -> String {
             // instead of an action that reports "Step executed." for a no-op
             // (dogfood 2026-10-06).
             let action = if session.state == "completed" {
-                "<span class=\"apex-pill\">Completed</span>".to_string()
+                "<span class=\"apex-status\">Completed</span>".to_string()
             } else {
                 format!(
                     "<form method=\"post\" action=\"/web/admin/demos/{}/advance\">\
@@ -5078,8 +5128,8 @@ pub fn web_demos_page(data: Option<&DemosPageData>) -> String {
 
     format!(
         "<div class=\"space-y-6\">
-<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Demos</h1>\
-<p class=\"text-sm text-surface-600\">Scripted, server-driven walkthroughs that execute the real product — the same console, the same API sandbox, the same grader and the same pricing source a customer would use.</p>\
+<h1 class=\"apex-page-title\">Demos</h1>\
+<p class=\"\">Scripted, server-driven walkthroughs that execute the real product — the same console, the same API sandbox, the same grader and the same pricing source a customer would use.</p>\
 {viewer_url}\
 <form class=\"apex-panel space-y-4\" method=\"post\" action=\"/web/admin/demos\">\
 <div class=\"apex-field\">\
@@ -5112,23 +5162,23 @@ pub fn web_demo_viewer_page(data: Option<&DemoViewerData>) -> String {
     let steps = data.map(|d| d.steps.as_slice()).unwrap_or(&[]);
 
     let banner = match state {
-        "completed" => "<div class=\"apex-callout apex-callout--success\" role=\"status\">\
+        "completed" => "<div class=\"apex-notice apex-notice--ok\" role=\"status\">\
              <strong>This demo has finished</strong>\
              <span>You are viewing a replay of every step and its result.</span></div>"
             .to_string(),
         "unavailable" => {
             // Audit #16: the step read failed — a service problem, not an
             // empty walkthrough.
-            "<div class=\"apex-callout apex-callout--warning\" role=\"status\">\
+            "<div class=\"apex-notice apex-notice--warn\" role=\"status\">\
              <strong>The walkthrough could not be loaded</strong>\
              <span>This information is temporarily unavailable. Reload to try again.</span></div>"
                 .to_string()
         }
-        "expired" => "<div class=\"apex-callout apex-callout--warning\" role=\"status\">\
+        "expired" => "<div class=\"apex-notice apex-notice--warn\" role=\"status\">\
              <strong>This demo link has expired</strong>\
              <span>Ask the ApexMail team for a fresh link to see the walkthrough.</span></div>"
             .to_string(),
-        "invalid" => "<div class=\"apex-callout apex-callout--error\" role=\"status\">\
+        "invalid" => "<div class=\"apex-notice apex-notice--fail\" role=\"status\">\
              <strong>This demo link is not valid</strong>\
              <span>Check the link, or ask the ApexMail team for a new one.</span></div>"
             .to_string(),
@@ -5138,40 +5188,35 @@ pub fn web_demo_viewer_page(data: Option<&DemoViewerData>) -> String {
     let mut list = String::new();
     if steps.is_empty() && state != "invalid" && state != "unavailable" {
         list.push_str(
-            "<p class=\"text-sm text-surface-600\">Nothing has been shown yet — the presenter has not started the walkthrough.</p>",
+            "<p class=\"\">Nothing has been shown yet — the presenter has not started the walkthrough.</p>",
         );
     } else {
         list.push_str("<ol class=\"space-y-6\">");
         for step in steps {
             let status = step
                 .status
-                .map(|s| format!("<span class=\"apex-pill ml-2\">HTTP {s}</span>"))
+                .map(|s| format!("<span class=\"apex-status ml-2\">HTTP {s}</span>"))
                 .unwrap_or_default();
             let detail = if step.detail.is_empty() {
                 String::new()
             } else {
                 format!(
-                    "<details class=\"mt-3 text-xs text-surface-600\"><summary class=\"cursor-pointer font-bold\">Result detail</summary><pre class=\"apex-mono mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-[9px_9px_7px_7px] bg-surface-100 p-3\">{}</pre></details>",
+                    "<details class=\"mt-3\"><summary class=\"\">Result detail</summary><pre class=\"apex-mono mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-words p-3\">{}</pre></details>",
                     html_escape(&step.detail)
                 )
             };
             let ran = step
                 .ran_at
                 .as_deref()
-                .map(|ts| {
-                    format!(
-                        "<p class=\"mt-2 text-xs text-surface-400\">{}</p>",
-                        html_escape(ts)
-                    )
-                })
+                .map(|ts| format!("<p class=\"mt-2\">{}</p>", html_escape(ts)))
                 .unwrap_or_default();
             list.push_str(&format!(
                 "<li class=\"apex-panel\" aria-current=\"false\">\
                  <div class=\"flex items-baseline justify-between gap-4\">\
                  <h2 class=\"apex-panel-title\">{idx}. {title}{status}</h2>\
-                 <span class=\"apex-pill\">{kind}</span>\
+                 <span class=\"apex-status\">{kind}</span>\
                  </div>\
-                 <p class=\"mt-2 text-sm text-surface-700\">{summary}</p>\
+                 <p class=\"mt-2\">{summary}</p>\
                  {detail}{ran}\
                  </li>",
                 idx = step.idx + 1,
@@ -5186,11 +5231,11 @@ pub fn web_demo_viewer_page(data: Option<&DemoViewerData>) -> String {
 
     format!(
         "<div class=\"mx-auto max-w-3xl space-y-6 py-8\">\
-<p class=\"text-xs font-bold uppercase tracking-[0.28em] text-primary\">ApexMail walkthrough</p>\
-<h1 class=\"text-3xl font-bold tracking-tighter text-surface-950\">{script}</h1>\
+<p class=\"apex-em\">ApexMail walkthrough</p>\
+<h1 class=\"apex-page-title\">{script}</h1>\
 {banner}\
 {list}\
-<p class=\"text-xs text-surface-500\">Every step above executed the real product. This link is valid until {expires}.</p>\
+<p class=\"\">Every step above executed the real product. This link is valid until {expires}.</p>\
 </div>",
         script = if script.is_empty() {
             "ApexMail demo".to_string()
@@ -5228,7 +5273,7 @@ pub fn web_assistant_page(data: Option<&AssistantPageData>) -> String {
         // capability is not enabled") and renders no message form: a form
         // that every submission refuses is not an honest disabled state.
         transcript.push_str(
-            "<div class=\"apex-callout apex-callout--warning\" role=\"status\">\
+            "<div class=\"apex-notice apex-notice--warn\" role=\"status\">\
              <strong>The assistant is not enabled for this workspace</strong>\
              <span>An administrator switched the AI assistant off for this workspace. It is not broken — the capability is disabled, and nothing was sent to the model. Contact support@apexmail.ee if you believe it should be on.</span></div>",
         );
@@ -5240,15 +5285,15 @@ pub fn web_assistant_page(data: Option<&AssistantPageData>) -> String {
         // --warning` is the shared, theme-safe recipe the drafts queue's
         // unavailable state already uses.
         transcript.push_str(
-            "<div class=\"apex-callout apex-callout--warning\" role=\"status\">\
+            "<div class=\"apex-notice apex-notice--warn\" role=\"status\">\
              <strong>Conversation unavailable</strong>\
              <span>The assistant could not read your conversation history just now. This is a temporary service problem, not an empty conversation — reload to try again.</span></div>",
         );
     } else if turns.is_empty() {
         transcript.push_str(
-            "<div class=\"rounded-sm border p-8 text-center\">\
-             <h2 class=\"text-sm font-bold text-surface-900\">Ask about your workspace</h2>\
-             <p class=\"mt-2 text-sm text-surface-600\">Pricing, deliverability, domains, compliance or the API — answers come from the published ApexMail documentation, and anything the assistant cannot verify is escalated to a human.</p></div>",
+            "<div class=\"border p-8\">\
+             <h2 class=\"apex-h2\">Ask about your workspace</h2>\
+             <p class=\"mt-2\">Pricing, deliverability, domains, compliance or the API — answers come from the published ApexMail documentation, and anything the assistant cannot verify is escalated to a human.</p></div>",
         );
     } else {
         transcript.push_str("<div class=\"space-y-6\">");
@@ -5262,25 +5307,25 @@ pub fn web_assistant_page(data: Option<&AssistantPageData>) -> String {
     let ask = if disabled {
         String::new()
     } else {
-        "<h2 class=\"text-lg font-bold text-surface-950\" id=\"ask\">Ask a question</h2>\
+        "<h2 class=\"apex-h2\" id=\"ask\">Ask a question</h2>\
 <form class=\"space-y-4\" method=\"post\" action=\"/web/assistant/message\">\
 <div class=\"space-y-2\">\
-<label class=\"block text-sm font-bold text-surface-900\" for=\"assistant-message\">Message <span class=\"text-surface-500 font-normal\">(up to 4,000 characters)</span></label>\
-<textarea id=\"assistant-message\" name=\"message\" rows=\"4\" maxlength=\"4000\" required class=\"w-full rounded-sm border border-surface-300 bg-white px-3 py-2 text-sm text-surface-900\" placeholder=\"What does the Pro plan include?\"></textarea>\
+<label class=\"block apex-em apex-label\" for=\"assistant-message\">Message <span class=\"\">(up to 4,000 characters)</span></label>\
+<textarea id=\"assistant-message\" name=\"message\" rows=\"4\" maxlength=\"4000\" required class=\"w-full border px-3 py-2 apex-input apex-textarea\" placeholder=\"What does the Pro plan include?\"></textarea>\
 </div>\
 <div class=\"flex items-center gap-3\">\
 <button type=\"submit\" class=\"apex-btn apex-btn--sm\">Send</button>\
-<span class=\"text-xs text-surface-500\">AI-generated answers; cited when grounded.</span>\
+<span class=\"\">AI-generated answers; cited when grounded.</span>\
 </div>\
 </form>\
-<p class=\"text-xs leading-5 text-surface-500\">Questions that ask us to contact you are shared with our sales team as a contact request.</p>"
+<p class=\"\">Questions that ask us to contact you are shared with our sales team as a contact request.</p>"
             .to_string()
     };
 
     format!(
         "<div class=\"max-w-3xl space-y-6\">
-<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Assistant</h1>\
-<p class=\"text-sm text-surface-600\">Grounded in the published ApexMail documentation. Answers cite their sources, and anything the assistant cannot verify is escalated to a human instead of being answered from memory.</p>\
+<h1 class=\"apex-page-title\">Assistant</h1>\
+<p class=\"\">Grounded in the published ApexMail documentation. Answers cite their sources, and anything the assistant cannot verify is escalated to a human instead of being answered from memory.</p>\
 {transcript}\
 {ask}\
 </div>",
@@ -5294,19 +5339,13 @@ pub fn web_assistant_page(data: Option<&AssistantPageData>) -> String {
 /// no JavaScript.
 fn assistant_turn_html(turn: &AssistantTurnData) -> String {
     let (role_label, frame) = if turn.role == "user" {
-        (
-            "You",
-            "rounded-sm border border-surface-200 bg-surface-50 p-5",
-        )
+        ("You", "apex-panel p-5")
     } else {
-        (
-            "ApexMail Assistant",
-            "rounded-sm border border-surface-200 p-5",
-        )
+        ("ApexMail Assistant", "apex-panel p-5")
     };
     let mut citations = String::new();
     if turn.role != "user" && !turn.citations.is_empty() {
-        citations.push_str("<details class=\"mt-3 text-xs text-surface-600\"><summary class=\"cursor-pointer font-bold\">Sources</summary><ul class=\"mt-2 space-y-1\">");
+        citations.push_str("<details class=\"mt-3\"><summary class=\"\">Sources</summary><ul class=\"mt-2 space-y-1\">");
         for citation in &turn.citations {
             let title = citation
                 .get("title")
@@ -5318,7 +5357,7 @@ fn assistant_turn_html(turn: &AssistantTurnData) -> String {
                     // a 15px-tall hit target without it; the 1.5rem line box
                     // lifts it to the 24px minimum without changing the
                     // underlined-text look (dogfood 2026-10-06 ui-visual).
-                    "<li><a class=\"underline inline-block leading-6\" href=\"{}\" rel=\"noopener\">{}</a></li>",
+                    "<li><a class=\"inline-block apex-link\" href=\"{}\" rel=\"noopener\">{}</a></li>",
                     html_escape(url),
                     html_escape(title)
                 )),
@@ -5331,16 +5370,16 @@ fn assistant_turn_html(turn: &AssistantTurnData) -> String {
         // Same canonical warning recipe as the unavailable state above: the
         // amber classes were undefined (no `amber` scale in this palette)
         // and rendered nothing.
-        "<div class=\"apex-callout apex-callout--warning mt-3\" role=\"status\"><span class=\"text-xs font-medium\">A human will follow up on this question — contact support@apexmail.ee for anything urgent.</span></div>"
+        "<div class=\"apex-notice apex-notice--warn mt-3\" role=\"status\"><span class=\"apex-em\">A human will follow up on this question — contact support@apexmail.ee for anything urgent.</span></div>"
     } else {
         ""
     };
     format!(
         "<article class=\"{frame}\">\
-<h2 class=\"text-xs font-bold uppercase tracking-[0.16em] text-surface-500\">{role}</h2>\
-<p class=\"mt-3 whitespace-pre-wrap break-words text-sm text-surface-900\">{content}</p>\
+<h2 class=\"apex-section-head\">{role}</h2>\
+<p class=\"mt-3 whitespace-pre-wrap break-words\">{content}</p>\
 {citations}{escalation}\
-<p class=\"mt-3 text-xs text-surface-400\">{created_at}</p>\
+<p class=\"mt-3\">{created_at}</p>\
 </article>",
         frame = frame,
         role = html_escape(role_label),
@@ -5355,7 +5394,7 @@ fn assistant_turn_html(turn: &AssistantTurnData) -> String {
 pub fn web_domains_new_page() -> String {
     format!(
         "<div class=\"max-w-2xl\">\
-<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight mb-6\">Add Domain</h1>\
+<h1 class=\"mb-6 apex-page-title\">Add Domain</h1>\
 <form class=\"space-y-6\" method=\"post\" action=\"/web/domains\">\
 <div class=\"space-y-2\">{domain_label}{domain_input}</div>\
 <div class=\"flex gap-3\">{save_button}</div>\
@@ -5406,23 +5445,23 @@ pub fn web_settings_page() -> String {
     // undifferentiated grid.
     "<div class=\"space-y-8\">\
 <section data-view-state=\"ready\" class=\"space-y-8\">\
-<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Settings</h1>\
-<div><h2 class=\"text-xs font-bold uppercase tracking-[0.18em] text-surface-500\">Identity and access</h2>\
+<h1 class=\"apex-page-title\">Settings</h1>\
+<div><h2 class=\"apex-section-head\">Identity and access</h2>\
 <nav class=\"mt-3 grid gap-4 md:grid-cols-3\">\
-<a href=\"/settings/api-keys\" class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">API Keys</h3><p class=\"text-sm text-muted-foreground mt-1\">Machine credentials for this workspace</p></a>\
-<a href=\"/settings/team\" class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Team</h3><p class=\"text-sm text-muted-foreground mt-1\">Members and their roles</p></a>\
-<a href=\"/settings/profile\" class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Profile</h3><p class=\"text-sm text-muted-foreground mt-1\">Your identity, password, and MFA</p></a>\
+<a href=\"/settings/api-keys\" class=\"border p-6 apex-btn\"><h3 class=\"apex-h3\">API Keys</h3><p class=\"mt-1\">Machine credentials for this workspace</p></a>\
+<a href=\"/settings/team\" class=\"border p-6 apex-btn\"><h3 class=\"apex-h3\">Team</h3><p class=\"mt-1\">Members and their roles</p></a>\
+<a href=\"/settings/profile\" class=\"border p-6 apex-btn\"><h3 class=\"apex-h3\">Profile</h3><p class=\"mt-1\">Your identity, password, and MFA</p></a>\
 </nav></div>\
-<div><h2 class=\"text-xs font-bold uppercase tracking-[0.18em] text-surface-500\">Sending infrastructure</h2>\
+<div><h2 class=\"apex-section-head\">Sending infrastructure</h2>\
 <nav class=\"mt-3 grid gap-4 md:grid-cols-3\">\
-<a href=\"/settings/dedicated-ips\" class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Dedicated IPs</h3><p class=\"text-sm text-muted-foreground mt-1\">Sending IPs reserved for this workspace</p></a>\
-<a href=\"/settings/webhooks\" class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Webhooks</h3><p class=\"text-sm text-muted-foreground mt-1\">Event delivery to your endpoints</p></a>\
-<a href=\"/settings/suppressions\" class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Suppressions</h3><p class=\"text-sm text-muted-foreground mt-1\">Addresses that never receive campaign mail</p></a>\
-<a href=\"/settings/journal\" class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Journal</h3><p class=\"text-sm text-muted-foreground mt-1\">Archive and journaling copies for workspace mailboxes</p></a>\
+<a href=\"/settings/dedicated-ips\" class=\"border p-6 apex-btn\"><h3 class=\"apex-h3\">Dedicated IPs</h3><p class=\"mt-1\">Sending IPs reserved for this workspace</p></a>\
+<a href=\"/settings/webhooks\" class=\"border p-6 apex-btn\"><h3 class=\"apex-h3\">Webhooks</h3><p class=\"mt-1\">Event delivery to your endpoints</p></a>\
+<a href=\"/settings/suppressions\" class=\"border p-6 apex-btn\"><h3 class=\"apex-h3\">Suppressions</h3><p class=\"mt-1\">Addresses that never receive campaign mail</p></a>\
+<a href=\"/settings/journal\" class=\"border p-6 apex-btn\"><h3 class=\"apex-h3\">Journal</h3><p class=\"mt-1\">Archive and journaling copies for workspace mailboxes</p></a>\
 </nav></div>\
-<div><h2 class=\"text-xs font-bold uppercase tracking-[0.18em] text-surface-500\">Billing</h2>\
+<div><h2 class=\"apex-section-head\">Billing</h2>\
 <nav class=\"mt-3 grid gap-4 md:grid-cols-3\">\
-<a href=\"/settings/billing\" class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Billing</h3><p class=\"text-sm text-muted-foreground mt-1\">Plan, invoices, and payment arrangements</p></a>\
+<a href=\"/settings/billing\" class=\"border p-6 apex-btn\"><h3 class=\"apex-h3\">Billing</h3><p class=\"mt-1\">Plan, invoices, and payment arrangements</p></a>\
 </nav></div>\
 </section></div>".to_string()
 }
@@ -5454,8 +5493,8 @@ pub fn web_settings_suppressions_page() -> String {
     };
     format!(
         "<div class=\"space-y-6\">\
-<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Suppressions</h1><p class=\"text-sm text-muted-foreground\">Addresses withheld from sending — recorded by bounces, complaints, and unsubscribes.</p></div></div>\
-<section class=\"rounded-sm border border-surface-200 bg-card/80 p-6\"><p class=\"text-sm font-bold text-foreground\">Why this list is read-only</p><p class=\"mt-1 text-xs text-muted-foreground\">Addresses land here automatically when they bounce, complain, or unsubscribe, and they never receive campaign mail while listed. That makes the list a safety record rather than something to edit — a contact who wants mail again resubscribes through your signup path.</p></section>\
+<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"apex-page-title\">Suppressions</h1><p class=\"\">Addresses withheld from sending — recorded by bounces, complaints, and unsubscribes.</p></div></div>\
+<section class=\"border p-6\"><p class=\"apex-em\">Why this list is read-only</p><p class=\"mt-1\">Addresses land here automatically when they bounce, complain, or unsubscribe, and they never receive campaign mail while listed. That makes the list a safety record rather than something to edit — a contact who wants mail again resubscribes through your signup path.</p></section>\
 {table}</div>",
         table = table.render_html(),
     )
@@ -5502,8 +5541,8 @@ pub fn web_settings_journal_page() -> String {
     };
     format!(
         "<div class=\"space-y-6\">\
-<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Journal</h1><p class=\"text-sm text-muted-foreground\">The legal copy of inbound and outbound messages for workspace mailboxes with archive + journaling enabled.</p></div></div>\
-<section class=\"rounded-sm border border-surface-200 bg-card/80 p-6\"><p class=\"text-sm font-bold text-foreground\">How journaling works</p><p class=\"mt-1 text-xs text-muted-foreground\">When the Mailboxes archive + journaling add-on is active — for the workspace or for an individual mailbox — every inbound delivery and every outbound send writes one immutable copy here, including the complete raw message. Disabling the add-on stops new copies; entries already written stay readable. Only workspace administrators can open this page.</p></section>\
+<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"apex-page-title\">Journal</h1><p class=\"\">The legal copy of inbound and outbound messages for workspace mailboxes with archive + journaling enabled.</p></div></div>\
+<section class=\"border p-6\"><p class=\"apex-em\">How journaling works</p><p class=\"mt-1\">When the Mailboxes archive + journaling add-on is active — for the workspace or for an individual mailbox — every inbound delivery and every outbound send writes one immutable copy here, including the complete raw message. Disabling the add-on stops new copies; entries already written stay readable. Only workspace administrators can open this page.</p></section>\
 <section data-view-state=\"empty\" class=\"space-y-4\">{empty}</section>\
 {table}</div>",
         empty = EmptyState {
@@ -5546,8 +5585,8 @@ pub fn web_settings_api_keys_page() -> String {
     };
     format!(
         "<div class=\"space-y-6\">\
-<div class=\"flex flex-col gap-1\"><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">API Keys</h1>\
-<p class=\"text-sm text-muted-foreground\">Machine credentials for this workspace. Secrets are shown once at creation.</p></div>\
+<div class=\"apex-page-heading\"><h1 class=\"apex-page-title\">API Keys</h1>\
+<p class=\"\">Machine credentials for this workspace. Secrets are shown once at creation.</p></div>\
 {form}\
 {table}</div>",
         form = api_key_create_form_html(),
@@ -5604,14 +5643,14 @@ pub fn api_key_create_form_html() -> String {
                 .iter()
                 .map(|scope| {
                     format!(
-                        "<label class=\"flex items-start gap-2 rounded-sm border border-surface-200 bg-background px-3 py-2 cursor-pointer hover:border-surface-300\"><input type=\"checkbox\" name=\"scopes\" value=\"{scope}\" class=\"mt-0.5 h-4 w-4 rounded-sm border-surface-300 text-brand-600 focus-visible:ring-2 focus-visible:ring-primary/20\" /><span class=\"text-sm font-mono text-surface-800\">{scope}</span></label>",
+                        "<label class=\"flex items-start gap-2 border px-3 py-2 apex-label\"><input type=\"checkbox\" name=\"scopes\" value=\"{scope}\" class=\"mt-0.5 h-4 w-4 apex-input\" /><span class=\"\">{scope}</span></label>",
                         scope = html_escape(scope),
                     )
                 })
                 .collect::<Vec<_>>()
                 .join("");
             format!(
-                "<fieldset class=\"space-y-2\"><legend class=\"text-sm font-semibold text-surface-950\">{title}</legend><p class=\"text-xs text-muted-foreground\">{hint}</p><div class=\"flex flex-wrap gap-2\">{boxes}</div></fieldset>",
+                "<fieldset class=\"space-y-2\"><legend class=\"\">{title}</legend><p class=\"\">{hint}</p><div class=\"flex flex-wrap gap-2\">{boxes}</div></fieldset>",
                 title = html_escape(title),
                 hint = html_escape(hint),
                 boxes = boxes,
@@ -5621,25 +5660,25 @@ pub fn api_key_create_form_html() -> String {
         .join("");
 
     format!(
-        "<form class=\"rounded-sm border border-surface-200 bg-card p-6 space-y-6\" method=\"post\" action=\"/web/api-keys\" data-form-id=\"api-key-create\">\
-<div class=\"space-y-1\"><h2 class=\"text-base font-semibold text-surface-950\">Create an API key</h2>\
-<p class=\"text-sm text-muted-foreground\">Pick only the scopes this integration needs. The secret appears once after creation.</p></div>\
+        "<form class=\"border p-6 space-y-6\" method=\"post\" action=\"/web/api-keys\" data-form-id=\"api-key-create\">\
+<div class=\"space-y-1\"><h2 class=\"apex-h2\">Create an API key</h2>\
+<p class=\"\">Pick only the scopes this integration needs. The secret appears once after creation.</p></div>\
 <div class=\"grid gap-4 sm:grid-cols-2\">\
-<div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"api-key-name\">Key name</label>\
-<input id=\"api-key-name\" name=\"name\" type=\"text\" required maxlength=\"100\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px]\" placeholder=\"Production sender\" /></div>\
-<div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"api-key-expiry\">Expires in</label>\
-<select id=\"api-key-expiry\" name=\"expires_in_days\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px]\">\
+<div class=\"space-y-2\"><label class=\"apex-em apex-label\" for=\"api-key-name\">Key name</label>\
+<input id=\"api-key-name\" name=\"name\" type=\"text\" required maxlength=\"100\" class=\"flex h-12 w-full border px-3 apex-input\" placeholder=\"Production sender\" /></div>\
+<div class=\"space-y-2\"><label class=\"apex-em apex-label\" for=\"api-key-expiry\">Expires in</label>\
+<select id=\"api-key-expiry\" name=\"expires_in_days\" class=\"flex h-12 w-full border px-3 apex-select\">\
 <option value=\"90\" selected>90 days (recommended)</option>\
 <option value=\"30\">30 days</option>\
 <option value=\"180\">180 days</option>\
 <option value=\"365\">365 days</option>\
 </select></div></div>\
-<div class=\"space-y-4\"><div><p class=\"text-sm font-semibold text-surface-950\">Scopes</p>\
-<p class=\"text-xs text-muted-foreground mt-0.5\">Only scopes your account already holds can be issued. Prefer read-only keys when write access is not required.</p></div>\
+<div class=\"space-y-4\"><div><p class=\"apex-em\">Scopes</p>\
+<p class=\"mt-0.5\">Only scopes your account already holds can be issued. Prefer read-only keys when write access is not required.</p></div>\
 {scope_groups}</div>\
-<div class=\"flex items-center gap-3 pt-2 border-t border-surface-100\">\
-<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-primary px-5 py-2.5 text-sm font-semibold text-white hover:bg-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Create API Key</button>\
-<p class=\"text-xs text-muted-foreground\">No scopes selected still creates a key with no API access.</p></div>\
+<div class=\"flex items-center gap-3 pt-2 border-t\">\
+<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap px-5 py-2.5 apex-btn apex-btn--primary\">Create API Key</button>\
+<p class=\"\">No scopes selected still creates a key with no API access.</p></div>\
 </form>",
         scope_groups = scope_groups,
     )
@@ -5656,13 +5695,13 @@ pub fn api_key_create_form_html() -> String {
 /// 2026-10-22). `team_invite_form_matches_the_handler_contract` pins the two
 /// names to the handler.
 pub fn team_invite_form_html() -> String {
-    "<form class=\"space-y-4 rounded-sm border border-surface-200 bg-card p-6\" method=\"post\" action=\"/web/team/invite\">\
-<div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"team-invite-email\">Email</label>\
-<input id=\"team-invite-email\" name=\"userName\" type=\"email\" required autocomplete=\"email\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px]\" placeholder=\"colleague@company.com\" /></div>\
-<div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"team-invite-role\">Role</label>\
-<select id=\"team-invite-role\" name=\"role\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px]\"><option value=\"member\">Member</option><option value=\"admin\">Admin</option></select></div>\
-<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-primary px-4 py-2 text-sm font-semibold text-white\">Send invitation</button>\
-<p class=\"text-xs text-muted-foreground\">Submitting creates an invitation record and adds the address as <strong>invited</strong>. No invitation email is sent from this page yet — the record alone does not sign anyone in.</p>\
+    "<form class=\"space-y-4 border p-6\" method=\"post\" action=\"/web/team/invite\">\
+<div class=\"space-y-2\"><label class=\"apex-em apex-label\" for=\"team-invite-email\">Email</label>\
+<input id=\"team-invite-email\" name=\"userName\" type=\"email\" required autocomplete=\"email\" class=\"flex h-12 w-full border px-3 apex-input\" placeholder=\"colleague@company.com\" /></div>\
+<div class=\"space-y-2\"><label class=\"apex-em apex-label\" for=\"team-invite-role\">Role</label>\
+<select id=\"team-invite-role\" name=\"role\" class=\"flex h-12 w-full border px-3 apex-select\"><option value=\"member\">Member</option><option value=\"admin\">Admin</option></select></div>\
+<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap px-4 py-2 apex-btn apex-btn--primary\">Send invitation</button>\
+<p class=\"\">Submitting creates an invitation record and adds the address as <strong>invited</strong>. No invitation email is sent from this page yet — the record alone does not sign anyone in.</p>\
 </form>"
         .to_string()
 }
@@ -5687,8 +5726,8 @@ pub fn webhook_register_form_html() -> String {
                 html_escape(event)
             };
             format!(
-                "<label class=\"flex items-center gap-2 text-sm\" for=\"{id}\">\
-<input id=\"{id}\" name=\"events\" type=\"checkbox\" value=\"{value}\" class=\"h-4 w-4 rounded-sm border-input\" />\
+                "<label class=\"flex items-center gap-2 apex-label\" for=\"{id}\">\
+<input id=\"{id}\" name=\"events\" type=\"checkbox\" value=\"{value}\" class=\"h-4 w-4 apex-input\" />\
 <span>{label}</span></label>",
                 id = id,
                 value = html_escape(event),
@@ -5697,22 +5736,22 @@ pub fn webhook_register_form_html() -> String {
         })
         .collect();
     format!(
-        "<form class=\"space-y-4 rounded-sm border border-surface-200 bg-card p-6\" method=\"post\" action=\"/web/webhooks\">\
-<div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"webhook-url\">Endpoint URL</label>\
-<input id=\"webhook-url\" name=\"url\" type=\"url\" required class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px]\" placeholder=\"https://example.com/hooks/apexmail\" /></div>\
-<fieldset class=\"space-y-2\"><legend class=\"text-sm font-medium leading-none\">Events</legend>\
-<p class=\"text-xs text-muted-foreground\">At least one. Each event is delivered to the endpoint as a signed JSON POST.</p>\
+        "<form class=\"space-y-4 border p-6\" method=\"post\" action=\"/web/webhooks\">\
+<div class=\"space-y-2\"><label class=\"apex-em apex-label\" for=\"webhook-url\">Endpoint URL</label>\
+<input id=\"webhook-url\" name=\"url\" type=\"url\" required class=\"flex h-12 w-full border px-3 apex-input\" placeholder=\"https://example.com/hooks/apexmail\" /></div>\
+<fieldset class=\"space-y-2\"><legend class=\"\">Events</legend>\
+<p class=\"\">At least one. Each event is delivered to the endpoint as a signed JSON POST.</p>\
 <div class=\"grid grid-cols-1 gap-1.5 sm:grid-cols-2\">{events}</div></fieldset>\
-<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-primary px-4 py-2 text-sm font-semibold text-white\">Register endpoint</button>\
+<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap px-4 py-2 apex-btn apex-btn--primary\">Register endpoint</button>\
 </form>"
     )
 }
 
 /// Dedicated-IP request form, composed beside the live IP table.
 pub fn dedicated_ip_request_form_html() -> String {
-    "<form class=\"space-y-4 rounded-sm border border-surface-200 bg-card p-6\" method=\"post\" action=\"/web/dedicated-ips/request\">\
-<p class=\"text-sm text-muted-foreground\">Request a dedicated IP. Eligibility depends on plan and sending volume; provisioning is confirmed by support.</p>\
-<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-primary px-4 py-2 text-sm font-semibold text-white\">Request dedicated IP</button>\
+    "<form class=\"space-y-4 border p-6\" method=\"post\" action=\"/web/dedicated-ips/request\">\
+<p class=\"\">Request a dedicated IP. Eligibility depends on plan and sending volume; provisioning is confirmed by support.</p>\
+<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap px-4 py-2 apex-btn apex-btn--primary\">Request dedicated IP</button>\
 </form>"
         .to_string()
 }
@@ -5720,9 +5759,9 @@ pub fn dedicated_ip_request_form_html() -> String {
 /// Billing action form: plan-change / invoice request affordance kept
 /// beside live billing rows.
 pub fn billing_action_form_html() -> String {
-    "<div class=\"rounded-sm border border-surface-200 bg-card p-6 space-y-3\">\
-<p class=\"text-sm text-muted-foreground\">Plan changes and invoice downloads are completed through the billing team. Submitting logs a request — it does not charge the account.</p>\
-<a href=\"/settings/billing\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-primary px-4 py-2 text-sm font-semibold text-white\">Manage billing</a>\
+    "<div class=\"border p-6 space-y-3\">\
+<p class=\"\">Plan changes and invoice downloads are completed through the billing team. Submitting logs a request — it does not charge the account.</p>\
+<a href=\"/settings/billing\" class=\"inline-flex items-center justify-center whitespace-nowrap px-4 py-2 apex-em apex-btn apex-btn--primary\">Manage billing</a>\
 </div>"
         .to_string()
 }
@@ -5753,7 +5792,7 @@ pub fn web_settings_team_page() -> String {
     };
     format!(
         "<div class=\"space-y-6\">\
-<div class=\"flex items-center justify-between\"><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Team</h1></div>\
+<div class=\"apex-page-heading\"><h1 class=\"apex-page-title\">Team</h1></div>\
 {form}\
 {table}</div>",
         form = team_invite_form_html(),
@@ -5771,47 +5810,47 @@ pub fn web_settings_billing_page() -> String {
     // flash copy in api-server's billing twins).
     format!(
         "<div class=\"space-y-6\">\
-<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Billing</h1>\
+<h1 class=\"apex-page-title\">Billing</h1>\
 <section data-view-state=\"ready\" class=\"space-y-6\">\
-<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\">\
-<h3 class=\"text-lg font-bold mb-2\">Current Plan</h3>\
-<p class=\"text-3xl font-bold mt-4\">unavailable<span class=\"text-sm font-normal text-muted-foreground\"> — live figures load with your account data</span></p>\
-<p class=\"mt-3 text-sm text-muted-foreground\">Plan changes are arranged with the billing team. Submitting the request below records a change request for them — nothing is charged from this page and no checkout session opens here.</p>\
+<div class=\"border p-6 md:p-8\">\
+<h3 class=\"mb-2 apex-h3\">Current Plan</h3>\
+<p class=\"mt-4 apex-em\">unavailable<span class=\"\"> — live figures load with your account data</span></p>\
+<p class=\"mt-3\">Plan changes are arranged with the billing team. Submitting the request below records a change request for them — nothing is charged from this page and no checkout session opens here.</p>\
 <form class=\"mt-4\" method=\"post\" action=\"/web/billing/checkout\">\
-<label class=\"apex-klabel mb-2\" for=\"upgrade-plan\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Plan</label>\
-<select id=\"upgrade-plan\" name=\"plan\" class=\"w-full max-w-xs px-4 py-3 rounded-sm border border-surface-200 focus:border-primary outline-none transition-all bg-background text-sm font-medium text-surface-950\"><option value=\"starter\">Developer — €20/mo</option><option value=\"pro\">Pro — €89/mo</option><option value=\"growth\">Growth — €229/mo</option><option value=\"scale\">Business — €699/mo</option></select>\
-<button type=\"submit\" class=\"mt-3 inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">Request plan change</button>\
+<label class=\"mb-2 apex-label\" for=\"upgrade-plan\"><svg class=\"\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Plan</label>\
+<select id=\"upgrade-plan\" name=\"plan\" class=\"w-full max-w-xs px-4 py-3 border apex-select\"><option value=\"starter\">Developer — €20/mo</option><option value=\"pro\">Pro — €89/mo</option><option value=\"growth\">Growth — €229/mo</option><option value=\"scale\">Business — €699/mo</option></select>\
+<button type=\"submit\" class=\"mt-3 inline-flex items-center justify-center whitespace-nowrap h-12 px-6 py-3 apex-btn apex-btn--primary\">Request plan change</button>\
 </form>\
 </div>\
-<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\">\
-<h3 class=\"text-lg font-bold mb-4\">Payment Method</h3>\
-<div class=\"flex flex-wrap items-center gap-4 p-4 rounded-sm bg-surface-50 border border-surface-100\">\
-<div class=\"flex h-10 w-14 flex-shrink-0 items-center justify-center rounded-sm bg-surface-200 text-surface-500\">\
+<div class=\"border p-6 md:p-8\">\
+<h3 class=\"mb-4 apex-h3\">Payment Method</h3>\
+<div class=\"flex flex-wrap items-center gap-4 p-4 border\">\
+<div class=\"flex h-10 w-14 flex-shrink-0 items-center justify-center\">\
 <svg class=\"h-5 w-5\" xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect width=\"20\" height=\"14\" x=\"2\" y=\"5\" rx=\"2\"/><line x1=\"2\" x2=\"22\" y1=\"10\" y2=\"10\"/></svg>\
 </div>\
 <div class=\"flex-1 min-w-[9rem]\">\
-<p class=\"text-sm font-semibold text-surface-950\">Payment methods are managed with the billing team</p>\
-<p class=\"text-xs text-surface-500\">The request below asks the billing team to open the secure portal for you — card details are never entered on this page</p>\
+<p class=\"apex-em\">Payment methods are managed with the billing team</p>\
+<p class=\"\">The request below asks the billing team to open the secure portal for you — card details are never entered on this page</p>\
 </div>\
 <div class=\"flex flex-col gap-2 w-full sm:w-auto shrink-0\">\
-<form class=\"inline\" method=\"post\" action=\"/web/billing/portal\"><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all border border-surface-300 text-surface-700 hover:bg-surface-100 h-10 px-4 py-2\">Request portal access</button></form>\
+<form class=\"inline\" method=\"post\" action=\"/web/billing/portal\"><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap border h-10 px-4 py-2 apex-btn\">Request portal access</button></form>\
 </div>\
 </div>\
 </div>\
-<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\">\
-<h3 class=\"text-lg font-bold mb-2\">Cancel subscription</h3>\
-<p class=\"text-sm text-muted-foreground\">Cancelling stops the next renewal charge. Access continues until the end of the current billing period; choose the immediate option to end access now. No refunds are issued for partial periods.</p>\
+<div class=\"border p-6 md:p-8\">\
+<h3 class=\"mb-2 apex-h3\">Cancel subscription</h3>\
+<p class=\"\">Cancelling stops the next renewal charge. Access continues until the end of the current billing period; choose the immediate option to end access now. No refunds are issued for partial periods.</p>\
 <form class=\"mt-4 space-y-3\" method=\"post\" action=\"/web/billing/cancel\">\
-<label class=\"flex items-center gap-2 text-sm text-surface-700\"><input type=\"checkbox\" name=\"immediately\" value=\"true\" class=\"h-4 w-4\" />End access immediately instead of at period end</label>\
-<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all border border-surface-300 text-surface-700 hover:bg-surface-100 h-10 px-4 py-2\">Cancel subscription</button>\
+<label class=\"flex items-center gap-2 apex-label\"><input type=\"checkbox\" name=\"immediately\" value=\"true\" class=\"h-4 w-4 apex-input\" />End access immediately instead of at period end</label>\
+<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap border h-10 px-4 py-2 apex-btn\">Cancel subscription</button>\
 </form>\
 </div>\
-<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-500 mb-6\">Usage This Month</h3>\
+<div class=\"border p-6 md:p-8\"><h3 class=\"mb-6 apex-h3\">Usage This Month</h3>\
 {progress}\
-<p class=\"text-sm text-muted-foreground mt-2\">Usage for this month is unavailable here — not zero. The live figure loads with your account data.</p>\
+<p class=\"mt-2\">Usage for this month is unavailable here — not zero. The live figure loads with your account data.</p>\
 </div>\
 </section>\
-<section data-view-state=\"empty\" hidden><div class=\"rounded-sm border border-surface-200 bg-card p-12 text-center shadow-premium\"><p class=\"text-lg font-bold text-surface-950\">No billing data available</p><p class=\"text-sm text-muted-foreground mt-1\">Billing information will appear once you start sending emails.</p></div></section>\
+<section data-view-state=\"empty\" hidden><div class=\"border p-12\"><p class=\"apex-em\">No billing data available</p><p class=\"mt-1\">Billing information will appear once you start sending emails.</p></div></section>\
 </div>",
         // No fabricated "0%" readout on the static fallback — the meter is
         // a chassis; the unavailable copy carries the uncertainty.
@@ -5845,14 +5884,14 @@ pub fn web_settings_webhooks_page() -> String {
     };
     format!(
         "<div class=\"space-y-6\">\
-<div class=\"flex items-center justify-between\"><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Webhooks</h1></div>\
+<div class=\"apex-page-heading\"><h1 class=\"apex-page-title\">Webhooks</h1></div>\
 <form class=\"flex flex-col gap-3 sm:flex-row sm:items-end\" method=\"post\" action=\"/web/webhooks\" data-form-id=\"webhook-create\">\
-<div class=\"flex-1 space-y-2\"><label class=\"apex-klabel\" for=\"webhook-url\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Endpoint URL</label>\
-<input id=\"webhook-url\" name=\"url\" type=\"url\" required class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary outline-none transition-all bg-background text-sm font-medium text-surface-950\" placeholder=\"https://example.com/hooks/apexmail\" /></div>\
-<label class=\"inline-flex items-center gap-2 apex-klabel text-surface-900\"><input type=\"checkbox\" name=\"events\" value=\"message.sent\" checked class=\"rounded border-surface-300\" /> Sent</label>\
-<label class=\"inline-flex items-center gap-2 apex-klabel text-surface-900\"><input type=\"checkbox\" name=\"events\" value=\"message.bounced\" checked class=\"rounded border-surface-300\" /> Bounced</label>\
-<label class=\"inline-flex items-center gap-2 apex-klabel text-surface-900\"><input type=\"checkbox\" name=\"events\" value=\"message.complained\" class=\"rounded border-surface-300\" /> Complained</label>\
-<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">Add Webhook</button>\
+<div class=\"flex-1 space-y-2\"><label class=\"apex-label\" for=\"webhook-url\"><svg class=\"\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Endpoint URL</label>\
+<input id=\"webhook-url\" name=\"url\" type=\"url\" required class=\"w-full px-4 py-3 border apex-input\" placeholder=\"https://example.com/hooks/apexmail\" /></div>\
+<label class=\"inline-flex items-center gap-2 apex-label\"><input type=\"checkbox\" name=\"events\" value=\"message.sent\" checked class=\"apex-input\" /> Sent</label>\
+<label class=\"inline-flex items-center gap-2 apex-label\"><input type=\"checkbox\" name=\"events\" value=\"message.bounced\" checked class=\"apex-input\" /> Bounced</label>\
+<label class=\"inline-flex items-center gap-2 apex-label\"><input type=\"checkbox\" name=\"events\" value=\"message.complained\" class=\"apex-input\" /> Complained</label>\
+<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap h-12 px-6 py-3 apex-btn apex-btn--primary\">Add Webhook</button>\
 </form>\
 {table}</div>",
         table = table.render_html(),
@@ -5863,14 +5902,14 @@ pub fn web_settings_webhooks_page() -> String {
 pub fn web_settings_profile_page() -> String {
     format!(
         "<div class=\"max-w-2xl space-y-6\">\
-<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Profile</h1>\
+<h1 class=\"apex-page-title\">Profile</h1>\
 <form class=\"space-y-6\" method=\"post\" action=\"/web/account/profile\">\
 <div class=\"space-y-2\">{name_label}{name_input}</div>\
 <div class=\"space-y-2\">{email_label}{email_input}</div>\
 <div class=\"flex gap-3\">{save_button}</div>\
 </form>\
 <div class=\"border-t pt-6\">\
-<h3 class=\"text-lg font-bold text-surface-900 mb-4\">Change Password</h3>\
+<h3 class=\"mb-4 apex-h3\">Change Password</h3>\
 <form class=\"space-y-4\" method=\"post\" action=\"/web/auth/change-password\">\
 <div class=\"space-y-2\">{current_label}{current_input}</div>\
 <div class=\"space-y-2\">{new_label}{new_input}</div>\
@@ -6007,88 +6046,54 @@ pub fn web_settings_profile_page() -> String {
 pub fn control_plane_dashboard_page() -> String {
     r#"
 <div class="space-y-8">
-    <header class="flex flex-col gap-2">
-        <h1 class="text-3xl font-bold tracking-tight text-surface-950">System Overview</h1>
-        <p class="text-surface-500 font-medium">Monitor fleet health, tenant activity, and system performance.</p>
+    <header class="apex-page-heading">
+        <h1 class="apex-page-title">System Overview</h1>
     </header>
+    <p class="apex-statusline">Fleet health, tenant activity and system performance. Absent figures render as absent, never as zero.</p>
 
-    <!-- Unified design language (2026-09-05): the service-slot ribbon —
-         platform services as flip-cells, the all-nominal cell solid. The
-         CP surface of the same motif that renders the marketing hero
-         ribbon and the console quota meters. The solid cell's white ink is
-         the theme's monochrome success-500 (#52525b): 7.3:1, AA/AAA on
-         every theme (the 2026-09-05 contrast fix moved the OLD green
-         palette's white ink to the token-safe solid; `--success-500` is
-         grey in this design system, so `bg-success-500 text-white` is the
-         contrast-corrected pair, not the superseded green one). -->
-    <section aria-label="Platform services" class="flex items-center gap-2 flex-wrap font-mono text-[10px] font-bold tracking-[0.08em] select-none">
-        <span class="apex-klabel mr-1"><svg class="apex-arc" viewBox="0 0 24 14" width="17" height="11" fill="none" aria-hidden="true"><path d="M4 12 A 9 9 0 0 1 20 12" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/></svg>services</span>
-        <span class="inline-grid place-items-center min-w-[34px] h-[22px] rounded bg-surface-100 text-surface-500">api</span>
-        <span class="inline-grid place-items-center min-w-[34px] h-[22px] rounded bg-surface-100 text-surface-500">mta</span>
-        <span class="inline-grid place-items-center min-w-[34px] h-[22px] rounded bg-surface-100 text-surface-500">imap</span>
-        <span class="inline-grid place-items-center min-w-[34px] h-[22px] rounded bg-surface-100 text-surface-500">worker</span>
-        <span class="inline-grid place-items-center min-w-[34px] h-[22px] rounded bg-surface-100 text-surface-500">queue</span>
-        <span class="inline-grid place-items-center min-w-[34px] h-[22px] rounded bg-surface-100 text-surface-500">billing</span>
-        <span class="inline-grid place-items-center min-w-[34px] h-[22px] rounded bg-success-500 text-white">all nominal</span>
+    <section aria-label="Platform services">
+        <h2 class="apex-section-head">Platform services</h2>
+        <div class="apex-table-wrap"><table class="apex-table apex-table--dense">
+            <thead><tr><th>Service</th><th>State</th></tr></thead>
+            <tbody>
+                <tr><td class="apex-key">api</td><td><span class="apex-status apex-status--on">Nominal</span></td></tr>
+                <tr><td class="apex-key">mta</td><td><span class="apex-status apex-status--on">Nominal</span></td></tr>
+                <tr><td class="apex-key">imap</td><td><span class="apex-status apex-status--on">Nominal</span></td></tr>
+                <tr><td class="apex-key">worker</td><td><span class="apex-status apex-status--on">Nominal</span></td></tr>
+                <tr><td class="apex-key">queue</td><td><span class="apex-status apex-status--on">Nominal</span></td></tr>
+                <tr><td class="apex-key">billing</td><td><span class="apex-status apex-status--on">Nominal</span></td></tr>
+            </tbody>
+        </table></div>
     </section>
 
-    <!-- WINDING receipt (mark DNA): the platform's proof line under the
-         service ribbon — challenge/work/proof, arcs rotating stepwise. -->
-    <div class="apex-receipt mb-4" aria-hidden="true">
-      <div><svg viewBox="0 0 24 14" width="14" height="9" fill="none" aria-hidden="true" style="transform:rotate(-24deg)"><path d="M4 12 A 9 9 0 0 1 20 12" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/></svg><span class="ok">✓</span> challenge · config verified</div>
-      <div><svg viewBox="0 0 24 14" width="14" height="9" fill="none" aria-hidden="true" style="transform:rotate(0deg)"><path d="M4 12 A 9 9 0 0 1 20 12" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/></svg><span class="ok">✓</span> work · migrations applied</div>
-      <div><svg viewBox="0 0 24 14" width="14" height="9" fill="none" aria-hidden="true" style="transform:rotate(24deg)"><path d="M4 12 A 9 9 0 0 1 20 12" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/></svg><span class="on">…</span> proof · delivery health</div>
-    </div>
-
-    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-        <section class="bg-white rounded-[16px_16px_9px_9px] border border-surface-200/60 p-8 shadow-sm transition-all hover:shadow-md">
-            <div class="flex items-center justify-between mb-8">
-                <h2 class="text-[10px] font-bold text-surface-500 uppercase tracking-[0.2em]">Fleet Health</h2>
-                <span class="inline-flex items-center gap-2 px-2 py-1 bg-success-50 rounded-full border border-success-100">
-                    <span class="h-1.5 w-1.5 rounded-full bg-success-500"></span>
-                    <span class="text-[9px] font-bold text-success-700 uppercase tracking-widest">Operational</span>
-                </span>
-            </div>
-            <div class="space-y-6">
-                <div class="flex items-end justify-between">
-                    <div>
-                        <p class="text-[10px] font-bold text-surface-500 uppercase tracking-widest mb-1">Active Tenants</p>
-                        <p class="text-3xl font-bold text-surface-950 tracking-tighter" data-metric="cp.tenants.active">&mdash;</p>
-                        <p class="text-[10px] font-medium text-surface-500 mt-1">Live count renders when the database is connected</p>
-                    </div>
-                    <div class="text-right">
-                        <p class="text-[10px] font-bold text-surface-500 uppercase tracking-widest mb-1">MTD Volume</p>
-                        <p class="text-xl font-bold text-surface-950 tracking-tighter" data-metric="cp.volume.mtd">&mdash;</p>
-                    </div>
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+        <section>
+            <h2 class="apex-section-head">Fleet Health <span class="apex-section-aside"><span class="apex-status apex-status--on">Operational</span></span></h2>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-6">
+                <div class="apex-kpi">
+                    <p class="apex-kpi__n" data-metric="cp.tenants.active">&mdash;</p>
+                    <p class="apex-kpi__l">Active tenants</p>
+                    <p class="apex-kpi__d">Live count renders when the database is connected</p>
+                </div>
+                <div class="apex-kpi">
+                    <p class="apex-kpi__n" data-metric="cp.volume.mtd">&mdash;</p>
+                    <p class="apex-kpi__l">Volume, month to date</p>
                 </div>
             </div>
         </section>
 
-        <section class="bg-white rounded-[16px_16px_9px_9px] border border-surface-200/60 p-8 shadow-sm transition-all hover:shadow-md">
-            <div class="flex items-center justify-between mb-8">
-                <h2 class="text-[10px] font-bold text-surface-500 uppercase tracking-[0.2em]">Security posture</h2>
-                <span class="text-[9px] font-bold text-surface-500 uppercase tracking-widest">Last 24h</span>
-            </div>
-            <div class="py-4 flex flex-col items-center justify-center text-center">
-                <div class="w-10 h-10 rounded-full bg-success-50 flex items-center justify-center mb-3">
-                    <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 text-success-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
-                </div>
-                <p class="text-sm font-bold text-surface-950 tracking-tight">Protected</p>
-                <p class="text-[11px] text-surface-500 mt-1 font-medium">No threats detected.</p>
-            </div>
+        <section>
+            <h2 class="apex-section-head">Security posture <span class="apex-section-aside">Last 24 h</span></h2>
+            <p class="apex-status apex-status--on">Protected</p>
+            <p class="apex-meta mt-1">No threats detected.</p>
         </section>
     </div>
 
-    <section class="bg-white rounded-[16px_16px_9px_9px] border border-surface-200/60 shadow-sm overflow-hidden">
-        <div class="px-8 py-6 border-b border-surface-100 flex items-center justify-between">
-            <h2 class="text-xs font-bold text-surface-950 uppercase tracking-[0.2em]">System Status</h2>
-            <div class="flex items-center gap-2 text-[10px] font-bold text-surface-500 uppercase tracking-widest">
-                <span class="w-2 h-2 rounded-full bg-success-500"></span>
-                <span>All nodes healthy</span>
-            </div>
-        </div>
-        <div class="p-12 text-center">
-            <p class="text-sm font-medium text-surface-500">Detailed system metrics and infrastructure telemetry will be available in the next deployment.</p>
+    <section>
+        <h2 class="apex-section-head">System status <span class="apex-section-aside"><span class="apex-status apex-status--on">All nodes healthy</span></span></h2>
+        <div class="apex-empty-state">
+            <p class="apex-empty-state__title">Infrastructure telemetry is not wired to this surface yet.</p>
+            <p>Detailed system metrics arrive with the next deployment; until then the service ledger above is the source of truth.</p>
         </div>
     </section>
 </div>
@@ -6102,7 +6107,7 @@ fn render_cp_signal_grid(signals: &[(&str, &str, &str)]) -> String {
         .iter()
         .map(|(label, value, description)| {
             format!(
-                "<article class=\"apex-signal-card rounded-sm border border-surface-200 bg-card p-4 shadow-premium\"><p class=\"text-[10px] font-bold uppercase tracking-[0.2em] text-surface-500\">{}</p><p class=\"mt-3 text-2xl font-bold tracking-tight text-surface-950\">{}</p><p class=\"mt-1 text-xs leading-5 text-surface-500\">{}</p></article>",
+                "<article class=\"apex-kpi\"><p class=\"apex-kpi__l\">{}</p><p class=\"apex-kpi__n\">{}</p><p class=\"apex-kpi__d\">{}</p></article>",
                 label, value, description
             )
         })
@@ -6122,7 +6127,7 @@ fn render_cp_collection_page(
     let action_markup = action
         .map(|(label, href)| {
             format!(
-                "<a href=\"{}\" class=\"inline-flex items-center justify-center rounded-xl bg-primary px-6 py-2.5 text-xs font-bold text-white transition-all hover:bg-brand-700 active:scale-[0.98] shadow-sm shadow-primary/20\">{}</a>",
+                "<a href=\"{}\" class=\"inline-flex items-center justify-center px-6 py-2.5 apex-em apex-btn apex-btn--primary apex-btn--sm\">{}</a>",
                 href, label
             )
         })
@@ -6153,18 +6158,18 @@ fn render_cp_collection_page(
         "<div class=\"space-y-8\">\
             <div class=\"flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between\">\
                 <div class=\"max-w-3xl\">\
-                    <h1 class=\"text-2xl font-bold tracking-tight text-surface-950\">{}</h1>\
-                    <p class=\"mt-2 text-surface-500 font-medium leading-relaxed\">{}</p>\
+                    <h1 class=\"apex-page-title\">{}</h1>\
+                    <p class=\"mt-2 apex-em\">{}</p>\
                 </div>\
                 {}\
             </div>\
             <div class=\"grid gap-6 sm:grid-cols-3\">{}</div>\
-            <section class=\"bg-white rounded-[16px_16px_9px_9px] border border-surface-200/60 shadow-sm overflow-hidden\">\
-                <div class=\"px-8 py-6 border-b border-surface-100 flex items-center justify-between\">\
-                    <h2 class=\"text-xs font-bold text-surface-950 uppercase tracking-[0.2em]\">{}</h2>\
+            <section class=\"border overflow-hidden\">\
+                <div class=\"px-8 py-6 border-b flex items-center justify-between\">\
+                    <h2 class=\"apex-section-head\">{}</h2>\
                     <div class=\"flex items-center gap-2\">\
-                        <span class=\"w-1.5 h-1.5 rounded-full bg-primary\"></span>\
-                        <span class=\"text-[10px] font-bold text-surface-500 uppercase tracking-widest\">Real-time</span>\
+                        <span class=\"w-1.5 h-1.5\"></span>\
+                        <span class=\"apex-em apex-section-head\">Real-time</span>\
                     </div>\
                 </div>\
                 {}\
@@ -6260,7 +6265,7 @@ pub fn control_plane_tenants_new_page_with_data(
             .collect::<String>();
         (
             format!(
-                "<div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"tenant-new-plan\">Plan</label><select id=\"tenant-new-plan\" name=\"plan\" required class=\"flex h-12 w-full rounded-[8px_8px_7px_7px] border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\">{options}</select><p class=\"text-xs text-muted-foreground\">The plan's entitlements (sending limits and capabilities) apply to the new workspace immediately. Later plan changes go through the audited billing plan-override flow.</p></div>"
+                "<div class=\"space-y-2\"><label class=\"apex-em apex-label\" for=\"tenant-new-plan\">Plan</label><select id=\"tenant-new-plan\" name=\"plan\" required class=\"flex h-12 w-full border px-3 apex-select\">{options}</select><p class=\"\">The plan's entitlements (sending limits and capabilities) apply to the new workspace immediately. Later plan changes go through the audited billing plan-override flow.</p></div>"
             ),
             Button {
                 variant: "default",
@@ -6276,7 +6281,7 @@ pub fn control_plane_tenants_new_page_with_data(
         )
     } else {
         (
-            "<div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"tenant-new-plan\">Plan</label><select id=\"tenant-new-plan\" name=\"plan\" disabled class=\"flex h-12 w-full rounded-[8px_8px_7px_7px] border border-input bg-background px-3 text-[14px] opacity-60\"><option>Plan catalog unavailable</option></select><p class=\"text-xs text-muted-foreground\">The billing plan catalog could not be read, so a tenant cannot be created on a verifiable plan right now. This is a service problem, not an empty catalog — try again shortly.</p></div>"
+            "<div class=\"space-y-2\"><label class=\"apex-em apex-label\" for=\"tenant-new-plan\">Plan</label><select id=\"tenant-new-plan\" name=\"plan\" disabled class=\"flex h-12 w-full border px-3 apex-select\"><option>Plan catalog unavailable</option></select><p class=\"\">The billing plan catalog could not be read, so a tenant cannot be created on a verifiable plan right now. This is a service problem, not an empty catalog — try again shortly.</p></div>"
                 .to_string(),
             String::new(),
         )
@@ -6284,7 +6289,7 @@ pub fn control_plane_tenants_new_page_with_data(
 
     format!(
         "<div class=\"max-w-2xl\">\
-<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight mb-6\">Add Tenant</h1>\
+<h1 class=\"mb-6 apex-page-title\">Add Tenant</h1>\
 <form class=\"space-y-6\" method=\"post\" action=\"/web/admin/tenants\" data-form-id=\"tenant-create\">\
 <div class=\"space-y-2\">{name_label}{name_input}</div>\
 <div class=\"space-y-2\">{domain_label}{domain_input}</div>\
@@ -6413,11 +6418,11 @@ pub fn control_plane_tenant_detail_page_with_data(
             }
             let plan_field = if catalog_usable {
                 format!(
-                    "<div class=\"apex-field\"><label for=\"tenant-plan\">Plan</label><select id=\"tenant-plan\" name=\"plan\" required class=\"flex h-12 w-full rounded-[8px_8px_7px_7px] border border-input bg-background px-3 text-[14px]\">{options}</select><p class=\"text-xs text-surface-600\">Changing the plan applies its entitlements immediately and writes an audited plan override.</p></div>"
+                    "<div class=\"apex-field\"><label for=\"tenant-plan\">Plan</label><select id=\"tenant-plan\" name=\"plan\" required class=\"flex h-12 w-full border px-3 apex-select\">{options}</select><p class=\"\">Changing the plan applies its entitlements immediately and writes an audited plan override.</p></div>"
                 )
             } else {
                 format!(
-                    "<div class=\"apex-field\"><p class=\"text-sm\"><span class=\"apex-cp-stat-label\">Current plan</span> <span class=\"apex-mono text-xs\">{current}</span></p><select id=\"tenant-plan\" name=\"plan\" disabled class=\"flex h-12 w-full rounded-[8px_8px_7px_7px] border border-input bg-background px-3 text-[14px] opacity-60\"><option>Plan catalog unavailable</option></select><p class=\"text-xs text-surface-600\">The billing plan catalog could not be read, so the plan cannot be changed right now.</p></div>",
+                    "<div class=\"apex-field\"><p class=\"\"><span class=\"apex-kpi__l\">Current plan</span> <span class=\"apex-mono\">{current}</span></p><select id=\"tenant-plan\" name=\"plan\" disabled class=\"flex h-12 w-full border px-3 apex-select\"><option>Plan catalog unavailable</option></select><p class=\"\">The billing plan catalog could not be read, so the plan cannot be changed right now.</p></div>",
                     current = html_escape(&tenant.plan),
                 )
             };
@@ -6438,7 +6443,7 @@ pub fn control_plane_tenant_detail_page_with_data(
             };
             (
                 format!(
-                    "<dl class=\"grid gap-2 text-sm\"><div class=\"flex gap-2\"><dt class=\"apex-cp-stat-label\">Slug</dt><dd class=\"apex-mono text-xs\">{slug}</dd></div><div class=\"flex gap-2\"><dt class=\"apex-cp-stat-label\">Status</dt><dd>{status}</dd></div><div class=\"flex gap-2\"><dt class=\"apex-cp-stat-label\">Created</dt><dd>{created}</dd></div></dl>",
+                    "<dl class=\"grid gap-2\"><div class=\"flex gap-2\"><dt class=\"apex-kpi__l\">Slug</dt><dd class=\"apex-mono\">{slug}</dd></div><div class=\"flex gap-2\"><dt class=\"apex-kpi__l\">Status</dt><dd>{status}</dd></div><div class=\"flex gap-2\"><dt class=\"apex-kpi__l\">Created</dt><dd>{created}</dd></div></dl>",
                     slug = html_escape(&tenant.slug),
                     status = html_escape(&tenant.status),
                     created = html_escape(&tenant.created),
@@ -6454,9 +6459,9 @@ pub fn control_plane_tenant_detail_page_with_data(
             // problem, a failed read is — the copy must not swap them.
             let missing = data.is_some_and(|tenant| tenant.missing);
             let note = if missing {
-                "<p class=\"text-sm\">No tenant with this id exists in the control plane. It may have been deleted — the tenant list shows the current workspaces.</p>"
+                "<p class=\"\">No tenant with this id exists in the control plane. It may have been deleted — the tenant list shows the current workspaces.</p>"
             } else {
-                "<p class=\"text-sm\">The tenant could not be read, so the plan cannot be shown or changed right now. This is a service problem, not a missing tenant — try again shortly.</p>"
+                "<p class=\"\">The tenant could not be read, so the plan cannot be shown or changed right now. This is a service problem, not a missing tenant — try again shortly.</p>"
             };
             (
                 String::new(),
@@ -6478,10 +6483,10 @@ pub fn control_plane_tenant_detail_page_with_data(
 
     format!(
         "<div class=\"max-w-2xl space-y-6\">\
-<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">{heading}</h1>\
+<h1 class=\"apex-page-title\">{heading}</h1>\
 {identity}\
 {plan_form}\
-<a class=\"text-sm font-medium underline\" href=\"/tenants\">&larr; All tenants</a>\
+<a class=\"apex-em apex-link\" href=\"/tenants\">&larr; All tenants</a>\
 </div>"
     )
 }
@@ -6545,7 +6550,7 @@ pub fn control_plane_operators_page() -> String {
 pub fn control_plane_operators_new_page() -> String {
     format!(
         "<div class=\"max-w-2xl\">\
-<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight mb-6\">Add Operator</h1>\
+<h1 class=\"mb-6 apex-page-title\">Add Operator</h1>\
 <form class=\"space-y-6\" method=\"post\" action=\"/web/admin/operators\">\
 <div class=\"space-y-2\">{name_label}{name_input}</div>\
 <div class=\"space-y-2\">{email_label}{email_input}</div>\
@@ -6619,16 +6624,16 @@ pub fn control_plane_operators_new_page() -> String {
 pub fn control_plane_analytics_page() -> String {
     format!(
         "<div class=\"space-y-6\">\
-<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Analytics</h1>\
+<h1 class=\"apex-page-title\">Analytics</h1>\
 <div class=\"grid gap-4 md:grid-cols-2 lg:grid-cols-4\">\
 {volume}{latency}{errors}{uptime}\
 </div>\
-<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-500 mb-6\">System Volume</h3><div class=\"h-64\">{chart}</div></div>\
+<div class=\"border p-6 md:p-8\"><h3 class=\"mb-6 apex-h3\">System Volume</h3><div class=\"h-64\">{chart}</div></div>\
 </div>",
-        volume = Card { title: "Messages/hr", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">0</p><p class=\"text-sm text-muted-foreground\">Current</p>", variant: "default", padding: "default", interactive: false }.render_html(),
-        latency = Card { title: "P99 Latency", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">0ms</p><p class=\"text-sm text-muted-foreground\">Last hour</p>", variant: "default", padding: "default", interactive: false }.render_html(),
-        errors = Card { title: "Error Rate", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">0%</p><p class=\"text-sm text-muted-foreground\">Last hour</p>", variant: "default", padding: "default", interactive: false }.render_html(),
-        uptime = Card { title: "Uptime", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">100%</p><p class=\"text-sm text-muted-foreground\">30 days</p>", variant: "default", padding: "default", interactive: false }.render_html(),
+        volume = Card { title: "Messages/hr", body: "<p class=\"apex-em\">0</p><p class=\"\">Current</p>", variant: "default", padding: "default", interactive: false }.render_html(),
+        latency = Card { title: "P99 Latency", body: "<p class=\"apex-em\">0ms</p><p class=\"\">Last hour</p>", variant: "default", padding: "default", interactive: false }.render_html(),
+        errors = Card { title: "Error Rate", body: "<p class=\"apex-em\">0%</p><p class=\"\">Last hour</p>", variant: "default", padding: "default", interactive: false }.render_html(),
+        uptime = Card { title: "Uptime", body: "<p class=\"apex-em\">100%</p><p class=\"\">30 days</p>", variant: "default", padding: "default", interactive: false }.render_html(),
         chart = ApexAreaChart { title: None, description: None, last_updated_label: None, height: 256, areas: vec![], data_count: 0, empty_state_reason: "No data" }.render_html(),
     )
 }
@@ -6638,10 +6643,10 @@ pub fn control_plane_analytics_page() -> String {
 /// instead of fabricating service-registry health rows.
 pub fn control_plane_discovery_page() -> String {
     "<div class=\"space-y-6\">\
-<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Lead Sources</h1>\
-<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\">\
-<h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-500 mb-6\">Discovery intake</h3>\
-<p class=\"text-sm text-muted-foreground\">Discovery runs register the lead sources they enriched here, with per-source yield. No sources have reported yet — run a discovery cycle from the Sales Console to populate this page.</p>\
+<h1 class=\"apex-page-title\">Lead Sources</h1>\
+<div class=\"border p-6 md:p-8\">\
+<h3 class=\"mb-6 apex-h3\">Discovery intake</h3>\
+<p class=\"\">Discovery runs register the lead sources they enriched here, with per-source yield. No sources have reported yet — run a discovery cycle from the Sales Console to populate this page.</p>\
 </div></div>".to_string()
 }
 
@@ -6661,10 +6666,10 @@ pub fn control_plane_jobs_page_with_data(data: Option<&crate::view_data::JobsPag
     };
     if data.unavailable {
         return "<div class=\"space-y-6\">\
-<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Jobs</h1>\
-<div class=\"rounded-sm border border-surface-200 bg-card p-8 shadow-premium\">\
-<h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-500 mb-4\">Job queues</h3>\
-<p class=\"text-sm text-surface-600\">The job queue store could not be read — this is a service problem, not an idle queue. Retry and cancel controls are hidden until the store answers, because acting on an unknown queue state would be guesswork.</p>\
+<h1 class=\"apex-page-title\">Jobs</h1>\
+<div class=\"border p-8\">\
+<h3 class=\"mb-4 apex-h3\">Job queues</h3>\
+<p class=\"\">The job queue store could not be read — this is a service problem, not an idle queue. Retry and cancel controls are hidden until the store answers, because acting on an unknown queue state would be guesswork.</p>\
 </div></div>"
             .to_string();
     }
@@ -6679,8 +6684,8 @@ pub fn control_plane_jobs_page_with_data(data: Option<&crate::view_data::JobsPag
             "pending" => format!(
                 "<form method=\"post\" action=\"/web/admin/jobs/{escaped_id}/cancel\" class=\"inline\"><button type=\"submit\" class=\"apex-btn apex-btn--sm\" title=\"Delete this unclaimed job from the queue\">Cancel</button></form>"
             ),
-            "processing" => "<span class=\"text-xs text-surface-500\" title=\"A worker holds the lease; the job returns to the queue after its visibility timeout\">In flight</span>".to_string(),
-            _ => "<span class=\"text-xs text-surface-500\" title=\"Completed history is immutable\">History</span>".to_string(),
+            "processing" => "<span class=\"\" title=\"A worker holds the lease; the job returns to the queue after its visibility timeout\">In flight</span>".to_string(),
+            _ => "<span class=\"\" title=\"Completed history is immutable\">History</span>".to_string(),
         };
         let error = if job.error.trim().is_empty() {
             "—".to_string()
@@ -6689,13 +6694,13 @@ pub fn control_plane_jobs_page_with_data(data: Option<&crate::view_data::JobsPag
         };
         row_html.push(format!(
             "<tr class=\"border-b align-middle\" data-job-id=\"{escaped_id}\">\
-<td class=\"p-4 apex-mono text-xs\" title=\"{escaped_id}\">{short_id}</td>\
-<td class=\"p-4 text-sm\">{queue}</td>\
-<td class=\"p-4 text-sm\">{status}</td>\
-<td class=\"p-4 text-sm apex-metric-number\">{attempts}/{max_attempts}</td>\
-<td class=\"p-4 text-xs text-surface-600 max-w-[28rem] truncate\" title=\"{error_title}\">{error}</td>\
-<td class=\"p-4 text-xs text-surface-500 whitespace-nowrap\">{updated}</td>\
-<td class=\"p-4 text-right\">{actions}</td>\
+<td class=\"p-4 apex-mono\" title=\"{escaped_id}\">{short_id}</td>\
+<td class=\"p-4\">{queue}</td>\
+<td class=\"p-4\">{status}</td>\
+<td class=\"p-4 apex-figure\">{attempts}/{max_attempts}</td>\
+<td class=\"p-4 max-w-[28rem]\" title=\"{error_title}\">{error}</td>\
+<td class=\"p-4 whitespace-nowrap\">{updated}</td>\
+<td class=\"p-4\">{actions}</td>\
 </tr>",
             escaped_id = escaped_id,
             short_id = html_escape(&job.id.chars().take(12).collect::<String>()),
@@ -6711,25 +6716,25 @@ pub fn control_plane_jobs_page_with_data(data: Option<&crate::view_data::JobsPag
     }
 
     let rows = if row_html.is_empty() {
-        "<tr><td colspan=\"7\" class=\"p-10 text-center text-sm text-surface-500\">No queued jobs — the worker queues are idle. Rows appear here as workers enqueue work, and dead-lettered jobs become retryable.</td></tr>".to_string()
+        "<tr><td colspan=\"7\" class=\"p-10\">No queued jobs — the worker queues are idle. Rows appear here as workers enqueue work, and dead-lettered jobs become retryable.</td></tr>".to_string()
     } else {
         row_html.join("")
     };
 
     format!(
         "<div class=\"space-y-6\">\
-<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Jobs</h1>\
-<p class=\"text-sm text-surface-500\">Background work across the canonical job queues. Retry re-queues a terminal (dead-lettered) job with a clean attempt counter; cancel deletes a job nothing has claimed yet.</p>\
+<h1 class=\"apex-page-title\">Jobs</h1>\
+<p class=\"\">Background work across the canonical job queues. Retry re-queues a terminal (dead-lettered) job with a clean attempt counter; cancel deletes a job nothing has claimed yet.</p>\
 <div class=\"grid gap-4 sm:grid-cols-3\">\
-<div class=\"rounded-sm border border-surface-200 bg-card px-5 py-4\"><p class=\"text-[10px] font-bold uppercase tracking-widest text-surface-500\">Pending</p><p class=\"text-2xl font-bold text-surface-950\">{pending}</p></div>\
-<div class=\"rounded-sm border border-surface-200 bg-card px-5 py-4\"><p class=\"text-[10px] font-bold uppercase tracking-widest text-surface-500\">Processing</p><p class=\"text-2xl font-bold text-surface-950\">{processing}</p></div>\
-<div class=\"rounded-sm border border-surface-200 bg-card px-5 py-4\"><p class=\"text-[10px] font-bold uppercase tracking-widest text-surface-500\">Dead-lettered</p><p class=\"text-2xl font-bold text-surface-950\">{dead}</p></div>\
+<div class=\"border px-5 py-4\"><p class=\"apex-em\">Pending</p><p class=\"apex-em\">{pending}</p></div>\
+<div class=\"border px-5 py-4\"><p class=\"apex-em\">Processing</p><p class=\"apex-em\">{processing}</p></div>\
+<div class=\"border px-5 py-4\"><p class=\"apex-em\">Dead-lettered</p><p class=\"apex-em\">{dead}</p></div>\
 </div>\
-<div class=\"rounded-sm border border-surface-200 bg-card shadow-premium overflow-hidden\">\
-<div class=\"px-6 py-4 border-b border-surface-100\"><h2 class=\"text-xs font-bold uppercase tracking-widest text-surface-500\">Recent jobs (newest activity first, up to 50)</h2></div>\
-<div class=\"w-full overflow-x-auto\"><table class=\"w-full min-w-[880px] text-sm\">\
-<thead><tr class=\"border-b bg-muted/20 text-left text-[10px] font-mono uppercase tracking-[0.14em] text-muted-foreground\">\
-<th scope=\"col\" class=\"h-12 px-4\">Job ID</th><th scope=\"col\" class=\"h-12 px-4\">Queue</th><th scope=\"col\" class=\"h-12 px-4\">Status</th><th scope=\"col\" class=\"h-12 px-4\">Attempts</th><th scope=\"col\" class=\"h-12 px-4\">Last error</th><th scope=\"col\" class=\"h-12 px-4\">Last activity</th><th scope=\"col\" class=\"h-12 px-4 text-right\">Controls</th>\
+<div class=\"border overflow-hidden\">\
+<div class=\"px-6 py-4 border-b\"><h2 class=\"apex-section-head\">Recent jobs (newest activity first, up to 50)</h2></div>\
+<div class=\"w-full overflow-x-auto\"><table class=\"w-full min-w-[880px] apex-table\">\
+<thead><tr class=\"border-b\">\
+<th scope=\"col\" class=\"h-12 px-4\">Job ID</th><th scope=\"col\" class=\"h-12 px-4\">Queue</th><th scope=\"col\" class=\"h-12 px-4\">Status</th><th scope=\"col\" class=\"h-12 px-4\">Attempts</th><th scope=\"col\" class=\"h-12 px-4\">Last error</th><th scope=\"col\" class=\"h-12 px-4\">Last activity</th><th scope=\"col\" class=\"h-12 px-4\">Controls</th>\
 </tr></thead><tbody>{rows}</tbody></table></div>\
 </div></div>",
         pending = data.pending,
@@ -6788,10 +6793,10 @@ pub fn control_plane_infrastructure_page() -> String {
     // /infrastructure/nodes is the outbound sending IP-pool inventory, not
     // a cluster-node list.
     "<div class=\"space-y-6\">\
-<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Infrastructure</h1>\
+<h1 class=\"apex-page-title\">Infrastructure</h1>\
 <nav class=\"grid gap-4 md:grid-cols-2\">\
-<a href=\"/infrastructure/nodes\" class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Outbound IPs</h3><p class=\"text-sm text-muted-foreground mt-1\">Sending addresses, warmup progress, and pool health</p></a>\
-<a href=\"/infrastructure/queues\" class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Queues</h3><p class=\"text-sm text-muted-foreground mt-1\">Backlog depth and oldest-pending age</p></a>\
+<a href=\"/infrastructure/nodes\" class=\"border p-6 md:p-8 apex-btn\"><h3 class=\"apex-h3\">Outbound IPs</h3><p class=\"mt-1\">Sending addresses, warmup progress, and pool health</p></a>\
+<a href=\"/infrastructure/queues\" class=\"border p-6 md:p-8 apex-btn\"><h3 class=\"apex-h3\">Queues</h3><p class=\"mt-1\">Backlog depth and oldest-pending age</p></a>\
 </nav></div>".to_string()
 }
 
@@ -6918,9 +6923,9 @@ pub fn control_plane_domains_page() -> String {
 /// CP billing page.
 pub fn control_plane_billing_page() -> String {
     "<div class=\"space-y-6\">\
-<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Billing</h1>\
+<h1 class=\"apex-page-title\">Billing</h1>\
 <nav class=\"grid gap-4 md:grid-cols-2\">\
-<a href=\"/billing/plans\" class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Plans</h3><p class=\"text-sm text-muted-foreground mt-1\">Manage subscription plans</p></a>\
+<a href=\"/billing/plans\" class=\"border p-6 md:p-8 apex-btn\"><h3 class=\"apex-h3\">Plans</h3><p class=\"mt-1\">Manage subscription plans</p></a>\
 </nav></div>".to_string()
 }
 
@@ -6966,19 +6971,19 @@ pub fn control_plane_billing_plans_page() -> String {
 /// CP compliance page.
 pub fn control_plane_compliance_page() -> String {
     "<div class=\"space-y-6\">\
-<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Compliance</h1>\
+<h1 class=\"apex-page-title\">Compliance</h1>\
 <nav class=\"grid gap-4 md:grid-cols-2\">\
-<a href=\"/compliance/gdpr\" class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">GDPR</h3><p class=\"text-sm text-muted-foreground mt-1\">Data protection compliance</p></a>\
+<a href=\"/compliance/gdpr\" class=\"border p-6 md:p-8 apex-btn\"><h3 class=\"apex-h3\">GDPR</h3><p class=\"mt-1\">Data protection compliance</p></a>\
 </nav></div>".to_string()
 }
 
 /// CP GDPR page.
 pub fn control_plane_gdpr_page() -> String {
     "<div class=\"space-y-6\">\
-<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">GDPR Compliance</h1>\
-<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\">\
-<h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-500 mb-6\">Data Subject Requests</h3>\
-<p class=\"text-sm text-muted-foreground\">Process data access, export, and deletion requests.</p>\
+<h1 class=\"apex-page-title\">GDPR Compliance</h1>\
+<div class=\"border p-6 md:p-8\">\
+<h3 class=\"mb-6 apex-h3\">Data Subject Requests</h3>\
+<p class=\"\">Process data access, export, and deletion requests.</p>\
 </div></div>"
         .to_string()
 }
@@ -7084,14 +7089,14 @@ pub fn control_plane_alert_rules_page(data: Option<&AlertRulesPageData>) -> Stri
             format!(
                 "<form class=\"apex-panel space-y-4\" method=\"post\" action=\"/web/admin/alert-rules/{id}/update\" data-form-id=\"alert-rule-edit\">\
 <h2 class=\"apex-panel-title\">Edit rule</h2>\
-<p class=\"text-sm text-surface-600\">Tenant <span class=\"apex-mono\">{tenant}</span> · metric <span class=\"apex-mono\">{metric}</span> (fixed — delete and recreate the rule to change them).</p>\
+<p class=\"\">Tenant <span class=\"apex-mono\">{tenant}</span>, metric <span class=\"apex-mono\">{metric}</span> (fixed — delete and recreate the rule to change them).</p>\
 <div class=\"grid gap-4 md:grid-cols-2\">\
 <div class=\"apex-field\"><label for=\"rule-edit-name\">Name</label><input id=\"rule-edit-name\" name=\"name\" type=\"text\" maxlength=\"80\" required value=\"{name}\"></div>\
 <div class=\"apex-field\"><label for=\"rule-edit-threshold\">Threshold (% of plan limit)</label><input id=\"rule-edit-threshold\" name=\"threshold\" type=\"number\" min=\"1\" max=\"100\" required value=\"{threshold}\"></div>\
 <div class=\"apex-field\"><label for=\"rule-edit-channel\">Notify via</label><select id=\"rule-edit-channel\" name=\"channel\">{channels}</select></div>\
 <div class=\"apex-field\"><label for=\"rule-edit-severity\">Severity</label><select id=\"rule-edit-severity\" name=\"severity\">{severities}</select></div>\
 </div>\
-<label class=\"flex items-center gap-2 text-sm font-medium\"><input type=\"checkbox\" name=\"enabled\" value=\"true\"{checked}> Enabled</label>\
+<label class=\"flex items-center gap-2 apex-em apex-label\"><input type=\"checkbox\" name=\"enabled\" value=\"true\"{checked}> Enabled</label>\
 <div class=\"flex flex-wrap gap-3\"><button type=\"submit\" class=\"apex-btn\">Save changes</button><a class=\"apex-btn apex-btn--sm\" href=\"/alerts/rules\">Cancel</a></div>\
 </form>",
                 id = html_escape(&rule.id),
@@ -7118,7 +7123,7 @@ pub fn control_plane_alert_rules_page(data: Option<&AlertRulesPageData>) -> Stri
 <div class=\"apex-field\"><label for=\"rule-channel\">Notify via</label><select id=\"rule-channel\" name=\"channel\"><option value=\"email\">Email</option><option value=\"webhook\">Webhook</option><option value=\"both\">Email + webhook</option></select></div>\
 <div class=\"apex-field\"><label for=\"rule-severity\">Severity</label><select id=\"rule-severity\" name=\"severity\"><option value=\"info\">Info</option><option value=\"warning\" selected>Warning</option><option value=\"critical\">Critical</option></select></div>\
 </div>\
-<label class=\"flex items-center gap-2 text-sm font-medium\"><input type=\"checkbox\" name=\"enabled\" value=\"true\" checked> Enabled</label>\
+<label class=\"flex items-center gap-2 apex-em apex-label\"><input type=\"checkbox\" name=\"enabled\" value=\"true\" checked> Enabled</label>\
 <button type=\"submit\" class=\"apex-btn\">Create rule</button>\
 </form>",
         tenants = tenant_options,
@@ -7127,11 +7132,11 @@ pub fn control_plane_alert_rules_page(data: Option<&AlertRulesPageData>) -> Stri
     let mut rows = String::new();
     if unavailable {
         rows.push_str(
-            "<tr><td colspan=\"8\" class=\"text-surface-600\">The rule list is unavailable right now — this is a service problem, not an empty list.</td></tr>",
+            "<tr><td colspan=\"8\" class=\"\">The rule list is unavailable right now — this is a service problem, not an empty list.</td></tr>",
         );
     } else if rules.is_empty() {
         rows.push_str(
-            "<tr><td colspan=\"8\" class=\"text-surface-600\">No alert rules yet — create one above. Every rule here is evaluated against live usage and fires onto the Alerts page.</td></tr>",
+            "<tr><td colspan=\"8\" class=\"\">No alert rules yet — create one above. Every rule here is evaluated against live usage and fires onto the Alerts page.</td></tr>",
         );
     } else {
         for rule in rules {
@@ -7154,7 +7159,7 @@ pub fn control_plane_alert_rules_page(data: Option<&AlertRulesPageData>) -> Stri
             rows.push_str(&format!(
                 "<tr>\
 <td>{name}</td>\
-<td class=\"apex-mono text-xs\">{tenant}</td>\
+<td class=\"apex-mono\">{tenant}</td>\
 <td>{metric} ≥ {threshold}% of the plan limit</td>\
 <td class=\"{severity_class}\">{severity}</td>\
 <td>{channel}</td>\
@@ -7187,7 +7192,7 @@ pub fn control_plane_alert_rules_page(data: Option<&AlertRulesPageData>) -> Stri
         .unwrap_or_default();
     let unavailable_banner = if unavailable && !unavailable_note.is_empty() {
         format!(
-            "<div class=\"apex-callout apex-callout--error\" role=\"status\"><strong>Alert rules could not be loaded</strong><span>{}</span></div>",
+            "<div class=\"apex-notice apex-notice--fail\" role=\"status\"><strong>Alert rules could not be loaded</strong><span>{}</span></div>",
             html_escape(unavailable_note),
         )
     } else {
@@ -7196,8 +7201,8 @@ pub fn control_plane_alert_rules_page(data: Option<&AlertRulesPageData>) -> Stri
 
     format!(
         "<div class=\"space-y-6\">\
-<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Alert Rules</h1>\
-<p class=\"text-sm text-surface-600\">Tenant usage thresholds evaluated by the billing maintenance sweep. When a threshold holds, the incident lands on <a class=\"text-primary font-medium\" href=\"/alerts\">Alerts</a> for triage.</p>\
+<h1 class=\"apex-page-title\">Alert Rules</h1>\
+<p class=\"\">Tenant usage thresholds evaluated by the billing maintenance sweep. When a threshold holds, the incident lands on <a class=\"apex-em apex-link\" href=\"/alerts\">Alerts</a> for triage.</p>\
 {unavailable_banner}\
 {edit_form}\
 {create_form}\
@@ -7244,9 +7249,9 @@ pub fn control_plane_settings_page() -> String {
     // Review §7 (Settings): a compact single destination instead of one
     // card floating in a half-empty grid.
     "<div class=\"space-y-6\">\
-<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Settings</h1>\
+<h1 class=\"apex-page-title\">Settings</h1>\
 <nav class=\"grid max-w-md gap-4\">\
-<a href=\"/settings/security\" class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Security</h3><p class=\"text-sm text-muted-foreground mt-1\">Your operator sign-in, MFA enrollment, and recovery codes.</p></a>\
+<a href=\"/settings/security\" class=\"border p-6 apex-btn\"><h3 class=\"apex-h3\">Security</h3><p class=\"mt-1\">Your operator sign-in, MFA enrollment, and recovery codes.</p></a>\
 </nav></div>".to_string()
 }
 
@@ -7262,30 +7267,30 @@ pub fn control_plane_security_page() -> String {
 /// native POST to /web/auth/mfa/*; there is no client-side code.
 pub fn control_plane_security_page_with_setup(setup: Option<&MfaSetupView<'_>>) -> String {
     let mfa_section: String = match setup {
-        None => "<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8\">\
-<h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-500 mb-6\">MFA Configuration</h3>\
-<p class=\"text-sm text-surface-500 mb-4\">Multi-factor authentication protects operator accounts. This page shows the current state of your second factor.</p>\
+        None => "<div class=\"border p-6 md:p-8\">\
+<h3 class=\"mb-6 apex-h3\">MFA Configuration</h3>\
+<p class=\"mb-4\">Multi-factor authentication protects operator accounts. This page shows the current state of your second factor.</p>\
 <form method=\"post\" action=\"/web/auth/mfa/setup\">\
-<button type=\"submit\" class=\"rounded-[8px_8px_7px_7px] bg-primary px-4 py-2 text-sm font-semibold text-white hover:bg-brand-700 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2\">Set up MFA</button>\
+<button type=\"submit\" class=\"px-4 py-2 apex-btn apex-btn--primary\">Set up MFA</button>\
 </form></div>".to_string(),
         Some(view) => format!(
-            "<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8\">\
-<h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-500 mb-6\">MFA Configuration — step 2 of 2</h3>\
-<p class=\"text-sm text-surface-700 mb-4\">Scan this QR with your authenticator app (e.g. Google Authenticator, Authy, 1Password), then enter a code to confirm. The QR is generated on the server — the secret never leaves this origin.</p>\
+            "<div class=\"border p-6 md:p-8\">\
+<h3 class=\"mb-6 apex-h3\">MFA Configuration — step 2 of 2</h3>\
+<p class=\"mb-4\">Scan this QR with your authenticator app (e.g. Google Authenticator, Authy, 1Password), then enter a code to confirm. The QR is generated on the server — the secret never leaves this origin.</p>\
 <div class=\"flex flex-col items-center gap-4 mb-6\" aria-label=\"MFA QR code (server-rendered)\">{qr_svg}\
-<div class=\"w-full max-w-md text-left\">\
-<p class=\"text-xs font-bold uppercase tracking-widest text-surface-500 mb-2\">No camera? Enter this manually</p>\
-<p class=\"text-xs text-surface-600 mb-1\">Secret key (selectable)</p>\
-<code class=\"mb-3 block font-mono text-sm bg-surface-50 border border-surface-200 rounded px-3 py-2 break-all select-text text-surface-800\">{secret}</code>\
-<p class=\"text-xs text-surface-600 mb-1\">otpauth URI (selectable)</p>\
-<code class=\"block font-mono text-xs bg-surface-50 border border-surface-200 rounded px-3 py-2 break-all select-text text-surface-800\">{otpauth}</code>\
+<div class=\"w-full max-w-md\">\
+<p class=\"mb-2 apex-em\">No camera? Enter this manually</p>\
+<p class=\"mb-1\">Secret key (selectable)</p>\
+<code class=\"mb-3 block border px-3 py-2 break-all apex-select\">{secret}</code>\
+<p class=\"mb-1\">otpauth URI (selectable)</p>\
+<code class=\"block border px-3 py-2 break-all apex-select\">{otpauth}</code>\
 </div></div>\
 <form method=\"post\" action=\"/web/auth/mfa/confirm\" class=\"flex flex-col gap-3 sm:flex-row sm:items-start\">\
 <div class=\"flex-1\">\
-<label for=\"mfa-code\" class=\"block text-xs font-bold uppercase tracking-widest text-surface-500 mb-2\">Enter the 6-digit code from your authenticator app</label>\
-<input id=\"mfa-code\" name=\"code\" type=\"text\" inputmode=\"numeric\" pattern=\"[0-9]{{6}}\" maxlength=\"6\" required autocomplete=\"one-time-code\" placeholder=\"000000\" class=\"w-full max-w-xs rounded-[8px_8px_7px_7px] border border-surface-300 bg-background px-3 py-2 text-sm font-mono tracking-widest focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary\" />\
+<label for=\"mfa-code\" class=\"block mb-2 apex-em apex-label\">Enter the 6-digit code from your authenticator app</label>\
+<input id=\"mfa-code\" name=\"code\" type=\"text\" inputmode=\"numeric\" pattern=\"[0-9]{{6}}\" maxlength=\"6\" required autocomplete=\"one-time-code\" placeholder=\"000000\" class=\"w-full max-w-xs border px-3 py-2 apex-input\" />\
 </div>\
-<button type=\"submit\" class=\"rounded-[8px_8px_7px_7px] bg-primary px-4 py-2 text-sm font-semibold text-white hover:bg-brand-700 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:opacity-50\">Verify &amp; Enable</button>\
+<button type=\"submit\" class=\"px-4 py-2 apex-btn apex-btn--primary\">Verify &amp; Enable</button>\
 </form>\
 </div>",
             qr_svg = view.qr_svg,
@@ -7295,11 +7300,11 @@ pub fn control_plane_security_page_with_setup(setup: Option<&MfaSetupView<'_>>) 
     };
     format!(
         "<div class=\"space-y-6\">\
-<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Security Settings</h1>\
+<h1 class=\"apex-page-title\">Security Settings</h1>\
 {mfa_section}\
-<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8\">\
-<h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-500 mb-6\">Session policy</h3>\
-<p class=\"text-sm text-muted-foreground\">Operator sessions are protected against cross-site request forgery and rate-limited.</p>\
+<div class=\"border p-6 md:p-8\">\
+<h3 class=\"mb-6 apex-h3\">Session policy</h3>\
+<p class=\"\">Operator sessions are protected against cross-site request forgery and rate-limited.</p>\
 </div>\
 </div>"
     )
@@ -7316,8 +7321,9 @@ pub struct MfaSetupView<'a> {
 
 impl<'a> MfaSetupView<'a> {
     pub fn new(secret: &'a str, otpauth: &'a str) -> Self {
-        let qr_svg = crate::qr::encode_to_svg(otpauth, 5, 4)
-            .unwrap_or_else(|| "<p class=\"text-sm text-muted-foreground\">QR unavailable — use the manual secret below.</p>".to_string());
+        let qr_svg = crate::qr::encode_to_svg(otpauth, 5, 4).unwrap_or_else(|| {
+            "<p class=\"\">QR unavailable — use the manual secret below.</p>".to_string()
+        });
         Self {
             secret,
             otpauth,
@@ -7331,12 +7337,12 @@ impl<'a> MfaSetupView<'a> {
 pub fn marketing_home_page() -> String {
     "<section class=\"relative overflow-hidden py-20 sm:py-32\">\
 <div class=\"max-w-7xl mx-auto px-4 sm:px-6 lg:px-8\">\
-<div class=\"text-center max-w-3xl mx-auto\">\
-<h1 class=\"text-5xl sm:text-6xl font-bold tracking-tight text-surface-900\">The email API<br/>built for control.</h1>\
-<p class=\"mt-6 text-xl text-surface-600 leading-relaxed\">The most secure, compliant, and developer-friendly email platform. Built for teams that demand reliability.</p>\
+<div class=\"max-w-3xl mx-auto\">\
+<h1 class=\"apex-page-title\">The email API<br/>built for control.</h1>\
+<p class=\"mt-6\">The most secure, compliant, and developer-friendly email platform. Built for teams that demand reliability.</p>\
 <div class=\"mt-10 flex flex-col sm:flex-row gap-4 justify-center\">\
-<a href=\"https://app.apexmail.ee/signup\" class=\"btn-primary text-lg px-8 py-3\">Get Started Free</a>\
-<a href=\"/pricing\" class=\"btn-secondary text-lg px-8 py-3\">View Pricing</a>\
+<a href=\"https://app.apexmail.ee/signup\" class=\"apex-btn apex-btn--primary px-8 py-3\">Get Started Free</a>\
+<a href=\"/pricing\" class=\"apex-btn px-8 py-3\">View Pricing</a>\
 </div></div></div></section>".to_string()
 }
 
@@ -7353,25 +7359,25 @@ pub fn marketing_pricing_page() -> String {
             // Per-plan canonical overage ladder (platform-catalog):
             // Developer €0.80/1K, Pro €0.60/1K, Growth/Business €0.35/1K —
             // never the retired flat €0.40.
-            "50,000 emails/month · €0.80 per extra 1,000",
+            "50,000 emails/month, €0.80 per extra 1,000",
             "",
         ),
         (
             "Pro",
             "€89",
-            "150,000 emails/month · €0.60 per extra 1,000",
+            "150,000 emails/month, €0.60 per extra 1,000",
             "border-2 border-primary",
         ),
         (
             "Growth",
             "€229",
-            "500,000 emails/month · €0.35 per extra 1,000",
+            "500,000 emails/month, €0.35 per extra 1,000",
             "",
         ),
         (
             "Business",
             "€699",
-            "2,000,000 emails/month · priority support",
+            "2,000,000 emails/month, priority support",
             "",
         ),
         (
@@ -7385,91 +7391,91 @@ pub fn marketing_pricing_page() -> String {
         .iter()
         .map(|(name, price, volume, accent)| {
             let badge = if *name == "Pro" {
-                "<div class=\"absolute -top-3 left-1/2 -translate-x-1/2 bg-primary text-white text-xs font-bold px-3 py-1 rounded-sm\">Popular</div>"
+                "<div class=\"apex-label\">Most chosen</div>"
             } else {
                 ""
             };
             format!(
-                "<div class=\"relative rounded-sm {accent} border bg-card p-8\">{badge}<h3 class=\"text-lg font-bold\">{name}</h3><p class=\"text-3xl font-bold mt-4\">{price}<span class=\"text-sm font-normal text-surface-500\">/mo</span></p><p class=\"text-sm text-surface-500 mt-2\">{volume}</p></div>"
+                "<div class=\"relative {accent} border p-8\">{badge}<h3 class=\"apex-h3\">{name}</h3><p class=\"mt-4 apex-em\">{price}<span class=\"\">/mo</span></p><p class=\"mt-2\">{volume}</p></div>"
             )
         })
         .collect::<Vec<_>>()
         .join("");
     format!(
         "<section class=\"py-20 px-4\"><div class=\"max-w-7xl mx-auto\">\
-<div class=\"text-center mb-16\"><h1 class=\"text-4xl font-bold text-surface-900\">Simple, transparent pricing</h1>\
-<p class=\"mt-4 text-lg text-surface-600\">Start free, scale as you grow. All prices in EUR, VAT excluded.</p></div>\
+<div class=\"apex-page-heading\"><h1 class=\"apex-page-title\">Simple, transparent pricing</h1>\
+<p class=\"mt-4\">Start free, scale as you grow. All prices in EUR, VAT excluded.</p></div>\
 <div class=\"grid md:grid-cols-3 gap-8 max-w-5xl mx-auto\">{cards}</div>\
-<p class=\"mt-10 text-center text-sm text-surface-500\">Dedicated IPs €49/mo for the first and €69/mo for each additional on Pro and above. See the <a class=\"text-primary font-bold hover:underline\" href=\"/pricing/calculator\">pricing calculator</a> for usage-based estimates.</p>\
+<p class=\"mt-10\">Dedicated IPs €49/mo for the first and €69/mo for each additional on Pro and above. See the <a class=\"apex-em apex-link\" href=\"/pricing/calculator\">pricing calculator</a> for usage-based estimates.</p>\
 </div></section>"
     )
 }
 
 pub fn marketing_pricing_calculator_page() -> String {
     "<section class=\"py-20 px-4\"><div class=\"max-w-3xl mx-auto\">\
-<h1 class=\"text-4xl font-bold text-surface-900 mb-4\">Pricing Calculator</h1>\
-<p class=\"text-lg text-surface-600 mb-8\">Estimate your monthly cost based on usage.</p>\
-<div class=\"rounded-sm border bg-card p-8 space-y-6\">\
-<div><label class=\"text-sm font-medium\">Monthly emails</label>\
-<input type=\"range\" min=\"0\" max=\"1000000\" value=\"30000\" class=\"w-full mt-2\" />\
-<p class=\"text-sm text-surface-500 mt-1\">3,000 emails/month</p></div>\
-<div class=\"border-t pt-6\"><p class=\"text-sm text-surface-500\">Estimated cost</p>\
-<p class=\"text-4xl font-bold text-surface-900\">$0/mo</p></div>\
+<h1 class=\"mb-4 apex-page-title\">Pricing Calculator</h1>\
+<p class=\"mb-8\">Estimate your monthly cost based on usage.</p>\
+<div class=\"border p-8 space-y-6\">\
+<div><label class=\"apex-em apex-label\">Monthly emails</label>\
+<input type=\"range\" min=\"0\" max=\"1000000\" value=\"30000\" class=\"w-full mt-2 apex-input\" />\
+<p class=\"mt-1\">3,000 emails/month</p></div>\
+<div class=\"border-t pt-6\"><p class=\"\">Estimated cost</p>\
+<p class=\"apex-em\">$0/mo</p></div>\
 </div></div></section>"
         .to_string()
 }
 
 pub fn marketing_features_page() -> String {
     "<section class=\"py-20 px-4\"><div class=\"max-w-7xl mx-auto\">\
-<div class=\"text-center mb-16\"><h1 class=\"text-4xl font-bold text-surface-900\">Features</h1>\
-<p class=\"mt-4 text-lg text-surface-600\">Everything you need for reliable email delivery</p></div>\
+<div class=\"apex-page-heading\"><h1 class=\"apex-page-title\">Features</h1>\
+<p class=\"mt-4\">Everything you need for reliable email delivery</p></div>\
 <div class=\"grid md:grid-cols-3 gap-8\">\
-<div class=\"p-6\"><h3 class=\"text-lg font-bold\">SMTP & REST API</h3><p class=\"text-sm text-surface-500 mt-2\">Send via SMTP relay or our REST API with SDKs in every language.</p></div>\
-<div class=\"p-6\"><h3 class=\"text-lg font-bold\">Delivery Analytics</h3><p class=\"text-sm text-surface-500 mt-2\">Track deliveries, opens, clicks, and bounces through event history.</p></div>\
-<div class=\"p-6\"><h3 class=\"text-lg font-bold\">Dedicated IPs</h3><p class=\"text-sm text-surface-500 mt-2\">Build and maintain your own sending reputation.</p></div>\
-<div class=\"p-6\"><h3 class=\"text-lg font-bold\">DKIM/SPF/DMARC</h3><p class=\"text-sm text-surface-500 mt-2\">Full authentication support with automated DNS verification.</p></div>\
-<div class=\"p-6\"><h3 class=\"text-lg font-bold\">Webhooks</h3><p class=\"text-sm text-surface-500 mt-2\">Signed event notifications with retry handling.</p></div>\
-<div class=\"p-6\"><h3 class=\"text-lg font-bold\">Template Engine</h3><p class=\"text-sm text-surface-500 mt-2\">Build responsive email templates with our visual editor.</p></div>\
+<div class=\"p-6\"><h3 class=\"apex-h3\">SMTP & REST API</h3><p class=\"mt-2\">Send via SMTP relay or our REST API with SDKs in every language.</p></div>\
+<div class=\"p-6\"><h3 class=\"apex-h3\">Delivery Analytics</h3><p class=\"mt-2\">Track deliveries, opens, clicks, and bounces through event history.</p></div>\
+<div class=\"p-6\"><h3 class=\"apex-h3\">Dedicated IPs</h3><p class=\"mt-2\">Build and maintain your own sending reputation.</p></div>\
+<div class=\"p-6\"><h3 class=\"apex-h3\">DKIM/SPF/DMARC</h3><p class=\"mt-2\">Full authentication support with automated DNS verification.</p></div>\
+<div class=\"p-6\"><h3 class=\"apex-h3\">Webhooks</h3><p class=\"mt-2\">Signed event notifications with retry handling.</p></div>\
+<div class=\"p-6\"><h3 class=\"apex-h3\">Template Engine</h3><p class=\"mt-2\">Build responsive email templates with our visual editor.</p></div>\
 </div></div></section>".to_string()
 }
 
 pub fn marketing_compliance_page() -> String {
     "<section class=\"py-20 px-4\"><div class=\"max-w-4xl mx-auto\">\
-<h1 class=\"text-4xl font-bold text-surface-900 mb-4\">Compliance</h1>\
-<p class=\"text-lg text-surface-600 mb-8\">Compliance workflow support for regulated email operations.</p>\
+<h1 class=\"mb-4 apex-page-title\">Compliance</h1>\
+<p class=\"mb-8\">Compliance workflow support for regulated email operations.</p>\
 <div class=\"space-y-8\">\
-<div class=\"rounded-sm border p-6\"><h3 class=\"text-lg font-bold\">GDPR Workflows</h3><p class=\"text-sm text-surface-500 mt-2\">DSR, consent, DPA, and EU-hosted data workflows.</p></div>\
-<div class=\"rounded-sm border p-6\"><h3 class=\"text-lg font-bold\">HIPAA BAA</h3><p class=\"text-sm text-surface-500 mt-2\">Enterprise BAA lifecycle workflow for healthcare implementation review.</p></div>\
+<div class=\"border p-6\"><h3 class=\"apex-h3\">GDPR Workflows</h3><p class=\"mt-2\">DSR, consent, DPA, and EU-hosted data workflows.</p></div>\
+<div class=\"border p-6\"><h3 class=\"apex-h3\">HIPAA BAA</h3><p class=\"mt-2\">Enterprise BAA lifecycle workflow for healthcare implementation review.</p></div>\
 </div></div></section>".to_string()
 }
 
 pub fn marketing_private_cloud_page() -> String {
     "<section class=\"py-20 px-4\"><div class=\"max-w-4xl mx-auto\">\
-<h1 class=\"text-4xl font-bold text-surface-900 mb-4\">Private Cloud</h1>\
-<p class=\"text-lg text-surface-600 mb-8\">Single-tenant deployment review for regulated Enterprise customers.</p>\
+<h1 class=\"mb-4 apex-page-title\">Private Cloud</h1>\
+<p class=\"mb-8\">Single-tenant deployment review for regulated Enterprise customers.</p>\
 <div class=\"grid md:grid-cols-2 gap-8\">\
-<div class=\"rounded-sm border p-6\"><h3 class=\"text-lg font-bold\">Dedicated Infrastructure</h3><p class=\"text-sm text-surface-500 mt-2\">Your own isolated environment with dedicated resources.</p></div>\
-<div class=\"rounded-sm border p-6\"><h3 class=\"text-lg font-bold\">BYOIP and Domains</h3><p class=\"text-sm text-surface-500 mt-2\">Dedicated IP lifecycle, BYOIP verification, and custom domain planning.</p></div>\
+<div class=\"border p-6\"><h3 class=\"apex-h3\">Dedicated Infrastructure</h3><p class=\"mt-2\">Your own isolated environment with dedicated resources.</p></div>\
+<div class=\"border p-6\"><h3 class=\"apex-h3\">BYOIP and Domains</h3><p class=\"mt-2\">Dedicated IP lifecycle, BYOIP verification, and custom domain planning.</p></div>\
 </div></div></section>".to_string()
 }
 
 pub fn marketing_forensic_page() -> String {
     "<section class=\"py-20 px-4\"><div class=\"max-w-4xl mx-auto\">\
-<h1 class=\"text-4xl font-bold text-surface-900 mb-4\">Forensic Analysis</h1>\
-<p class=\"text-lg text-surface-600 mb-8\">Deep-dive email delivery diagnostics.</p>\
-<div class=\"rounded-sm border p-6\">\
-<h3 class=\"text-lg font-bold\">Email Trace</h3>\
-<p class=\"text-sm text-surface-500 mt-2\">Full SMTP transaction trace for every message.</p>\
+<h1 class=\"mb-4 apex-page-title\">Forensic Analysis</h1>\
+<p class=\"mb-8\">Deep-dive email delivery diagnostics.</p>\
+<div class=\"border p-6\">\
+<h3 class=\"apex-h3\">Email Trace</h3>\
+<p class=\"mt-2\">Full SMTP transaction trace for every message.</p>\
 </div></div></section>"
         .to_string()
 }
 
 pub fn marketing_status_page() -> String {
     "<section class=\"py-20 px-4\"><div class=\"max-w-4xl mx-auto\">\
-<h1 class=\"text-4xl font-bold text-surface-900 mb-4\">System Status</h1>\
-<div class=\"rounded-sm border p-6 mb-6\">\
-<div class=\"flex items-center gap-3\"><span class=\"h-3 w-3 rounded-sm bg-success-500\"></span>\
-<span class=\"text-lg font-bold text-surface-900\">All Systems Operational</span></div>\
+<h1 class=\"mb-4 apex-page-title\">System Status</h1>\
+<div class=\"border p-6 mb-6\">\
+<div class=\"flex items-center gap-3\"><span class=\"h-3 w-3\"></span>\
+<span class=\"apex-em\">All Systems Operational</span></div>\
 </div></div></section>"
         .to_string()
 }
@@ -7483,16 +7489,16 @@ pub fn marketing_compare_page(competitor: &str) -> String {
     };
     format!(
         "<section class=\"py-20 px-4\"><div class=\"max-w-4xl mx-auto\">\
-<h1 class=\"text-4xl font-bold text-surface-900 mb-4\">ApexMail vs {display}</h1>\
-<p class=\"text-lg text-surface-600 mb-8\">See why teams choose ApexMail over {display}.</p>\
-<div class=\"rounded-sm border overflow-hidden\">\
-<table class=\"w-full text-sm\"><thead><tr class=\"border-b bg-surface-50\">\
-<th class=\"p-4 text-left font-bold\">Feature</th>\
-<th class=\"p-4 text-center font-bold\">ApexMail</th>\
-<th class=\"p-4 text-center font-bold\">{display}</th>\
+<h1 class=\"mb-4 apex-page-title\">ApexMail vs {display}</h1>\
+<p class=\"mb-8\">See why teams choose ApexMail over {display}.</p>\
+<div class=\"border overflow-hidden\">\
+<table class=\"w-full apex-table\"><thead><tr class=\"border-b\">\
+<th class=\"p-4\">Feature</th>\
+<th class=\"p-4\">ApexMail</th>\
+<th class=\"p-4\">{display}</th>\
 </tr></thead><tbody>\
-<tr class=\"border-b\"><td class=\"p-4\">Dedicated IPs</td><td class=\"p-4 text-center\">Included</td><td class=\"p-4 text-center\">Limited</td></tr>\
-<tr class=\"border-b\"><td class=\"p-4\">Private Cloud</td><td class=\"p-4 text-center\">Available</td><td class=\"p-4 text-center\">Not standard</td></tr>\
+<tr class=\"border-b\"><td class=\"p-4\">Dedicated IPs</td><td class=\"p-4\">Included</td><td class=\"p-4\">Limited</td></tr>\
+<tr class=\"border-b\"><td class=\"p-4\">Private Cloud</td><td class=\"p-4\">Available</td><td class=\"p-4\">Not standard</td></tr>\
 </tbody></table></div></div></section>",
     )
 }
@@ -7500,9 +7506,9 @@ pub fn marketing_compare_page(competitor: &str) -> String {
 /// Generic legal page template used for terms, privacy, cookies, AUP, DPA, SLA.
 pub fn marketing_legal_page(title: &str, slug: &str) -> String {
     format!(
-        "<section class=\"py-20 px-4\"><div class=\"max-w-3xl mx-auto prose prose-surface\">\
+        "<section class=\"py-20 px-4\"><div class=\"max-w-3xl mx-auto apex-prose\">\
 <h1>{title}</h1>\
-<p class=\"text-sm text-surface-500\">Last updated: April 2026</p>\
+<p class=\"\">Last updated: April 2026</p>\
 <div data-legal=\"{slug}\"></div>\
 </div></section>",
     )
@@ -7513,12 +7519,12 @@ pub fn marketing_legal_page(title: &str, slug: &str) -> String {
 /// marketing-zola has the same pages as marketing plus /compare index.
 pub fn marketing_zola_compare_index_page() -> String {
     "<section class=\"py-20 px-4\"><div class=\"max-w-4xl mx-auto\">\
-<h1 class=\"text-4xl font-bold text-surface-900 mb-4\">Compare</h1>\
-<p class=\"text-lg text-surface-600 mb-8\">See how ApexMail stacks up against the competition.</p>\
+<h1 class=\"mb-4 apex-page-title\">Compare</h1>\
+<p class=\"mb-8\">See how ApexMail stacks up against the competition.</p>\
 <div class=\"grid md:grid-cols-3 gap-6\">\
-<a href=\"/compare/postmark\" class=\"rounded-sm border p-6 hover:border-primary transition-colors\"><h3 class=\"font-bold\">vs Postmark</h3></a>\
-<a href=\"/compare/resend\" class=\"rounded-sm border p-6 hover:border-primary transition-colors\"><h3 class=\"font-bold\">vs Resend</h3></a>\
-<a href=\"/compare/sendgrid\" class=\"rounded-sm border p-6 hover:border-primary transition-colors\"><h3 class=\"font-bold\">vs SendGrid</h3></a>\
+<a href=\"/compare/postmark\" class=\"border p-6 apex-btn\"><h3 class=\"apex-h3\">vs Postmark</h3></a>\
+<a href=\"/compare/resend\" class=\"border p-6 apex-btn\"><h3 class=\"apex-h3\">vs Resend</h3></a>\
+<a href=\"/compare/sendgrid\" class=\"border p-6 apex-btn\"><h3 class=\"apex-h3\">vs SendGrid</h3></a>\
 </div></div></section>".to_string()
 }
 
@@ -7554,19 +7560,19 @@ pub fn web_confirm_page(
     let body = if signature_valid {
         format!(
 "<section aria-labelledby=\"confirm-title\" class=\"mx-auto max-w-xl\">\
-<div class=\"rounded-sm border border-destructive/30 bg-card p-6 md:p-8 shadow-premium\">\
-<h1 id=\"confirm-title\" class=\"text-2xl font-bold text-surface-950 tracking-tight\">{title}</h1>\
-<p class=\"mt-2 text-sm text-muted-foreground\">{description} <span class=\"font-mono text-surface-700\">{resource}</span></p>\
-<p class=\"mt-4 text-xs text-muted-foreground\">This confirmation link is signed and expires 15 minutes after it was rendered.</p>\
+<div class=\"border p-6 md:p-8\">\
+<h1 id=\"confirm-title\" class=\"apex-page-title\">{title}</h1>\
+<p class=\"mt-2\">{description} <span class=\"\">{resource}</span></p>\
+<p class=\"mt-4\">This confirmation link is signed and expires 15 minutes after it was rendered.</p>\
 <div class=\"mt-6 flex flex-col gap-3 sm:flex-row\">\
 <form method=\"post\" action=\"/web/confirm\" class=\"inline\">\
 <input type=\"hidden\" name=\"intent\" value=\"{intent}\" />\
 <input type=\"hidden\" name=\"id\" value=\"{resource}\" />\
 <input type=\"hidden\" name=\"return_to\" value=\"{return}\" />\
 <input type=\"hidden\" name=\"sig\" value=\"{sig}\" />\
-<button type=\"submit\" class=\"w-full rounded-sm bg-destructive px-6 py-3 text-sm font-bold text-destructive-foreground hover:bg-destructive/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 sm:w-auto\">Yes, {verb}</button>\
+<button type=\"submit\" class=\"w-full px-6 py-3 sm:w-auto apex-btn apex-btn--danger\">Yes, {verb}</button>\
 </form>\
-<a href=\"{return}\" class=\"w-full rounded-sm border border-surface-300 bg-card px-6 py-3 text-center text-sm font-bold text-surface-950 hover:border-surface-950 sm:w-auto\">Cancel</a>\
+<a href=\"{return}\" class=\"w-full border px-6 py-3 sm:w-auto apex-em apex-btn\">Cancel</a>\
 </div>\
 </div>\
 </section>",
@@ -7581,10 +7587,10 @@ pub fn web_confirm_page(
     } else {
         format!(
 "<section aria-labelledby=\"confirm-title\" class=\"mx-auto max-w-xl\">\
-<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\">\
-<h1 id=\"confirm-title\" class=\"text-2xl font-bold text-surface-950 tracking-tight\">Confirmation link unavailable</h1>\
-<p class=\"mt-2 text-sm text-muted-foreground\">This confirmation link is invalid, expired, or was tampered with. Nothing was changed. Return to the list and open a fresh link.</p>\
-<a href=\"{return}\" class=\"mt-6 inline-block rounded-sm bg-primary px-6 py-3 text-sm font-bold text-white hover:bg-brand-700\">Go back</a>\
+<div class=\"border p-6 md:p-8\">\
+<h1 id=\"confirm-title\" class=\"apex-page-title\">Confirmation link unavailable</h1>\
+<p class=\"mt-2\">This confirmation link is invalid, expired, or was tampered with. Nothing was changed. Return to the list and open a fresh link.</p>\
+<a href=\"{return}\" class=\"mt-6 inline-block px-6 py-3 apex-em apex-btn apex-btn--primary\">Go back</a>\
 </div>\
 </section>",
             return = html_escape(safe_return),
@@ -7635,7 +7641,7 @@ pub fn web_login_page_with_state(message: Option<&str>, csrf_token: &str) -> Str
         .filter(|m| !m.is_empty())
         .map(|m| {
             format!(
-                "<div class=\"mb-6 rounded-[8px_8px_7px_7px] border border-error/30 bg-error/5 px-4 py-3\" role=\"alert\"><p class=\"text-sm font-medium text-error\">{}</p></div>",
+                "<div class=\"mb-6 border border-error/30 px-4 py-3\" role=\"alert\"><p class=\"apex-em\">{}</p></div>",
                 crate::shell::html_escape(m),
             )
         })
@@ -7645,26 +7651,26 @@ pub fn web_login_page_with_state(message: Option<&str>, csrf_token: &str) -> Str
 {csrf}\
 {banner}\
 <div class=\"space-y-2\">\
-<label class=\"apex-klabel\" for=\"login-email\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Email</label>\
-<input id=\"login-email\" name=\"email\" type=\"email\" required autocomplete=\"username\" placeholder=\"you@example.com\" class=\"apex-input w-full px-4 py-3 border border-surface-200 focus-visible:outline-none transition-all placeholder:text-muted-foreground bg-surface-50 text-sm font-medium text-surface-950\" />\
+<label class=\"apex-label\" for=\"login-email\"><svg class=\"\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Email</label>\
+<input id=\"login-email\" name=\"email\" type=\"email\" required autocomplete=\"username\" placeholder=\"you@example.com\" class=\"apex-input w-full px-4 py-3 border\" />\
 </div>\
 <div class=\"space-y-2\">\
 <div class=\"flex items-center justify-between\">\
-<label class=\"apex-klabel\" for=\"password\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Password</label>\
+<label class=\"apex-label\" for=\"password\"><svg class=\"\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Password</label>\
 </div>\
 <div class=\"relative\">\
-<input id=\"password\" name=\"password\" type=\"password\" required autocomplete=\"current-password\" placeholder=\"Enter password\" class=\"apex-input w-full px-4 py-3 border border-surface-200 focus-visible:outline-none transition-all bg-surface-50 text-surface-950\" />\
+<input id=\"password\" name=\"password\" type=\"password\" required autocomplete=\"current-password\" placeholder=\"Enter password\" class=\"apex-input w-full px-4 py-3 border\" />\
 </div>\
 </div>\
 <div class=\"flex items-center justify-between py-1\">\
 <div class=\"flex items-center gap-2\">\
-<input id=\"rememberMe\" name=\"rememberMe\" type=\"checkbox\" checked class=\"h-4 w-4 rounded border-surface-300 text-primary focus:ring-primary transition-all cursor-pointer\" />\
-<label for=\"rememberMe\" class=\"text-xs text-surface-500 font-medium cursor-pointer\">Keep me signed in</label>\
+<input id=\"rememberMe\" name=\"rememberMe\" type=\"checkbox\" checked class=\"h-4 w-4 apex-input\" />\
+<label for=\"rememberMe\" class=\"apex-em apex-label\">Keep me signed in</label>\
 </div>\
-<a href=\"/forgot-password\" class=\"text-xs font-bold text-primary hover:text-brand-700\">Forgot password?</a>\
+<a href=\"/forgot-password\" class=\"apex-em apex-link\">Forgot password?</a>\
 </div>\
-<button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white text-sm font-semibold flex items-center justify-center gap-3 py-3 rounded-[8px_8px_7px_7px] shadow-premium transition-all active:scale-[0.99] group mt-2\"><span>Sign In</span>{arrow}</button>\
-<div class=\"text-center text-xs font-medium text-surface-500\">No account? <a href=\"/signup\" class=\"text-primary font-bold hover:underline\">Sign up</a></div>\
+<button type=\"submit\" class=\"w-full flex items-center justify-center gap-3 py-3 mt-2 apex-btn apex-btn--primary\"><span>Sign In</span>{arrow}</button>\
+<div class=\"apex-em\">No account? <a href=\"/signup\" class=\"apex-em apex-link\">Sign up</a></div>\
 </form>",
         csrf = csrf,
         banner = banner,
@@ -7714,16 +7720,16 @@ pub fn web_login_mfa_challenge_page(csrf_token: &str, email: &str, return_to: &s
     // no request at all (dogfood P0, 2026-10-06; pinned by GATE D's
     // no_rendered_document_nests_a_form_inside_another_form).
     let recovery_form = format!(
-        "<details class=\"mt-4 rounded-[8px_8px_7px_7px] border border-surface-200 bg-surface-50 px-4 py-3\">\
-<summary class=\"cursor-pointer text-sm font-bold text-primary\">Use a recovery code instead</summary>\
+        "<details class=\"mt-4 border px-4 py-3\">\
+<summary class=\"\">Use a recovery code instead</summary>\
 <form class=\"mt-3 space-y-3\" action=\"/web/auth/mfa/verify\" method=\"POST\">\
 {csrf}\
 <input type=\"hidden\" name=\"email\" value=\"{email}\" />\
 <input type=\"hidden\" name=\"return_to\" value=\"{return_to}\" />\
-<label class=\"apex-klabel\" for=\"recoveryCode\">Recovery code</label>\
-<input id=\"recoveryCode\" name=\"recovery_code\" type=\"text\" required autocomplete=\"off\" placeholder=\"xxxx-xxxx\" aria-describedby=\"recovery-code-hint\" class=\"apex-input flex h-12 w-full border border-surface-200 bg-surface-50 px-4 py-2 text-sm font-mono tracking-wide focus-visible:outline-none transition-all\" />\
-<p id=\"recovery-code-hint\" class=\"text-xs text-surface-500\">Each code from your enrollment sheet works once and then stops working.</p>\
-<button type=\"submit\" class=\"w-full border border-surface-300 bg-card text-surface-950 text-sm font-semibold flex items-center justify-center gap-3 py-3 rounded-[8px_8px_7px_7px] transition-all hover:bg-surface-50 active:scale-[0.99]\"><span>Verify recovery code</span></button>\
+<label class=\"apex-label\" for=\"recoveryCode\">Recovery code</label>\
+<input id=\"recoveryCode\" name=\"recovery_code\" type=\"text\" required autocomplete=\"off\" placeholder=\"xxxx-xxxx\" aria-describedby=\"recovery-code-hint\" class=\"apex-input flex h-12 w-full border px-4 py-2\" />\
+<p id=\"recovery-code-hint\" class=\"\">Each code from your enrollment sheet works once and then stops working.</p>\
+<button type=\"submit\" class=\"w-full border flex items-center justify-center gap-3 py-3 apex-btn\"><span>Verify recovery code</span></button>\
 </form></details>",
         csrf = csrf,
         email = html_escape(email),
@@ -7736,14 +7742,14 @@ pub fn web_login_mfa_challenge_page(csrf_token: &str, email: &str, return_to: &s
 <input type=\"hidden\" name=\"return_to\" value=\"{return_to}\" />\
 {status_notice}\
 <div class=\"space-y-2\">\
-<label class=\"apex-klabel\" for=\"mfaCode\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Authenticator code</label>\
-<input id=\"mfaCode\" name=\"code\" type=\"text\" inputmode=\"numeric\" pattern=\"[0-9]*\" maxlength=\"6\" minlength=\"6\" required autocomplete=\"one-time-code\" placeholder=\"000000\" aria-describedby=\"mfa-code-hint\" class=\"apex-input flex h-12 w-full border border-surface-200 bg-surface-50 px-4 py-2 text-sm font-mono text-center tracking-widest focus-visible:outline-none transition-all\" />\
-<p id=\"mfa-code-hint\" class=\"text-xs text-surface-500\">The code refreshes every 30 seconds in your app. Lost your device? Use a recovery code below.</p>\
+<label class=\"apex-label\" for=\"mfaCode\"><svg class=\"\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Authenticator code</label>\
+<input id=\"mfaCode\" name=\"code\" type=\"text\" inputmode=\"numeric\" pattern=\"[0-9]*\" maxlength=\"6\" minlength=\"6\" required autocomplete=\"one-time-code\" placeholder=\"000000\" aria-describedby=\"mfa-code-hint\" class=\"apex-input flex h-12 w-full border px-4 py-2\" />\
+<p id=\"mfa-code-hint\" class=\"\">The code refreshes every 30 seconds in your app. Lost your device? Use a recovery code below.</p>\
 </div>\
-<button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white text-sm font-semibold flex items-center justify-center gap-3 py-3 rounded-[8px_8px_7px_7px] shadow-premium transition-all active:scale-[0.99] group mt-2\"><span>Verify and sign in</span>{arrow}</button>\
+<button type=\"submit\" class=\"w-full flex items-center justify-center gap-3 py-3 mt-2 apex-btn apex-btn--primary\"><span>Verify and sign in</span>{arrow}</button>\
 </form>\
 {recovery_form}\
-<div class=\"text-center text-xs font-medium text-surface-500\"><a href=\"/login\" class=\"text-primary font-bold hover:underline\">Use a different account</a></div>",
+<div class=\"apex-em\"><a href=\"/login\" class=\"apex-em apex-link\">Use a different account</a></div>",
         csrf = csrf,
         email = html_escape(email),
         return_to = html_escape(safe_return_to),
@@ -7763,7 +7769,7 @@ pub fn web_login_mfa_challenge_page(csrf_token: &str, email: &str, return_to: &s
         "Two-factor verification",
         "Enter the code from your authenticator app",
         &form_html,
-        "<div class=\"px-8 pb-8\"><p class=\"text-center text-[11px] text-surface-500 font-medium leading-relaxed px-4\">Lost your device and your codes? <a href=\"mailto:support@apexmail.ee\" class=\"text-primary font-bold hover:underline\">Contact support</a> for account recovery.</p></div>",
+        "<div class=\"px-8 pb-8\"><p class=\"px-4 apex-em\">Lost your device and your codes? <a href=\"mailto:support@apexmail.ee\" class=\"apex-em apex-link\">Contact support</a> for account recovery.</p></div>",
     )
 }
 
@@ -7781,18 +7787,18 @@ pub fn control_plane_login_page(csrf_token: &str) -> String {
         "<form class=\"p-8 space-y-6\" action=\"/web/cp/login\" method=\"POST\">\
 {csrf}\
 <div class=\"space-y-2\">\
-<label class=\"apex-klabel\" for=\"login-email\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Email</label>\
-<input id=\"login-email\" name=\"email\" type=\"email\" required autocomplete=\"email\" placeholder=\"you@company.com\" class=\"apex-input w-full px-4 py-3 border border-surface-200 focus-visible:outline-none transition-all placeholder:text-muted-foreground bg-surface-50 text-sm font-medium text-surface-950\" />\
+<label class=\"apex-label\" for=\"login-email\"><svg class=\"\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Email</label>\
+<input id=\"login-email\" name=\"email\" type=\"email\" required autocomplete=\"email\" placeholder=\"you@company.com\" class=\"apex-input w-full px-4 py-3 border\" />\
 </div>\
 <div class=\"space-y-2\">\
 <div class=\"flex items-center justify-between\">\
-<label class=\"apex-klabel\" for=\"login-password\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Password</label>\
+<label class=\"apex-label\" for=\"login-password\"><svg class=\"\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Password</label>\
 </div>\
 <div class=\"relative\">\
-<input id=\"login-password\" name=\"password\" type=\"password\" required autocomplete=\"current-password\" placeholder=\"Enter password\" class=\"apex-input w-full px-4 py-3 border border-surface-200 focus-visible:outline-none transition-all bg-surface-50 text-surface-950\" />\
+<input id=\"login-password\" name=\"password\" type=\"password\" required autocomplete=\"current-password\" placeholder=\"Enter password\" class=\"apex-input w-full px-4 py-3 border\" />\
 </div>\
 </div>\
-<button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white text-sm font-semibold flex items-center justify-center gap-3 py-3 rounded-[8px_8px_7px_7px] shadow-premium transition-all active:scale-[0.99] group mt-2\"><span>Sign in</span>{arrow}</button>\
+<button type=\"submit\" class=\"w-full flex items-center justify-center gap-3 py-3 mt-2 apex-btn apex-btn--primary\"><span>Sign in</span>{arrow}</button>\
 </form>",
         csrf = csrf,
         arrow = web_auth_arrow_icon(),
@@ -7804,7 +7810,7 @@ pub fn control_plane_login_page(csrf_token: &str) -> String {
         &form_html,
         // Review §7 (Operator login): a concise access-recovery contact, so
         // a locked-out operator is not stranded on the login card.
-        "<div class=\"px-8 pb-8\"><p class=\"text-center text-[11px] text-surface-500 font-medium leading-relaxed px-4\">Operator console restricted to authorized administrators. Locked out? Ask your workspace owner to reset your access, or <a href=\"mailto:support@apexmail.ee\" class=\"text-primary font-bold hover:underline\">contact ApexMail support</a>.</p></div>",
+        "<div class=\"px-8 pb-8\"><p class=\"px-4 apex-em\">Operator console restricted to authorized administrators. Locked out? Ask your workspace owner to reset your access, or <a href=\"mailto:support@apexmail.ee\" class=\"apex-em apex-link\">contact ApexMail support</a>.</p></div>",
     )
 }
 
@@ -7829,7 +7835,7 @@ mod tests {
         // Batch-2 single-main fix: the former landmark's styling moved onto
         // the <body> and the root layout no longer emits a <main>.
         assert!(html.contains(&format!(
-            "<body class=\"{} min-h-screen bg-background\">",
+            "<body class=\"{} min-h-screen\">",
             WEB_ROOT_BODY_CLASSES
         )));
         assert!(!html.contains("<main"));
@@ -7846,7 +7852,7 @@ mod tests {
         assert!(html.contains("<title>Control Plane — ApexMail</title>"));
         let titled = control_plane_root_layout_with_title("<p>test</p>", "Tenants — ApexMail");
         assert!(titled.contains("<title>Tenants — ApexMail</title>"));
-        assert!(html.contains("<body class=\"antialiased bg-background text-surface-950\">"));
+        assert!(html.contains("<body class=\"\">"));
         assert!(html.contains("<p>test</p>"));
     }
 
@@ -8737,7 +8743,7 @@ mod tests {
         assert!(html.contains("No account? <a href=\"/signup\""));
         assert!(html.contains("Or continue with"));
         // Header now matches signup (title + subtitle)
-        assert!(html.contains("Apex</span><span class=\"text-surface-950\">Mail</span>"));
+        assert!(html.contains("<span class=\"apex-wordmark__apex\">Apex</span><span class=\"apex-wordmark__mail\">Mail</span>"));
         assert!(html.contains("Welcome back"));
         assert!(html.contains("Sign in to your ApexMail account"));
     }
@@ -8811,7 +8817,7 @@ mod tests {
     fn web_auth_shell_empty_title_skips_header() {
         let html = web_auth_shell("", "", "<form></form>", "");
         assert!(!html.contains("<h1"));
-        assert!(html.contains("Apex</span><span class=\"text-surface-950\">Mail</span>"));
+        assert!(html.contains("<span class=\"apex-wordmark__apex\">Apex</span><span class=\"apex-wordmark__mail\">Mail</span>"));
     }
 
     // ─── Marketing page parity ──────────────────────────────
@@ -9115,9 +9121,11 @@ mod tests {
         assert!(html.contains("Overview"));
         assert!(html.contains("Send Volume"));
         assert!(html.contains("Last 30 days"));
-        assert!(html.contains("rounded-[16px_16px_9px_9px]") /* ARCH (mark DNA) */);
-        // H1 consistency: every console page title is text-2xl.
-        assert!(!html.contains("text-3xl font-bold tracking-tight text-surface-950"));
+        // ARK: figures are KPI primitives under a 2px rule; no arch radii.
+        assert!(html.contains("apex-kpi"), "{html}");
+        assert!(!html.contains("rounded-["), "{html}");
+        // H1 consistency: every console page title is the page-band title.
+        assert!(html.contains("apex-page-heading"), "{html}");
         // Batch-2 honesty fix: the no-data fallback must not fabricate a
         // delivery rate — "unavailable", never a dial claiming 98.9%.
         assert!(!html.contains("98.9"));
@@ -9147,10 +9155,10 @@ mod tests {
             rows: vec![],
         });
         let html = data_list_page(&data, "queue");
-        // Stat-tile chassis, not the old KPI card dialect.
-        assert!(html.contains("apex-cp-stat-tile"));
-        assert!(html.contains("apex-cp-stat-label"));
-        assert!(html.contains("apex-cp-stat-value"));
+        // ARK KPI figures (label / figure / delta), not tiles.
+        assert!(html.contains("apex-kpi"), "{html}");
+        assert!(html.contains("apex-kpi__l"), "{html}");
+        assert!(html.contains("apex-kpi__n"), "{html}");
         // Tone inference: non-zero risk counter tints, zero stays calm.
         assert!(html.contains("data-tone=\"error\""));
         assert!(!html.contains("data-tone=\"warn\""));
@@ -9181,7 +9189,7 @@ mod tests {
             }],
         });
         let html = data_list_page(&data, "tenant");
-        assert!(html.contains("apex-eyebrow"));
+        assert!(html.contains("apex-page-heading"), "{html}");
         assert!(html.contains("apex-table-wrap--scroll"));
         assert!(html.contains("apex-table--dense"));
         // Web list pages keep the consumer density.
@@ -9253,7 +9261,7 @@ mod tests {
             }],
         };
         let html = web_inbox_placement_detail_page_with_data(&with_providers);
-        assert!(html.contains(">Completed</div>"), "{html}");
+        assert!(html.contains(">Completed</"), "{html}");
         assert!(html.contains("Per-provider results"), "{html}");
         assert!(html.contains(">Gmail<"), "{html}");
         assert!(html.contains("40 of 40 seed accounts reported"), "{html}");
@@ -9263,7 +9271,7 @@ mod tests {
             ..with_providers.clone()
         };
         let html = web_inbox_placement_detail_page_with_data(&running);
-        assert!(html.contains(">Running</div>"), "{html}");
+        assert!(html.contains(">Running</"), "{html}");
         assert!(
             html.contains("Results appear once the test completes"),
             "{html}"
@@ -9492,7 +9500,8 @@ mod tests {
         let html = control_plane_dashboard_page();
         assert!(html.contains("System Overview"));
         assert!(html.contains("Fleet Health"));
-        assert!(html.contains("rounded-[16px_16px_9px_9px]") /* ARCH (mark DNA) */);
+        assert!(html.contains("apex-kpi"), "{html}");
+        assert!(!html.contains("rounded-["), "{html}");
     }
 
     #[test]
@@ -10250,7 +10259,7 @@ mod tests {
     #[test]
     fn sanitizer_keeps_only_allowlisted_attributes() {
         let out = sanitize_preview_html(
-            r#"<a href="https://example.com" class="link" id="x" target="_blank" rel="noopener" style="color:red">link</a>"#,
+            r#"<a href="https://example.com" class="link apex-link" id="x" target="_blank" rel="noopener" style="color:red">link</a>"#,
         );
         assert!(out.contains("href=\"https://example.com\""), "got: {out}");
         for dropped in ["class=", "id=", "target=", "rel=", "style="] {
@@ -10518,8 +10527,8 @@ mod deferred_feature_view_tests {
         });
         let html = web_campaign_edit_page_with_data(&editor);
         // The badge is the row's real lifecycle status, not "Draft".
-        assert!(html.contains(">Scheduled</div>"), "{html}");
-        assert!(!html.contains(">Draft</div>"), "{html}");
+        assert!(html.contains(">Scheduled</"), "{html}");
+        assert!(!html.contains(">Draft</span>"), "{html}");
         // §4.11: the schedule is explicit about UTC and the consequence of
         // saving, and save-as-draft is a distinct authorization-free submit.
         assert!(html.contains("Schedule (optional, UTC)"), "{html}");
@@ -10749,16 +10758,16 @@ mod deferred_feature_view_tests {
         assert!(html.contains("formaction=\"/web/templates/preview\""));
     }
 
-    /// The auth wordmark is the marketing two-tone lockup: brand red "Apex"
-    /// + near-black "Mail" (`text-brand-600` / `text-surface-950`).
+    /// The auth wordmark is the fixed two-tone lockup artefact (owner pin):
+    /// "Apex" in the wordmark red, "Mail" in ink, via the authority's
+    /// .apex-wordmark classes (the tones live in --wordmark-*).
     #[test]
     fn auth_logo_is_two_tone_brand_red_and_ink() {
         let logo = web_auth_logo();
-        assert!(logo.contains("text-brand-600\">Apex"), "{logo}");
-        assert!(logo.contains("text-surface-950\">Mail"), "{logo}");
+        assert!(logo.contains("apex-wordmark\"><span class=\"apex-wordmark__apex\">Apex</span><span class=\"apex-wordmark__mail\">Mail</span></span>"), "{logo}");
         assert!(
             !logo.contains("text-primary\">Apex"),
-            "the wordmark must not rely on .text-primary (undefined --accent-text collapsed it): {logo}"
+            "the wordmark must not rely on .text-primary: {logo}"
         );
     }
 
@@ -10776,9 +10785,7 @@ mod deferred_feature_view_tests {
             "Analytics &amp; suppressions",
         ] {
             assert!(
-                form.contains(&format!(
-                    "<legend class=\"text-sm font-semibold text-surface-950\">{legend}</legend>"
-                )),
+                form.contains(&format!("<legend class=\"\">{legend}</legend>")),
                 "missing scope group {legend}: {form}"
             );
         }

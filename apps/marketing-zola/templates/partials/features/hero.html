@@ -1,59 +1,57 @@
 {# ── Features Hero ────────────────────────────────────────────── #}
 {# Converted from features/FeaturesHero.tsx                      #}
 
-<section class="py-20 lg:py-32 bg-surface-50">
+<section class="py-20 lg:py-32">
   <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-    <div class="animate-in text-center max-w-4xl mx-auto">
+    <div class="max-w-4xl mx-auto">
       {# Eyebrow on the calculator grammar (design audit item 11). #}
-      <div class="inline-flex items-center gap-2 px-3 py-1 rounded-md bg-brand-50 text-brand-700 border border-brand-100/50 text-xs font-bold tracking-[0.05em] uppercase mb-6">
-        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+      <div class="mb-6 apex-meta">
         {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["hero_badge"] %}{{ i18n_data[l]["features"]["hero_badge"] }}{% else %}Complete Email Infrastructure{% endif %}
       </div>
 
-      <h1 class="text-[40px] sm:text-[48px] lg:text-[80px] font-bold tracking-tight mb-6 text-surface-950">
+      <h1 class="mb-6 apex-page-title">
         {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["hero_heading_1"] %}{{ i18n_data[l]["features"]["hero_heading_1"] }}{% else %}Every Feature You Need,{% endif %}
-        {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["hero_heading_2"] %}<span class="text-surface-950 block sm:inline sm:ml-3">{{ i18n_data[l]["features"]["hero_heading_2"] }}</span>{% else %}<span class="text-surface-950 block sm:inline sm:ml-3">Zero You Don&rsquo;t</span>{% endif %}
+        {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["hero_heading_2"] %}<span class="block sm:inline sm:ml-3">{{ i18n_data[l]["features"]["hero_heading_2"] }}</span>{% else %}<span class="block sm:inline sm:ml-3">Zero You Don&rsquo;t</span>{% endif %}
       </h1>
 
-      <p class="text-xl text-surface-600 mb-10 max-w-2xl mx-auto leading-relaxed">
+      <p class="mb-10 max-w-2xl mx-auto">
         {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["hero_subtitle"] %}{{ i18n_data[l]["features"]["hero_subtitle"] }}{% else %}From send to delivery, ApexMail handles everything: authentication, deliverability, compliance, analytics, and AI optimization—all without external dependencies.{% endif %}
       </p>
 
       <div class="flex flex-col sm:flex-row items-center justify-center gap-4 mb-20">
-        <a href="{{ config.extra.app_url }}/signup" class="btn-primary btn-primary--lg flex items-center gap-2 group">
+        <a href="{{ config.extra.app_url }}/signup" class="apex-btn apex-btn--primary">
           {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["hero_cta_trial"] %}{{ i18n_data[l]["features"]["hero_cta_trial"] }}{% else %}Start Free{% endif %}
-          <svg class="w-4 h-4 group-hover:translate-x-1 transition-transform" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
         </a>
-        <a href="{{ lp }}/pricing/" class="btn-secondary btn-secondary--lg flex items-center gap-2">
+        <a href="{{ lp }}/pricing/" class="apex-btn">
           {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["hero_cta_pricing"] %}{{ i18n_data[l]["features"]["hero_cta_pricing"] }}{% else %}View Pricing{% endif %}
         </a>
       </div>
 
       {# Stats Grid #}
-      <div class="grid grid-cols-2 lg:grid-cols-4 gap-8 pt-8 border-t border-surface-100">
-        <div class="animate-in text-center">
-          <div class="text-3xl lg:text-4xl font-bold text-surface-950 mb-2 tracking-tight">99.9%</div>
-          <div class="text-sm text-surface-500 font-medium">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["stat_uptime"] %}{{ i18n_data[l]["features"]["stat_uptime"] }}{% else %}Uptime SLA (Business and Enterprise plans){% endif %}</div>
-          <div class="text-xs text-surface-400 mt-1"><a href="{{ lp }}/sla/" class="hover:text-brand-500 transition-colors">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["stat_uptime_link"] %}{{ i18n_data[l]["features"]["stat_uptime_link"] }}{% else %}Service credits{% endif %}</a></div>
+      <div class="grid grid-cols-2 lg:grid-cols-4 gap-8 pt-8 border-t">
+        <div class="">
+          <div class="mb-2 apex-em">99.9%</div>
+          <div class="apex-em">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["stat_uptime"] %}{{ i18n_data[l]["features"]["stat_uptime"] }}{% else %}Uptime SLA (Business and Enterprise plans){% endif %}</div>
+          <div class="mt-1"><a href="{{ lp }}/sla/" class="apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["stat_uptime_link"] %}{{ i18n_data[l]["features"]["stat_uptime_link"] }}{% else %}Service credits{% endif %}</a></div>
         </div>
-        <div class="animate-in text-center">
+        <div class="">
           {# This figure is an SLA TARGET from data/canonical.json
              (claims.api_latency_target: "P95 ≤ 500ms measured at gateway"),
              not a measured result — the label says so beside the number. #}
-          <div class="text-3xl lg:text-4xl font-bold text-surface-950 mb-2 tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["stat_latency_value"] %}{{ i18n_data[l]["features"]["stat_latency_value"] }}{% else %}P95 &le; 500ms{% endif %}</div>
-          <div class="text-sm text-surface-500 font-medium">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["stat_api_latency"] %}{{ i18n_data[l]["features"]["stat_api_latency"] }}{% else %}API latency SLA target (gateway){% endif %}</div>
+          <div class="mb-2 apex-em">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["stat_latency_value"] %}{{ i18n_data[l]["features"]["stat_latency_value"] }}{% else %}P95 &le; 500ms{% endif %}</div>
+          <div class="apex-em">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["stat_api_latency"] %}{{ i18n_data[l]["features"]["stat_api_latency"] }}{% else %}API latency SLA target (gateway){% endif %}</div>
           {# performance-methodology/ exists in EN only — link it un-prefixed
              ({{ lp }} made it a 404 on locale pages; broken-links.sh finding). #}
-          <div class="text-xs text-surface-400 mt-1"><a href="/performance-methodology/" class="hover:text-brand-500 transition-colors">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["stat_latency_link"] %}{{ i18n_data[l]["features"]["stat_latency_link"] }}{% else %}Target definition and methodology{% endif %}</a></div>
+          <div class="mt-1"><a href="/performance-methodology/" class="apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["stat_latency_link"] %}{{ i18n_data[l]["features"]["stat_latency_link"] }}{% else %}Target definition and methodology{% endif %}</a></div>
         </div>
-        <div class="animate-in text-center">
-          <div class="text-3xl lg:text-4xl font-bold text-surface-950 mb-2 tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["stat_gdpr_value"] %}{{ i18n_data[l]["features"]["stat_gdpr_value"] }}{% else %}EU-Hosted{% endif %}</div>
-          <div class="text-sm text-surface-500 font-medium">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["stat_gdpr_label"] %}{{ i18n_data[l]["features"]["stat_gdpr_label"] }}{% else %}GDPR-Aligned Infrastructure{% endif %}</div>
-          <div class="text-xs text-surface-400 mt-1"><a href="{{ lp }}/compliance/" class="hover:text-brand-500 transition-colors">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["stat_gdpr_link"] %}{{ i18n_data[l]["features"]["stat_gdpr_link"] }}{% else %}Compliance details{% endif %}</a></div>
+        <div class="">
+          <div class="mb-2 apex-em">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["stat_gdpr_value"] %}{{ i18n_data[l]["features"]["stat_gdpr_value"] }}{% else %}EU-Hosted{% endif %}</div>
+          <div class="apex-em">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["stat_gdpr_label"] %}{{ i18n_data[l]["features"]["stat_gdpr_label"] }}{% else %}GDPR-Aligned Infrastructure{% endif %}</div>
+          <div class="mt-1"><a href="{{ lp }}/compliance/" class="apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["stat_gdpr_link"] %}{{ i18n_data[l]["features"]["stat_gdpr_link"] }}{% else %}Compliance details{% endif %}</a></div>
         </div>
-        <div class="animate-in text-center">
-          <div class="text-3xl lg:text-4xl font-bold text-surface-950 mb-2 tracking-tight">0</div>
-          <div class="text-sm text-surface-500 font-medium">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["stat_no_paid_ai"] %}{{ i18n_data[l]["features"]["stat_no_paid_ai"] }}{% else %}Paid AI APIs{% endif %}</div>
+        <div class="">
+          <div class="mb-2 apex-em">0</div>
+          <div class="apex-em">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["stat_no_paid_ai"] %}{{ i18n_data[l]["features"]["stat_no_paid_ai"] }}{% else %}Paid AI APIs{% endif %}</div>
         </div>
       </div>
     </div>

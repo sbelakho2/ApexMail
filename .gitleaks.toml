@@ -201,10 +201,9 @@ paths = [
     "(^|/)packages/kiwicaptcha-php/src/ExecutionChallengeGenerator[.]php$",
     "(^|/)packages/kiwicaptcha/integrations/symfony/src/Risk/ClientContextTag[.]php$",
     "(^|/)tests/browser/router[.]php$",
-    # Vendored artifacts (tracked binaries / node_modules — see audit §4;
-    # moving them out of git is the real fix): the compiled tailwind CLI
-    # and the vendored playwright tree contain binary hash-like strings.
-    "^apps/marketing-zola/tailwindcss$",
+    # Vendored artifacts (tracked node_modules — see audit §4; moving them
+    # out of git is the real fix): the vendored playwright tree contains
+    # binary hash-like strings.
     "(^|/)tools/contrast-audit/node_modules/",
     #
     # Per-file heuristic-noise triage (2026-08-23, all 66 remaining findings

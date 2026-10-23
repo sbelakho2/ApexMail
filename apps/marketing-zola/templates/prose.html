@@ -10,11 +10,11 @@
 
 {% block content %}
 <div class="max-w-3xl mx-auto px-6 py-20 lg:py-32">
-  <h1 class="mb-4 text-surface-950 [overflow-wrap:anywhere]">{{ page.title }}</h1>
+  <h1 class="mb-4 break-words apex-page-title">{{ page.title }}</h1>
   {% if page.extra.last_updated %}
   {# Machine-readable date + localized label: the literal string used to be
      hardcoded English ("Last updated") on every locale. #}
-  <p class="text-surface-400 mb-12 text-xs font-bold tracking-widest">
+  <p class="mb-12 apex-em">
     {% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['last_updated'] %}{{ i18n_data[l]['a11y']['last_updated'] }}{% else %}Last updated:{% endif %}
     <time datetime="{{ page.extra.last_updated }}">{{ page.extra.last_updated }}</time>
   </p>
@@ -22,17 +22,17 @@
   {# Stable section navigation: Zola's heading anchors ARE the section ids,
      so this nav survives renames of the page and is language-independent. #}
   {% if page.toc %}
-  <nav aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['on_this_page'] %}{{ i18n_data[l]['a11y']['on_this_page'] }}{% else %}On this page{% endif %}" class="mb-10 rounded-sm border border-surface-200 bg-surface-50 p-4">
-    <ul class="space-y-1.5 text-sm">
+  <nav aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['on_this_page'] %}{{ i18n_data[l]['a11y']['on_this_page'] }}{% else %}On this page{% endif %}" class="mb-10 border p-4">
+    <ul class="space-y-1.5">
       {% for h in page.toc %}
       {% if h.level <= 2 %}
-      <li><a href="{{ h.permalink }}" class="text-surface-600 hover:text-brand-600 hover:underline">{{ h.title | safe }}</a></li>
+      <li><a href="{{ h.permalink }}" class="apex-link">{{ h.title | safe }}</a></li>
       {% endif %}
       {% endfor %}
     </ul>
   </nav>
   {% endif %}
-  <div class="prose max-w-none">
+  <div class="apex-prose">
     {# Content is rendered from trusted Markdown source files only (legal/policy pages). #}
     {# |safe is acceptable because the content author is the site owner, not end users. #}
     {{ page.content | safe }}

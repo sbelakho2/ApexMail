@@ -6,64 +6,69 @@
 {# currently being read (aria-current="page").                   #}
 {% set competitor_name = page.extra.competitor_name | default(value="the alternative") %}
 
-<section id="decision-guide" class="scroll-mt-20 py-20 lg:py-32 bg-surface-100 border-t border-surface-200">
+<section id="decision-guide" class="scroll-mt-20 py-20 lg:py-32 border-t">
   <div class="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8">
-    <div class="bg-surface-50 border border-surface-200 rounded-sm p-10 lg:p-16">
-      <div class="text-center mb-16">
-        <span class="inline-block px-2 py-0.5 text-xs font-bold tracking-widest text-surface-400 border border-surface-200 rounded-sm mb-6 uppercase">{% if i18n_data and i18n_data[l] and i18n_data[l]["compare"] and i18n_data[l]["compare"]["decision_label"] %}{{ i18n_data[l]["compare"]["decision_label"] }}{% else %}Decision guide{% endif %}</span>
-        <h2 class="text-surface-950 mb-6 tracking-tighter">
-          {{ page.extra.decision_title | default(value="Which should you choose?") }}
+    <div class="border p-10 lg:p-16">
+      <div class="mb-16">
+        <p class="mb-6 apex-meta">{% if i18n_data and i18n_data[l] and i18n_data[l]["compare"] and i18n_data[l]["compare"]["decision_label"] %}{{ i18n_data[l]["compare"]["decision_label"] }}{% else %}Decision guide{% endif %}</p>
+        <h2 class="mb-6 apex-h2">
+          {{ page.extra.decision_title | default(value="Where each product fits") }}
         </h2>
       </div>
 
       {# Balanced decision rules (review SS47): when each product is the
          better fit — no winner language. #}
-      <div class="grid sm:grid-cols-2 gap-6 mb-12 text-left">
-        <div class="p-6 border border-surface-200 bg-surface-50">
-          <h3 class="text-sm font-bold text-surface-950 mb-3">{% if i18n_data and i18n_data[l] and i18n_data[l]["compare"] and i18n_data[l]["compare"]["choose_apexmail"] %}{{ i18n_data[l]["compare"]["choose_apexmail"] }}{% else %}Choose ApexMail when…{% endif %}</h3>
+      <div class="grid sm:grid-cols-2 gap-6 mb-12">
+        <div class="p-6 border">
+          <h3 class="mb-3 apex-h3">{% if i18n_data and i18n_data[l] and i18n_data[l]["compare"] and i18n_data[l]["compare"]["choose_apexmail"] %}{{ i18n_data[l]["compare"]["choose_apexmail"] }}{% else %}Choose ApexMail when…{% endif %}</h3>
           <ul class="space-y-2">
             {% for point in page.extra.choose_apexmail | default(value=["You need per-message delivery diagnostics and raw SMTP responses", "EEA data storage or private deployment (Dedicated Tenant / BYOC) matters", "You want deliverability tooling (grader, warm-up, reputation) integrated with sending"]) %}
-            <li class="flex items-start gap-3 text-[13px] text-surface-600"><span class="text-brand-500 font-bold" aria-hidden="true">+</span>{{ point }}</li>
+            <li class="flex items-start gap-3"><span class="apex-em" aria-hidden="true">+</span>{{ point }}</li>
             {% endfor %}
           </ul>
         </div>
-        <div class="p-6 border border-surface-200 bg-surface-50">
-          <h3 class="text-sm font-bold text-surface-950 mb-3">{% if i18n_data and i18n_data[l] and i18n_data[l]["compare"] and i18n_data[l]["compare"]["choose_competitor"] %}{{ i18n_data[l]["compare"]["choose_competitor"] }}{% else %}Choose {{ competitor_name }} when…{% endif %}</h3>
+        <div class="p-6 border">
+          <h3 class="mb-3 apex-h3">{% if i18n_data and i18n_data[l] and i18n_data[l]["compare"] and i18n_data[l]["compare"]["choose_competitor"] %}{{ i18n_data[l]["compare"]["choose_competitor"] }}{% else %}Choose {{ competitor_name }} when…{% endif %}</h3>
           <ul class="space-y-2">
             {% for point in page.extra.choose_competitor | default(value=["Your stack depends on that provider's ecosystem or marketplace", "Its specific pricing shape fits your volume profile better", "You need a capability ApexMail does not currently offer"]) %}
-            <li class="flex items-start gap-3 text-[13px] text-surface-600"><span class="text-surface-400 font-bold" aria-hidden="true">+</span>{{ point }}</li>
+            <li class="flex items-start gap-3"><span class="apex-em" aria-hidden="true">+</span>{{ point }}</li>
             {% endfor %}
           </ul>
         </div>
       </div>
 
-      <div class="text-center">
+      <div class="">
         <div class="flex flex-col sm:flex-row justify-center gap-4 mb-10">
-          <a href="{{ config.extra.app_url }}/signup" class="btn-primary">
+          <a href="{{ config.extra.app_url }}/signup" class="apex-btn apex-btn--primary">
             {% if i18n_data and i18n_data[l] and i18n_data[l]["cta"] and i18n_data[l]["cta"]["cta_button"] %}{{ i18n_data[l]["cta"]["cta_button"] }}{% else %}Start free{% endif %}
           </a>
-          <a href="{{ lp }}/pricing/" class="btn-secondary">{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["pricing"] %}{{ i18n_data[l]["header"]["pricing"] }}{% else %}View pricing{% endif %}</a>
+          <a href="{{ lp }}/pricing/" class="apex-btn">{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["pricing"] %}{{ i18n_data[l]["header"]["pricing"] }}{% else %}View pricing{% endif %}</a>
         </div>
-        <p class="text-xs text-surface-400 font-bold tracking-[0.05em]">
-          {% if i18n_data and i18n_data[l] and i18n_data[l]["compare"] and i18n_data[l]["compare"]["cta_note"] %}{{ i18n_data[l]["compare"]["cta_note"] }}{% else %}No credit card &bull; 3,000 emails/month free{% endif %}
+        <p class="apex-em">
+          {% if i18n_data and i18n_data[l] and i18n_data[l]["compare"] and i18n_data[l]["compare"]["cta_note"] %}{{ i18n_data[l]["compare"]["cta_note"] }}{% else %}No credit card required, 3,000 emails per month free{% endif %}
         </p>
       </div>
     </div>
 
     {# Complete applicable competitor set: all five published comparisons,
        with the current page marked. Pages share this partial; the slug is
-       compared against page.extra.competitor_slug. #}
+       compared against page.extra.competitor_slug. Plain route links: the
+       current page is marked with aria-current (no state class — the law
+       gate allows only apex-* and structural tokens). #}
     {% set competitor_slugs = ["sendgrid", "resend", "postmark", "mailgun", "amazon-ses"] %}
     {% set competitor_names = ["SendGrid", "Resend", "Postmark", "Mailgun", "Amazon SES"] %}
-    <div class="mt-16 text-center">
-      <p class="text-xs text-surface-500 mb-6 font-bold tracking-widest text-balance uppercase">{% if i18n_data and i18n_data[l] and i18n_data[l]["compare"] and i18n_data[l]["compare"]["alternatives"] %}{{ i18n_data[l]["compare"]["alternatives"] }}{% else %}Alternatives, compared{% endif %}</p>
-      <div class="flex flex-wrap justify-center gap-2">
+    <div class="mt-16">
+      <p class="mb-6 apex-em">{% if i18n_data and i18n_data[l] and i18n_data[l]["compare"] and i18n_data[l]["compare"]["alternatives"] %}{{ i18n_data[l]["compare"]["alternatives"] }}{% else %}Alternatives, compared{% endif %}</p>
+      <div class="flex flex-wrap gap-x-6 gap-y-2">
         {% for slug in competitor_slugs %}
+        {% if page.extra.competitor_slug == slug %}
         <a href="{{ lp }}/compare/{{ slug }}/"
-           {% if page.extra.competitor_slug == slug %}aria-current="page"{% endif %}
-           class="text-xs font-bold tracking-widest px-4 py-2 border transition-colors {% if page.extra.competitor_slug == slug %}bg-surface-950 text-white border-surface-950{% else %}bg-surface-50 border-surface-200 text-surface-600 hover:text-surface-950 hover:border-surface-950{% endif %}">
-          vs {{ competitor_names[loop.index0] }}
-        </a>
+           aria-current="page"
+           class="apex-link">{{ competitor_names[loop.index0] }}</a>
+        {% else %}
+        <a href="{{ lp }}/compare/{{ slug }}/"
+           class="apex-link">{{ competitor_names[loop.index0] }}</a>
+        {% endif %}
         {% endfor %}
       </div>
     </div>

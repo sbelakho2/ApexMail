@@ -32,7 +32,6 @@ venv/
 .env_python/
 __pycache__/
 **/__pycache__/
-apps/marketing-zola/tailwindcss-*
 apps/marketing-zola/public/
 *.pyc
 *.pyo

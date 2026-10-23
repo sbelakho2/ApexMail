@@ -20,7 +20,7 @@
 {%- if l and l != config.default_language -%}{%- set_global lp = "/" ~ l -%}{%- endif -%}
 
 <!DOCTYPE html>
-<html lang="{{ lang | default(value=config.default_language) }}" dir="ltr" id="top" data-theme="apex" class="scroll-smooth">
+<html lang="{{ lang | default(value=config.default_language) }}" dir="ltr" id="top" data-theme="apex">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -30,8 +30,8 @@
   {# woff2 versions (converted from the variable TTFs with fontTools) are
      ~70% smaller and universally supported; the TTFs remain as fallback
      sources in the font-family stacks only. #}
-  {% set inter_font_url = get_url(path="fonts/InterVariable.woff2", cachebust=true) %}
-  {% set fraunces_font_url = get_url(path="fonts/Fraunces-Variable.woff2", cachebust=true) %}
+  {% set sans_font_url = get_url(path="fonts/Overpass-latin-400-normal.woff2", cachebust=true) %}
+  {% set display_font_url = get_url(path="fonts/Spectral-latin-500-normal.woff2", cachebust=true) %}
   {% set styles_css_url = get_url(path="css/styles.css", cachebust=true) %}
   {% set no_js_css_url = get_url(path="css/no-js.css", cachebust=true) %}
   <title>{% block title %}{{ config.title }}{% endblock title %}</title>
@@ -112,21 +112,21 @@
   <meta name="twitter:creator" content="{{ config.extra.twitter_handle }}" />
   <link rel="icon" href="/icon.svg" type="image/svg+xml" />
   <link rel="manifest" href="/manifest.json" />
-  {# Font preloads — body + display faces only. Inter (body text) and
-     Fraunces (display headings) are above-the-fold critical on every
-     page, so both are preloaded. JetBrainsMono is deliberately NOT
-     preloaded: it only styles code snippets/API-console samples on a
-     minority of pages, so a site-wide preload would push ~100KB that
-     most page views never render — it loads normally via the CSS
-     @font-face in styles.css when actually used. #}
-  <link rel="preload" href="{{ inter_font_url }}" as="font" type="font/woff2" crossorigin />
-  <link rel="preload" href="{{ fraunces_font_url }}" as="font" type="font/woff2" crossorigin />
+  {# Font preloads — the two faces ark.css sets above the fold: Overpass
+     (body text) and Spectral (display headings), both weight-critical on
+     every page. OverpassMono is deliberately NOT preloaded: it only styles
+     code samples and identifiers on a minority of pages, so a site-wide
+     preload would push bytes that most page views never render — it loads
+     normally via the @font-face rules in styles.css when actually used. #}
+  <link rel="preload" href="{{ sans_font_url }}" as="font" type="font/woff2" crossorigin />
+  <link rel="preload" href="{{ display_font_url }}" as="font" type="font/woff2" crossorigin />
   {% set giallo_css_url = get_url(path="giallo.css", cachebust=true) %}
   <link rel="stylesheet" href="{{ styles_css_url }}" />
   <link rel="stylesheet" href="{{ no_js_css_url }}" />
   {# giallo.css is the syntax-highlighting sheet (~28KB) and only ~14 of the
      177 built pages render highlighted code. Load it only when the current
-     document actually contains a giallo block (`<pre class="giallo z-code">`)
+     document actually contains a giallo-highlighted code block
+     (a pre.z-code.giallo element emitted by the Markdown pipeline)
      instead of shipping it to every page view. #}
   {% set has_highlighted_code = false %}
   {% if page and page.content and "giallo z-code" in page.content %}{% set_global has_highlighted_code = true %}{% endif %}
@@ -163,7 +163,7 @@
   {% block head %}{% endblock head %}
   {% include "partials/analytics.html" %}
 </head>
-<body class="antialiased min-h-screen safe-area-inset-bottom flex flex-col">
+<body class="min-h-screen flex flex-col">
   <a href="#main-content" id="skip-to-content">{% if i18n_data and i18n_data[l] and i18n_data[l]["a11y"] and i18n_data[l]["a11y"]["skip_to_main"] %}{{ i18n_data[l]["a11y"]["skip_to_main"] }}{% else %}Skip to main content{% endif %}</a>
   {% include "partials/header.html" %}
   <main id="main-content" class="flex-1 scroll-mt-16 lg:scroll-mt-20" tabindex="-1">
@@ -174,12 +174,8 @@
   <a
     href="#top"
     id="back-to-top"
-    class="fixed bottom-6 right-6 z-50 rounded-sm bg-surface-950 p-3 text-white border border-surface-800 transition-opacity hover:bg-surface-800 focus-visible:outline-2 focus-visible:outline-white focus-visible:outline-offset-2"
+    class="fixed bottom-6 right-6 z-50 p-3 border apex-btn"
     aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['back_to_top'] %}{{ i18n_data[l]['a11y']['back_to_top'] }}{% else %}Back to top{% endif %}"
-  >
-    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-      <path fill-rule="evenodd" d="M14.707 12.707a1 1 0 01-1.414 0L10 9.414l-3.293 3.293a1 1 0 01-1.414-1.414l4-4a1 1 0 011.414 0l4 4a1 1 0 010 1.414z" clip-rule="evenodd" />
-    </svg>
-  </a>
+  >Top</a>
 </body>
 </html>

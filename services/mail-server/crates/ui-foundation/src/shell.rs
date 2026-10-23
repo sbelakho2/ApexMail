@@ -206,21 +206,21 @@ impl<'a> Branding<'a> {
         if email_link {
             let escaped = html_escape(support_email);
             links.push(format!(
-                "<a class=\"underline hover:text-surface-950\" href=\"mailto:{escaped}\">{escaped}</a>"
+                "<a class=\"apex-link\" href=\"mailto:{escaped}\">{escaped}</a>"
             ));
         }
         if url_link {
             let escaped = html_escape(support_url);
             links.push(format!(
-                "<a class=\"underline hover:text-surface-950\" href=\"{escaped}\">{escaped}</a>"
+                "<a class=\"apex-link\" href=\"{escaped}\">{escaped}</a>"
             ));
         }
         if !links.is_empty() {
-            parts.push(format!("<p>{}</p>", links.join(" &middot; ")));
+            parts.push(format!("<p>{}</p>", links.join(", ")));
         }
 
         Some(format!(
-            "<footer class=\"mt-10 border-t border-surface-200/60 pt-6 text-xs text-surface-500\" data-whitelabel-footer>{}</footer>",
+            "<footer class=\"mt-10 border-t pt-6\" data-whitelabel-footer>{}</footer>",
             parts.join("")
         ))
     }
@@ -301,8 +301,8 @@ impl<'a> ShellHeader<'a> {
             String::new()
         } else {
             format!(
-                "<div class=\"hidden lg:flex items-center gap-1 pr-4 border-r border-surface-100\" data-plan-label>\
-                    <span class=\"text-[10px] font-semibold tracking-wide text-surface-500\">{plan_label}</span>\
+                "<div class=\"hidden lg:flex items-center gap-1 pr-4 border-r\" data-plan-label>\
+                    <span class=\"apex-em\">{plan_label}</span>\
                 </div>"
             )
         };
@@ -312,9 +312,9 @@ impl<'a> ShellHeader<'a> {
         // engage (live dogfood 2026-10-06 ui-visual, 768 px).
         let identity_block = if user.is_some() {
             format!(
-                "<div class=\"text-right hidden sm:block min-w-0\">\
-                    <p class=\"text-xs font-semibold text-surface-950 truncate\">{display_name}</p>\
-                    <p class=\"text-[10px] font-medium text-surface-500 truncate\">{email}</p>\
+                "<div class=\"hidden sm:block min-w-0\">\
+                    <p class=\"apex-em\">{display_name}</p>\
+                    <p class=\"apex-em\">{email}</p>\
                 </div>"
             )
         } else {
@@ -322,15 +322,15 @@ impl<'a> ShellHeader<'a> {
         };
 
         format!(
-            "<header class=\"apex-console-header sticky top-0 z-20 flex h-16 items-center justify-between border-b border-surface-200/60 bg-card px-8\">\
+            "<header class=\"apex-console-header sticky top-0 z-20 flex h-16 items-center justify-between border-b px-8\">\
                 <div class=\"flex items-center gap-4\">\
                     {mobile_toggle}\
                     <form method=\"get\" action=\"/campaigns\" role=\"search\" class=\"relative hidden md:block\">\
-                        <label class=\"sr-only\" for=\"global-search\">Search campaigns</label>\
-                        <div class=\"flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-surface-500 bg-surface-50 border border-surface-200/60 rounded-[16px_16px_9px_9px] focus-within:border-primary min-w-[220px]\">\
+                        <label class=\"sr-only apex-label\" for=\"global-search\">Search campaigns</label>\
+                        <div class=\"flex items-center gap-2 px-3 py-1.5 border min-w-[220px] apex-em\">\
                             <svg xmlns=\"http://www.w3.org/2000/svg\" width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><circle cx=\"11\" cy=\"11\" r=\"8\"/><path d=\"m21 21-4.3-4.3\"/></svg>\
-                            <input id=\"global-search\" type=\"search\" name=\"query\" placeholder=\"Search campaigns…\" class=\"bg-transparent outline-none text-surface-600 placeholder:text-muted-foreground w-full\" />\
-                            <button type=\"submit\" class=\"text-[10px] font-bold uppercase tracking-widest text-surface-500 hover:text-surface-900 transition-colors\">Search</button>\
+                            <input id=\"global-search\" type=\"search\" name=\"query\" placeholder=\"Search campaigns…\" class=\"w-full apex-input\" />\
+                            <button type=\"submit\" class=\"apex-btn\">Search</button>\
                         </div>\
                     </form>\
                 </div>\
@@ -338,8 +338,8 @@ impl<'a> ShellHeader<'a> {
                     {plan_label_block}\
                     <div class=\"flex items-center gap-3 pl-2 min-w-0\">\
                         {identity_block}\
-                        <div class=\"apex-avatar relative flex shrink-0 h-9 w-9 rounded-full bg-primary/10 border border-primary/20 items-center justify-center\" aria-label=\"Signed in as {avatar}\">\
-                            <span class=\"text-brand-700 font-semibold text-xs tracking-tighter\">{avatar}</span>\
+                        <div class=\"apex-avatar relative flex shrink-0 h-9 w-9 border items-center justify-center\" aria-label=\"Signed in as {avatar}\">\
+                            <span class=\"apex-em\">{avatar}</span>\
                         </div>\
                     </div>\
                 </div>\
@@ -365,18 +365,13 @@ impl<'a> ImpersonationBanner<'a> {
     pub fn render_html(&self) -> String {
         let error = self
             .end_session_error
-            .map(|value| {
-                format!(
-                    "<span class=\"text-[11px] font-semibold text-white tracking-tight\">{}</span>",
-                    html_escape(value)
-                )
-            })
+            .map(|value| format!("<span class=\"apex-em\">{}</span>", html_escape(value)))
             .unwrap_or_default();
         let safe_tenant = html_escape(self.tenant_id);
         let safe_operator = html_escape(self.operator_name);
         let safe_time = html_escape(self.time_remaining);
         format!(
-            "<div class=\"fixed top-0 left-0 right-0 z-[100] bg-primary text-white border-b border-brand-700\" role=\"alert\" aria-live=\"polite\"><div class=\"max-w-7xl mx-auto px-6 py-2\"><div class=\"flex items-center justify-between\"><div class=\"flex items-center gap-6\"><div class=\"flex items-center gap-2 bg-white/10 px-2 py-0.5 rounded-full\"><span class=\"text-[10px] font-semibold uppercase tracking-[0.1em]\">Impersonation Active</span></div><div class=\"flex items-center gap-2 text-[11px] font-semibold tracking-tight\"><span class=\"opacity-70\">Tenant:</span><span class=\"bg-white/10 px-1.5 py-0.5 rounded-[8px_8px_7px_7px]\">{}</span></div><div class=\"hidden md:flex items-center gap-2 text-[11px] font-semibold tracking-tight\"><span class=\"opacity-70\">Operator:</span><span>{}</span></div></div><div class=\"flex items-center gap-6\">{}<div class=\"flex items-center gap-2 text-[11px] font-semibold tracking-tight\"><span class=\"opacity-70\">Expires:</span><span class=\"font-mono bg-white/20 px-1.5 py-0.5 rounded-[8px_8px_7px_7px]\">{}</span></div><form method=\"POST\" action=\"/web/auth/impersonate/end\" class=\"inline\"><button type=\"submit\" class=\"px-3 py-1 bg-white text-primary rounded-[8px_8px_7px_7px] text-[11px] font-semibold hover:bg-surface-50 transition-colors\">{}</button></form></div></div></div></div>",
+            "<div class=\"fixed top-0 left-0 right-0 z-[100] border-b\" role=\"alert\" aria-live=\"polite\"><div class=\"max-w-7xl mx-auto px-6 py-2\"><div class=\"flex items-center justify-between\"><div class=\"flex items-center gap-6\"><div class=\"flex items-center gap-2 px-2 py-0.5\"><span class=\"apex-em apex-section-head\">Impersonation Active</span></div><div class=\"flex items-center gap-2 apex-em\"><span class=\"\">Tenant:</span><span class=\"px-1.5 py-0.5\">{}</span></div><div class=\"hidden md:flex items-center gap-2 apex-em\"><span class=\"\">Operator:</span><span>{}</span></div></div><div class=\"flex items-center gap-6\">{}<div class=\"flex items-center gap-2 apex-em\"><span class=\"\">Expires:</span><span class=\"px-1.5 py-0.5\">{}</span></div><form method=\"POST\" action=\"/web/auth/impersonate/end\" class=\"inline\"><button type=\"submit\" class=\"px-3 py-1 apex-btn apex-btn--sm\">{}</button></form></div></div></div></div>",
             safe_tenant,
             safe_operator,
             error,
@@ -450,20 +445,20 @@ impl<'a> WebDashboardShell<'a> {
         let menu_icon = shell_icon("menu", "h-5 w-5");
         let mobile_sidebar = format!(
             "<details class=\"apex-mobile-nav md:hidden\" id=\"mobile-sidebar\">\
-            <summary class=\"fixed left-4 top-3 z-50 inline-flex h-10 w-10 items-center justify-center rounded-[16px_16px_9px_9px] bg-card text-surface-500 hover:bg-surface-50 hover:text-surface-950 transition-colors border border-surface-200\" aria-label=\"Toggle navigation menu\" aria-controls=\"mobile-sidebar-panel\">{menu_icon}<span class=\"sr-only\">Menu</span></summary>\
+            <summary class=\"fixed left-4 top-3 z-50 inline-flex h-10 w-10 items-center justify-center border\" aria-label=\"Toggle navigation menu\" aria-controls=\"mobile-sidebar-panel\">{menu_icon}<span class=\"sr-only\">Menu</span></summary>\
             <div id=\"mobile-sidebar-panel\" class=\"apex-mobile-nav-panel\">{sidebar_content}</div>\
             </details>",
             menu_icon = menu_icon,
         );
 
         format!(
-            "<div class=\"apex-console-shell min-h-screen bg-background flex\" data-theme-storage-key=\"{theme_key}\">\
+            "<div class=\"apex-console-shell min-h-screen flex\" data-theme-storage-key=\"{theme_key}\">\
             {banner}\
-            <aside class=\"hidden md:flex flex-col fixed left-0 top-0 h-screen {sidebar_width} z-30 transition-all duration-300\" data-sidebar-storage-key=\"{sidebar_key}\" aria-label=\"Primary sidebar navigation\">\
+            <aside class=\"hidden md:flex flex-col fixed left-0 top-0 h-screen {sidebar_width} z-30\" data-sidebar-storage-key=\"{sidebar_key}\" aria-label=\"Primary sidebar navigation\">\
                 {sidebar_content}\
             </aside>\
             {mobile_sidebar}\
-            <div class=\"flex-1 flex flex-col min-h-screen min-w-0 transition-all duration-300 ml-0 md:ml-{ml_val}\"{impersonation_offset}>\
+            <div class=\"flex-1 flex flex-col min-h-screen min-w-0 ml-0 md:ml-{ml_val}\"{impersonation_offset}>\
                 {header}\
                 <main class=\"apex-console-main relative p-6 lg:p-10 flex-1\" id=\"app-main\">\
                     <div class=\"max-w-7xl mx-auto\">\
@@ -532,7 +527,7 @@ impl<'a> ControlPlaneShell<'a> {
             .iter()
             .map(|banner| {
                 format!(
-                    "<div class=\"px-6 py-2 text-[11px] font-semibold tracking-tight border-b border-white/10 {}\">{}</div>",
+                    "<div class=\"px-6 py-2 border-b {} apex-em\">{}</div>",
                     control_plane_banner_class(banner.tone),
                     html_escape(banner.message)
                 )
@@ -556,16 +551,16 @@ impl<'a> ControlPlaneShell<'a> {
             String::new()
         } else {
             format!(
-                "<div class=\"hidden lg:flex items-center gap-1 pr-4 border-r border-surface-100\" data-plan-label>\
-                    <span class=\"text-[10px] font-semibold tracking-wide text-surface-500\">{plan_label}</span>\
+                "<div class=\"hidden lg:flex items-center gap-1 pr-4 border-r\" data-plan-label>\
+                    <span class=\"apex-em\">{plan_label}</span>\
                 </div>"
             )
         };
         let identity_block = match self.user_context.as_ref() {
             Some(user) => format!(
-                "<div class=\"text-right hidden sm:block min-w-0\" data-user-identity>\
-                    <p class=\"text-xs font-semibold text-surface-950 truncate\">{display_name}</p>\
-                    <p class=\"text-[10px] font-medium text-surface-500 truncate\">{email}</p>\
+                "<div class=\"hidden sm:block min-w-0\" data-user-identity>\
+                    <p class=\"apex-em\">{display_name}</p>\
+                    <p class=\"apex-em\">{email}</p>\
                 </div>",
                 display_name = html_escape(user.display_name),
                 email = html_escape(user.email),
@@ -583,14 +578,12 @@ impl<'a> ControlPlaneShell<'a> {
                 let plan = if plan_label.is_empty() {
                     String::new()
                 } else {
-                    format!(
-                        "<span class=\"text-[10px] font-bold uppercase tracking-wide text-surface-500\">{plan_label}</span>"
-                    )
+                    format!("<span class=\"apex-em apex-section-head\">{plan_label}</span>")
                 };
                 format!(
                     "<div class=\"flex sm:hidden items-center gap-2 min-w-0\" data-user-identity-compact>\
                         {plan}\
-                        <span class=\"text-xs font-semibold text-surface-950 truncate max-w-[9rem]\">{display_name}</span>\
+                        <span class=\"max-w-[9rem] apex-em\">{display_name}</span>\
                     </div>",
                     display_name = html_escape(user.display_name),
                 )
@@ -608,24 +601,24 @@ impl<'a> ControlPlaneShell<'a> {
         // 100vh hit area).
         let mobile_sidebar = format!(
             "<details class=\"apex-mobile-nav md:hidden\" id=\"control-plane-mobile-sidebar\">\
-            <summary class=\"fixed left-4 top-3 z-50 inline-flex h-10 w-10 items-center justify-center rounded-[16px_16px_9px_9px] bg-card text-surface-500 hover:bg-surface-50 hover:text-surface-950 transition-colors border border-surface-200\" aria-label=\"Toggle control plane navigation menu\" aria-controls=\"control-plane-mobile-panel\">{menu_icon}<span class=\"sr-only\">Menu</span></summary>\
+            <summary class=\"fixed left-4 top-3 z-50 inline-flex h-10 w-10 items-center justify-center border\" aria-label=\"Toggle control plane navigation menu\" aria-controls=\"control-plane-mobile-panel\">{menu_icon}<span class=\"sr-only\">Menu</span></summary>\
             <div id=\"control-plane-mobile-panel\" class=\"apex-mobile-nav-panel\">{sidebar_content}</div>\
             </details>",
             menu_icon = menu_icon,
         );
 
         format!(
-            "<div class=\"apex-cp-shell min-h-screen bg-background flex\" data-theme-storage-key=\"{theme_key}\">\
+            "<div class=\"apex-cp-shell min-h-screen flex\" data-theme-storage-key=\"{theme_key}\">\
             <aside class=\"hidden md:flex flex-col fixed left-0 top-0 h-screen w-64 z-30\" data-user-role=\"{role}\">\
                 {sidebar_content}\
             </aside>\
             {mobile_sidebar}\
             <div class=\"flex-1 flex flex-col min-h-screen min-w-0 ml-0 md:ml-64\"{banner_offset}>\
                 {banner_markup}\
-                <header class=\"h-16 border-b border-surface-200/60 bg-card flex items-center justify-between pr-8 pl-14 md:px-8 sticky top-0 z-20\">\
+                <header class=\"h-16 border-b flex items-center justify-between pr-8 pl-14 md:px-8 sticky top-0 z-20\">\
                     <div class=\"flex items-baseline gap-3 min-w-0\">\
-                        <p class=\"text-lg font-bold text-surface-950 tracking-tight\">{page_title}</p>\
-                        <p class=\"hidden sm:block text-xs font-medium text-surface-500 truncate\">{page_description}</p>\
+                        <p class=\"apex-em\">{page_title}</p>\
+                        <p class=\"hidden sm:block apex-em\">{page_description}</p>\
                     </div>\
                     <div class=\"flex items-center gap-4 min-w-0\">{plan_label_block}{identity_block}{compact_identity_block}</div>\
                 </header>\
@@ -665,34 +658,34 @@ pub struct MarketingShell<'a> {
 }
 
 fn render_marketing_header() -> String {
-    "<header id=\"site-header\" data-marketing-shell=\"header\" class=\"fixed top-0 left-0 right-0 z-50 transition-all duration-300 bg-transparent border-b border-transparent\">\
+    "<header id=\"site-header\" data-marketing-shell=\"header\" class=\"fixed top-0 left-0 right-0 z-50 border-b border-transparent\">\
          <nav class=\"max-w-7xl mx-auto px-4 sm:px-6 lg:px-8\">\
          <div class=\"flex items-center justify-between h-16 lg:h-20\">\
-         <a href=\"/\" class=\"flex items-center gap-2 group\">\
-         <div class=\"w-8 h-8 rounded-[8px_8px_7px_7px] bg-surface-950 flex items-center justify-center border border-surface-800\">\
-         <svg xmlns=\"http://www.w3.org/2000/svg\" class=\"w-5 h-5 text-white\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><polygon points=\"13 2 3 14 12 14 11 22 21 10 12 10 13 2\"/></svg>\
-         </div><span class=\"text-xl font-bold text-surface-950 tracking-tighter\">ApexMail</span></a>\
+         <a href=\"/\" class=\"flex items-center gap-2 apex-link\">\
+         <div class=\"w-8 h-8 flex items-center justify-center border\">\
+         <svg xmlns=\"http://www.w3.org/2000/svg\" class=\"w-5 h-5\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><polygon points=\"13 2 3 14 12 14 11 22 21 10 12 10 13 2\"/></svg>\
+         </div><span class=\"apex-em\">ApexMail</span></a>\
          <div class=\"hidden lg:flex items-center gap-6\">\
-         <a href=\"/features\" class=\"text-sm font-semibold text-surface-600 hover:text-surface-950\">Features</a>\
-         <a href=\"/pricing\" class=\"text-sm font-semibold text-surface-600 hover:text-surface-950\">Pricing</a>\
-         <a href=\"/docs\" class=\"text-sm font-semibold text-surface-600 hover:text-surface-950\">Docs</a>\
+         <a href=\"/features\" class=\"apex-em apex-link\">Features</a>\
+         <a href=\"/pricing\" class=\"apex-em apex-link\">Pricing</a>\
+         <a href=\"/docs\" class=\"apex-em apex-link\">Docs</a>\
          </div>\
          <div class=\"flex items-center gap-3\">\
-         <a href=\"/login\" class=\"text-sm font-semibold text-surface-600 px-3 py-2\">Login</a>\
-         <a href=\"/signup\" class=\"btn-primary px-4 py-2 text-sm font-semibold\">Get Started</a>\
+         <a href=\"/login\" class=\"px-3 py-2 apex-em apex-btn\">Login</a>\
+         <a href=\"/signup\" class=\"apex-btn apex-btn--primary px-4 py-2 apex-em\">Get Started</a>\
          </div></div></nav></header>"
         .to_string()
 }
 
 fn render_marketing_footer() -> String {
-    "<footer data-marketing-shell=\"footer\" class=\"bg-surface-950 text-white py-12\">\
+    "<footer data-marketing-shell=\"footer\" class=\"py-12\">\
          <div class=\"max-w-7xl mx-auto px-4 sm:px-6 lg:px-8\">\
          <div class=\"grid grid-cols-2 md:grid-cols-4 gap-8 mb-12\">\
-         <div><h4 class=\"text-[11px] font-semibold uppercase tracking-[0.1em] mb-6 opacity-40\">Product</h4><ul class=\"space-y-4 text-sm text-surface-500\"><li><a href=\"/features\">Features</a></li><li><a href=\"/pricing\">Pricing</a></li></ul></div>\
-         <div><h4 class=\"text-[11px] font-semibold uppercase tracking-[0.1em] mb-6 opacity-40\">Platform</h4><ul class=\"space-y-4 text-sm text-surface-500\"><li><a href=\"/docs\">API</a></li><li><a href=\"/status\">Status</a></li></ul></div>\
-         <div><h4 class=\"text-[11px] font-semibold uppercase tracking-[0.1em] mb-6 opacity-40\">Legal</h4><ul class=\"space-y-4 text-sm text-surface-500\"><li><a href=\"/privacy\">Privacy</a></li><li><a href=\"/terms\">Terms</a></li></ul></div>\
-         <div><h4 class=\"text-[11px] font-semibold uppercase tracking-[0.1em] mb-6 opacity-40\">Company</h4><ul class=\"space-y-4 text-sm text-surface-500\"><li><a href=\"/about\">About</a></li><li><a href=\"/contact\">Contact</a></li></ul></div>\
-         </div><div class=\"pt-8 border-t border-white/5 flex flex-col md:flex-row justify-between items-center gap-4 text-[11px] text-surface-500 font-medium\">\
+         <div><h4 class=\"mb-6\">Product</h4><ul class=\"space-y-4\"><li><a href=\"/features\">Features</a></li><li><a href=\"/pricing\">Pricing</a></li></ul></div>\
+         <div><h4 class=\"mb-6\">Platform</h4><ul class=\"space-y-4\"><li><a href=\"/docs\">API</a></li><li><a href=\"/status\">Status</a></li></ul></div>\
+         <div><h4 class=\"mb-6\">Legal</h4><ul class=\"space-y-4\"><li><a href=\"/privacy\">Privacy</a></li><li><a href=\"/terms\">Terms</a></li></ul></div>\
+         <div><h4 class=\"mb-6\">Company</h4><ul class=\"space-y-4\"><li><a href=\"/about\">About</a></li><li><a href=\"/contact\">Contact</a></li></ul></div>\
+         </div><div class=\"pt-8 border-t flex flex-col md:flex-row justify-between items-center gap-4 apex-em\">\
          <p>© 2026 APEXMAIL TECH LTD. ALL RIGHTS RESERVED.</p><div class=\"flex gap-6\"><a href=\"#\">Twitter</a><a href=\"#\">GitHub</a></div>\
          </div></div></footer>"
         .to_string()
@@ -701,7 +694,7 @@ fn render_marketing_footer() -> String {
 impl<'a> MarketingShell<'a> {
     pub fn render_html(&self) -> String {
         format!(
-            "<div class=\"font-apex antialiased text-[17px] leading-[1.6] min-h-screen safe-area-inset-bottom flex flex-col\">{}<main class=\"flex-1 pt-16 lg:pt-20\">{}</main>{}<div data-marketing-shell=\"cookie-consent\"></div><button data-marketing-shell=\"back-to-top\"></button></div>",
+            "<div class=\"min-h-screen safe-area-inset-bottom flex flex-col\">{}<main class=\"flex-1 pt-16 lg:pt-20\">{}</main>{}<div data-marketing-shell=\"cookie-consent\"></div><button data-marketing-shell=\"back-to-top\"></button></div>",
             render_marketing_header(),
             self.child_html,
             render_marketing_footer(),
@@ -773,22 +766,17 @@ fn render_sidebar_content(
             // CONCENTRIC (mark DNA): the active cell is solid + an outer
             // ring — the spiral's two arms (apex-nav-cell in globals.css).
             let classes = if is_active {
-                "apex-nav-cell is-active flex items-center gap-3 px-3 py-2 text-sm font-semibold transition-all bg-primary text-white"
+                "apex-nav-cell is-active"
             } else {
-                "flex items-center gap-3 px-3 py-2 text-sm font-medium transition-all rounded-[8px_8px_7px_7px] text-surface-600 hover:text-surface-950 hover:bg-surface-50"
+                "apex-nav-cell"
             };
 
-            let icon_color = if is_active { "text-brand-700" } else { "text-surface-500" };
-            let icon_wrap = format!(
-                "<span class=\"w-5 h-5 flex items-center justify-center transition-colors {}\">{}</span>",
-                icon_color, icon
-            );
+            let _ = icon; // ARK: the rail is an index of words, icons are chrome
             format!(
-                "<a href=\"{}\" class=\"{}\"{}>{}{}</a>",
+                "<a href=\"{}\" class=\"{} apex-link\"{}><span>{}</span><span class=\"apex-nav-lead\"></span></a>",
                 href,
                 classes,
                 if is_active { active_class } else { "" },
-                icon_wrap,
                 label,
             )
         })
@@ -841,7 +829,7 @@ fn render_web_sidebar(
     let render_section = |title: &str, items: &[(&str, &str, &str)]| {
         format!(
             "<div class=\"space-y-1 mb-6\">\
-                <h3 class=\"px-6 text-[11px] font-semibold uppercase tracking-[0.1em] text-surface-500 mb-2\">{}</h3>\
+                <h3 class=\"px-6 mb-2 apex-h3\">{}</h3>\
                 {}</div>",
             title,
             render_sidebar_content(items, "", current_path)
@@ -860,11 +848,11 @@ fn render_web_sidebar(
     let wordmark = render_web_wordmark(branding);
 
     format!(
-        "<div class=\"apex-console-sidebar flex flex-col h-full bg-card text-surface-900 border-r border-surface-200/60 transition-all w-64\">\
+        "<div class=\"apex-console-sidebar flex flex-col h-full border-r w-64\">\
          <div class=\"p-6 mb-4\"><div class=\"flex items-center gap-2\">\
          {wordmark}</div></div>\
          <nav class=\"flex-1 overflow-y-auto\" data-sidebar=\"primary\" aria-label=\"Primary sidebar navigation\">{content}</nav>\
-         <div class=\"p-4 border-t border-surface-100\"><form method=\"POST\" action=\"/web/auth/logout\"><input type=\"hidden\" name=\"_csrf\" value=\"{csrf_token}\" /><button type=\"submit\" class=\"flex w-full items-center gap-3 px-4 py-2 text-sm font-semibold rounded-[8px_8px_7px_7px] text-surface-500 hover:text-surface-950 hover:bg-surface-50 transition-colors\"><span>Sign Out</span></button></form></div></div>",
+         <div class=\"p-4 border-t\"><form method=\"POST\" action=\"/web/auth/logout\"><input type=\"hidden\" name=\"_csrf\" value=\"{csrf_token}\" /><button type=\"submit\" class=\"flex w-full items-center gap-3 px-4 py-2 apex-btn\"><span>Sign Out</span></button></form></div></div>",
         content = content,
         csrf_token = html_escape(csrf_token),
         wordmark = wordmark,
@@ -876,7 +864,7 @@ fn render_web_sidebar(
 /// escaped; an entitled tenant without a company name and logo renders the
 /// stock markup exactly.
 fn render_web_wordmark(branding: Option<&Branding<'_>>) -> String {
-    const STOCK: &str = "<span class=\"apex-sidebar-brand text-xl font-bold tracking-tighter transition-all hover:opacity-80\"><span class=\"text-brand-600\">Apex</span><span class=\"text-surface-950\">Mail</span></span>";
+    const STOCK: &str = "<span class=\"apex-sidebar-brand apex-wordmark\"><span class=\"apex-wordmark__apex\">Apex</span><span class=\"apex-wordmark__mail\">Mail</span></span>";
 
     let Some(branding) = branding else {
         return STOCK.to_string();
@@ -891,7 +879,7 @@ fn render_web_wordmark(branding: Option<&Branding<'_>>) -> String {
     }
     if !branding.company_name.trim().is_empty() {
         return format!(
-            "<span class=\"apex-sidebar-brand text-xl font-bold tracking-tighter transition-all hover:opacity-80\" data-whitelabel-company>{}</span>",
+            "<span class=\"apex-sidebar-brand apex-em\" data-whitelabel-company>{}</span>",
             html_escape(branding.company_name.trim())
         );
     }
@@ -933,7 +921,7 @@ pub fn apply_control_plane_impersonation_banner(
     html: &str,
     banner: &ImpersonationBanner<'_>,
 ) -> String {
-    const SHELL_ANCHOR: &str = "<div class=\"apex-cp-shell min-h-screen bg-background flex\"";
+    const SHELL_ANCHOR: &str = "<div class=\"apex-cp-shell min-h-screen flex\"";
     let Some(shell_start) = html.find(SHELL_ANCHOR) else {
         return html.to_string();
     };
@@ -1013,7 +1001,7 @@ fn render_cp_sidebar(current_path: &str, csrf_token: &str) -> String {
     let render_section = |title: &str, items: &[(&str, &str, &str)]| {
         format!(
             "<div class=\"space-y-1 mb-6\">\
-                <h3 class=\"px-6 text-[11px] font-semibold uppercase tracking-[0.1em] text-surface-500 mb-2\">{}</h3>\
+                <h3 class=\"px-6 mb-2 apex-h3\">{}</h3>\
                 {}</div>",
             title,
             render_sidebar_content(items, "", current_path)
@@ -1028,12 +1016,12 @@ fn render_cp_sidebar(current_path: &str, csrf_token: &str) -> String {
     );
 
     format!(
-        "<div class=\"apex-cp-sidebar flex flex-col h-full bg-card text-surface-900 border-r border-surface-200/60 w-64\">\
+        "<div class=\"apex-cp-sidebar flex flex-col h-full border-r w-64\">\
          <div class=\"p-6 mb-4\"><div class=\"flex flex-col gap-0.5\">\
-         <span class=\"apex-sidebar-brand text-xl font-bold tracking-tighter\"><span class=\"text-brand-600\">Apex</span><span class=\"text-surface-950\">Mail</span></span>\
-         <span class=\"text-[11px] font-semibold uppercase tracking-[0.1em] text-surface-500\">Operations</span></div></div>\
+         <span class=\"apex-sidebar-brand apex-wordmark\"><span class=\"apex-wordmark__apex\">Apex</span><span class=\"apex-wordmark__mail\">Mail</span></span>\
+         <span class=\"apex-em apex-section-head\">Operations</span></div></div>\
          <nav class=\"flex-1 overflow-y-auto cp-sidebar-nav\" data-sidebar=\"primary\" aria-label=\"Control Plane navigation\">{}</nav>\
-         <div class=\"p-4 border-t border-surface-100\"><form method=\"POST\" action=\"/web/auth/logout\"><input type=\"hidden\" name=\"_csrf\" value=\"{csrf_token}\" /><button type=\"submit\" class=\"flex w-full items-center gap-3 px-4 py-2 text-sm font-semibold rounded-[8px_8px_7px_7px] text-surface-500 hover:text-surface-950 hover:bg-surface-50 transition-colors\"><span>Sign Out</span></button></form></div></div>",
+         <div class=\"p-4 border-t\"><form method=\"POST\" action=\"/web/auth/logout\"><input type=\"hidden\" name=\"_csrf\" value=\"{csrf_token}\" /><button type=\"submit\" class=\"flex w-full items-center gap-3 px-4 py-2 apex-btn\"><span>Sign Out</span></button></form></div></div>",
         content,
         csrf_token = html_escape(csrf_token),
     )
@@ -1924,8 +1912,8 @@ mod deferred_shell_tests {
             branding: None,
         }
         .render_html();
-        assert!(web.contains("text-brand-600\">Apex"), "{web}");
-        assert!(web.contains("text-surface-950\">Mail"), "{web}");
+        assert!(web.contains("apex-wordmark__apex\">Apex"), "{web}");
+        assert!(web.contains("apex-wordmark__mail\">Mail"), "{web}");
         assert!(!web.contains("text-primary\">Apex"), "{web}");
 
         let cp = ControlPlaneShell {
@@ -1940,8 +1928,8 @@ mod deferred_shell_tests {
             user_context: None,
         }
         .render_html();
-        assert!(cp.contains("text-brand-600\">Apex"), "{cp}");
-        assert!(cp.contains("text-surface-950\">Mail"), "{cp}");
+        assert!(cp.contains("apex-wordmark__apex\">Apex"), "{cp}");
+        assert!(cp.contains("apex-wordmark__mail\">Mail"), "{cp}");
     }
 
     // ── White-label branding ─────────────────────────────────────
@@ -2047,7 +2035,7 @@ mod deferred_shell_tests {
         let sidebar = render_web_sidebar("/dashboard", "tok", None);
         assert!(
             sidebar.contains(
-                "<span class=\"text-brand-600\">Apex</span><span class=\"text-surface-950\">Mail</span>"
+                "<span class=\"apex-wordmark__apex\">Apex</span><span class=\"apex-wordmark__mail\">Mail</span>"
             ),
             "{sidebar}"
         );

@@ -15,33 +15,32 @@
 {% endblock robots %}
 
 {% block content %}
-<section class="relative overflow-hidden bg-surface-950 text-white">
-  <div class="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(220,38,38,0.1),transparent_60%)]"></div>
+<section class="relative overflow-hidden">
+  <div class="absolute inset-0"></div>
   <div class="relative mx-auto flex min-h-[70vh] max-w-5xl flex-col justify-center px-4 py-20 sm:px-6 lg:px-8">
     <div class="max-w-2xl">
-      <p class="mb-4 text-sm font-semibold tracking-[0.3em] text-brand-300">404</p>
-      <h1 class="text-4xl font-semibold tracking-tight text-white sm:text-5xl">
+      <p class="mb-4 apex-em">404</p>
+      <h1 class="apex-page-title">
         {% if i18n_data and i18n_data[l] and i18n_data[l]["not_found"] and i18n_data[l]["not_found"]["heading"] %}{{ i18n_data[l]["not_found"]["heading"] }}{% else %}This page is gone, but the platform is still here.{% endif %}
       </h1>
-      <p class="mt-6 max-w-xl text-lg text-surface-300">
+      <p class="mt-6 max-w-xl">
         {% if i18n_data and i18n_data[l] and i18n_data[l]["not_found"] and i18n_data[l]["not_found"]["copy"] %}{{ i18n_data[l]["not_found"]["copy"] }}{% else %}The URL may be outdated or mistyped. Use one of the primary entry points below to get back to pricing, docs, or the application.{% endif %}
       </p>
       <div class="mt-10 flex flex-col gap-3 sm:flex-row">
-        {# Design audit item 10: the private button grammar is absorbed —
-           primary actions use .btn-primary, dark-surface secondaries use
-           .btn-secondary--invert (defined in input.css). #}
-        <a href="{{ lp }}/pricing/" class="btn-primary">
+        {# ARK button grammar: the filled button is the primary action, the
+           ruled default button carries the secondary routes. #}
+        <a href="{{ lp }}/pricing/" class="apex-btn apex-btn--primary">
           {% if i18n_data and i18n_data[l] and i18n_data[l]["not_found"] and i18n_data[l]["not_found"]["pricing"] %}{{ i18n_data[l]["not_found"]["pricing"] }}{% else %}View Pricing{% endif %}
         </a>
-        <a href="/docs/" class="btn-secondary--invert">
+        <a href="/docs/" class="apex-btn">
           {% if i18n_data and i18n_data[l] and i18n_data[l]["not_found"] and i18n_data[l]["not_found"]["docs"] %}{{ i18n_data[l]["not_found"]["docs"] }}{% else %}Read Docs{% endif %}
         </a>
-        <a href="{{ config.extra.app_url }}/login" class="btn-secondary--invert">
+        <a href="{{ config.extra.app_url }}/login" class="apex-btn">
           {% if i18n_data and i18n_data[l] and i18n_data[l]["not_found"] and i18n_data[l]["not_found"]["console"] %}{{ i18n_data[l]["not_found"]["console"] }}{% else %}Open Console{% endif %}
         </a>
       </div>
-      <p class="mt-10 text-xs text-surface-500">
-        {% if i18n_data and i18n_data[l] and i18n_data[l]["not_found"] and i18n_data[l]["not_found"]["docs_index"] %}{{ i18n_data[l]["not_found"]["docs_index"] | safe }}{% else %}Or visit the <a href="/docs/" class="text-brand-300 underline hover:text-brand-200">full documentation index</a>.{% endif %}
+      <p class="mt-10">
+        {% if i18n_data and i18n_data[l] and i18n_data[l]["not_found"] and i18n_data[l]["not_found"]["docs_index"] %}{{ i18n_data[l]["not_found"]["docs_index"] | safe }}{% else %}Or visit the <a href="/docs/" class="apex-link">full documentation index</a>.{% endif %}
       </p>
     </div>
   </div>

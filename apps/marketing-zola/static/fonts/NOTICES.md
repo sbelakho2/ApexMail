@@ -2,12 +2,16 @@
 
 This application self-hosts the following open-source fonts:
 
-- Inter Variable (normal + italic) — SIL Open Font License 1.1
+- Spectral (400/500/600 + italic, latin + latin-ext subsets) — SIL Open Font License 1.1
+  Source: https://fonts.google.com/specimen/Spectral (Production Type / Cipher Software)
+- Overpass (400/600/700, latin + latin-ext subsets) — SIL Open Font License 1.1
+  Source: https://fonts.google.com/specimen/Overpass (Overpass, Delve WithRical)
+- Overpass Mono (400/600, latin + latin-ext subsets) — SIL Open Font License 1.1
+  Source: https://fonts.google.com/specimen/Overpass+Mono
+- Inter Wordmark — SIL Open Font License 1.1. A pyftsubset-derived subset of
+  Inter Variable containing only the eight glyphs the wordmark renders
+  ("ApexMail"); Inter is used for the wordmark and nothing else.
   Source: https://rsms.me/inter/
-- JetBrains Mono Variable (normal + italic) — SIL Open Font License 1.1
-  Source: https://www.jetbrains.com/lp/mono/
-- Fraunces Variable (normal + italic) — SIL Open Font License 1.1
-  Source: https://github.com/undercasetype/Fraunces
 
 The full text of the SIL Open Font License 1.1 is included below.
 

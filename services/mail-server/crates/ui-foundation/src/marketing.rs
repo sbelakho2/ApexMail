@@ -349,18 +349,18 @@ impl<'a> MarketingHeader<'a> {
         let close_icon = marketing_icon("x", "h-5 w-5");
         let menu_icon = marketing_icon("menu", "h-5 w-5");
         let dropdown_markup = if self.active_dropdown == Some("Product") {
-            "<div class=\"animate-in absolute top-full left-0 pt-2\"><div class=\"w-80 p-2 bg-card rounded-sm border border-surface-200 shadow-premium\"><a href=\"/features\" class=\"flex items-start gap-3 p-3 rounded-sm hover:bg-surface-50 transition-colors group\"><div><div class=\"font-bold text-surface-900 text-sm mb-0.5\">Features</div><div class=\"text-xs text-surface-500 leading-snug\">Explore our complete feature set</div></div></a><a href=\"/compliance\" class=\"flex items-start gap-3 p-3 rounded-sm hover:bg-surface-50 transition-colors group\"><div><div class=\"font-bold text-surface-900 text-sm mb-0.5\">Security</div><div class=\"text-xs text-surface-500 leading-snug\">Enterprise-grade protection</div></div></a><a href=\"/private-cloud\" class=\"flex items-start gap-3 p-3 rounded-sm hover:bg-surface-50 transition-colors group\"><div><div class=\"font-bold text-surface-900 text-sm mb-0.5\">Private Cloud</div><div class=\"text-xs text-surface-500 leading-snug\">Single-tenant deployments</div></div></a></div></div>"
+            "<div class=\"absolute top-full left-0 pt-2\"><div class=\"w-80 p-2 border\"><a href=\"/features\" class=\"flex items-start gap-3 p-3 apex-btn\"><div><div class=\"mb-0.5 apex-em\">Features</div><div class=\"\">Explore our complete feature set</div></div></a><a href=\"/compliance\" class=\"flex items-start gap-3 p-3 apex-btn\"><div><div class=\"mb-0.5 apex-em\">Security</div><div class=\"\">Enterprise-grade protection</div></div></a><a href=\"/private-cloud\" class=\"flex items-start gap-3 p-3 apex-btn\"><div><div class=\"mb-0.5 apex-em\">Private Cloud</div><div class=\"\">Single-tenant deployments</div></div></a></div></div>"
         } else {
             ""
         };
         let mobile_menu = if self.mobile_menu_open {
-            "<div class=\"animate-in lg:hidden bg-card border-b border-surface-200 overflow-hidden\"><div class=\"px-4 py-6 space-y-6\"><div class=\"space-y-3\"><div class=\"text-xs font-bold text-surface-900 px-3\">Product</div><div class=\"space-y-1\"><a href=\"/features\" class=\"flex items-center gap-3 p-3.5 rounded-sm hover:bg-surface-50 transition-colors\">Features</a><a href=\"/compliance\" class=\"flex items-center gap-3 p-3.5 rounded-sm hover:bg-surface-50 transition-colors\">Security</a><a href=\"/private-cloud\" class=\"flex items-center gap-3 p-3.5 rounded-sm hover:bg-surface-50 transition-colors\">Private Cloud</a></div></div><a href=\"/pricing\" class=\"block px-3 py-3 text-surface-900 font-medium hover:bg-surface-50 rounded-sm text-sm\">Pricing</a><a href=\"/compliance\" class=\"block px-3 py-3 text-surface-900 font-medium hover:bg-surface-50 rounded-sm text-sm\">Compliance</a><a href=\"/private-cloud\" class=\"block px-3 py-3 text-surface-900 font-medium hover:bg-surface-50 rounded-sm text-sm\">Enterprise</a><div class=\"pt-6 border-t border-surface-200 space-y-3 px-3\"><a href=\"https://app.apexmail.ee/login\" class=\"block w-full text-center py-3 text-surface-900 font-bold border border-surface-200 rounded-sm hover:bg-surface-50 transition-colors text-sm\">Sign In</a><a href=\"https://app.apexmail.ee/signup\" class=\"block w-full btn-primary text-center py-3 text-sm\">Get Started Free</a></div></div></div>"
+            "<div class=\"lg:hidden border-b overflow-hidden\"><div class=\"px-4 py-6 space-y-6\"><div class=\"space-y-3\"><div class=\"px-3 apex-em\">Product</div><div class=\"space-y-1\"><a href=\"/features\" class=\"flex items-center gap-3 p-3.5 apex-btn\">Features</a><a href=\"/compliance\" class=\"flex items-center gap-3 p-3.5 apex-btn\">Security</a><a href=\"/private-cloud\" class=\"flex items-center gap-3 p-3.5 apex-btn\">Private Cloud</a></div></div><a href=\"/pricing\" class=\"block px-3 py-3 apex-em apex-btn\">Pricing</a><a href=\"/compliance\" class=\"block px-3 py-3 apex-em apex-btn\">Compliance</a><a href=\"/private-cloud\" class=\"block px-3 py-3 apex-em apex-btn\">Enterprise</a><div class=\"pt-6 border-t space-y-3 px-3\"><a href=\"https://app.apexmail.ee/login\" class=\"block w-full py-3 border apex-em apex-btn\">Sign In</a><a href=\"https://app.apexmail.ee/signup\" class=\"block w-full apex-btn apex-btn--primary py-3\">Get Started Free</a></div></div></div>"
         } else {
             ""
         };
 
         format!(
-            "<header class=\"fixed top-0 left-0 right-0 z-50 transition-all duration-300 {}\"><nav class=\"max-w-7xl mx-auto px-4 sm:px-6 lg:px-8\"><div class=\"flex items-center justify-between h-16 lg:h-20\"><a href=\"/\" class=\"flex items-center gap-2 group\"><div class=\"w-8 h-8 rounded-sm bg-primary flex items-center justify-center transition-transform group-hover:scale-105\">{}</div><span class=\"text-xl font-bold text-surface-900 tracking-tight\">ApexMail</span></a><div class=\"hidden lg:flex items-center gap-2\"><div class=\"relative\"><button class=\"flex items-center gap-1.5 px-3 py-3 text-sm font-medium text-surface-600 hover:text-surface-900 transition-colors rounded-sm hover:bg-surface-50\" aria-haspopup=\"menu\" aria-expanded=\"{}\">Product{}</button>{}</div><a href=\"/docs\" class=\"px-3 py-3 text-sm font-medium text-surface-600 hover:text-surface-900 transition-colors rounded-sm hover:bg-surface-50\">Documentation</a><a href=\"/api-console\" class=\"px-3 py-3 text-sm font-medium text-surface-600 hover:text-surface-900 transition-colors rounded-sm hover:bg-surface-50\">API Console</a><a href=\"/pricing\" class=\"px-3 py-3 text-sm font-medium text-surface-600 hover:text-surface-900 transition-colors rounded-sm hover:bg-surface-50\">Pricing</a><a href=\"/compliance\" class=\"px-3 py-3 text-sm font-medium text-surface-600 hover:text-surface-900 transition-colors rounded-sm hover:bg-surface-50\">Compliance</a><a href=\"/private-cloud\" class=\"px-3 py-3 text-sm font-medium text-surface-600 hover:text-surface-900 transition-colors rounded-sm hover:bg-surface-50\">Enterprise</a></div><div class=\"hidden lg:flex items-center gap-3\"><a href=\"https://app.apexmail.ee/login\" class=\"text-sm font-bold text-surface-600 hover:text-surface-900 transition-colors px-3 py-3 hover:bg-surface-50 rounded-sm\">Sign In</a><a href=\"https://app.apexmail.ee/signup\" class=\"btn-primary text-sm\">Get Started Free</a></div><button class=\"lg:hidden p-2 text-surface-600 hover:text-surface-900 rounded-sm hover:bg-surface-50 transition-colors min-h-[44px] min-w-[44px] flex items-center justify-center\" aria-label=\"{} menu\" aria-expanded=\"{}\">{}</button></div></nav>{}</header>",
+            "<header class=\"fixed top-0 left-0 right-0 z-50 {}\"><nav class=\"max-w-7xl mx-auto px-4 sm:px-6 lg:px-8\"><div class=\"flex items-center justify-between h-16 lg:h-20\"><a href=\"/\" class=\"flex items-center gap-2 apex-link\"><div class=\"w-8 h-8 flex items-center justify-center\">{}</div><span class=\"apex-em\">ApexMail</span></a><div class=\"hidden lg:flex items-center gap-2\"><div class=\"relative\"><button class=\"flex items-center gap-1.5 px-3 py-3 apex-btn\" aria-haspopup=\"menu\" aria-expanded=\"{}\">Product{}</button>{}</div><a href=\"/docs\" class=\"px-3 py-3 apex-em apex-btn\">Documentation</a><a href=\"/api-console\" class=\"px-3 py-3 apex-em apex-btn\">API Console</a><a href=\"/pricing\" class=\"px-3 py-3 apex-em apex-btn\">Pricing</a><a href=\"/compliance\" class=\"px-3 py-3 apex-em apex-btn\">Compliance</a><a href=\"/private-cloud\" class=\"px-3 py-3 apex-em apex-btn\">Enterprise</a></div><div class=\"hidden lg:flex items-center gap-3\"><a href=\"https://app.apexmail.ee/login\" class=\"px-3 py-3 apex-em apex-btn\">Sign In</a><a href=\"https://app.apexmail.ee/signup\" class=\"apex-btn apex-btn--primary\">Get Started Free</a></div><button class=\"lg:hidden p-2 min-h-[44px] min-w-[44px] flex items-center justify-center apex-btn\" aria-label=\"{} menu\" aria-expanded=\"{}\">{}</button></div></nav>{}</header>",
             if self.is_scrolled {
                 "bg-card/80 backdrop-blur-xl border-b border-surface-200/50 "
             } else {
@@ -407,7 +407,7 @@ impl CookieConsentBanner {
         // "recorded" when the consent cookie is present, and the
         // stylesheet collapses the banner. No script is involved.
         format!(
-            "<div class=\"fixed inset-x-0 bottom-0 z-50 border-t border-surface-200 bg-surface-50/95 backdrop-blur px-4 py-3\" data-consent-key=\"{}\" data-consent-state=\"pending\"><div class=\"mx-auto flex max-w-6xl flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"text-sm text-surface-600\">We use essential cookies and privacy-friendly analytics to improve ApexMail. See our <a href=\"/cookies\" class=\"font-bold text-surface-900 underline\">Cookie Policy</a>.</p><div class=\"flex items-center gap-2\"><a href=\"{CONSENT_ENDPOINT_PATH}?choice=necessary\" rel=\"nofollow\" class=\"inline-flex items-center justify-center rounded-[8px_8px_7px_7px] border border-surface-300 bg-card px-4 py-2 text-sm font-semibold text-surface-950 transition-all duration-200 ease-premium\">Necessary only</a><a href=\"{CONSENT_ENDPOINT_PATH}?choice=all\" rel=\"nofollow\" class=\"btn-primary px-4 py-2 text-sm\">Accept</a></div></div></div>",
+            "<div class=\"fixed inset-x-0 bottom-0 z-50 border-t backdrop-blur px-4 py-3\" data-consent-key=\"{}\" data-consent-state=\"pending\"><div class=\"mx-auto flex max-w-6xl flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"\">We use essential cookies and privacy-friendly analytics to improve ApexMail. See our <a href=\"/cookies\" class=\"apex-em apex-link\">Cookie Policy</a>.</p><div class=\"flex items-center gap-2\"><a href=\"{CONSENT_ENDPOINT_PATH}?choice=necessary\" rel=\"nofollow\" class=\"inline-flex items-center justify-center border px-4 py-2 apex-em apex-btn\">Necessary only</a><a href=\"{CONSENT_ENDPOINT_PATH}?choice=all\" rel=\"nofollow\" class=\"apex-btn apex-btn--primary px-4 py-2\">Accept</a></div></div></div>",
             cookie_consent_storage_key(),
         )
     }
@@ -435,11 +435,11 @@ impl<'a> MarketingApiConsole<'a> {
             .enumerate()
             .map(|(index, candidate)| {
                 format!(
-                    "<button class=\"w-full text-left px-3 py-3 text-sm flex items-center gap-2 transition-colors {}\"><span class=\"font-mono text-xs font-bold {}\">{}</span><span class=\"truncate\">{}</span></button>",
+                    "<button class=\"w-full px-3 py-3 flex items-center gap-2 {} apex-btn\"><span class=\"{} apex-em\">{}</span><span class=\"apex-meta\">{}</span></button>",
                     if index == self.selected_idx {
-                        "bg-primary/10 text-white"
+                        "is-selected"
                     } else {
-                        "text-surface-400 hover:text-surface-200 hover:bg-surface-800"
+                        ""
                     },
                     method_color(candidate.method),
                     candidate.method,
@@ -450,25 +450,24 @@ impl<'a> MarketingApiConsole<'a> {
             .join("");
         let request_editor = if endpoint.method == "POST" {
             format!(
-                "<div class=\"px-4 py-3 border-b border-surface-700 bg-surface-800/20\"><div class=\"text-xs font-bold text-surface-400 mb-2\">Request Body</div><textarea class=\"w-full bg-surface-900 text-surface-200 font-mono text-xs rounded-sm p-3 border border-surface-700 focus:border-primary focus:outline-none resize-none\" rows=\"4\" spellcheck=\"false\">{}</textarea></div>",
+                "<div class=\"px-4 py-3 border-b\"><div class=\"mb-2 apex-em\">Request Body</div><textarea class=\"w-full p-3 border resize-none apex-input apex-textarea\" rows=\"4\" spellcheck=\"false\">{}</textarea></div>",
                 html_escape(self.request_body),
             )
         } else {
             String::new()
         };
         let response_markup = if self.loading {
-            "<div class=\"flex items-center gap-2 text-surface-400 text-sm\"><div class=\"w-4 h-4 border-2 border-primary border-t-transparent rounded-sm animate-spin\"></div> Sending request...</div>".to_string()
+            "<div class=\"flex items-center gap-2\"><div class=\"w-4 h-4 border-2 border-t-transparent\"></div> Sending request...</div>".to_string()
         } else if let Some(response) = self.response {
             format!(
-                "<pre class=\"text-xs text-success-400 font-mono bg-surface-800/50 rounded-sm p-3 overflow-auto max-h-60\">{}</pre>",
+                "<pre class=\"p-3 overflow-auto max-h-60\">{}</pre>",
                 html_escape(response),
             )
         } else {
-            "<p class=\"text-sm text-surface-400 italic\">Click \"Send\" to execute the request.</p>"
-                .to_string()
+            "<p class=\"\">Click \"Send\" to execute the request.</p>".to_string()
         };
         format!(
-            "<div class=\"rounded-sm border border-surface-700 bg-surface-900 overflow-hidden\" data-csrf-token=\"{}\"><div class=\"flex border-b border-surface-700\"><div class=\"w-56 border-r border-surface-700 bg-surface-800/50 hidden sm:block\"><div class=\"p-3 text-xs font-bold text-surface-400 uppercase tracking-wider\">Endpoints</div>{}</div><div class=\"flex-1 flex flex-col min-h-[24rem]\"><div class=\"flex items-center gap-2 px-4 py-3 border-b border-surface-700 bg-surface-800/30\"><span class=\"font-mono text-sm font-bold {}\">{}</span><span class=\"font-mono text-sm text-surface-300\">{}</span><button class=\"ml-auto px-4 py-1.5 rounded-sm bg-primary text-white text-sm font-bold hover:bg-primary transition-colors disabled:opacity-50\">{}</button></div>{}<div class=\"flex-1 px-4 py-3\"><div class=\"text-xs font-bold text-surface-400 mb-2\">Response</div>{}</div></div></div></div>",
+            "<div class=\"border overflow-hidden\" data-csrf-token=\"{}\"><div class=\"flex border-b\"><div class=\"w-56 border-r hidden sm:block\"><div class=\"p-3 apex-em apex-section-head\">Endpoints</div>{}</div><div class=\"flex-1 flex flex-col min-h-[24rem]\"><div class=\"flex items-center gap-2 px-4 py-3 border-b\"><span class=\"{} apex-em\">{}</span><span class=\"\">{}</span><button class=\"ml-auto px-4 py-1.5 apex-btn apex-btn--primary apex-btn--sm\">{}</button></div>{}<div class=\"flex-1 px-4 py-3\"><div class=\"mb-2 apex-em\">Response</div>{}</div></div></div></div>",
             html_escape(self.csrf_token),
             sidebar,
             method_color(endpoint.method),

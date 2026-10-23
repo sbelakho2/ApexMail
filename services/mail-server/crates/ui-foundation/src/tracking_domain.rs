@@ -52,35 +52,35 @@ pub fn tracking_domain_panel_html(panel: &TrackingDomainPanel, csrf_token: &str)
     let csrf = escape(csrf_token);
     let card = |inner: String| {
         format!(
-            "<section data-page=\"tracking-domain\" class=\"space-y-4\"><div class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium\">{inner}</div></section>"
+            "<section data-page=\"tracking-domain\" class=\"space-y-4\"><div class=\"border p-6\">{inner}</div></section>"
         )
     };
-    const BTN: &str = "inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-primary px-4 py-2 text-sm font-semibold text-white transition-all duration-200 ease-premium active:scale-[0.98] hover:bg-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2";
-    const H2: &str = "text-xs font-bold uppercase tracking-widest text-surface-500";
+    const BTN: &str = "apex-btn apex-btn--primary";
+    const H2: &str = "apex-section-head";
 
     if !panel.domain_verified {
         return card(format!(
-            "<h2 class=\"{H2}\">Custom tracking domain</h2><p class=\"mt-2 text-sm text-muted-foreground\">Verify <span class=\"font-mono\">{domain_name}</span> first. A tracking domain must be a subdomain of a verified domain in your workspace, so it can only be configured after this domain passes verification.</p>"
+            "<h2 class=\"{H2} apex-h2\">Custom tracking domain</h2><p class=\"mt-2\">Verify <span class=\"\">{domain_name}</span> first. A tracking domain must be a subdomain of a verified domain in your workspace, so it can only be configured after this domain passes verification.</p>"
         ));
     }
 
     if !panel.entitled {
         return card(format!(
-            "<h2 class=\"{H2}\">Custom tracking domain</h2><p class=\"mt-2 text-sm text-muted-foreground\">Custom tracking domains are available on Pro and above. Your current plan does not include this capability, so no setup form is shown here.</p>"
+            "<h2 class=\"{H2} apex-h2\">Custom tracking domain</h2><p class=\"mt-2\">Custom tracking domains are available on Pro and above. Your current plan does not include this capability, so no setup form is shown here.</p>"
         ));
     }
 
     match &panel.configured {
         None => card(format!(
-            "<h2 class=\"{H2}\">Custom tracking domain</h2>\
-             <p class=\"mt-2 text-sm text-muted-foreground\">Use your own subdomain (for example <span class=\"font-mono\">email.{domain_name}</span>) for open and click tracking links. It must be a subdomain of <span class=\"font-mono\">{domain_name}</span>, one per verified domain, and must not use a mail or web label such as <span class=\"font-mono\">www</span> or <span class=\"font-mono\">mail</span>.</p>\
+            "<h2 class=\"{H2} apex-h2\">Custom tracking domain</h2>\
+             <p class=\"mt-2\">Use your own subdomain (for example <span class=\"\">email.{domain_name}</span>) for open and click tracking links. It must be a subdomain of <span class=\"\">{domain_name}</span>, one per verified domain, and must not use a mail or web label such as <span class=\"\">www</span> or <span class=\"\">mail</span>.</p>\
              <form method=\"post\" action=\"/web/domains/{domain_id}/tracking-domain\" class=\"mt-4 flex flex-col gap-3 sm:flex-row\" data-form-id=\"tracking-domain-create\">\
                <input type=\"hidden\" name=\"_csrf\" value=\"{csrf}\">\
-               <label class=\"sr-only\" for=\"tracking-domain-input\">Tracking domain</label>\
-               <input id=\"tracking-domain-input\" name=\"domain\" required placeholder=\"email.{domain_name}\" pattern=\"[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\">\
+               <label class=\"sr-only apex-label\" for=\"tracking-domain-input\">Tracking domain</label>\
+               <input id=\"tracking-domain-input\" name=\"domain\" required placeholder=\"email.{domain_name}\" pattern=\"[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+\" class=\"flex h-12 w-full border px-3 apex-input\">\
                <button type=\"submit\" class=\"{BTN}\">Use custom tracking domain</button>\
              </form>\
-             <p class=\"mt-2 text-xs text-muted-foreground\">The CNAME record to publish is shown here immediately after setup, and verification checks it live.</p>",
+             <p class=\"mt-2\">The CNAME record to publish is shown here immediately after setup, and verification checks it live.</p>",
             domain_id = escape(&panel.domain_id)
         )),
         Some(row) => {
@@ -88,7 +88,7 @@ pub fn tracking_domain_panel_html(panel: &TrackingDomainPanel, csrf_token: &str)
             let reason = row
                 .status_reason
                 .as_deref()
-                .map(|reason| format!("<p class=\"mt-2 text-sm text-muted-foreground\">{}</p>", escape(reason)))
+                .map(|reason| format!("<p class=\"mt-2\">{}</p>", escape(reason)))
                 .unwrap_or_default();
             // The CNAME record stays INSPECTABLE after verification too: the
             // operator still needs to see (and keep) it, and the panel used to
@@ -96,30 +96,30 @@ pub fn tracking_domain_panel_html(panel: &TrackingDomainPanel, csrf_token: &str)
             // tracking_domain.rs: "retain the record after verification").
             let verified = row.status == "verified";
             let record = format!(
-                "<div class=\"mt-4 rounded-sm border border-primary/30 bg-primary/5 p-4\"><p class=\"text-xs font-bold uppercase tracking-[0.18em] text-primary\">DNS record {heading}</p><p class=\"mt-2 text-[10px] font-bold uppercase tracking-[0.18em] text-surface-500\">Type · Host · Value</p><p class=\"mt-1 font-mono text-xs break-all select-text text-surface-800\">CNAME · {host} · {value}</p>{after}</div>",
+                "<div class=\"mt-4 border p-4\"><p class=\"apex-em\">DNS record {heading}</p><p class=\"mt-2 apex-em\">Type, Host, Value</p><p class=\"mt-1 apex-mono-id\">CNAME, {host}, {value}</p>{after}</div>",
                 heading = if verified { "in place" } else { "to publish" },
                 host = escape(&row.domain),
                 value = escape(&row.cname_target),
                 after = if verified {
-                    "<p class=\"mt-2 text-xs text-muted-foreground\">Keep this record: removing it stops open and click tracking on this host.</p>"
+                    "<p class=\"mt-2\">Keep this record: removing it stops open and click tracking on this host.</p>"
                 } else {
                     ""
                 },
             );
             let verified_note = match row.verified_at.as_deref() {
                 Some(at) => format!(
-                    "<p class=\"mt-2 text-xs text-muted-foreground\">Verified at {}. Tracked links on this host are served for this workspace.</p>",
+                    "<p class=\"mt-2\">Verified at {}. Tracked links on this host are served for this workspace.</p>",
                     escape(at)
                 ),
                 None => String::new(),
             };
             card(format!(
-                "<h2 class=\"{H2}\">Custom tracking domain</h2>\
-                 <div class=\"mt-2 flex flex-wrap items-center gap-3\"><span class=\"font-mono text-sm\">{domain}</span><span class=\"inline-flex items-center rounded-full border border-surface-200 px-2 py-0.5 text-[11px] font-bold uppercase tracking-widest text-surface-500\">{status}</span></div>\
+                "<h2 class=\"{H2} apex-h2\">Custom tracking domain</h2>\
+                 <div class=\"mt-2 flex flex-wrap items-center gap-3\"><span class=\"\">{domain}</span><span class=\"inline-flex items-center border px-2 py-0.5 apex-em apex-section-head\">{status}</span></div>\
                  {reason}{verified_note}{record}\
                  <div class=\"mt-4 flex flex-wrap gap-3\">\
                    <form method=\"post\" action=\"/web/domains/{domain_id}/tracking-domain/verify\" class=\"inline\"><input type=\"hidden\" name=\"_csrf\" value=\"{csrf}\"><button type=\"submit\" class=\"{BTN}\">Verify DNS now</button></form>\
-                   <form method=\"post\" action=\"/web/domains/{domain_id}/tracking-domain/delete\" class=\"inline\"><input type=\"hidden\" name=\"_csrf\" value=\"{csrf}\"><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] border border-surface-200 bg-background px-4 py-2 text-sm font-semibold text-foreground transition-all duration-200 ease-premium active:scale-[0.98] hover:border-surface-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Remove</button></form>\
+                   <form method=\"post\" action=\"/web/domains/{domain_id}/tracking-domain/delete\" class=\"inline\"><input type=\"hidden\" name=\"_csrf\" value=\"{csrf}\"><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap border px-4 py-2 apex-btn\">Remove</button></form>\
                  </div>",
                 domain = escape(&row.domain),
                 domain_id = escape(&panel.domain_id),
@@ -132,15 +132,15 @@ pub fn tracking_domain_panel_html(panel: &TrackingDomainPanel, csrf_token: &str)
 /// the panel. `None` is the no-data fallback the route inventory sweep and
 /// the exported route fixture render — never a fabricated configured state.
 pub fn web_domain_tracking_page(panel: Option<&TrackingDomainPanel>, csrf_token: &str) -> String {
-    let header = "<nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\"><li><a href=\"/domains\" class=\"hover:text-surface-900 transition-colors\">Domains</a></li><li class=\"text-surface-500\">/</li><li class=\"text-surface-900 font-medium\">Tracking domain</li></ol></nav>\
-<div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Custom tracking domain</h1>\
-<p class=\"text-sm text-muted-foreground\">Serve open and click tracking links from your own subdomain.</p></div>";
+    let header = "<nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2\"><li><a href=\"/domains\" class=\"apex-link\">Domains</a></li><li class=\"\">/</li><li class=\"apex-em\">Tracking domain</li></ol></nav>\
+<div><h1 class=\"apex-page-title\">Custom tracking domain</h1>\
+<p class=\"\">Serve open and click tracking links from your own subdomain.</p></div>";
     let body = match panel {
         Some(panel) => tracking_domain_panel_html(panel, csrf_token),
-        None => "<section data-page=\"tracking-domain\" class=\"space-y-4\"><div class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium\">\
-<h2 class=\"text-xs font-bold uppercase tracking-widest text-surface-500\">Custom tracking domain</h2>\
-<p class=\"mt-2 text-sm text-muted-foreground\">Open a domain from the Domains page to configure its tracking subdomain. This page is only reachable for a domain in your workspace.</p>\
-<a href=\"/domains\" class=\"mt-4 inline-flex items-center justify-center whitespace-nowrap rounded-sm border border-input bg-background hover:bg-accent h-12 px-6 py-3 text-sm font-bold\">Back to domains</a></div></section>"
+        None => "<section data-page=\"tracking-domain\" class=\"space-y-4\"><div class=\"border p-6\">\
+<h2 class=\"apex-section-head\">Custom tracking domain</h2>\
+<p class=\"mt-2\">Open a domain from the Domains page to configure its tracking subdomain. This page is only reachable for a domain in your workspace.</p>\
+<a href=\"/domains\" class=\"mt-4 inline-flex items-center justify-center whitespace-nowrap border h-12 px-6 py-3 apex-em apex-btn\">Back to domains</a></div></section>"
             .to_string(),
     };
     format!(
@@ -185,7 +185,7 @@ mod tests {
             "csrf",
         );
         assert!(
-            html.contains("CNAME · email.customer.test · track.apexmail.ee"),
+            html.contains("CNAME, email.customer.test, track.apexmail.ee"),
             "{html}"
         );
         assert!(html.contains("DNS record in place"), "{html}");

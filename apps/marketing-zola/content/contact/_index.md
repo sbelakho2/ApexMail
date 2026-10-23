@@ -17,7 +17,7 @@ Pick the route that matches your situation:
 | Abuse | [Report abuse](mailto:abuse@apexmail.ee) |
 | Enterprise architecture | [Book architecture review](/contact/enterprise/) |
 
-General enquiries: [hello@apexmail.ee](mailto:hello@apexmail.ee) · Documentation: [ApexMail docs](/docs/)
+General enquiries: [hello@apexmail.ee](mailto:hello@apexmail.ee), Documentation: [ApexMail docs](/docs/)
 
 ## Enterprise review
 

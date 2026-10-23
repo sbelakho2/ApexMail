@@ -31,14 +31,14 @@
   "Paid-plan changes use secure Adyen Checkout or the Adyen billing portal. A plan does not change until Adyen confirms the billing event and ApexMail reconciles the verified Adyen webhook. Enterprise annual contracts follow the signed order form and service terms."
 ] %}
 
-<section id="pricing-faq" class="scroll-mt-20 py-20 lg:py-32 bg-surface-50 border-t border-surface-100">
+<section id="pricing-faq" class="scroll-mt-20 py-20 lg:py-32 border-t">
   <div class="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8">
-    <div class="text-center mb-16">
-      <h2 class="text-3xl font-bold text-surface-950 tracking-tight">
+    <div class="mb-16">
+      <h2 class="apex-h2">
         {% if i18n_data and i18n_data[l] and i18n_data[l]["pricing_faq"] and i18n_data[l]["pricing_faq"]["title"] %}{{ i18n_data[l]["pricing_faq"]["title"] }}{% else %}Frequently Asked Questions{% endif %}
       </h2>
     </div>
-    <div class="space-y-0 divide-y divide-surface-100">
+    <div class="space-y-0">
 
       {% for question in faq_questions %}
       {% set q_text = question %}
@@ -48,12 +48,12 @@
       {% if i18n_data and i18n_data[l] and i18n_data[l]["pricing_faq"] and i18n_data[l]["pricing_faq"][q_key] %}{% set q_text = i18n_data[l]["pricing_faq"][q_key] %}{% endif %}
       {% if i18n_data and i18n_data[l] and i18n_data[l]["pricing_faq"] and i18n_data[l]["pricing_faq"][a_key] %}{% set a_text = i18n_data[l]["pricing_faq"][a_key] %}{% endif %}
       <details class="faq-item">
-        <summary class="w-full flex items-center justify-between py-6 text-left group">
-          <span class="text-lg font-medium text-surface-950 group-hover:text-surface-950 transition-colors">{{ q_text }}</span>
-          <svg class="faq-icon w-5 h-5 text-surface-400 transition-transform duration-200 flex-shrink-0 ml-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
+        <summary class="w-full flex items-center justify-between py-6">
+          <span class="apex-em">{{ q_text }}</span>
+          <svg class="faq-icon w-5 h-5 flex-shrink-0 ml-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
         </summary>
         <div class="pb-6 pr-12">
-          <p class="text-surface-600 leading-relaxed">{{ a_text | safe }}</p>
+          <p class="">{{ a_text | safe }}</p>
         </div>
       </details>
       {% endfor %}

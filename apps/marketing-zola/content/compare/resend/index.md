@@ -12,7 +12,7 @@ competitor_description = "Resend is a modern email API for developers with compo
 pricing_as_of = "2026-10-04"
 og_image = "/images/og-image.png"
 # Feature comparison counts are not displayed (review 2026-09-08 §19)
-verdict_title = "Why Choose ApexMail Over Resend?"
+verdict_title = "How ApexMail differs from Resend"
 verdict_points = [
   "Core email data (content, delivery events, sender and recipient data) stored in the EEA by default — not just sent from an EU region",
   "Private deployment paths (Dedicated Tenant, BYOC) alongside the shared cloud",
@@ -26,25 +26,25 @@ verdict_points = [
 # spans and any inline markup. Winner is one of: apexmail | competitor | tie | none.
 comparison_sections = [
   { title = "DELIVERABILITY", rows = [
-    { feature = "Delivery Rate", apex = '<span class="text-surface-600 font-semibold">Not directly comparable — provider-defined measurement</span>', comp = '<span class="text-surface-600">Not directly comparable — provider-defined measurement</span>', winner = "none" },
-    { feature = "Dedicated IP", apex = '<span class="text-brand-600 font-semibold">Approved add-on on Pro; 1 included on Growth and Business; 3 on Enterprise Cloud</span>', comp = '<span class="text-surface-600">See provider pricing</span>', winner = "none" },
-    { feature = "IP Warming", apex = '<span class="text-brand-600 font-semibold">Automatic geometric</span>', comp = '<span class="text-surface-600">Automatic (managed)</span>', winner = "tie" },
-    { feature = "BIMI Support", apex = '<span class="text-surface-400">✗</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
-    { feature = "ARC Signing", apex = '<span class="text-surface-400">✗</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
-    { feature = "Reputation Circuit Breaker", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-400">✗</span>', winner = "apexmail" }
+    { feature = "Delivery Rate", apex = '<span>Not directly comparable — provider-defined measurement</span>', comp = '<span class="">Not directly comparable — provider-defined measurement</span>', winner = "none" },
+    { feature = "Dedicated IP", apex = '<span>Approved add-on on Pro; 1 included on Growth and Business; 3 on Enterprise Cloud</span>', comp = '<span class="">See provider pricing</span>', winner = "none" },
+    { feature = "IP Warming", apex = '<span>Automatic geometric</span>', comp = '<span class="">Automatic (managed)</span>', winner = "tie" },
+    { feature = "BIMI Support", apex = '<span class="">✗</span>', comp = '<span class="">✗</span>', winner = "none" },
+    { feature = "ARC Signing", apex = '<span class="">✗</span>', comp = '<span class="">✗</span>', winner = "none" },
+    { feature = "Reputation Circuit Breaker", apex = '<span class="">✓</span>', comp = '<span class="">✗</span>', winner = "apexmail" }
   ]},
   { title = "COMPLIANCE", rows = [
-    { feature = "GDPR Automation", apex = '<span class="text-brand-600 font-semibold">DSR workflows</span>', comp = '<span class="text-surface-600">Standard controls</span>', winner = "apexmail" },
-    { feature = "HIPAA availability", apex = '<span class="text-surface-600 font-semibold">Not currently offered</span>', comp = '<span class="text-surface-600">Not evaluated in this comparison</span>', winner = "none" },
-    { feature = "Consent Management", apex = '<span class="text-brand-600 font-semibold">Built-in</span>', comp = '<span class="text-surface-400">✗</span>', winner = "apexmail" },
-    { feature = "Audit Logs", apex = '<span class="text-brand-600 font-semibold">Operator + API audit trail</span>', comp = '<span class="text-surface-600">Activity logs only</span>', winner = "apexmail" },
-    { feature = "Idempotency Keys", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-brand-600">✓</span>', winner = "tie" }
+    { feature = "GDPR Automation", apex = '<span>DSR workflows</span>', comp = '<span class="">Standard controls</span>', winner = "apexmail" },
+    { feature = "HIPAA availability", apex = '<span>Not currently offered</span>', comp = '<span class="">Not evaluated in this comparison</span>', winner = "none" },
+    { feature = "Consent Management", apex = '<span>Built-in</span>', comp = '<span class="">✗</span>', winner = "apexmail" },
+    { feature = "Audit Logs", apex = '<span>Operator + API audit trail</span>', comp = '<span class="">Activity logs only</span>', winner = "apexmail" },
+    { feature = "Idempotency Keys", apex = '<span class="">✓</span>', comp = '<span class="">✓</span>', winner = "tie" }
   ]}
 ]
 
 # Trailing methodology paragraph (rendered by partials/compare/table.html).
 methodology_note = """\
-<strong>Methodology:</strong> Feature rows summarize publicly documented Resend behavior. Plans compared: ApexMail self-service tiers and Resend published plans; where a comparable published measurement does not exist (for example delivery rate), the row states that it is not directly comparable. Reviewed: 2026-10-04. See our <a href="/compare/methodology/" class="text-brand-600 hover:text-brand-700 underline">comparison methodology</a> for sourcing standards. <strong>Migrating from Resend?</strong> The base-URL swap and the exactly mapped subset of its API are documented in the <a href="/migrate/resend/" class="text-brand-600 hover:text-brand-700 underline">Resend migration guide</a>.
+<strong>Methodology:</strong> Feature rows summarize publicly documented Resend behavior. Plans compared: ApexMail self-service tiers and Resend published plans; where a comparable published measurement does not exist (for example delivery rate), the row states that it is not directly comparable. Reviewed: 2026-10-04. See our <a href="/compare/methodology/">comparison methodology</a> for sourcing standards. <strong>Migrating from Resend?</strong> The base-URL swap and the exactly mapped subset of its API are documented in the <a href="/migrate/resend/">Resend migration guide</a>.
 """
 +++
 

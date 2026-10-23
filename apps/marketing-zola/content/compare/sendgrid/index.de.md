@@ -14,7 +14,7 @@ verification_date = "2026-08-19"
 currency_note = "Preise werden in EUR angezeigt. Veröffentlicht ein Anbieter nur USD, wird der EUR-Betrag zum Kurs 1 USD = €0.92 (Referenzkurs, 2026-08-19) umgerechnet und der vom Anbieter veröffentlichte USD-Preis in Klammern angegeben. Angaben ohne anfallende Steuern."
 og_image = "/images/og-image.png"
 # Feature comparison counts — update when capabilities change
-verdict_title = "Warum ApexMail statt SendGrid?"
+verdict_title = "Wie sich ApexMail von SendGrid unterscheidet"
 verdict_points = [
   "Bessere Zustellbarkeit durch automatisches IP-Warm-up und Reputationsschutz",
   "DSGVO-orientierte Workflows, Einwilligungsnachweise und Audit-Logs",
@@ -29,44 +29,44 @@ verdict_points = [
 # spans and any inline markup. Winner is one of: apexmail | competitor | tie | none.
 comparison_sections = [
   { title = "ZUSTELLBARKEIT", rows = [
-    { feature = "Zustellrate", apex = '<span class="text-surface-600 font-semibold">Nicht direkt vergleichbar (anbieterspezifische Metrik)</span>', comp = '<span class="text-surface-600">Nicht direkt vergleichbar (anbieterspezifische Metrik)</span>', winner = "none" },
-    { feature = "Dedizierte IP", apex = '<span class="text-brand-600 font-semibold">Freigegebenes Add-on ab Pro; 1 enthalten ab Growth und Business; 3 ab Enterprise Cloud</span>', comp = '<span class="text-surface-600">Pro: €82.75 (US$89.95)/Monat; dedizierte IPs auf Anfrage</span>', winner = "none" },
-    { feature = "IP-Warm-up", apex = '<span class="text-brand-600 font-semibold">Automatisch</span>', comp = '<span class="text-surface-600">Automatisch</span>', winner = "tie" },
-    { feature = "DKIM-Rotation", apex = '<span class="text-brand-600 font-semibold">Automatisch, konfigurierbar</span>', comp = '<span class="text-surface-600">Manuell</span>', winner = "none" },
-    { feature = "Reputations-Circuit-Breaker", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
-    { feature = "BIMI-Unterstützung", apex = '<span class="text-surface-400">✗</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" }
+    { feature = "Zustellrate", apex = '<span>Nicht direkt vergleichbar (anbieterspezifische Metrik)</span>', comp = '<span class="">Nicht direkt vergleichbar (anbieterspezifische Metrik)</span>', winner = "none" },
+    { feature = "Dedizierte IP", apex = '<span>Freigegebenes Add-on ab Pro; 1 enthalten ab Growth und Business; 3 ab Enterprise Cloud</span>', comp = '<span class="">Pro: €82.75 (US$89.95)/Monat; dedizierte IPs auf Anfrage</span>', winner = "none" },
+    { feature = "IP-Warm-up", apex = '<span>Automatisch</span>', comp = '<span class="">Automatisch</span>', winner = "tie" },
+    { feature = "DKIM-Rotation", apex = '<span>Automatisch, konfigurierbar</span>', comp = '<span class="">Manuell</span>', winner = "none" },
+    { feature = "Reputations-Circuit-Breaker", apex = '<span class="">✓</span>', comp = '<span class="">✗</span>', winner = "none" },
+    { feature = "BIMI-Unterstützung", apex = '<span class="">✗</span>', comp = '<span class="">✗</span>', winner = "none" }
   ]},
   { title = "COMPLIANCE", rows = [
-    { feature = "DSGVO-Tools", apex = '<span class="text-brand-600 font-semibold">DSR-Workflows</span>', comp = '<span class="text-surface-600">Dokumentierte DPA</span>', winner = "apexmail" },
-    { feature = "HIPAA-Verfügbarkeit", apex = '<span class="text-surface-600 font-semibold">Derzeit nicht angeboten</span>', comp = '<span class="text-surface-600">Siehe Anbieter-Dokumentation</span>', winner = "none" },
-    { feature = "Datenverschlüsselung", apex = '<span class="text-brand-600 font-semibold">AES-256 im Ruhezustand</span>', comp = '<span class="text-brand-600">✓</span>', winner = "none" },
-    { feature = "Audit-Logs", apex = '<span class="text-brand-600 font-semibold">Ab Growth-Tarif</span>', comp = '<span class="text-surface-600">Nur Zugriffsprotokolle</span>', winner = "apexmail" },
-    { feature = "Residenz-Review", apex = '<span class="text-brand-600 font-semibold">Enterprise-Review</span>', comp = '<span class="text-surface-600">Nur Enterprise</span>', winner = "none" }
+    { feature = "DSGVO-Tools", apex = '<span>DSR-Workflows</span>', comp = '<span class="">Dokumentierte DPA</span>', winner = "apexmail" },
+    { feature = "HIPAA-Verfügbarkeit", apex = '<span>Derzeit nicht angeboten</span>', comp = '<span class="">Siehe Anbieter-Dokumentation</span>', winner = "none" },
+    { feature = "Datenverschlüsselung", apex = '<span>AES-256 im Ruhezustand</span>', comp = '<span class="">✓</span>', winner = "none" },
+    { feature = "Audit-Logs", apex = '<span>Ab Growth-Tarif</span>', comp = '<span class="">Nur Zugriffsprotokolle</span>', winner = "apexmail" },
+    { feature = "Residenz-Review", apex = '<span>Enterprise-Review</span>', comp = '<span class="">Nur Enterprise</span>', winner = "none" }
   ]},
   { title = "ENTWICKLERERFAHRUNG", rows = [
-    { feature = "Zeit bis zur ersten E-Mail", apex = '<span class="text-brand-600 font-semibold">&lt;10 Sekunden</span>', comp = '<span class="text-surface-600">~5 Minuten</span>', winner = "none" },
-    { feature = "Offizielle SDK-Abdeckung", apex = '<span class="text-brand-600 font-semibold">Sechs SDKs in aktiver Entwicklung (Python, Go, TypeScript, PHP, Ruby, Java); Quellcode im Monorepo, noch nicht in Registries veröffentlicht</span>', comp = '<span class="text-surface-600">Sieben SDKs</span>', winner = "competitor" },
-    { feature = "Idempotenzschlüssel", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
-    { feature = "Webhook-Signaturen", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-brand-600">✓</span>', winner = "none" },
-    { feature = "Sandbox-Modus", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-brand-600">✓</span>', winner = "none" }
+    { feature = "Zeit bis zur ersten E-Mail", apex = '<span>&lt;10 Sekunden</span>', comp = '<span class="">~5 Minuten</span>', winner = "none" },
+    { feature = "Offizielle SDK-Abdeckung", apex = '<span>Sechs SDKs in aktiver Entwicklung (Python, Go, TypeScript, PHP, Ruby, Java); Quellcode im Monorepo, noch nicht in Registries veröffentlicht</span>', comp = '<span class="">Sieben SDKs</span>', winner = "competitor" },
+    { feature = "Idempotenzschlüssel", apex = '<span class="">✓</span>', comp = '<span class="">✗</span>', winner = "none" },
+    { feature = "Webhook-Signaturen", apex = '<span class="">✓</span>', comp = '<span class="">✓</span>', winner = "none" },
+    { feature = "Sandbox-Modus", apex = '<span class="">✓</span>', comp = '<span class="">✓</span>', winner = "none" }
   ]},
   { title = "PREISE", rows = [
-    { feature = "Kostenlose Stufe", apex = '<span class="text-brand-600 font-semibold">3.000 E-Mails/Monat + einmaliges Startguthaben von 30.000</span>', comp = '<span class="text-surface-600">100 E-Mails/Tag</span>', winner = "none" },
-    { feature = "100K E-Mails/Monat", apex = '<span class="text-brand-600 font-semibold">€89 (Pro: 150K)</span>', comp = '<span class="text-surface-600">€82.75 (US$89.95) — Pro; Essentials ab €18.35 (US$19.95)</span>', winner = "apexmail" },
-    { feature = "SSO inklusive", apex = '<span class="text-brand-600 font-semibold">Business- und Enterprise-Tarife</span>', comp = '<span class="text-surface-600">Ab Pro enthalten</span>', winner = "none" },
-    { feature = "Prüfung individueller Bereitstellungen", apex = '<span class="text-brand-600 font-semibold">Enterprise-Review</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" }
+    { feature = "Kostenlose Stufe", apex = '<span>3.000 E-Mails/Monat + einmaliges Startguthaben von 30.000</span>', comp = '<span class="">100 E-Mails/Tag</span>', winner = "none" },
+    { feature = "100K E-Mails/Monat", apex = '<span>€89 (Pro: 150K)</span>', comp = '<span class="">€82.75 (US$89.95) — Pro; Essentials ab €18.35 (US$19.95)</span>', winner = "apexmail" },
+    { feature = "SSO inklusive", apex = '<span>Business- und Enterprise-Tarife</span>', comp = '<span class="">Ab Pro enthalten</span>', winner = "none" },
+    { feature = "Prüfung individueller Bereitstellungen", apex = '<span>Enterprise-Review</span>', comp = '<span class="">✗</span>', winner = "none" }
   ]},
   { title = "EINBLICKE & INTELLIGENZ", rows = [
-    { feature = "Sendezeit-Einblicke", apex = '<span class="text-brand-600 font-semibold">Empfehlungen</span>', comp = '<span class="text-surface-600">E-Mail-Scoring</span>', winner = "apexmail" },
-    { feature = "Inhaltsdiagnosen", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
-    { feature = "Betreffzeilen-Analyse", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
-    { feature = "Inhaltsanalyse", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-600">Nur Klassifizierung</span>', winner = "apexmail" }
+    { feature = "Sendezeit-Einblicke", apex = '<span>Empfehlungen</span>', comp = '<span class="">E-Mail-Scoring</span>', winner = "apexmail" },
+    { feature = "Inhaltsdiagnosen", apex = '<span class="">✓</span>', comp = '<span class="">✗</span>', winner = "none" },
+    { feature = "Betreffzeilen-Analyse", apex = '<span class="">✓</span>', comp = '<span class="">✗</span>', winner = "none" },
+    { feature = "Inhaltsanalyse", apex = '<span class="">✓</span>', comp = '<span class="">Nur Klassifizierung</span>', winner = "apexmail" }
   ]}
 ]
 
 # Trailing methodology paragraph (rendered by partials/compare/table.html).
 methodology_note = """\
-<strong>Methodik:</strong> Die Funktionszeilen fassen öffentlich dokumentiertes SendGrid-Verhalten und veröffentlichte Preise zusammen; die Preiszeilen nennen die verglichenen Tarife (SendGrid Pro, Essentials) bei 100.000 E-Mails/Monat. Preise und Tarifdetails zuletzt geprüft: 2026-10-04. Ist eine Anbieterangabe nicht öffentlich dokumentiert, sagt die Zeile das, statt eine Zahl zu behaupten. Quellen- und Prüfstandards: <a href="/de/compare/methodology/" class="text-brand-600 hover:text-brand-700 underline">Vergleichsmethodik</a>. <strong>Migration von SendGrid?</strong> Der Basis-URL-Wechsel und die exakt abgebildete Teilmenge der API sind im <a href="/de/migrate/sendgrid/" class="text-brand-600 hover:text-brand-700 underline">Migrationsleitfaden SendGrid</a> dokumentiert.
+<strong>Methodik:</strong> Die Funktionszeilen fassen öffentlich dokumentiertes SendGrid-Verhalten und veröffentlichte Preise zusammen; die Preiszeilen nennen die verglichenen Tarife (SendGrid Pro, Essentials) bei 100.000 E-Mails/Monat. Preise und Tarifdetails zuletzt geprüft: 2026-10-04. Ist eine Anbieterangabe nicht öffentlich dokumentiert, sagt die Zeile das, statt eine Zahl zu behaupten. Quellen- und Prüfstandards: <a href="/de/compare/methodology/">Vergleichsmethodik</a>. <strong>Migration von SendGrid?</strong> Der Basis-URL-Wechsel und die exakt abgebildete Teilmenge der API sind im <a href="/de/migrate/sendgrid/">Migrationsleitfaden SendGrid</a> dokumentiert.
 """
 +++
 

@@ -1,24 +1,24 @@
 {# ── Compliance Hero ──────────────────────────────────────────── #}
 {# Converted from compliance/ComplianceHero.tsx                  #}
 
-<section class="relative min-h-screen flex items-center pt-32 pb-20 overflow-hidden bg-surface-100">
+<section class="relative min-h-screen flex items-center pt-32 pb-20 overflow-hidden">
   <div class="relative max-w-7xl mx-auto px-6 sm:px-6 lg:px-8 py-12 lg:py-20">
     <div class="grid lg:grid-cols-2 gap-12 lg:gap-16 items-center">
       {# Left Column #}
-      <div class="animate-in">
-        <div class="inline-flex items-center gap-2 px-3 py-1 rounded-sm bg-surface-50 border border-surface-200 text-[14px] font-medium text-surface-600 mb-8">
-          <span class="w-6 h-6 rounded-sm bg-surface-100 flex items-center justify-center">
+      <div class="">
+        <div class="inline-flex items-center gap-2 px-3 py-1 border mb-8 apex-em">
+          <span class="w-6 h-6 flex items-center justify-center">
             <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
           </span>
           {% if i18n_data and i18n_data[l] and i18n_data[l]["compliance"] and i18n_data[l]["compliance"]["hero_badge"] %}{{ i18n_data[l]["compliance"]["hero_badge"] }}{% else %}Compliance workflows{% endif %}
         </div>
 
-        <h1 class="text-3xl sm:text-5xl lg:text-6xl font-bold tracking-tight mb-6 leading-tight text-surface-950 break-words">
+        <h1 class="mb-6 break-words apex-page-title">
           {% if i18n_data and i18n_data[l] and i18n_data[l]["compliance"] and i18n_data[l]["compliance"]["hero_title"] %}{{ i18n_data[l]["compliance"]["hero_title"] }}{% else %}Compliance workflows built into <br />
-          <span class="text-surface-500">your email operations.</span>{% endif %}
+          <span class="">your email operations.</span>{% endif %}
         </h1>
 
-        <p class="text-lg text-surface-600 mb-10 leading-relaxed max-w-lg">
+        <p class="mb-10 max-w-lg">
           {% if i18n_data and i18n_data[l] and i18n_data[l]["compliance"] and i18n_data[l]["compliance"]["hero_subtitle"] %}{{ i18n_data[l]["compliance"]["hero_subtitle"] }}{% else %}Treat compliance as a current, documented operating concern. ApexMail includes
           GDPR-oriented workflow APIs, audit-capable plans, and security-review material
           for Enterprise evaluation. HIPAA availability is not currently offered.{% endif %}
@@ -26,25 +26,25 @@
 
         <ul class="space-y-4 mb-10">
           <li class="flex items-start gap-3">
-            <svg class="w-5 h-5 text-brand-500 mt-0.5 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-            <span class="text-surface-700 font-medium text-[14px] leading-relaxed">Lawful-basis records per processing purpose (consent, contract, legal obligation, legitimate interests) with evidence references</span>
+            <svg class="w-5 h-5 mt-0.5 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+            <span class="apex-em">Lawful-basis records per processing purpose (consent, contract, legal obligation, legitimate interests) with evidence references</span>
           </li>
           <li class="flex items-start gap-3">
-            <svg class="w-5 h-5 text-brand-500 mt-0.5 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-            <span class="text-surface-700 font-medium text-[14px] leading-relaxed">Security-questionnaire requests assessed case by case from current review material — no standardized SIG, CAIQ, or HECVAT pack is a product entitlement</span>
+            <svg class="w-5 h-5 mt-0.5 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+            <span class="apex-em">Security-questionnaire requests assessed case by case from current review material — no standardized SIG, CAIQ, or HECVAT pack is a product entitlement</span>
           </li>
           <li class="flex items-start gap-3">
-            <svg class="w-5 h-5 text-brand-500 mt-0.5 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-            <span class="text-surface-700 font-medium text-[14px] leading-relaxed">Right-to-be-Forgotten erasure workflow with audit events</span>
+            <svg class="w-5 h-5 mt-0.5 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+            <span class="apex-em">Right-to-be-Forgotten erasure workflow with audit events</span>
           </li>
         </ul>
 
         <div class="flex flex-wrap gap-4">
-          <a href="{{ config.extra.app_url }}/signup" class="inline-flex items-center justify-center px-6 py-3 text-sm font-semibold text-white bg-brand-600 rounded-sm hover:bg-brand-700 transition-colors">
+          <a href="{{ config.extra.app_url }}/signup" class="inline-flex items-center justify-center px-6 py-3 apex-em apex-btn apex-btn--primary">
             {% if i18n_data and i18n_data[l] and i18n_data[l]["cta"] and i18n_data[l]["cta"]["cta_button"] %}{{ i18n_data[l]["cta"]["cta_button"] }}{% else %}Start Free{% endif %}
             <svg class="w-4 h-4 ml-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
           </a>
-          <a href="{{ lp }}/contact/" class="inline-flex items-center justify-center px-6 py-3 text-sm font-semibold text-surface-950 bg-surface-50 border border-surface-200 rounded-sm hover:bg-surface-100 transition-colors">
+          <a href="{{ lp }}/contact/" class="inline-flex items-center justify-center px-6 py-3 border apex-em apex-btn">
             Compliance Review
           </a>
         </div>
@@ -53,28 +53,28 @@
            directive 2026-10-16) so the contractual layer and the sovereign
            position read as one story. #}
         <p class="mt-8">
-          <a href="{{ lp }}/eu-sovereign/" class="text-sm font-bold text-brand-600 hover:underline">{% if i18n_data and i18n_data[l] and i18n_data[l]["compliance"] and i18n_data[l]["compliance"]["sovereignty_link"] %}{{ i18n_data[l]["compliance"]["sovereignty_link"] }}{% else %}Read the EU-sovereign architecture and its evidence{% endif %} &rarr;</a>
+          <a href="{{ lp }}/eu-sovereign/" class="apex-em apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["compliance"] and i18n_data[l]["compliance"]["sovereignty_link"] %}{{ i18n_data[l]["compliance"]["sovereignty_link"] }}{% else %}Read the EU-sovereign architecture and its evidence{% endif %} &rarr;</a>
         </p>
       </div>
 
       {# Right Column — Compliance Controls #}
-      <div class="animate-in delay-200 relative">
-        <div class="p-6 sm:p-8 bg-surface-50 rounded-sm border border-surface-200">
-          <h2 class="text-[14px] font-semibold text-surface-500 mb-8 text-center">Compliance Workflows</h2>
+      <div class="relative">
+        <div class="p-6 sm:p-8 border">
+          <h2 class="mb-8 apex-h2">Compliance Workflows</h2>
           {% set badges = ["GDPR DSR", "Audit logs", "DPA review", "Current documentation"] %}
           <div class="grid grid-cols-2 lg:grid-cols-3 gap-4">
             {% for badge in badges %}
-            <div class="animate-in min-h-[8rem] rounded-2xl bg-surface-100 border border-surface-200 flex flex-col items-center justify-center p-4 hover:border-surface-300 transition-colors">
-              <div class="w-10 h-10 rounded-md bg-surface-50 flex items-center justify-center mb-3 border border-surface-200 text-surface-950">
+            <div class="min-h-[8rem] border flex flex-col items-center justify-center p-4">
+              <div class="w-10 h-10 flex items-center justify-center mb-3 border">
                 <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
               </div>
-              <span class="text-[14px] font-semibold text-surface-950 text-balance max-w-full text-center [overflow-wrap:anywhere]">{{ badge }}</span>
+              <span class="max-w-full break-words apex-em">{{ badge }}</span>
             </div>
             {% endfor %}
           </div>
-          <div class="mt-10 p-4 rounded-sm bg-success-50 border border-success-100">
-            <div class="flex items-center gap-3 text-success-700 text-[14px] font-bold">
-              <span class="w-2 h-2 rounded-sm bg-success-500" aria-hidden="true"></span>
+          <div class="mt-10 p-4 border">
+            <div class="flex items-center gap-3 apex-em">
+              <span class="w-2 h-2" aria-hidden="true"></span>
               Current security-review information for qualified Enterprise evaluation
             </div>
           </div>

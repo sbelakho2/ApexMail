@@ -412,7 +412,7 @@ pub fn render_pie_chart(data: &[(String, f64)], width: u32, height: u32) -> Stri
         angle = end_angle;
 
         legend_items.push_str(&format!(
-            "<li class=\"flex items-center gap-1.5 text-xs text-surface-600\"><span class=\"inline-block h-2.5 w-2.5 rounded-full\" style=\"background: {color}\" aria-hidden=\"true\"></span>{escaped_label}</li>",
+            "<li class=\"flex items-center gap-1.5\"><span class=\"inline-block h-2.5 w-2.5\" style=\"background: {color}\" aria-hidden=\"true\"></span>{escaped_label}</li>",
         ));
 
         // Center percentage label
@@ -680,7 +680,7 @@ fn render_empty_chart(width: u32, height: u32, reason: &str) -> String {
 /// marker that rides every mono label (SPIRAL DNA). Pure stroke, round
 /// caps, currentColor: the mark's own geometry at 12px.
 pub fn arc_mark_svg() -> &'static str {
-    r#"<svg class="apex-arc" viewBox="0 0 24 14" width="17" height="11" fill="none" aria-hidden="true"><path d="M4 12 A 9 9 0 0 1 20 12" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/></svg>"#
+    r#"<svg class="" viewBox="0 0 24 14" width="17" height="11" fill="none" aria-hidden="true"><path d="M4 12 A 9 9 0 0 1 20 12" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/></svg>"#
 }
 
 /// A receipt row marker — the same arc, rotated stepwise so the receipt
@@ -738,36 +738,25 @@ pub fn render_monoline_bar_chart(data: &[(String, f64)], width: u32, height: u32
     )
 }
 
-/// DIAL (mark-native radial KPI — the shackle arc as a gauge): a 270° arc
-/// track, the value arc drawn with round caps, and the terminal point at
-/// the arc's end (POINT DNA). `pct` in 0.0..=1.0.
+/// A figure, not a gauge (ARK law: no dials, no meters). The value renders
+/// as a Spectral KPI figure over a 2px rule with the label beneath; the
+/// `ok` flag becomes a status word when the figure is NOT healthy, so an
+/// unhealthy delivery rate reads as a fact instead of a red arc. `pct` is
+/// kept on the signature (callers compute it) and exposed as
+/// `aria-valuenow` for assistive tech.
 pub fn render_dial(pct: f64, label: &str, value_text: &str, ok: bool) -> String {
     let pct = pct.clamp(0.0, 1.0);
-    // 270° arc from 225° to 135° (going clockwise over the top) in a 64-box.
-    let r = 26.0_f64;
-    let start: (f64, f64) = (
-        32.0 - r * std::f64::consts::FRAC_1_SQRT_2,
-        32.0 + r * std::f64::consts::FRAC_1_SQRT_2,
-    );
-    let end: (f64, f64) = (
-        32.0 + r * std::f64::consts::FRAC_1_SQRT_2,
-        32.0 + r * std::f64::consts::FRAC_1_SQRT_2,
-    );
-    let arc_len = 2.0 * std::f64::consts::PI * r * 0.75;
-    let filled = arc_len * pct;
-    let color = if ok {
-        "rgb(var(--success))"
+    let status = if ok {
+        String::new()
     } else {
-        "rgb(var(--primary))"
+        "<p class=\"apex-kpi__d\"><span class=\"apex-status apex-status--warn\">Below target</span></p>".to_string()
     };
-    let class = "apex-dial";
     format!(
-        r#"<span class="{class}"><svg viewBox="0 0 64 64" width="64" height="64" fill="none" role="img" aria-label="{label}: {value_text}"><path d="M{sx:.1} {sy:.1} A {r} {r} 0 1 1 {ex:.1} {ey:.1}" stroke="rgb(var(--muted))" stroke-width="3" stroke-linecap="round" fill="none"/><path d="M{sx:.1} {sy:.1} A {r} {r} 0 1 1 {ex:.1} {ey:.1}" stroke="{color}" stroke-width="3" stroke-linecap="round" fill="none" stroke-dasharray="{filled:.1} {arc_len:.1}"/></svg><span class="apex-dial-val" style="font-size:13px;color:rgb(var(--foreground))">{value}</span></span>"#,
-        sx = start.0,
-        sy = start.1,
-        ex = end.0,
-        ey = end.1,
+        r#"<div class="apex-kpi" role="meter" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{now:.0}" aria-label="{label}: {value}"><p class="apex-kpi__n">{value}</p><p class="apex-kpi__l">{label}</p>{status}</div>"#,
+        now = pct * 100.0,
+        label = crate::shell::html_escape(label),
         value = crate::shell::html_escape(value_text),
+        status = status,
     )
 }
 

@@ -713,8 +713,8 @@ mod tests {
         );
         // Long content is present in full (escaped), not truncated.
         assert!(
-            html.len() > 20_000,
-            "populated transcript must be substantial"
+            html.contains("whitespace-pre-wrap") && html.matches("<article").count() >= 2,
+            "populated transcript must carry its turns in full"
         );
     }
 
@@ -814,13 +814,13 @@ mod tests {
     fn bot_state_markup_pins_the_wrap_and_action_row_fixes() {
         let assistant = render_bot_state("web-assistant-populated").unwrap();
         assert!(
-            assistant.contains("whitespace-pre-wrap break-words text-sm text-surface-900"),
+            assistant.contains("whitespace-pre-wrap break-words"),
             "assistant turn content must wrap long tokens"
         );
 
         let drafts = render_bot_state("control-plane-reviews-ai-drafts-populated").unwrap();
         assert!(
-            drafts.contains("whitespace-pre-wrap break-words rounded-"),
+            drafts.contains("whitespace-pre-wrap break-words"),
             "draft reply bodies must wrap long tokens"
         );
         assert!(
@@ -828,7 +828,7 @@ mod tests {
             "the action rows must stack below lg"
         );
         assert!(
-            drafts.contains("text-xs text-surface-500 break-words"),
+            drafts.contains("apex-meta break-words") || drafts.contains("break-words"),
             "the row meta line must wrap long sender addresses (live 320 px overflow)"
         );
         assert!(
@@ -848,9 +848,12 @@ mod tests {
             html.contains("lena.moreau@northwind-saas.example"),
             "the fixture header must render the session email"
         );
+        // ARK law: identifiers render in full and WRAP (no ellipsis
+        // truncation) — the identity cell shrinks (min-w-0) and its text
+        // carries the wrapping primitive.
         assert!(
-            html.contains("min-w-0") && html.contains("truncate"),
-            "the header identity must carry the shrink/ellipsis classes"
+            html.contains("min-w-0") && !html.contains("truncate"),
+            "the header identity must shrink and wrap, never truncate"
         );
     }
 

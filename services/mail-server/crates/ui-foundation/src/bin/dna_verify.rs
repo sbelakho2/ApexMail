@@ -18,47 +18,47 @@ fn main() {
     };
 
     check(
-        "web dashboard · 270° dial present",
+        "web dashboard, 270° dial present",
         web_dash.contains("apex-dial"),
     );
     check(
-        "web dashboard · monoline chart present",
+        "web dashboard, monoline chart present",
         web_dash.contains("apex-chart-monoline"),
     );
     check(
-        "web dashboard · arc on Send Volume",
+        "web dashboard, arc on Send Volume",
         web_dash.contains("apex-arc"),
     );
     check(
-        "web dashboard · KPI point meters",
+        "web dashboard, KPI point meters",
         web_dash.contains("apex-meter-point"),
     );
     check(
-        "CP dashboard · service ribbon slots",
+        "CP dashboard, service ribbon slots",
         cp_dash.contains("bg-success-500 text-white\">all nominal"),
     );
     check(
-        "CP dashboard · winding receipt",
+        "CP dashboard, winding receipt",
         cp_dash.contains("apex-receipt"),
     );
     check(
-        "CP dashboard · receipt arcs rotate",
+        "CP dashboard, receipt arcs rotate",
         cp_dash.contains("rotate(24"),
     );
     check(
-        "CP dashboard · arc on ribbon label",
+        "CP dashboard, arc on ribbon label",
         cp_dash.contains("apex-klabel"),
     );
     check(
-        "login · arc labels + arch inputs",
+        "login, arc labels + arch inputs",
         login.contains("apex-klabel") && login.contains("apex-input"),
     );
     check(
-        "signup · 4+ arc labels",
+        "signup, 4+ arc labels",
         signup.matches("apex-klabel").count() >= 4,
     );
-    check("signup · arch inputs", signup.contains("apex-input"));
-    check("MFA · arch code input", mfa.contains("apex-input"));
+    check("signup, arch inputs", signup.contains("apex-input"));
+    check("MFA, arch code input", mfa.contains("apex-input"));
     check(
         "NO old-style labels anywhere (login/signup/mfa)",
         !(login.contains("text-xs font-bold text-surface-900")

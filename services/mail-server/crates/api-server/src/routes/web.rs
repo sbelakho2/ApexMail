@@ -1874,12 +1874,14 @@ fn stub_flash_banner(flash: &[FlashMessage]) -> String {
         .iter()
         .map(|message| {
             let (tone, label) = match message.kind {
-                ui_foundation::flash::FlashKind::Success => ("border-emerald-200 bg-emerald-50 text-emerald-900", "Success"),
-                ui_foundation::flash::FlashKind::Error => ("border-red-200 bg-red-50 text-red-900", "Error"),
-                ui_foundation::flash::FlashKind::Info => ("border-surface-200 bg-surface-100 text-foreground", "Notice"),
+                ui_foundation::flash::FlashKind::Success => ("apex-notice apex-notice--ok", "Done"),
+                ui_foundation::flash::FlashKind::Error => {
+                    ("apex-notice apex-notice--fail", "Failure")
+                }
+                ui_foundation::flash::FlashKind::Info => ("apex-notice", "Notice"),
             };
             format!(
-                "<div class=\"mb-4 rounded-sm border {tone} px-4 py-3 text-sm\" role=\"status\"><span class=\"font-bold\">{label}:</span> {}</div>",
+                "<div class=\"{tone}\" role=\"status\"><b>{label}</b><p>{}</p></div>",
                 html_escape_text(&message.text)
             )
         })

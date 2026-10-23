@@ -96,7 +96,7 @@ fn assert_surface_wrapper(route: &ssr::SsrRoute, html: &str) {
             // background styling moved onto the <body>.
             assert!(
                 html.contains(&format!(
-                    "<body class=\"{} min-h-screen bg-background\">",
+                    "<body class=\"{} min-h-screen\">",
                     leptos_views::WEB_ROOT_BODY_CLASSES
                 )),
                 "[web] {} missing web body class",
@@ -146,7 +146,7 @@ fn assert_surface_wrapper(route: &ssr::SsrRoute, html: &str) {
                 route.pattern
             );
             assert!(
-                html.contains("<body class=\"antialiased bg-background text-surface-950\">"),
+                html.contains("<body class=\"\">"),
                 "[control-plane] {} missing control-plane body classes",
                 route.pattern
             );
@@ -435,7 +435,16 @@ fn migration_marketing_shell_attributes_present() {
         html.contains("data-marketing-shell=\"footer\""),
         "marketing footer missing"
     );
-    assert!(html.contains("font-apex"), "apex font class missing");
+    // ARK: the marketing fallback shell composes the authority's vocabulary
+    // (the type position lives in ark.css, never as a per-page font class).
+    assert!(
+        html.contains("apex-"),
+        "ark vocabulary missing from the marketing shell"
+    );
+    assert!(
+        !html.contains("font-apex"),
+        "per-page font classes are banned (ark.css owns type)"
+    );
 }
 
 #[test]
@@ -582,8 +591,8 @@ fn migration_web_and_cp_share_primitives() {
     let web_login = leptos_views::web_login_page("");
     let cp_login = leptos_views::control_plane_login_page("");
 
-    // Both should use the same button class pattern
-    let btn_class = "py-3 rounded-[8px_8px_7px_7px]";
+    // Both compose the same button primitive (ARK: apex-btn, radius 0).
+    let btn_class = "apex-btn";
     assert!(
         web_login.contains(btn_class),
         "web login missing common button class"
@@ -593,9 +602,9 @@ fn migration_web_and_cp_share_primitives() {
         "cp login missing common button class"
     );
 
-    // Both should use the shared ARCH input class (Spiral-Lock DNA v2:
-    // apex-input carries the crown radius + concentric focus).
-    let input_class = "apex-input w-full px-4 py-3 border border-surface-200";
+    // Both compose the shared input primitive (ARK: apex-input, 1px ink
+    // rule, radius 0, the global 3px double focus outline).
+    let input_class = "apex-input";
     assert!(
         web_login.contains(input_class),
         "web login missing common input class"
@@ -697,13 +706,27 @@ fn migration_critical_css_classes_preserved() {
     let classes = pixel_parity::extract_classes(&web_home);
     let flat: Vec<&String> = classes.iter().flat_map(|c| c.iter()).collect();
 
-    // Essential Tailwind classes that must be preserved
-    let required = ["min-h-screen", "text-5xl", "font-bold", "bg-surface-50"];
+    // Essential structure (ARK): the viewport shell, the page band and the
+    // button primitive — and NO typography/colour utilities (the authority
+    // owns every design decision; cssgen cannot compile them).
+    let required = ["min-h-screen", "apex-page-title", "apex-btn"];
     for cls in &required {
         assert!(
             flat.iter().any(|c| c.as_str() == *cls),
-            "web home page missing Tailwind class '{}'",
+            "web home page missing structural class '{}'",
             cls
+        );
+    }
+    for banned in [
+        "text-5xl",
+        "font-bold",
+        "bg-surface-50",
+        "rounded-[8px_8px_7px_7px]",
+    ] {
+        assert!(
+            !flat.iter().any(|c| c.as_str() == banned),
+            "web home page still carries the design utility '{}'",
+            banned
         );
     }
 }

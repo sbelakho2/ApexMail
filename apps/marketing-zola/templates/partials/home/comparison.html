@@ -2,70 +2,64 @@
 {# DORMANT SNAPSHOT (review §8.3): no current template includes this partial.
    Competitor cells carry descriptive, plan-scoped wording (no superiority
    adjectives); any future reuse needs a fresh sourcing pass against the
-   /compare/* pages before it goes live. #}
-<section class="py-20 lg:py-32 bg-surface-50">
-  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-    <div class="text-center mb-24">
-      <span class="inline-block px-2 py-0.5 text-xs font-bold tracking-widest text-surface-600 border border-surface-200 rounded-sm mb-6 uppercase">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["eyebrow"] %}{{ i18n_data[l]["home_comparison"]["eyebrow"] }}{% else %}Market Position{% endif %}</span>
-      <h2 class="text-surface-950 mb-6 tracking-tighter text-4xl lg:text-6xl">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["heading_1"] %}{{ i18n_data[l]["home_comparison"]["heading_1"] }}{% else %}Why teams migrate to{% endif %}<br /><span class="text-brand-500">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["heading_2"] %}{{ i18n_data[l]["home_comparison"]["heading_2"] }}{% else %}ApexMail{% endif %}</span></h2>
-      <p class="text-surface-600 max-w-2xl mx-auto text-lg leading-[1.5]">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["subtitle"] %}{{ i18n_data[l]["home_comparison"]["subtitle"] }}{% else %}Legacy infrastructure vs. Modern engineering.{% endif %}</p>
-    </div>
-    <div class="overflow-x-auto">
-      <table class="w-full text-left border border-surface-200 border-collapse min-w-[600px]">
-        <caption class="sr-only">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["table_caption"] %}{{ i18n_data[l]["home_comparison"]["table_caption"] }}{% else %}Homepage comparison of ApexMail against SendGrid and Postmark.{% endif %}</caption>
-        <thead class="bg-surface-100">
-          <tr>
-            <th scope="col" class="py-4 px-6 text-xs font-bold text-surface-400 tracking-widest border-b border-r border-surface-200 uppercase">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["col_feature"] %}{{ i18n_data[l]["home_comparison"]["col_feature"] }}{% else %}Feature{% endif %}</th>
-            <th scope="col" class="py-4 px-6 text-xs font-bold text-brand-500 tracking-widest border-b border-r border-surface-200 uppercase">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["col_apexmail"] %}{{ i18n_data[l]["home_comparison"]["col_apexmail"] }}{% else %}ApexMail{% endif %}</th>
-            <th scope="col" class="py-4 px-6 text-xs font-bold text-surface-400 tracking-widest border-b border-r border-surface-200 uppercase">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["col_sendgrid"] %}{{ i18n_data[l]["home_comparison"]["col_sendgrid"] }}{% else %}SendGrid{% endif %}</th>
-            <th scope="col" class="py-4 px-6 text-xs font-bold text-surface-400 tracking-widest border-b border-surface-200 uppercase">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["col_postmark"] %}{{ i18n_data[l]["home_comparison"]["col_postmark"] }}{% else %}Postmark{% endif %}</th>
-          </tr>
-        </thead>
-        <tbody class="text-[13px]">
-          <tr class="hover:bg-surface-50 transition-colors">
-            <td class="py-4 px-6 font-bold text-surface-950 border-b border-r border-surface-200 tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_delivery_tracking"] %}{{ i18n_data[l]["home_comparison"]["row_delivery_tracking"] }}{% else %}Delivery Tracking{% endif %}</td>
-            <td class="py-4 px-6 text-brand-500 font-bold border-b border-r border-surface-200 bg-brand-50/10">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_delivery_tracking_apex"] %}{{ i18n_data[l]["home_comparison"]["row_delivery_tracking_apex"] }}{% else %}Per-message event history{% endif %}</td>
-            <td class="py-4 px-6 text-surface-500 border-b border-r border-surface-200">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_delivery_tracking_sendgrid"] %}{{ i18n_data[l]["home_comparison"]["row_delivery_tracking_sendgrid"] }}{% else %}Event webhooks{% endif %}</td>
-            <td class="py-4 px-6 text-surface-500 border-b border-r border-surface-200">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_delivery_tracking_postmark"] %}{{ i18n_data[l]["home_comparison"]["row_delivery_tracking_postmark"] }}{% else %}Message events{% endif %}</td>
-          </tr>
-          <tr class="hover:bg-surface-50 transition-colors">
-            <td class="py-4 px-6 font-bold text-surface-950 border-b border-r border-surface-200 tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_gdpr"] %}{{ i18n_data[l]["home_comparison"]["row_gdpr"] }}{% else %}GDPR Compliance{% endif %}</td>
-            <td class="py-4 px-6 text-brand-500 font-bold border-b border-r border-surface-200 bg-brand-50/10">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_gdpr_apex"] %}{{ i18n_data[l]["home_comparison"]["row_gdpr_apex"] }}{% else %}EU/EEA-oriented default configuration; DPA available{% endif %}</td>
-            <td class="py-4 px-6 text-surface-500 border-b border-r border-surface-200">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_gdpr_sendgrid"] %}{{ i18n_data[l]["home_comparison"]["row_gdpr_sendgrid"] }}{% else %}Documented DPA{% endif %}</td>
-            <td class="py-4 px-6 text-surface-500 border-b border-r border-surface-200">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_gdpr_postmark"] %}{{ i18n_data[l]["home_comparison"]["row_gdpr_postmark"] }}{% else %}Self-managed data-subject requests{% endif %}</td>
-          </tr>
-          <tr class="hover:bg-surface-50 transition-colors">
-            <td class="py-4 px-6 font-bold text-surface-950 border-b border-r border-surface-200 tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_private_cloud"] %}{{ i18n_data[l]["home_comparison"]["row_private_cloud"] }}{% else %}Private Cloud{% endif %}</td>
-            <td class="py-4 px-6 text-brand-500 font-bold border-b border-r border-surface-200 bg-brand-50/10">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_private_cloud_apex"] %}{{ i18n_data[l]["home_comparison"]["row_private_cloud_apex"] }}{% else %}Available{% endif %}</td>
-            <td class="py-4 px-6 text-surface-500 border-b border-r border-surface-200">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_private_cloud_sendgrid"] %}{{ i18n_data[l]["home_comparison"]["row_private_cloud_sendgrid"] }}{% else %}No{% endif %}</td>
-            <td class="py-4 px-6 text-surface-500 border-b border-r border-surface-200">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_private_cloud_postmark"] %}{{ i18n_data[l]["home_comparison"]["row_private_cloud_postmark"] }}{% else %}No{% endif %}</td>
-          </tr>
-          <tr class="hover:bg-surface-50 transition-colors">
-            <td class="py-4 px-6 font-bold text-surface-950 border-b border-r border-surface-200 tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_audit_trail"] %}{{ i18n_data[l]["home_comparison"]["row_audit_trail"] }}{% else %}Audit Trail{% endif %}</td>
-            <td class="py-4 px-6 text-brand-500 font-bold border-b border-r border-surface-200 bg-brand-50/10">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_audit_trail_apex"] %}{{ i18n_data[l]["home_comparison"]["row_audit_trail_apex"] }}{% else %}Growth and above{% endif %}</td>
-            <td class="py-4 px-6 text-surface-500 border-b border-r border-surface-200">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_audit_trail_sendgrid"] %}{{ i18n_data[l]["home_comparison"]["row_audit_trail_sendgrid"] }}{% else %}Not directly comparable{% endif %}</td>
-            <td class="py-4 px-6 text-surface-500 border-b border-r border-surface-200">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_audit_trail_postmark"] %}{{ i18n_data[l]["home_comparison"]["row_audit_trail_postmark"] }}{% else %}Not directly comparable{% endif %}</td>
-          </tr>
-          <tr class="hover:bg-surface-50 transition-colors">
-            <td class="py-4 px-6 font-bold text-surface-950 border-b border-r border-surface-200 tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_infrastructure"] %}{{ i18n_data[l]["home_comparison"]["row_infrastructure"] }}{% else %}Infrastructure{% endif %}</td>
-            <td class="py-4 px-6 text-brand-500 font-bold border-b border-r border-surface-200 bg-brand-50/10">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_infrastructure_apex"] %}{{ i18n_data[l]["home_comparison"]["row_infrastructure_apex"] }}{% else %}Shared cloud + single-tenant options{% endif %}</td>
-            <td class="py-4 px-6 text-surface-500 border-b border-r border-surface-200">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_infrastructure_sendgrid"] %}{{ i18n_data[l]["home_comparison"]["row_infrastructure_sendgrid"] }}{% else %}Shared{% endif %}</td>
-            <td class="py-4 px-6 text-surface-500 border-b border-surface-200">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_infrastructure_postmark"] %}{{ i18n_data[l]["home_comparison"]["row_infrastructure_postmark"] }}{% else %}Shared{% endif %}</td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
-    {# Methodology citation — the /compare/* pages carry one via
-       macros::methodology_note; the homepage table must not be the only
-       comparison without sourcing disclosure. Same disclosure pattern. #}
-    <div class="callout mt-12">
-      <p class="text-xs text-surface-500 leading-relaxed"><strong>Methodology:</strong> Feature comparisons are based on publicly available documentation, pricing pages, and official sources. Plans compared: ApexMail self-service tiers and SendGrid and Postmark standard plans. Last verified: 2026-07-30. Data may change; verify with each provider's current documentation. See our <a href="{{ lp }}/compare/methodology/" class="text-brand-600 hover:text-brand-700 underline">comparison methodology</a> for sourcing details and the <a href="{{ lp }}/compare/" class="text-brand-600 hover:text-brand-700 underline">full comparison</a> for plan-level detail.</p>
-    </div>
-    <div class="text-center mt-12">
-      <a href="{{ lp }}/compare/" class="inline-flex items-center gap-2 text-brand-500 font-bold hover:text-brand-700 transition-all hover:gap-3 group">
-        {% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["cta_full_comparison"] %}{{ i18n_data[l]["home_comparison"]["cta_full_comparison"] }}{% else %}See full comparison{% endif %}
-        <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 transition-transform group-hover:translate-x-1" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
-      </a>
-    </div>
+   /compare/* pages before it goes live. ARK round: the comparison is the
+   ruled apex-table; the methodology note is an apex-notice. #}
+<section class="apex-mkt-section">
+  <div class="apex-section-head">
+    <h2 class="apex-h2">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["heading_1"] %}{{ i18n_data[l]["home_comparison"]["heading_1"] }}{% else %}Why teams migrate to ApexMail{% endif %}</h2>
+    <span class="apex-section-aside">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["eyebrow"] %}{{ i18n_data[l]["home_comparison"]["eyebrow"] }}{% else %}Market Position{% endif %}</span>
   </div>
+  <div class="apex-table-wrap mt-6">
+    <table class="apex-table">
+      <caption class="sr-only">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["table_caption"] %}{{ i18n_data[l]["home_comparison"]["table_caption"] }}{% else %}Homepage comparison of ApexMail against SendGrid and Postmark.{% endif %}</caption>
+      <thead>
+        <tr>
+          <th scope="col">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["col_feature"] %}{{ i18n_data[l]["home_comparison"]["col_feature"] }}{% else %}Feature{% endif %}</th>
+          <th scope="col">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["col_apexmail"] %}{{ i18n_data[l]["home_comparison"]["col_apexmail"] }}{% else %}ApexMail{% endif %}</th>
+          <th scope="col">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["col_sendgrid"] %}{{ i18n_data[l]["home_comparison"]["col_sendgrid"] }}{% else %}SendGrid{% endif %}</th>
+          <th scope="col">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["col_postmark"] %}{{ i18n_data[l]["home_comparison"]["col_postmark"] }}{% else %}Postmark{% endif %}</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <th scope="row" class="apex-key">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_delivery_tracking"] %}{{ i18n_data[l]["home_comparison"]["row_delivery_tracking"] }}{% else %}Delivery Tracking{% endif %}</th>
+          <td class="break-words">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_delivery_tracking_apex"] %}{{ i18n_data[l]["home_comparison"]["row_delivery_tracking_apex"] }}{% else %}Per-message event history{% endif %}</td>
+          <td class="break-words">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_delivery_tracking_sendgrid"] %}{{ i18n_data[l]["home_comparison"]["row_delivery_tracking_sendgrid"] }}{% else %}Event webhooks{% endif %}</td>
+          <td class="break-words">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_delivery_tracking_postmark"] %}{{ i18n_data[l]["home_comparison"]["row_delivery_tracking_postmark"] }}{% else %}Message events{% endif %}</td>
+        </tr>
+        <tr>
+          <th scope="row" class="apex-key">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_gdpr"] %}{{ i18n_data[l]["home_comparison"]["row_gdpr"] }}{% else %}GDPR Compliance{% endif %}</th>
+          <td class="break-words">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_gdpr_apex"] %}{{ i18n_data[l]["home_comparison"]["row_gdpr_apex"] }}{% else %}EU/EEA-oriented default configuration; DPA available{% endif %}</td>
+          <td class="break-words">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_gdpr_sendgrid"] %}{{ i18n_data[l]["home_comparison"]["row_gdpr_sendgrid"] }}{% else %}Documented DPA{% endif %}</td>
+          <td class="break-words">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_gdpr_postmark"] %}{{ i18n_data[l]["home_comparison"]["row_gdpr_postmark"] }}{% else %}Self-managed data-subject requests{% endif %}</td>
+        </tr>
+        <tr>
+          <th scope="row" class="apex-key">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_private_cloud"] %}{{ i18n_data[l]["home_comparison"]["row_private_cloud"] }}{% else %}Private Cloud{% endif %}</th>
+          <td class="break-words">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_private_cloud_apex"] %}{{ i18n_data[l]["home_comparison"]["row_private_cloud_apex"] }}{% else %}Available{% endif %}</td>
+          <td class="break-words">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_private_cloud_sendgrid"] %}{{ i18n_data[l]["home_comparison"]["row_private_cloud_sendgrid"] }}{% else %}No{% endif %}</td>
+          <td class="break-words">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_private_cloud_postmark"] %}{{ i18n_data[l]["home_comparison"]["row_private_cloud_postmark"] }}{% else %}No{% endif %}</td>
+        </tr>
+        <tr>
+          <th scope="row" class="apex-key">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_audit_trail"] %}{{ i18n_data[l]["home_comparison"]["row_audit_trail"] }}{% else %}Audit Trail{% endif %}</th>
+          <td class="break-words">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_audit_trail_apex"] %}{{ i18n_data[l]["home_comparison"]["row_audit_trail_apex"] }}{% else %}Growth and above{% endif %}</td>
+          <td class="break-words">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_audit_trail_sendgrid"] %}{{ i18n_data[l]["home_comparison"]["row_audit_trail_sendgrid"] }}{% else %}Not directly comparable{% endif %}</td>
+          <td class="break-words">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_audit_trail_postmark"] %}{{ i18n_data[l]["home_comparison"]["row_audit_trail_postmark"] }}{% else %}Not directly comparable{% endif %}</td>
+        </tr>
+        <tr>
+          <th scope="row" class="apex-key">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_infrastructure"] %}{{ i18n_data[l]["home_comparison"]["row_infrastructure"] }}{% else %}Infrastructure{% endif %}</th>
+          <td class="break-words">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_infrastructure_apex"] %}{{ i18n_data[l]["home_comparison"]["row_infrastructure_apex"] }}{% else %}Shared cloud and single-tenant options{% endif %}</td>
+          <td class="break-words">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_infrastructure_sendgrid"] %}{{ i18n_data[l]["home_comparison"]["row_infrastructure_sendgrid"] }}{% else %}Shared{% endif %}</td>
+          <td class="break-words">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_infrastructure_postmark"] %}{{ i18n_data[l]["home_comparison"]["row_infrastructure_postmark"] }}{% else %}Shared{% endif %}</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  {# Methodology citation — the /compare/* pages carry one via
+     macros::methodology_note; the homepage table must not be the only
+     comparison without sourcing disclosure. Same disclosure pattern. #}
+  <div class="apex-notice mt-10">
+    <b class="apex-notice__legend">Methodology</b>
+    <p>Feature comparisons are based on publicly available documentation, pricing pages, and official sources. Plans compared: ApexMail self-service tiers and SendGrid and Postmark standard plans. Last verified: 2026-07-30. Data may change; verify with each provider's current documentation. See our <a href="{{ lp }}/compare/methodology/">comparison methodology</a> for sourcing details and the <a href="{{ lp }}/compare/">full comparison</a> for plan-level detail.</p>
+  </div>
+  <p class="mt-8"><a href="{{ lp }}/compare/">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["cta_full_comparison"] %}{{ i18n_data[l]["home_comparison"]["cta_full_comparison"] }}{% else %}See full comparison{% endif %}</a></p>
 </section>

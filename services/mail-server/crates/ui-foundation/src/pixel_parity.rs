@@ -450,8 +450,9 @@ mod tests {
         let html = btn.render_html();
         let html2 = btn.render_html();
         assert_pixel_parity("button_default", &html, &html2);
-        assert!(html.contains("bg-primary"));
-        assert!(html.contains("text-white"));
+        // ARK: the default button is the primary ink-fill primitive.
+        assert!(html.contains("apex-btn--primary"), "{html}");
+        assert!(!html.contains("bg-primary"), "{html}");
     }
 
     #[test]
@@ -474,8 +475,12 @@ mod tests {
         let html = inp.render_html();
         let classes = extract_classes(&html);
         assert!(!classes.is_empty());
-        assert!(classes[0].contains(&"rounded-[8px_8px_7px_7px]".to_string()));
-        assert!(classes[0].contains(&"border".to_string()));
+        assert!(
+            classes[0].contains(&"apex-input".to_string()),
+            "{:?}",
+            classes[0]
+        );
+        assert!(!classes[0].iter().any(|c| c.contains("rounded-")));
     }
 
     #[test]
@@ -558,25 +563,25 @@ mod tests {
 
     #[test]
     fn extract_classes_parses_correctly() {
-        let html = r#"<div class="flex gap-4"><span class="text-sm font-medium">hi</span></div>"#;
+        let html = r#"<div class="flex gap-4"><span class="apex-em apex-meta">hi</span></div>"#;
         let classes = extract_classes(html);
         assert_eq!(classes.len(), 2);
         assert_eq!(classes[0], vec!["flex", "gap-4"]);
-        assert_eq!(classes[1], vec!["text-sm", "font-medium"]);
+        assert_eq!(classes[1], vec!["apex-em", "apex-meta"]);
     }
 
     #[test]
     fn compare_classes_detects_differences() {
-        let expected = r#"<div class="flex gap-4 bg-red-500"></div>"#;
-        let actual = r#"<div class="flex gap-4 bg-info-500"></div>"#;
+        let expected = r#"<div class="flex gap-4 apex-panel"></div>"#;
+        let actual = r#"<div class="flex gap-4 apex-notice"></div>"#;
         let diffs = compare_classes(expected, actual);
         assert!(!diffs.is_empty());
-        assert!(diffs[0].contains("bg-red-500") || diffs[0].contains("bg-info-500"));
+        assert!(diffs[0].contains("apex-panel") || diffs[0].contains("apex-notice"));
     }
 
     #[test]
     fn compare_classes_returns_empty_for_identical() {
-        let html = r#"<div class="flex gap-4"><span class="text-sm">hi</span></div>"#;
+        let html = r#"<div class="flex gap-4"><span class="">hi</span></div>"#;
         let diffs = compare_classes(html, html);
         assert!(diffs.is_empty());
     }
@@ -696,7 +701,7 @@ mod tests {
     #[test]
     fn parity_detects_class_mutation_on_real_page() {
         let html = leptos_views::web_login_page("");
-        let tampered = html.replacen("rounded-xl", "rounded-none", 1);
+        let tampered = html.replacen("apex-btn", "apex-btn-tampered", 1);
         let result = check_parity(&html, &tampered);
         assert!(
             !result.is_identical,
@@ -837,17 +842,23 @@ mod tests {
             .flat_map(|c| c.iter().map(|s| s.as_str()))
             .collect();
 
-        let required = [
-            "min-h-screen",
+        // ARK: the login document composes the vocabulary, never utilities.
+        let required = ["min-h-screen", "apex-input", "apex-btn", "apex-wordmark"];
+        for cls in &required {
+            assert!(flat.contains(cls), "web login missing class '{}'", cls);
+        }
+        for banned in [
             "rounded-xl",
             "rounded-[8px_8px_7px_7px]",
-            "border",
             "bg-white",
             "font-bold",
             "bg-primary",
-        ];
-        for cls in &required {
-            assert!(flat.contains(cls), "web login missing class '{}'", cls);
+        ] {
+            assert!(
+                !flat.contains(&banned),
+                "web login still carries '{}'",
+                banned
+            );
         }
     }
 
@@ -860,17 +871,22 @@ mod tests {
             .flat_map(|c| c.iter().map(|s| s.as_str()))
             .collect();
 
-        let required = [
-            "min-h-screen",
+        let required = ["min-h-screen", "apex-input", "apex-btn", "apex-wordmark"];
+        for cls in &required {
+            assert!(flat.contains(cls), "cp login missing class '{}'", cls);
+        }
+        for banned in [
             "rounded-xl",
             "rounded-[8px_8px_7px_7px]",
-            "border",
             "text-2xl",
             "font-bold",
             "bg-primary",
-        ];
-        for cls in &required {
-            assert!(flat.contains(cls), "cp login missing class '{}'", cls);
+        ] {
+            assert!(
+                !flat.contains(&banned),
+                "cp login still carries '{}'",
+                banned
+            );
         }
     }
 

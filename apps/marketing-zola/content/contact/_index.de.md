@@ -20,7 +20,7 @@ Wählen Sie den Weg, der zu Ihrer Situation passt:
 | Missbrauch | [Missbrauch melden](mailto:abuse@apexmail.ee) |
 | Enterprise-Architektur | [Architektur-Review buchen](/de/contact/enterprise/) |
 
-Allgemeine Anfragen: [hello@apexmail.ee](mailto:hello@apexmail.ee) · Dokumentation: [ApexMail-Dokumentation](/docs/)
+Allgemeine Anfragen: [hello@apexmail.ee](mailto:hello@apexmail.ee), Dokumentation: [ApexMail-Dokumentation](/docs/)
 
 ## Enterprise-Prüfung
 

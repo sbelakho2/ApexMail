@@ -29,10 +29,10 @@
 {# winner_badge(winner, competitor_name, tie_label, unavailable_label): the
    4th-column indicator. Handles the 6 distinct variants that existed across
    the 5 files:
-     apexmail   → <span class="text-brand-600 font-semibold">ApexMail</span>
-     competitor → <span class="text-brand-600 font-semibold">{competitor_name}</span>
-     tie        → <span class="text-surface-500">{tie_label}</span>
-     none       → <span class="text-surface-500">—</span>
+     apexmail   → <span class="apex-em">ApexMail</span>
+     competitor → <span class="apex-em">{competitor_name}</span>
+     tie        → <span class="">{tie_label}</span>
+     none       → <span class="">—</span>
    (The bare "—" with no span from amazon-ses/mailgun normalizes to the
    spanned "—" variant — semantically identical, now structurally consistent.)
 
@@ -44,25 +44,25 @@
 {%- set tie_text = tie_label | default(value="Tie") -%}
 {%- set none_text = unavailable_label | default(value="Not available") -%}
 {%- if winner == "apexmail" -%}
-<span class="text-brand-600 font-semibold">ApexMail</span>
+<span class="apex-em">ApexMail</span>
 {%- elif winner == "competitor" -%}
-<span class="text-brand-600 font-semibold">{{ competitor_name }}</span>
+<span class="apex-em">{{ competitor_name }}</span>
 {%- elif winner == "tie" -%}
-<span class="text-surface-500">{{ tie_text }}</span>
+<span class="">{{ tie_text }}</span>
 {%- else -%}
-<span class="text-surface-500" role="img" aria-label="{{ none_text }}"><span aria-hidden="true">&mdash;</span></span>
+<span class="" role="img" aria-label="{{ none_text }}"><span aria-hidden="true">&mdash;</span></span>
 {%- endif -%}
 {%- endmacro winner_badge -%}
 
 {# sources_block(sources, disclaimer): trailing footnote/citation block
    for pages with inline <sup><a href="#src-XXn"> references (amazon-ses,
    mailgun). sources is an array of {ref, n, label, url}.
-   Box styling is the shared .callout component (design audit item 18). #}
+   Renders as the ARK footnote rule (small, muted, top-ruled). #}
 {%- macro sources_block(sources, disclaimer) -%}
-<div class="callout mt-12">
-  <p class="text-xs text-surface-500 leading-relaxed">
+<div class="apex-footnote mt-12">
+  <p class="">
   {%- for src in sources -%}
-    <sup id="src-{{ src.ref }}">{{ src.n }}</sup> <a href="{{ src.url }}" class="text-brand-600 hover:text-brand-700 underline" rel="noopener noreferrer">{{ src.label }}</a><br/>
+    <sup id="src-{{ src.ref }}">{{ src.n }}</sup> <a href="{{ src.url }}" class="apex-link" rel="noopener noreferrer">{{ src.label }}</a><br/>
   {%- endfor -%}
   {%- if disclaimer -%}
     <br/><em>{{ disclaimer }}</em>
@@ -75,7 +75,7 @@
    text is raw HTML — typically contains <strong>Methodology:</strong> plus
    a link to /compare/methodology/. #}
 {%- macro methodology_note(text) -%}
-<div class="callout mt-12">
-  <p class="text-xs text-surface-500 leading-relaxed">{{ text | safe }}</p>
+<div class="apex-notice mt-12">
+  <p class="">{{ text | safe }}</p>
 </div>
 {%- endmacro methodology_note -%}

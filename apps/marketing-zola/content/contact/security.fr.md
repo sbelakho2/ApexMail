@@ -20,32 +20,34 @@ ApexMail fournit de la documentation de sécurité aux prospects et clients Ente
 
 ## Formulaire de demande de questionnaire de sécurité
 
-<div id="enquiry-submitted" class="form-banner form-banner--success" role="status">
-  <p><strong>Merci — votre demande a bien été reçue.</strong> Notre équipe l'examine et répond sous 2 jours ouvrés.</p>
+<div id="enquiry-submitted" class="apex-notice apex-notice--ok" role="status">
+  <b>Reçue</b>
+  <p>Merci — votre demande a bien été reçue. Notre équipe l'examine et répond sous 2 jours ouvrés.</p>
 </div>
-<div id="enquiry-error" class="form-banner form-banner--error" role="alert">
-  <p><strong>Votre demande n'a pas pu être acceptée.</strong> Vérifiez les champs obligatoires (une adresse e-mail professionnelle valide est requise) puis réessayez.</p>
+<div id="enquiry-error" class="apex-notice apex-notice--fail" role="alert">
+  <b>Non acceptée</b>
+  <p>Votre demande n'a pas pu être acceptée. Vérifiez les champs obligatoires (une adresse e-mail professionnelle valide est requise) puis réessayez.</p>
 </div>
 <form id="security-questionnaire-form" class="space-y-6 max-w-2xl" method="POST" action="https://api.apexmail.ee/v1/contact/security">
   <input type="hidden" name="page_language" value="fr" />
-  <div>
-    <label for="work-email-sec" class="block text-xs font-bold tracking-widest text-surface-600 uppercase mb-2">Email professionnel <span class="text-red-500">*</span></label>
+  <div class="apex-field">
+    <label for="work-email-sec" class="apex-label">Email professionnel <span class="">*</span></label>
     <input type="email" id="work-email-sec" name="work_email" required autocomplete="email"
-      class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-surface-50 focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none"
+      class="apex-input"
       placeholder="vous@entreprise.com" />
   </div>
 
-  <div>
-    <label for="company-sec" class="block text-xs font-bold tracking-widest text-surface-600 uppercase mb-2">Entreprise <span class="text-red-500">*</span></label>
+  <div class="apex-field">
+    <label for="company-sec" class="apex-label">Entreprise <span class="">*</span></label>
     <input type="text" id="company-sec" name="company" required
-      class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-surface-50 focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none"
+      class="apex-input"
       placeholder="Nom de votre organisation" />
   </div>
 
-  <div>
-    <label for="document-type" class="block text-xs font-bold tracking-widest text-surface-600 uppercase mb-2">Documentation demandée <span class="text-red-500">*</span></label>
-    <select id="document-type" name="document_type" required
-      class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-surface-50 focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none">
+  <div class="apex-field">
+    <label for="document-type" class="apex-label">Documentation demandée <span class="">*</span></label>
+    <div class="apex-select-wrap">
+      <select id="document-type" name="document_type" required>
       <option value="" disabled selected>Sélectionnez ce dont vous avez besoin</option>
       <option value="sig">Questionnaire SIG</option>
       <option value="caiq">Questionnaire CAIQ</option>
@@ -55,35 +57,35 @@ ApexMail fournit de la documentation de sécurité aux prospects et clients Ente
       <option value="architecture_review">Revue d'architecture de sécurité</option>
       <option value="data_flow">Diagrammes de flux de données</option>
     </select>
+    </div>
   </div>
 
-  <div>
-    <label for="nda-status" class="block text-xs font-bold tracking-widest text-surface-600 uppercase mb-2">Statut du NDA</label>
-    <select id="nda-status" name="nda_status"
-      class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-surface-50 focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none">
+  <div class="apex-field">
+    <label for="nda-status" class="apex-label">Statut du NDA</label>
+    <div class="apex-select-wrap">
+      <select id="nda-status" name="nda_status">
       <option value="not_signed" selected>NDA non encore signé</option>
       <option value="signed">NDA déjà en place</option>
       <option value="willing">Prêt à signer un NDA</option>
     </select>
+    </div>
   </div>
 
-  <div>
-    <label for="context" class="block text-xs font-bold tracking-widest text-surface-600 uppercase mb-2">Contexte complémentaire</label>
+  <div class="apex-field">
+    <label for="context" class="apex-label">Contexte complémentaire</label>
     <textarea id="context" name="context" rows="4"
-      class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-surface-50 focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none resize-y"
       placeholder="Tout cadre de conformité spécifique, exigence réglementaire ou contrainte de calendrier que nous devrions connaître."></textarea>
   </div>
 
   <div>
     <button type="submit"
-      class="btn-primary px-8 py-4 text-base uppercase w-full sm:w-auto">
+      class="apex-btn apex-btn--primary w-full sm:w-auto">
       Envoyer la demande
-      <svg class="w-4 h-4 ml-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
     </button>
   </div>
-  <p class="form-privacy-note">En envoyant ce formulaire, vous acceptez notre <a href="/fr/privacy/">politique de confidentialité</a>. Nous utilisons ces informations uniquement pour répondre à votre demande (RGPD art. 13).</p>
+  <p class="apex-footnote">En envoyant ce formulaire, vous acceptez notre <a href="/fr/privacy/">politique de confidentialité</a>. Nous utilisons ces informations uniquement pour répondre à votre demande (RGPD art. 13).</p>
 </form>
 
 ## Contact direct
 
-Vous préférez l'email ? Envoyez votre demande de documentation de sécurité à [support@apexmail.ee](mailto:support@apexmail.ee). Précisez le nom de votre entreprise, les documents ou questionnaires spécifiques dont vous avez besoin, et si un NDA est déjà en place ou nécessaire.
+Vous pouvez également envoyer votre demande de documentation de sécurité par e-mail à [support@apexmail.ee](mailto:support@apexmail.ee). Précisez le nom de votre entreprise, les documents ou questionnaires spécifiques dont vous avez besoin, et si un NDA est déjà en place ou nécessaire.

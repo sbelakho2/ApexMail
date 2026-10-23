@@ -236,7 +236,7 @@ mod detector_tests {
 
     #[test]
     fn reads_class_attributes_only() {
-        let html = r#"<div class="a b  c"><p data-x="class=&quot;z&quot;">text</p></div>"#;
+        let html = r#"<div class="a b c"><p data-x="class=&quot;z&quot;">text</p></div>"#;
         let used = used_classes(html);
         assert!(used.contains("a") && used.contains("b") && used.contains("c"));
         assert!(!used.contains("z"));

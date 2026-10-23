@@ -57,7 +57,11 @@
    item 6): the banner neither traps focus nor blocks the page behind
    it, so modal semantics were a lie. A labelled region is truthful;
    the inner tabindex="0" focus hack (a deleted-JS leftover) is gone
-   too — the action links are the keyboard path. #}
+   too — the action links are the keyboard path. The former
+   cookie-consent-* component classes are gone: the bar is a fixed,
+   full-width strip (structural utilities) whose visible styling comes
+   from the apex vocabulary; the recorded-consent collapse stays
+   id-scoped in no-js.css. #}
 <div
   id="cookie-consent-banner"
   role="region"
@@ -66,18 +70,14 @@
   data-consent-endpoint="{{ config.extra.api_url | default(value='https://api.apexmail.ee') }}/consent"
   data-cookie-consent-cookie-name="{{ config.extra.cookie_consent_cookie_name | default(value='apexmail_consent') }}"
   data-analytics-enabled="{{ config.extra.analytics_enabled | default(value=false) }}"
-  class="cookie-consent-banner"
+  class="fixed inset-x-0 bottom-0 z-50 border-t"
 >
-  {# A slim full-width bottom BAR, not a floating corner card: at short
-     viewports the old 28rem card permanently covered a quarter of the
-     screen over page text, which read as broken overlay soup. A bar is
-     page chrome — one line of copy, inline actions, ~64px tall. #}
-  <div class="cookie-consent-inner">
-    <div class="cookie-consent-copy">
-      <span class="cookie-consent-heading"><span class="cookie-consent-dot" aria-hidden="true"></span><span id="cookie-consent-heading">{{ consent_heading }}</span></span>
-      <p id="cookie-consent-copy">{{- consent_copy -}}</p>
+  <div class="mx-auto max-w-7xl px-4 py-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+    <div>
+      <p id="cookie-consent-heading" class="apex-em">{{ consent_heading }}</p>
+      <p id="cookie-consent-copy" class="apex-meta">{{ consent_copy }}</p>
     </div>
-    <div class="cookie-consent-actions">
+    <div class="flex flex-wrap items-center gap-3">
       {% if consent_choices | length > 0 %}
         {# Equivalent necessary-only choices are collapsed: config lists both
            "necessary" and "dismiss", and both record the SAME necessary-only
@@ -95,7 +95,7 @@
             data-cookie-consent-choice
             data-cookie-consent-value="necessary"
             data-cookie-consent-analytics="false"
-            class="cookie-consent-button cookie-consent-button--secondary"
+            class="apex-btn apex-btn--sm"
           >
             {{- consent_necessary -}}
           </a>
@@ -107,28 +107,41 @@
             data-cookie-consent-choice
             data-cookie-consent-value="necessary"
             data-cookie-consent-analytics="false"
-            class="cookie-consent-button cookie-consent-button--secondary"
+            class="apex-btn apex-btn--sm"
           >
             {{- consent_necessary -}}
           </a>
         {% endif %}
         {% for choice in all_choices %}
+          {% if choice.primary | default(value=false) %}
           <a
             href="{{ config.extra.api_url | default(value='https://api.apexmail.ee') }}/consent?choice=all&amp;return_to={{ consent_return_to }}"
             rel="nofollow"
             data-cookie-consent-choice
             data-cookie-consent-value="all"
             data-cookie-consent-analytics="true"
-            class="cookie-consent-button{% if choice.primary | default(value=false) %} cookie-consent-button--primary{% else %} cookie-consent-button--secondary{% endif %}"
+            class="apex-btn apex-btn--primary apex-btn--sm"
           >
             {{- consent_accept_all -}}
           </a>
+          {% else %}
+          <a
+            href="{{ config.extra.api_url | default(value='https://api.apexmail.ee') }}/consent?choice=all&amp;return_to={{ consent_return_to }}"
+            rel="nofollow"
+            data-cookie-consent-choice
+            data-cookie-consent-value="all"
+            data-cookie-consent-analytics="true"
+            class="apex-btn apex-btn--sm"
+          >
+            {{- consent_accept_all -}}
+          </a>
+          {% endif %}
         {% endfor %}
       {% else %}
-        <a href="{{ config.extra.api_url | default(value='https://api.apexmail.ee') }}/consent?choice=necessary&amp;return_to={{ consent_return_to }}" rel="nofollow" data-cookie-consent-choice data-cookie-consent-value="necessary" data-cookie-consent-analytics="false" class="cookie-consent-button cookie-consent-button--secondary">
+        <a href="{{ config.extra.api_url | default(value='https://api.apexmail.ee') }}/consent?choice=necessary&amp;return_to={{ consent_return_to }}" rel="nofollow" data-cookie-consent-choice data-cookie-consent-value="necessary" data-cookie-consent-analytics="false" class="apex-btn apex-btn--sm">
           {{- consent_necessary -}}
         </a>
-        <a href="{{ config.extra.api_url | default(value='https://api.apexmail.ee') }}/consent?choice=all&amp;return_to={{ consent_return_to }}" rel="nofollow" data-cookie-consent-choice data-cookie-consent-value="all" data-cookie-consent-analytics="true" class="cookie-consent-button cookie-consent-button--primary">
+        <a href="{{ config.extra.api_url | default(value='https://api.apexmail.ee') }}/consent?choice=all&amp;return_to={{ consent_return_to }}" rel="nofollow" data-cookie-consent-choice data-cookie-consent-value="all" data-cookie-consent-analytics="true" class="apex-btn apex-btn--primary apex-btn--sm">
           {{- consent_accept_all -}}
         </a>
       {% endif %}
@@ -137,7 +150,7 @@
          its policy link must stay in-language. Without the prefix the
          German/French/Spanish banner linked the English /cookies/ page
          even though /de|/fr|/es/cookies/ exist (dogfood 2026-10-08). #}
-      <a href="{{ lp }}{{ config.extra.cookie_consent_policy_path | default(value='/cookies/') }}" class="cookie-consent-policy text-xs text-surface-500 underline hover:text-brand-600 transition-colors">
+      <a href="{{ lp }}{{ config.extra.cookie_consent_policy_path | default(value='/cookies/') }}" class="apex-link">
         {{- consent_policy_link -}}
       </a>
     </div>

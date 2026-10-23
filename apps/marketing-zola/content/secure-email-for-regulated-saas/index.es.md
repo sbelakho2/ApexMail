@@ -14,16 +14,16 @@ Los equipos de SaaS regulado necesitan algo más que una API de envío. Necesita
 ApexMail proporciona flujos de trabajo de seguridad y privacidad en torno a la entrega de email, incluidos controles de acceso, planes con capacidad de auditoría, herramientas para solicitudes de los interesados y documentación actual para la revisión de contratación.
 
 <div class="grid grid-cols-1 md:grid-cols-3 gap-6 my-12">
-  <div class="bg-surface-900 border border-surface-800 rounded-lg p-6">
-    <h3 class="text-xl font-semibold mb-3">Auditoría y controles de acceso</h3>
+  <div class="border p-6">
+    <h3 class="mb-3 apex-h3">Auditoría y controles de acceso</h3>
     <p>Business y Enterprise incluyen funciones de identidad y auditoría en tiempo de ejecución. La titularidad de la configuración y de las operaciones sigue siendo responsabilidad del cliente.</p>
   </div>
-  <div class="bg-surface-900 border border-surface-800 rounded-lg p-6">
-    <h3 class="text-xl font-semibold mb-3">Posición de cumplimiento actual</h3>
+  <div class="border p-6">
+    <h3 class="mb-3 apex-h3">Posición de cumplimiento actual</h3>
     <p>Está disponible documentación de procesamiento orientada al RGPD y una DPA. La disponibilidad HIPAA no se ofrecen actualmente.</p>
   </div>
-  <div class="bg-surface-900 border border-surface-800 rounded-lg p-6">
-    <h3 class="text-xl font-semibold mb-3">Revisión de seguridad</h3>
+  <div class="border p-6">
+    <h3 class="mb-3 apex-h3">Revisión de seguridad</h3>
     <p>Los candidatos cualificados pueden solicitar documentación actual y tratar el alcance de cualquier compromiso contractual de seguridad o despliegue.</p>
   </div>
 </div>

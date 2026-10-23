@@ -832,20 +832,18 @@ pub fn render_data_cell(cell: &DataCell) -> String {
     match cell {
         DataCell::Text(value) => html_escape(value),
         DataCell::Mono(value) => format!(
-            "<code class=\"font-mono text-xs bg-muted/40 rounded px-1.5 py-0.5 apex-mono-id\" title=\"{}\">{}</code>",
+            "<code class=\"px-1.5 py-0.5 apex-mono-id\" title=\"{}\">{}</code>",
             html_escape(value),
             html_escape(value),
         ),
         DataCell::Link { href, text } => format!(
-            "<a href=\"{}\" class=\"font-bold text-foreground hover:text-primary\">{}</a>",
+            "<a href=\"{}\" class=\"apex-em apex-link\">{}</a>",
             attribute_escape(href),
             html_escape(text)
         ),
-        DataCell::Status(status) => {
-            crate::primitives::StatusIndicator { status }.render_html()
-        }
+        DataCell::Status(status) => crate::primitives::StatusIndicator { status }.render_html(),
         DataCell::Time { relative, utc } => format!(
-            "<time class=\"apex-time-cell text-xs\" datetime=\"{}\" title=\"{} UTC\">{}</time>",
+            "<time class=\"apex-time-cell\" datetime=\"{}\" title=\"{} UTC\">{}</time>",
             attribute_escape(utc),
             html_escape(utc),
             html_escape(relative),

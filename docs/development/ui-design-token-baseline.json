@@ -2,148 +2,611 @@
   "version": 1,
   "surfaces": {
     "web": {
-      "sources": ["services/mail-server/crates/ui-foundation/assets/globals.css", "services/mail-server/crates/ui-foundation/src/lib.rs"],
+      "sources": [
+        "services/mail-server/crates/ui-foundation/assets/ark.css",
+        "services/mail-server/crates/ui-foundation/src/lib.rs"
+      ],
       "colors": [
-        { "source": "globals.css", "name": "--background", "value": "244 244 246" },
-        { "source": "globals.css", "name": "--foreground", "value": "9 9 11" },
-        { "source": "globals.css", "name": "--primary", "value": "185 28 28" },
-        { "source": "globals.css", "name": "--primary-foreground", "value": "255 255 255" },
-        { "source": "globals.css", "name": "--secondary", "value": "244 244 245" },
-        { "source": "globals.css", "name": "--secondary-foreground", "value": "9 9 11" },
-        { "source": "globals.css", "name": "--muted", "value": "238 238 240" },
-        { "source": "globals.css", "name": "--muted-foreground", "value": "82 82 91" },
-        { "source": "globals.css", "name": "--accent", "value": "244 244 245" },
-        { "source": "globals.css", "name": "--accent-foreground", "value": "9 9 11" },
-        { "source": "globals.css", "name": "--destructive", "value": "220 38 38" },
-        { "source": "globals.css", "name": "--destructive-foreground", "value": "255 255 255" },
-        { "source": "globals.css", "name": "--warning", "value": "217 119 6" },
-        { "source": "globals.css", "name": "--border", "value": "209 209 213" },
-        { "source": "globals.css", "name": "--input", "value": "209 209 213" },
-        { "source": "globals.css", "name": "--ring", "value": "220 38 38" },
-        { "source": "globals.css", "name": "--surface-50", "value": "250 250 250" },
-        { "source": "globals.css", "name": "--surface-100", "value": "238 238 240" },
-        { "source": "globals.css", "name": "--surface-200", "value": "212 212 216" },
-        { "source": "globals.css", "name": "--surface-300", "value": "212 212 216" },
-        { "source": "globals.css", "name": "--surface-400", "value": "161 161 170" },
-        { "source": "globals.css", "name": "--surface-500", "value": "113 113 122" },
-        { "source": "globals.css", "name": "--surface-600", "value": "82 82 91" },
-        { "source": "globals.css", "name": "--surface-900", "value": "24 24 27" },
-        { "source": "globals.css", "name": "--brand-50", "value": "254 242 242" },
-        { "source": "globals.css", "name": "--brand-900", "value": "69 10 10" },
-        { "source": "globals.css", "name": "--primary-600", "value": "220 38 38" }
+        {
+          "source": "ark.css",
+          "name": "--background",
+          "value": "255 255 255"
+        },
+        {
+          "source": "ark.css",
+          "name": "--foreground",
+          "value": "14 20 27"
+        },
+        {
+          "source": "ark.css",
+          "name": "--card",
+          "value": "255 255 255"
+        },
+        {
+          "source": "ark.css",
+          "name": "--card-foreground",
+          "value": "14 20 27"
+        },
+        {
+          "source": "ark.css",
+          "name": "--popover",
+          "value": "255 255 255"
+        },
+        {
+          "source": "ark.css",
+          "name": "--popover-foreground",
+          "value": "14 20 27"
+        },
+        {
+          "source": "ark.css",
+          "name": "--primary",
+          "value": "29 79 124"
+        },
+        {
+          "source": "ark.css",
+          "name": "--primary-foreground",
+          "value": "255 255 255"
+        },
+        {
+          "source": "ark.css",
+          "name": "--secondary",
+          "value": "246 248 250"
+        },
+        {
+          "source": "ark.css",
+          "name": "--secondary-foreground",
+          "value": "14 20 27"
+        },
+        {
+          "source": "ark.css",
+          "name": "--muted",
+          "value": "238 242 246"
+        },
+        {
+          "source": "ark.css",
+          "name": "--muted-foreground",
+          "value": "61 75 89"
+        },
+        {
+          "source": "ark.css",
+          "name": "--accent",
+          "value": "246 248 250"
+        },
+        {
+          "source": "ark.css",
+          "name": "--accent-foreground",
+          "value": "14 20 27"
+        },
+        {
+          "source": "ark.css",
+          "name": "--destructive",
+          "value": "142 42 32"
+        },
+        {
+          "source": "ark.css",
+          "name": "--destructive-foreground",
+          "value": "255 255 255"
+        },
+        {
+          "source": "ark.css",
+          "name": "--border",
+          "value": "196 205 213"
+        },
+        {
+          "source": "ark.css",
+          "name": "--input",
+          "value": "14 20 27"
+        },
+        {
+          "source": "ark.css",
+          "name": "--ring",
+          "value": "14 20 27"
+        },
+        {
+          "source": "ark.css",
+          "name": "--error",
+          "value": "142 42 32"
+        },
+        {
+          "source": "ark.css",
+          "name": "--warning",
+          "value": "138 90 16"
+        },
+        {
+          "source": "ark.css",
+          "name": "--accent-text",
+          "value": "20 58 92"
+        },
+        {
+          "source": "ark.css",
+          "name": "--surface-50",
+          "value": "255 255 255"
+        },
+        {
+          "source": "ark.css",
+          "name": "--surface-100",
+          "value": "246 248 250"
+        },
+        {
+          "source": "ark.css",
+          "name": "--surface-200",
+          "value": "238 242 246"
+        },
+        {
+          "source": "ark.css",
+          "name": "--surface-300",
+          "value": "196 205 213"
+        },
+        {
+          "source": "ark.css",
+          "name": "--surface-400",
+          "value": "139 153 167"
+        },
+        {
+          "source": "ark.css",
+          "name": "--surface-500",
+          "value": "91 107 122"
+        },
+        {
+          "source": "ark.css",
+          "name": "--surface-600",
+          "value": "61 75 89"
+        },
+        {
+          "source": "ark.css",
+          "name": "--surface-700",
+          "value": "42 54 66"
+        },
+        {
+          "source": "ark.css",
+          "name": "--surface-800",
+          "value": "27 37 48"
+        },
+        {
+          "source": "ark.css",
+          "name": "--surface-900",
+          "value": "21 30 40"
+        },
+        {
+          "source": "ark.css",
+          "name": "--surface-950",
+          "value": "14 20 27"
+        },
+        {
+          "source": "ark.css",
+          "name": "--brand-50",
+          "value": "232 239 246"
+        },
+        {
+          "source": "ark.css",
+          "name": "--brand-500",
+          "value": "29 79 124"
+        },
+        {
+          "source": "ark.css",
+          "name": "--brand-600",
+          "value": "20 58 92"
+        },
+        {
+          "source": "ark.css",
+          "name": "--brand-950",
+          "value": "5 15 24"
+        },
+        {
+          "source": "ark.css",
+          "name": "--success",
+          "value": "29 79 124"
+        },
+        {
+          "source": "ark.css",
+          "name": "--success-500",
+          "value": "29 79 124"
+        },
+        {
+          "source": "ark.css",
+          "name": "--warning-500",
+          "value": "138 90 16"
+        },
+        {
+          "source": "ark.css",
+          "name": "--info",
+          "value": "20 58 92"
+        },
+        {
+          "source": "ark.css",
+          "name": "--danger-500",
+          "value": "142 42 32"
+        },
+        {
+          "source": "ark.css",
+          "name": "--wordmark-apex",
+          "value": "185 28 28"
+        },
+        {
+          "source": "ark.css",
+          "name": "--wordmark-mail",
+          "value": "9 9 11"
+        }
       ],
       "spacing": [
-        { "source": "tailwind", "name": "--space-1", "value": "4px" },
-        { "source": "tailwind", "name": "--space-2", "value": "8px" },
-        { "source": "tailwind", "name": "--space-3", "value": "12px" },
-        { "source": "tailwind", "name": "--space-4", "value": "16px" },
-        { "source": "tailwind", "name": "--space-6", "value": "24px" },
-        { "source": "tailwind", "name": "--space-8", "value": "32px" },
-        { "source": "tailwind", "name": "--space-12", "value": "48px" },
-        { "source": "tailwind", "name": "--space-16", "value": "64px" }
+        {
+          "source": "ark-4px-grid",
+          "name": "--space-1",
+          "value": "4px"
+        },
+        {
+          "source": "ark-4px-grid",
+          "name": "--space-2",
+          "value": "8px"
+        },
+        {
+          "source": "ark-4px-grid",
+          "name": "--space-3",
+          "value": "12px"
+        },
+        {
+          "source": "ark-4px-grid",
+          "name": "--space-4",
+          "value": "16px"
+        },
+        {
+          "source": "ark-4px-grid",
+          "name": "--space-5",
+          "value": "20px"
+        },
+        {
+          "source": "ark-4px-grid",
+          "name": "--space-6",
+          "value": "24px"
+        },
+        {
+          "source": "ark-4px-grid",
+          "name": "--space-7",
+          "value": "28px"
+        },
+        {
+          "source": "ark-4px-grid",
+          "name": "--space-8",
+          "value": "32px"
+        }
       ],
       "typography": [
-        { "source": "tailwind", "name": "--font-sans", "value": "Inter, system-ui, sans-serif" },
-        { "source": "tailwind", "name": "--font-mono", "value": "JetBrains Mono, monospace" },
-        { "source": "tailwind", "name": "--text-xs", "value": "12px" },
-        { "source": "tailwind", "name": "--text-sm", "value": "14px" },
-        { "source": "tailwind", "name": "--text-base", "value": "16px" },
-        { "source": "tailwind", "name": "--text-lg", "value": "18px" },
-        { "source": "tailwind", "name": "--text-xl", "value": "20px" },
-        { "source": "tailwind", "name": "--text-2xl", "value": "24px" },
-        { "source": "tailwind", "name": "--text-4xl", "value": "36px" }
+        {
+          "source": "ark.css",
+          "name": "--font-sans",
+          "value": "Overpass, system-ui, sans-serif"
+        },
+        {
+          "source": "ark.css",
+          "name": "--font-display",
+          "value": "Spectral, Georgia, serif"
+        },
+        {
+          "source": "ark.css",
+          "name": "--font-mono",
+          "value": "Overpass Mono, ui-monospace, monospace"
+        },
+        {
+          "source": "ark.css",
+          "name": "--font-wordmark",
+          "value": "Inter Wordmark (subset), Inter Variable, sans-serif"
+        }
       ],
       "icons": [
-        { "source": "icon-baseline", "name": "--icon-size-sm", "value": "16px" },
-        { "source": "icon-baseline", "name": "--icon-size-md", "value": "20px" },
-        { "source": "icon-baseline", "name": "--icon-size-lg", "value": "24px" },
-        { "source": "icon-baseline", "name": "--icon-stroke-width", "value": "1.75" }
+        {
+          "source": "icon-baseline",
+          "name": "--icon-size-sm",
+          "value": "16px"
+        },
+        {
+          "source": "icon-baseline",
+          "name": "--icon-size-md",
+          "value": "20px"
+        },
+        {
+          "source": "icon-baseline",
+          "name": "--icon-size-lg",
+          "value": "24px"
+        },
+        {
+          "source": "icon-baseline",
+          "name": "--icon-stroke-width",
+          "value": "1.75"
+        }
       ],
       "motion": [
-        { "source": "globals.css", "name": "--motion-duration-150", "value": "150ms" },
-        { "source": "globals.css", "name": "--motion-duration-180", "value": "180ms" },
-        { "source": "globals.css", "name": "--motion-duration-200", "value": "200ms" },
-        { "source": "globals.css", "name": "--motion-duration-300", "value": "300ms" },
-        { "source": "globals.css", "name": "--motion-easing-default", "value": "cubic-bezier(0.4, 0, 0.2, 1)" }
+        {
+          "source": "ark.css",
+          "name": "--motion-duration",
+          "value": "130ms"
+        },
+        {
+          "source": "ark.css",
+          "name": "--motion-ease",
+          "value": "cubic-bezier(0.2, 0, 0, 1)"
+        }
       ],
       "radius": [
-        { "source": "globals.css", "name": "--radius-sm", "value": "0px" },
-        { "source": "globals.css", "name": "--radius-md", "value": "2px" },
-        { "source": "globals.css", "name": "--radius-lg", "value": "4px" },
-        { "source": "globals.css", "name": "--radius-xl", "value": "6px" },
-        { "source": "globals.css", "name": "--radius-full", "value": "9999px" }
+        {
+          "source": "ark.css",
+          "name": "--radius",
+          "value": "0px"
+        },
+        {
+          "source": "ark.css",
+          "name": "--radius-sm",
+          "value": "0px"
+        },
+        {
+          "source": "ark.css",
+          "name": "--radius-md",
+          "value": "0px"
+        },
+        {
+          "source": "ark.css",
+          "name": "--radius-lg",
+          "value": "0px"
+        },
+        {
+          "source": "ark.css",
+          "name": "--radius-xl",
+          "value": "0px"
+        },
+        {
+          "source": "ark.css",
+          "name": "--radius-full",
+          "value": "0px"
+        }
       ]
     },
     "control-plane": {
-      "sources": ["services/mail-server/crates/ui-foundation/assets/globals.css", "services/mail-server/crates/ui-foundation/src/lib.rs"],
+      "sources": [
+        "services/mail-server/crates/ui-foundation/assets/globals.css",
+        "services/mail-server/crates/ui-foundation/src/lib.rs"
+      ],
       "colors": [
-        { "source": "globals.css", "name": "--background", "value": "244 244 246" },
-        { "source": "globals.css", "name": "--foreground", "value": "250 250 250" },
-        { "source": "globals.css", "name": "--primary", "value": "185 28 28" },
-        { "source": "globals.css", "name": "--card", "value": "18 18 21" }
+        {
+          "source": "globals.css",
+          "name": "--background",
+          "value": "244 244 246"
+        },
+        {
+          "source": "globals.css",
+          "name": "--foreground",
+          "value": "250 250 250"
+        },
+        {
+          "source": "globals.css",
+          "name": "--primary",
+          "value": "185 28 28"
+        },
+        {
+          "source": "globals.css",
+          "name": "--card",
+          "value": "18 18 21"
+        }
       ],
       "spacing": [
-        { "source": "tailwind", "name": "--space-4", "value": "16px" },
-        { "source": "tailwind", "name": "--space-8", "value": "32px" }
+        {
+          "source": "tailwind",
+          "name": "--space-4",
+          "value": "16px"
+        },
+        {
+          "source": "tailwind",
+          "name": "--space-8",
+          "value": "32px"
+        }
       ],
       "typography": [
-        { "source": "tailwind", "name": "--font-sans", "value": "Inter, system-ui, sans-serif" }
+        {
+          "source": "tailwind",
+          "name": "--font-sans",
+          "value": "Inter, system-ui, sans-serif"
+        }
       ],
       "icons": [
-        { "source": "icon-baseline", "name": "--icon-size-md", "value": "20px" }
+        {
+          "source": "icon-baseline",
+          "name": "--icon-size-md",
+          "value": "20px"
+        }
       ],
       "motion": [
-        { "source": "globals.css", "name": "--motion-duration-300", "value": "300ms" }
+        {
+          "source": "globals.css",
+          "name": "--motion-duration-300",
+          "value": "300ms"
+        }
       ],
       "radius": [
-        { "source": "globals.css", "name": "--radius-lg", "value": "4px" }
+        {
+          "source": "globals.css",
+          "name": "--radius-lg",
+          "value": "4px"
+        }
       ]
     },
     "marketing": {
-      "sources": ["apps/marketing-zola/static/css/styles.css", "apps/marketing-zola/tailwind.config.js"],
-      "description": "Marketing Zola site tokens — Apex Style (Functionalist)",
+      "sources": [
+        "apps/marketing-zola/static/css/styles.css",
+        "apps/marketing-zola/tailwind.config.js"
+      ],
+      "description": "Marketing Zola site tokens \u2014 Apex Style (Functionalist)",
       "colors": [
-        { "source": "styles.css", "name": "--brand-50", "value": "254 242 242" },
-        { "source": "styles.css", "name": "--brand-100", "value": "254 226 226" },
-        { "source": "styles.css", "name": "--brand-200", "value": "254 202 202" },
-        { "source": "styles.css", "name": "--brand-300", "value": "252 165 165" },
-        { "source": "styles.css", "name": "--brand-400", "value": "248 113 113" },
-        { "source": "styles.css", "name": "--brand-500", "value": "220 38 38" },
-        { "source": "styles.css", "name": "--brand-600", "value": "185 28 28" },
-        { "source": "styles.css", "name": "--brand-700", "value": "153 27 27" },
-        { "source": "styles.css", "name": "--brand-800", "value": "127 29 29" },
-        { "source": "styles.css", "name": "--brand-900", "value": "69 10 10" },
-        { "source": "styles.css", "name": "--destructive", "value": "220 38 38" },
-        { "source": "styles.css", "name": "--error", "value": "220 38 38" },
-        { "source": "styles.css", "name": "--success", "value": "22 163 74" },
-        { "source": "styles.css", "name": "--warning", "value": "217 119 6" }
+        {
+          "source": "styles.css",
+          "name": "--brand-50",
+          "value": "254 242 242"
+        },
+        {
+          "source": "styles.css",
+          "name": "--brand-100",
+          "value": "254 226 226"
+        },
+        {
+          "source": "styles.css",
+          "name": "--brand-200",
+          "value": "254 202 202"
+        },
+        {
+          "source": "styles.css",
+          "name": "--brand-300",
+          "value": "252 165 165"
+        },
+        {
+          "source": "styles.css",
+          "name": "--brand-400",
+          "value": "248 113 113"
+        },
+        {
+          "source": "styles.css",
+          "name": "--brand-500",
+          "value": "220 38 38"
+        },
+        {
+          "source": "styles.css",
+          "name": "--brand-600",
+          "value": "185 28 28"
+        },
+        {
+          "source": "styles.css",
+          "name": "--brand-700",
+          "value": "153 27 27"
+        },
+        {
+          "source": "styles.css",
+          "name": "--brand-800",
+          "value": "127 29 29"
+        },
+        {
+          "source": "styles.css",
+          "name": "--brand-900",
+          "value": "69 10 10"
+        },
+        {
+          "source": "styles.css",
+          "name": "--destructive",
+          "value": "220 38 38"
+        },
+        {
+          "source": "styles.css",
+          "name": "--error",
+          "value": "220 38 38"
+        },
+        {
+          "source": "styles.css",
+          "name": "--success",
+          "value": "22 163 74"
+        },
+        {
+          "source": "styles.css",
+          "name": "--warning",
+          "value": "217 119 6"
+        }
       ],
       "spacing": [
-        { "source": "tailwind", "name": "--space-4", "value": "16px" },
-        { "source": "tailwind", "name": "--space-6", "value": "24px" },
-        { "source": "tailwind", "name": "--space-8", "value": "32px" },
-        { "source": "tailwind", "name": "--space-12", "value": "48px" },
-        { "source": "tailwind", "name": "--space-16", "value": "64px" }
+        {
+          "source": "tailwind",
+          "name": "--space-4",
+          "value": "16px"
+        },
+        {
+          "source": "tailwind",
+          "name": "--space-6",
+          "value": "24px"
+        },
+        {
+          "source": "tailwind",
+          "name": "--space-8",
+          "value": "32px"
+        },
+        {
+          "source": "tailwind",
+          "name": "--space-12",
+          "value": "48px"
+        },
+        {
+          "source": "tailwind",
+          "name": "--space-16",
+          "value": "64px"
+        }
       ],
       "typography": [
-        { "source": "tailwind", "name": "--font-sans", "value": "Inter, system-ui, sans-serif" },
-        { "source": "tailwind", "name": "--font-display", "value": "Inter, system-ui, sans-serif" },
-        { "source": "tailwind", "name": "--text-sm", "value": "14px" },
-        { "source": "tailwind", "name": "--text-base", "value": "17px" },
-        { "source": "tailwind", "name": "--text-lg", "value": "18px" },
-        { "source": "tailwind", "name": "--text-xl", "value": "20px" },
-        { "source": "tailwind", "name": "--text-2xl", "value": "24px" },
-        { "source": "tailwind", "name": "--text-4xl", "value": "36px" }
+        {
+          "source": "tailwind",
+          "name": "--font-sans",
+          "value": "Inter, system-ui, sans-serif"
+        },
+        {
+          "source": "tailwind",
+          "name": "--font-display",
+          "value": "Inter, system-ui, sans-serif"
+        },
+        {
+          "source": "tailwind",
+          "name": "--text-sm",
+          "value": "14px"
+        },
+        {
+          "source": "tailwind",
+          "name": "--text-base",
+          "value": "17px"
+        },
+        {
+          "source": "tailwind",
+          "name": "--text-lg",
+          "value": "18px"
+        },
+        {
+          "source": "tailwind",
+          "name": "--text-xl",
+          "value": "20px"
+        },
+        {
+          "source": "tailwind",
+          "name": "--text-2xl",
+          "value": "24px"
+        },
+        {
+          "source": "tailwind",
+          "name": "--text-4xl",
+          "value": "36px"
+        }
       ],
       "motion": [
-        { "source": "styles.css", "name": "--motion-duration-200", "value": "200ms" },
-        { "source": "styles.css", "name": "--motion-duration-300", "value": "300ms" }
+        {
+          "source": "styles.css",
+          "name": "--motion-duration-200",
+          "value": "200ms"
+        },
+        {
+          "source": "styles.css",
+          "name": "--motion-duration-300",
+          "value": "300ms"
+        }
       ],
       "radius": [
-        { "source": "tailwind", "name": "--radius-sm", "value": "0px" },
-        { "source": "tailwind", "name": "--radius-md", "value": "2px" },
-        { "source": "tailwind", "name": "--radius-lg", "value": "4px" },
-        { "source": "tailwind", "name": "--radius-xl", "value": "6px" }
+        {
+          "source": "tailwind",
+          "name": "--radius-sm",
+          "value": "0px"
+        },
+        {
+          "source": "tailwind",
+          "name": "--radius-md",
+          "value": "2px"
+        },
+        {
+          "source": "tailwind",
+          "name": "--radius-lg",
+          "value": "4px"
+        },
+        {
+          "source": "tailwind",
+          "name": "--radius-xl",
+          "value": "6px"
+        }
       ]
     }
   }

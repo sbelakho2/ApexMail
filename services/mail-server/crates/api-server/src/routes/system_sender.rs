@@ -554,14 +554,19 @@ pub(crate) fn render_transactional_email_with_branding(
 ) -> String {
     use crate::routes::helpers::html_escape;
 
+    // White-label mail carries no ApexMail wordmark at all (the branded
+    // footer replaces it); stock mail renders the fixed lockup alone.
+    let brand_for = "";
     let mut actions_html = String::new();
     for action in email.actions {
         let label = html_escape(action.label);
         let url = html_escape(action.url);
+        // ARK: primary actions are the ink fill; secondary are the 2px rule.
+        // Red is reserved for destruction, never for "click here".
         let style = if action.secondary {
-            "display:inline-block;padding:12px 28px;background:#09090b;color:#fff;border-radius:0px;text-decoration:none;font-weight:700;text-transform:uppercase;letter-spacing:0.1em"
+            "display:inline-block;padding:12px 24px;background:#ffffff;color:#0E141B;border:2px solid #0E141B;text-decoration:none;font-weight:600;font-family:-apple-system,'Segoe UI',Arial,sans-serif;font-size:14px"
         } else {
-            "display:inline-block;padding:12px 28px;background:#dc2626;color:#fff;border-radius:0px;text-decoration:none;font-weight:700;text-transform:uppercase;letter-spacing:0.1em"
+            "display:inline-block;padding:12px 24px;background:#0E141B;color:#ffffff;border:2px solid #0E141B;text-decoration:none;font-weight:600;font-family:-apple-system,'Segoe UI',Arial,sans-serif;font-size:14px"
         };
         actions_html.push_str(&format!(
             "<p><a href=\"{url}\" style=\"{style}\">{label}</a></p>\n\
@@ -573,7 +578,7 @@ pub(crate) fn render_transactional_email_with_branding(
         Some(branding) => render_branded_email_footer(branding, email.footer_link),
         None => {
             if email.footer_link {
-                "&copy; 2026 ApexMail &middot; <a href=\"https://apexmail.ee\" style=\"color:#999;text-decoration:none\">apexmail.ee</a>"
+                "&copy; 2026 ApexMail, <a href=\"https://apexmail.ee\" style=\"color:#5B6B7A;text-decoration:underline\">apexmail.ee</a>"
             } else {
                 "&copy; 2026 ApexMail"
             }
@@ -583,11 +588,13 @@ pub(crate) fn render_transactional_email_with_branding(
 
     format!(
         r#"<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/><meta name="color-scheme" content="light only"/><title>{title}</title></head><body style="margin:0;padding:24px;background-color:#ffffff;color:#09090b;font-family:ui-monospace,'JetBrains Mono',Consolas,monospace;line-height:1.6"><div style="max-width:560px;margin:0 auto;background-color:#ffffff">
-<h2 style="color:#dc2626;text-transform:uppercase;letter-spacing:0.05em">{heading}</h2>
+<html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/><meta name="color-scheme" content="light only"/><title>{title}</title></head><body style="margin:0;padding:24px;background-color:#ffffff;color:#0E141B;font-family:'Overpass',-apple-system,'Segoe UI',Arial,sans-serif;font-size:15px;line-height:1.6"><div style="max-width:560px;margin:0 auto;background-color:#ffffff">
+<p style="margin:0 0 20px;font-family:Arial,Helvetica,sans-serif;font-size:22px;font-weight:700;letter-spacing:-0.04em"><span style="color:#B91C1C">Apex</span><span style="color:#09090B">Mail</span>{brand_for}</p>
+<table role="presentation" style="width:100%;border-collapse:collapse"><tr><td style="border-top:3px solid #0E141B;padding-top:16px">
+<h2 style="margin:0 0 12px;color:#0E141B;font-family:'Spectral',Georgia,'Times New Roman',serif;font-size:20px;font-weight:500;letter-spacing:0;text-transform:none">{heading}</h2>
 {body}
-{actions}<hr style="border:none;border-top:1px solid #000;margin:24px 0"/>
-<p style="font-size:11px;color:#999;text-transform:uppercase;letter-spacing:0.05em">{footer}</p>
+{actions}</td></tr></table><hr style="border:none;border-top:1px solid #C4CDD5;margin:24px 0 12px"/>
+<p style="font-size:12px;color:#5B6B7A">{footer}</p>
 </div></body></html>"#,
         title = html_escape(email.document_title),
         heading = html_escape(email.heading),
@@ -628,7 +635,7 @@ fn render_branded_email_footer(branding: &TenantBranding, footer_link: bool) -> 
             ));
         }
     }
-    parts.join(" &middot; ")
+    parts.join(", ")
 }
 
 /// http(s)/mailto only — mirrors the console footer rule so a hostile

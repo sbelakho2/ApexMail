@@ -2844,8 +2844,8 @@ async fn login(
                         heading: "Your MFA Code",
                         body_html: &format!(
                             "<p>Your one-time verification code for <strong>{safe_email}</strong> is:</p>\n\
-                             <p style=\"font-size:28px;font-family:ui-monospace,'JetBrains Mono',monospace;letter-spacing:0.2em;font-weight:700;color:#dc2626\">{safe_code}</p>\n\
-                             <p style=\"font-size:13px;color:#71717a\">This code expires in 5 minutes. If you didn't request this, your account may be at risk.</p>\n"
+                             <p style=\"font-size:28px;font-family:ui-monospace,'SF Mono',Consolas,monospace;letter-spacing:0.2em;font-weight:700;color:#0E141B\">{safe_code}</p>\n\
+                             <p style=\"font-size:13px;color:#5B6B7A\">This code expires in 5 minutes. If you didn't request this, your account may be at risk.</p>\n"
                         ),
                         // A code email deliberately carries no action links.
                         actions: &[],

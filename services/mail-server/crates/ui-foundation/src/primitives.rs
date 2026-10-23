@@ -302,36 +302,25 @@ impl<'a> Button<'a> {
             ""
         };
         let button_type = if self.submit { "submit" } else { "button" };
-        let loading = if self.loading {
-            "<svg class=\"mr-2 h-4 w-4 animate-spin\" viewBox=\"0 0 24 24\" fill=\"none\" aria-hidden=\"true\"><circle class=\"opacity-25\" cx=\"12\" cy=\"12\" r=\"10\" stroke=\"currentColor\" stroke-width=\"3\"></circle><path class=\"opacity-75\" fill=\"currentColor\" d=\"M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z\"></path></svg>"
+        // ARK: a busy action changes its verb and its border — there is no
+        // spinner. Icons are chrome (the API fields stay, unrendered).
+        let _ = (self.left_icon, self.right_icon);
+        let busy = if self.loading {
+            " aria-busy=\"true\""
         } else {
             ""
         };
-        let left_icon = if !self.loading {
-            self.left_icon
-                .map(|icon| format!("<span class=\"mr-2\">{icon}</span>"))
-                .unwrap_or_default()
-        } else {
-            String::new()
-        };
-        let right_icon = if !self.loading {
-            self.right_icon
-                .map(|icon| format!("<span class=\"ml-2\">{icon}</span>"))
-                .unwrap_or_default()
-        } else {
-            String::new()
-        };
+        let busy_class = if self.loading { " apex-btn--busy" } else { "" };
         format!(
-            "<button type=\"{button_type}\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] text-[14px] font-sans font-semibold tracking-[0.01em] ring-offset-background transition-all duration-200 ease-premium active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 {} {}\" data-variant=\"{}\" data-size=\"{}\"{}>{}{}{}{}</button>",
+            "<button type=\"{button_type}\" class=\"{} {} apex-btn{}\" data-variant=\"{}\" data-size=\"{}\"{}{}>{}</button>",
             button_variant_class(self.variant),
             button_size_class(self.size),
+            busy_class,
             self.variant,
             self.size,
             disabled,
-            loading,
-            left_icon,
+            busy,
             self.label,
-            right_icon,
         )
     }
 }
@@ -403,12 +392,12 @@ impl<'a> Input<'a> {
         // instead of an attribute). Every attribute now sits where it
         // belongs: classes in class=, the rest as real attributes.
         let classes = format!(
-            "flex w-full rounded-[9px_9px_7px_7px] border bg-background text-[14px] ring-offset-background transition-all duration-300 file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-primary apex-focus-ring disabled:cursor-not-allowed disabled:opacity-50 hover:border-border/80 {} {}",
+            "apex-input {} {}",
             input_variant_class(resolved_variant),
             input_size_class(self.size),
         );
         let input_markup = format!(
-            "<input type=\"{input_type}\"{name}{id} value=\"{value}\" placeholder=\"{placeholder}\" class=\"{classes}\"{disabled}{aria_error}{autocomplete_attr}{required_attr} data-variant=\"{variant}\" data-size=\"{size}\" />",
+            "<input type=\"{input_type}\"{name}{id} value=\"{value}\" placeholder=\"{placeholder}\" class=\"{classes} apex-input\"{disabled}{aria_error}{autocomplete_attr}{required_attr} data-variant=\"{variant}\" data-size=\"{size}\" />",
             input_type = self.input_type,
             name = name_attr,
             id = id_attr,
@@ -428,8 +417,14 @@ impl<'a> Input<'a> {
         );
 
         let base = if self.left_icon.is_some() || self.right_icon.is_some() {
-            let left = self.left_icon.map(|icon| format!("<div class=\"absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground\">{icon}</div>")).unwrap_or_default();
-            let right = self.right_icon.map(|icon| format!("<div class=\"absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground\">{icon}</div>")).unwrap_or_default();
+            let left = self
+                .left_icon
+                .map(|icon| format!("<div class=\"absolute left-3\">{icon}</div>"))
+                .unwrap_or_default();
+            let right = self
+                .right_icon
+                .map(|icon| format!("<div class=\"absolute right-3\">{icon}</div>"))
+                .unwrap_or_default();
             let adjusted =
                 input_markup.replace("class=\"flex w-full", "class=\"flex w-full pl-10 pr-10");
             format!("<div class=\"relative\">{}{adjusted}{}</div>", left, right)
@@ -439,7 +434,7 @@ impl<'a> Input<'a> {
 
         if let Some(error) = self.error {
             return format!(
-                "<div>{base}<p id=\"{}\" class=\"text-xs text-destructive\" role=\"alert\">{}</p></div>",
+                "<div>{base}<p id=\"{}\" class=\"apex-error\" role=\"alert\">{}</p></div>",
                 html_escape(&error_id),
                 html_escape(error),
             );
@@ -492,7 +487,7 @@ impl<'a> Textarea<'a> {
             .map(|max| format!(" maxlength=\"{max}\""))
             .unwrap_or_default();
         let textarea = format!(
-            "<textarea{}{}{} class=\"flex min-h-[80px] w-full rounded-[9px_9px_7px_7px] border bg-background px-3 py-2 text-[14px] ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-primary apex-focus-ring disabled:cursor-not-allowed disabled:opacity-50 hover:border-border/80 transition-all duration-200 {} {}\" data-variant=\"{}\" data-resize=\"{}\" placeholder=\"{}\"{}>{}</textarea>",
+            "<textarea{}{}{} class=\"flex min-h-[80px] w-full border px-3 py-2 {} {} apex-input apex-textarea\" data-variant=\"{}\" data-resize=\"{}\" placeholder=\"{}\"{}>{}</textarea>",
             id_attr,
             name_attr,
             maxlength_attr,
@@ -517,7 +512,7 @@ impl<'a> Textarea<'a> {
                 Some(max) => format!("Limit {max} characters · {count} entered"),
                 None => format!("{count} characters entered"),
             };
-            return format!("<div class=\"relative\">{textarea}<span id=\"{}\" class=\"absolute bottom-2 right-2 text-xs text-muted-foreground\">{suffix}</span></div>", char_count_id);
+            return format!("<div class=\"relative\">{textarea}<span id=\"{}\" class=\"absolute bottom-2 right-2\">{suffix}</span></div>", char_count_id);
         }
 
         textarea
@@ -536,13 +531,6 @@ pub struct Checkbox {
 
 impl Checkbox {
     pub fn render_html(&self) -> String {
-        let state = if self.indeterminate {
-            "indeterminate"
-        } else if self.checked {
-            "checked"
-        } else {
-            "unchecked"
-        };
         let disabled = if self.disabled {
             " disabled aria-disabled=\"true\""
         } else {
@@ -550,33 +538,16 @@ impl Checkbox {
         };
         let aria_label = self
             .aria_label
-            .map(|label| format!(" aria-label=\"{}\"", label))
+            .map(|value| format!(" aria-label=\"{}\"", html_escape(value)))
             .unwrap_or_default();
-        let indicator = if self.indeterminate {
-            primitive_icon("minus", "h-3 w-3")
-        } else if self.checked {
-            primitive_icon("check", "h-3 w-3")
-        } else {
-            String::new()
-        };
+        let checked = if self.checked { " checked" } else { "" };
+        let _ = (self.variant, self.indeterminate);
         format!(
-            "<button type=\"button\" role=\"checkbox\" aria-checked=\"{}\" class=\"peer shrink-0 border ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 transition-all duration-200 relative after:absolute after:left-1/2 after:top-1/2 after:h-[44px] after:w-[44px] after:-translate-x-1/2 after:-translate-y-1/2 after:content-[\"\"] {} {}\" data-state=\"{}\"{}{}>{}</button>",
-            self.checked || self.indeterminate,
-            checkbox_variant_class(self.variant),
-            checkbox_size_class(self.size),
-            state,
-            disabled,
-            aria_label,
-            indicator,
+            "<input type=\"checkbox\" class=\"apex-checkbox\"{checked}{disabled}{aria_label} />"
         )
     }
 }
 
-/// A NATIVE `<select>` styled with the shared form-control classes.
-///
-/// The combobox [`Select`] above requires the hydration script; plain
-/// server-posted forms (the campaign editor, settings pages) need a control
-/// that serializes without JavaScript. Use this for every no-JS form.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeSelect<'a> {
     pub id: &'a str,
@@ -615,7 +586,7 @@ impl NativeSelect<'_> {
             .collect::<Vec<_>>()
             .join("");
         format!(
-            "<select id=\"{}\" name=\"{}\" class=\"flex w-full rounded-[8px_8px_7px_7px] border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary{}\"{}{}>{}</select>",
+            "<select id=\"{}\" name=\"{}\" class=\"flex w-full border px-3 focus-visible:border-primary{} apex-select\"{}{}>{}</select>",
             html_escape(self.id),
             html_escape(self.name),
             if self.multiple { " min-h-12 py-2" } else { " h-12" },
@@ -640,8 +611,8 @@ impl NativeCheckbox<'_> {
     pub fn render_html(&self) -> String {
         let checked = if self.checked { " checked" } else { "" };
         format!(
-            "<label class=\"flex items-center gap-3 text-sm font-medium text-surface-950 min-h-[44px]\" for=\"{}\"\
-><input id=\"{}\" name=\"{}\" type=\"checkbox\" value=\"true\"{} class=\"h-4 w-4 rounded-sm border border-surface-300 text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20\" />\
+            "<label class=\"flex items-center gap-3 min-h-[44px] apex-em apex-label\" for=\"{}\"\
+><input id=\"{}\" name=\"{}\" type=\"checkbox\" value=\"true\"{} class=\"h-4 w-4 border apex-input\" />\
 <span>{}</span></label>",
             html_escape(self.id),
             html_escape(self.id),
@@ -681,132 +652,6 @@ pub struct Select<'a> {
     pub id: Option<&'a str>,
 }
 
-impl<'a> Select<'a> {
-    pub fn render_html(&self) -> String {
-        let value = self.value_label.unwrap_or(self.placeholder);
-        let selected_value = self
-            .options
-            .iter()
-            .find(|option| option.selected)
-            .map(|option| option.value)
-            .unwrap_or("");
-        let name_attrs = self
-            .name
-            .map(|name| {
-                format!(" name=\"{name}\" data-field=\"{name}\" data-value=\"{selected_value}\"")
-            })
-            .unwrap_or_default();
-        let filter_attrs = self
-            .filter_param
-            .map(|param| format!(" data-filter-param=\"{param}\""))
-            .unwrap_or_default();
-        let listbox_id = "select-listbox";
-        let active_id = if self.open {
-            self.options
-                .iter()
-                .position(|o| o.selected)
-                .map(|i| format!("select-option-{}", i))
-                .unwrap_or_else(|| "select-option-0".to_string())
-        } else {
-            String::new()
-        };
-        let expanded = if self.open { "true" } else { "false" };
-        let activedescendant = if self.open {
-            format!(" aria-activedescendant=\"{}\"", active_id)
-        } else {
-            String::new()
-        };
-        let menu = if self.open {
-            let items = self
-                .options
-                .iter()
-                .enumerate()
-                .map(|(i, option)| {
-                    let selected = if option.selected {
-                        format!("<span class=\"absolute left-2 flex h-3.5 w-3.5 items-center justify-center\">{}</span>", primitive_icon("check", "h-3.5 w-3.5"))
-                    } else {
-                        String::new()
-                    };
-                    let disabled = if option.disabled { " data-disabled=\"true\"" } else { "" };
-                    format!(
-                        "<div id=\"select-option-{}\" data-value=\"{}\" class=\"relative flex w-full cursor-default select-none items-center rounded-[8px_8px_7px_7px] py-3 pl-8 pr-2 text-sm outline-none hover:bg-surface-50 focus:bg-surface-100 focus:text-surface-900 data-[disabled]:pointer-events-none data-[disabled]:opacity-50 min-h-[44px]\" role=\"option\" aria-selected=\"{}\"{}>{}<span>{}</span></div>",
-                        i,
-                        html_escape(option.value),
-                        option.selected,
-                        disabled,
-                        selected,
-                        html_escape(option.label),
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("");
-            format!(
-                "<div id=\"{}\" class=\"relative z-50 max-h-106 min-w-[8rem] overflow-hidden rounded-[16px_16px_9px_9px] border bg-popover text-popover-foreground border-border/60 data-[state=open]:animate-in\" role=\"listbox\"{}><div class=\"p-1\">{}</div></div>",
-                listbox_id,
-                if self.open { "" } else { " hidden" },
-                items,
-            )
-        } else {
-            // Options are always in the DOM (hidden when closed) so the
-            // hidden when closed)
-            let items = self
-                .options
-                .iter()
-                .enumerate()
-                .map(|(i, option)| {
-                    let selected = if option.selected {
-                        format!("<span class=\"absolute left-2 flex h-3.5 w-3.5 items-center justify-center\">{}</span>", primitive_icon("check", "h-3.5 w-3.5"))
-                    } else {
-                        String::new()
-                    };
-                    let disabled = if option.disabled { " data-disabled=\"true\"" } else { "" };
-                    format!(
-                        "<div id=\"select-option-{}\" data-value=\"{}\" class=\"relative flex w-full cursor-default select-none items-center rounded-[8px_8px_7px_7px] py-3 pl-8 pr-2 text-sm outline-none hover:bg-surface-50 focus:bg-surface-100 focus:text-surface-900 data-[disabled]:pointer-events-none data-[disabled]:opacity-50 min-h-[44px]\" role=\"option\" aria-selected=\"{}\"{}>{}<span>{}</span></div>",
-                        i,
-                        html_escape(option.value),
-                        option.selected,
-                        disabled,
-                        selected,
-                        html_escape(option.label),
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("");
-            format!(
-                "<div id=\"{}\" class=\"relative z-50 max-h-106 min-w-[8rem] overflow-hidden rounded-[16px_16px_9px_9px] border bg-popover text-popover-foreground border-border/60 data-[state=open]:animate-in\" role=\"listbox\" hidden><div class=\"p-1\">{}</div></div>",
-                listbox_id, items,
-            )
-        };
-
-        let trigger_keyboard_attrs = if self.open {
-            " data-keyboard-contract=\"select\" data-keyboard-arrow-navigates=\"true\" data-keyboard-enter-selects=\"true\" data-keyboard-escape-closes=\"true\""
-        } else {
-            ""
-        };
-        let id_attr = self
-            .id
-            .map(|value| format!(" id=\"{}\"", value))
-            .unwrap_or_default();
-
-        format!(
-            "<div data-open=\"{}\"{}{}><button{} type=\"button\" role=\"combobox\" aria-expanded=\"{}\" aria-controls=\"{}\" aria-haspopup=\"listbox\"{}{} class=\"flex w-full items-center justify-between rounded-[9px_9px_7px_7px] border border-surface-200 bg-background px-3 py-2 text-[14px] ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary disabled:cursor-not-allowed disabled:opacity-50 [&>span]:line-clamp-1 transition-all duration-200 {} {}\" data-variant=\"{}\" data-size=\"{}\"><span>{}</span><span class=\"h-4 w-4 opacity-50\">⌄</span></button>{}</div>",
-            self.open,
-            name_attrs,
-            filter_attrs,
-            id_attr,
-            expanded, listbox_id,
-            activedescendant,
-            trigger_keyboard_attrs,
-            select_variant_class(self.variant),
-            select_size_class(self.size),
-            self.variant,
-            self.size,
-            value,
-            menu,
-        )
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Switch {
     pub checked: bool,
@@ -817,22 +662,14 @@ pub struct Switch {
 
 impl Switch {
     pub fn render_html(&self) -> String {
+        let _ = (self.variant, self.size);
         let disabled = if self.disabled {
             " disabled aria-disabled=\"true\""
         } else {
             ""
         };
-        let state = if self.checked { "checked" } else { "unchecked" };
-        format!(
-            "<button type=\"button\" role=\"switch\" aria-checked=\"{}\" class=\"peer inline-flex shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:cursor-not-allowed disabled:opacity-50 hover:opacity-90 active:scale-95 duration-200 relative after:absolute after:left-1/2 after:top-1/2 after:h-[44px] after:w-[44px] after:-translate-x-1/2 after:-translate-y-1/2 after:content-[\"\"] {} {}\" data-state=\"{}\"{}><span class=\"pointer-events-none block rounded-full bg-background ring-0 transition-transform {} {}\"></span></button>",
-            self.checked,
-            switch_variant_class(self.variant),
-            switch_size_class(self.size),
-            state,
-            disabled,
-            switch_thumb_size_class(self.size),
-            switch_thumb_state_class(self.size, self.checked),
-        )
+        let checked = if self.checked { " checked" } else { "" };
+        format!("<input type=\"checkbox\" class=\"apex-checkbox\"{checked}{disabled} />")
     }
 }
 
@@ -846,25 +683,14 @@ pub struct Slider {
 
 impl Slider {
     pub fn render_html(&self) -> String {
-        let tooltip = if self.show_tooltip {
-            format!("<span class=\"absolute -top-8 left-1/2 -translate-x-1/2 rounded bg-primary px-3 py-1 text-xs text-white\">{}</span>", self.value)
-        } else {
-            String::new()
-        };
+        let _ = (self.variant, self.size, self.show_tooltip);
         format!(
-            "<div class=\"relative flex w-full touch-none select-none items-center\" data-size=\"{}\"><div class=\"relative w-full grow overflow-hidden rounded-sm bg-secondary {}\"><div class=\"absolute h-full {}\" style=\"width:{}%\"></div></div><span class=\"block rounded-sm border-2 border-primary bg-background ring-offset-background transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 hover:scale-110 hover: relative {}\">{}</span></div>",
-            self.size,
-            slider_track_size_class(self.size),
-            progress_indicator_class(self.variant),
-            self.value,
-            slider_thumb_size_class(self.size),
-            tooltip,
+            "<input type=\"range\" min=\"0\" max=\"100\" value=\"{}\" class=\"apex-input\" aria-valuenow=\"{}\" />",
+            self.value, self.value
         )
     }
 }
 
-/// RadioGroup:accessible radio-group with arrow-key navigation and focus management.
-/// Matches the role="radiogroup" contract used in report filters.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RadioGroupItem<'a> {
     pub value: &'a str,
@@ -946,6 +772,52 @@ pub struct RadioGroupKeyboardContract {
     pub space_selects: bool,
 }
 
+impl<'a> Select<'a> {
+    pub fn render_html(&self) -> String {
+        // ARK: a select is a NATIVE select with the shared field recipe —
+        // no custom combobox, no listbox overlay, no animation state.
+        let _ = (self.variant, self.size, self.open, self.value_label);
+        let id_attr = self
+            .id
+            .map(|id| format!(" id=\"{}\"", html_escape(id)))
+            .unwrap_or_default();
+        let name_attr = self
+            .name
+            .map(|name| {
+                format!(
+                    " name=\"{}\" data-field=\"{}\"",
+                    html_escape(name),
+                    html_escape(name)
+                )
+            })
+            .unwrap_or_default();
+        let mut options = String::new();
+        if !self.placeholder.is_empty() {
+            options.push_str(&format!(
+                "<option value=\"\"{}>{}</option>",
+                if self.options.iter().any(|o| o.selected) {
+                    ""
+                } else {
+                    " selected"
+                },
+                html_escape(self.placeholder)
+            ));
+        }
+        for option in &self.options {
+            options.push_str(&format!(
+                "<option value=\"{}\"{}{}>{}</option>",
+                html_escape(option.value),
+                if option.selected { " selected" } else { "" },
+                if option.disabled { " disabled" } else { "" },
+                html_escape(option.label)
+            ));
+        }
+        format!(
+            "<span class=\"apex-select-wrap\"><select class=\"apex-select\"{id_attr}{name_attr}>{options}</select></span>"
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Label<'a> {
     pub text: &'a str,
@@ -962,12 +834,12 @@ pub struct Label<'a> {
 impl<'a> Label<'a> {
     pub fn render_html(&self) -> String {
         let suffix = if self.required {
-            "<span class=\"ml-1 text-destructive\">*</span>"
+            "<span class=\"ml-1 apex-error\">*</span>"
         } else {
             ""
         };
         let optional = if self.optional {
-            "<span class=\"ml-1 text-muted-foreground\">(optional)</span>"
+            "<span class=\"ml-1\">(optional)</span>"
         } else {
             ""
         };
@@ -976,7 +848,7 @@ impl<'a> Label<'a> {
             .map(|value| format!(" for=\"{}\"", value))
             .unwrap_or_default();
         format!(
-            "<label{} class=\"text-sm font-medium leading-none {} {}\">{}{}{}</label>",
+            "<label{} class=\"{} {} apex-em apex-label\">{}{}{}</label>",
             for_attr,
             label_variant_class(self.variant),
             label_size_class(self.size),
@@ -998,27 +870,10 @@ pub struct Progress {
 
 impl Progress {
     pub fn render_html(&self) -> String {
-        let animated = if self.animated {
-            " animate-progress"
-        } else {
-            ""
-        };
-        let value = if self.show_value {
-            format!(
-                "<span class=\"text-sm text-muted-foreground apex-metric-number\">{}%</span>",
-                self.value
-            )
-        } else {
-            String::new()
-        };
+        let _ = (self.variant, self.size, self.animated);
         format!(
-            "<div class=\"flex items-center gap-2\"><div class=\"relative w-full overflow-hidden rounded-sm {} {}\"><div class=\"h-full w-full flex-1 transition-all duration-300 ease-in-out {}{}\" style=\"transform: translateX(-{}%);\"></div></div>{}</div>",
-            progress_track_class(self.variant),
-            progress_size_class(self.size),
-            progress_indicator_class(self.variant),
-            animated,
-            100_u8.saturating_sub(self.value),
-            value,
+            "<span class=\"apex-meta\" role=\"progressbar\" aria-valuemin=\"0\" aria-valuemax=\"100\" aria-valuenow=\"{}\">{} of 100</span>",
+            self.value, self.value
         )
     }
 }
@@ -1042,13 +897,12 @@ impl<'a> Badge<'a> {
         // (DB-sourced VARCHARs like event_type / suppression reason), so the
         // badge label must never be interpolated verbatim.
         let text = html_escape(self.text);
+        let _ = icon; // ARK: status is a word and its 8px square, no glyph
         format!(
-            "<div class=\"inline-flex items-center rounded-full border font-semibold uppercase tracking-wide transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 max-w-full min-w-0 truncate {} {}\" data-variant=\"{}\" data-size=\"{}\">{}{}</div>",
+            "<span class=\"{}\" data-variant=\"{}\" data-size=\"{}\">{}</span>",
             badge_variant_class(self.variant),
-            badge_size_class(self.size),
             self.variant,
             self.size,
-            icon,
             text,
         )
     }
@@ -1074,28 +928,13 @@ pub struct Avatar<'a> {
 
 impl<'a> Avatar<'a> {
     pub fn render_html(&self) -> String {
-        let image = self
-            .image_url
-            .map(|src| {
-                format!(
-                    "<img src=\"{}\" alt=\"{}\" class=\"aspect-square h-full w-full object-cover\" />",
-                    html_escape(src),
-                    html_escape(self.label)
-                )
-            })
-            .unwrap_or_default();
-        let fallback = if self.image_url.is_none() {
-            format!("<span class=\"flex h-full w-full items-center justify-center bg-surface-100 text-surface-600 font-semibold text-xs uppercase tracking-wide\">{}</span>", self.fallback)
-        } else {
-            String::new()
-        };
+        // ARK: a person is a name (initials as machine data); avatar
+        // photographs were chrome. The URL stays accepted and unrendered.
+        let _ = (self.image_url, self.size, self.status);
         format!(
-            "<div class=\"relative flex shrink-0 overflow-hidden rounded-full border border-surface-200 {} {}\" aria-label=\"{}\">{}{}</div>",
-            avatar_size_class(self.size),
-            avatar_status_class(self.status),
+            "<span class=\"apex-avatar\" aria-label=\"{}\">{}</span>",
             html_escape(self.label),
-            image,
-            fallback,
+            html_escape(self.fallback),
         )
     }
 }
@@ -1114,15 +953,18 @@ pub struct EmptyState<'a> {
 
 impl<'a> EmptyState<'a> {
     pub fn render_html(&self) -> String {
-        let icon = self.icon_markup.map(|icon| format!("<div class=\"mb-4 flex h-16 w-16 items-center justify-center rounded-[16px_16px_9px_9px] bg-muted/50 border border-border/50\">{}</div>", icon)).unwrap_or_default();
-        let description = self.description.map(|text| format!("<p class=\"mx-auto max-w-[320px] text-sm text-muted-foreground leading-relaxed\">{}</p>", text)).unwrap_or_default();
+        let icon = self.icon_markup.map(|icon| format!("<div class=\"mb-4 flex h-16 w-16 items-center justify-center border border-border/50\">{}</div>", icon)).unwrap_or_default();
+        let description = self
+            .description
+            .map(|text| format!("<p class=\"mx-auto max-w-[320px]\">{}</p>", text))
+            .unwrap_or_default();
         let action = match (self.action_label, self.action_href) {
-            (Some(label), Some(href)) => format!("<a href=\"{}\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] text-[14px] font-sans font-semibold tracking-[0.01em] border border-surface-200 bg-background text-foreground hover:border-surface-300 hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 h-10 px-3 text-sm min-h-[44px] mt-6\">{}</a>", href, label),
-            (Some(label), None) => format!("<button type=\"button\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] text-[14px] font-sans font-semibold tracking-[0.01em] border border-surface-200 bg-background text-foreground hover:border-surface-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 h-10 px-3 text-sm min-h-[44px] mt-6\">{}</button>", label),
+            (Some(label), Some(href)) => format!("<a href=\"{}\" class=\"inline-flex items-center justify-center whitespace-nowrap border h-10 px-3 min-h-[44px] mt-6 apex-em apex-btn\">{}</a>", href, label),
+            (Some(label), None) => format!("<button type=\"button\" class=\"inline-flex items-center justify-center whitespace-nowrap border h-10 px-3 min-h-[44px] mt-6 apex-btn\">{}</button>", label),
             _ => String::new(),
         };
         format!(
-            "<div class=\"apex-empty-state flex flex-col items-center justify-center py-12 px-6 text-center animate-in fade-in zoom-in-95 duration-500\">{}<h3 class=\"text-[17px] font-bold text-foreground mb-2\">{}</h3>{}{}</div>",
+            "<div class=\"apex-empty-state flex flex-col items-center justify-center py-12 px-6\">{}<h3 class=\"mb-2 apex-h3\">{}</h3>{}{}</div>",
             icon,
             self.title,
             description,
@@ -1167,14 +1009,14 @@ impl<'a> AsyncState<'a> {
                         .render_html()
                     })
                     .unwrap_or_default();
-                format!("<div class=\"flex items-center justify-center min-h-[320px]\"><div class=\"flex flex-col items-center gap-3\"><svg class=\"animate-spin h-8 w-8 text-muted-foreground\" viewBox=\"0 0 24 24\" fill=\"none\" aria-hidden=\"true\"><circle class=\"opacity-25\" cx=\"12\" cy=\"12\" r=\"10\" stroke=\"currentColor\" stroke-width=\"3\"></circle><path class=\"opacity-75\" fill=\"currentColor\" d=\"M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z\"></path></svg><p class=\"text-sm text-muted-foreground font-medium\">{}</p>{}</div></div>", label, badge)
+                format!("<div class=\"flex items-center justify-center min-h-[320px]\"><div class=\"flex flex-col items-center gap-3\"><svg class=\"h-8 w-8\" viewBox=\"0 0 24 24\" fill=\"none\" aria-hidden=\"true\"><circle class=\"\" cx=\"12\" cy=\"12\" r=\"10\" stroke=\"currentColor\" stroke-width=\"3\"></circle><path class=\"\" fill=\"currentColor\" d=\"M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z\"></path></svg><p class=\"apex-em\">{}</p>{}</div></div>", label, badge)
             }
             Self::Error {
                 title,
                 description,
                 retry_label,
             } => EmptyState {
-                icon_markup: Some("<span class=\"h-8 w-8 text-muted-foreground/60\">!</span>"),
+                icon_markup: Some("<span class=\"h-8 w-8\">!</span>"),
                 title,
                 description: Some(description),
                 // The Retry control is a real link, not a dead button: an
@@ -1189,7 +1031,7 @@ impl<'a> AsyncState<'a> {
                 description,
                 action_label,
             } => EmptyState {
-                icon_markup: Some("<span class=\"h-8 w-8 text-muted-foreground/60\">⌂</span>"),
+                icon_markup: Some("<span class=\"h-8 w-8\">⌂</span>"),
                 title,
                 description: Some(description),
                 action_label: *action_label,
@@ -1208,8 +1050,9 @@ pub struct Skeleton<'a> {
 
 impl<'a> Skeleton<'a> {
     pub fn render_html(&self) -> String {
+        // ARK: loading is blank ruled rows — the shape of the ledger to come.
         format!(
-            "<div class=\"animate-pulse rounded-sm {} {}\"></div>",
+            "<div class=\"{} {}\" aria-hidden=\"true\"><div class=\"apex-loading__row\"><div class=\"apex-loading__bar\"></div><div class=\"apex-loading__bar\" style=\"width:40%\"></div></div></div>",
             skeleton_variant_class(self.variant),
             self.class_name
         )
@@ -1261,20 +1104,15 @@ impl<'a> Dialog<'a> {
         let title = html_escape(self.title);
         let description = self
             .description
-            .map(|value| {
-                format!(
-                    "<p class=\"text-sm text-muted-foreground\">{}</p>",
-                    html_escape(value)
-                )
-            })
+            .map(|value| format!("<p class=\"\">{}</p>", html_escape(value)))
             .unwrap_or_default();
         let close = if self.hide_close_button {
             String::new()
         } else {
-            format!("<button data-dialog-close data-focus-initial=\"true\" class=\"absolute right-4 top-4 rounded-[8px_8px_7px_7px] opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2\" aria-label=\"Close\">{}<span class=\"sr-only\">Close</span></button>", primitive_icon("x", "h-4 w-4"))
+            format!("<button data-dialog-close data-focus-initial=\"true\" class=\"absolute right-4 top-4\" aria-label=\"Close\">{}<span class=\"sr-only\">Close</span></button>", primitive_icon("x", "h-4 w-4"))
         };
         format!(
-            "<div class=\"fixed inset-0 z-50 bg-black/40 backdrop-blur-sm data-[state=open]:animate-in\"></div><div role=\"dialog\" aria-modal=\"true\" aria-labelledby=\"{dialog_id}\" tabindex=\"-1\" data-focus-trap=\"true\" data-escape-dismiss=\"true\" data-initial-focus=\"[data-focus-initial]\" class=\"fixed left-[50%] top-[50%] z-50 grid w-full translate-x-[-50%] translate-y-[-50%] gap-4 border bg-background p-6 duration-200 sm:rounded-[16px_16px_9px_9px] {} {}\"><div class=\"flex flex-col space-y-1.5 text-center sm:text-left\"><h2 id=\"{dialog_id}\" class=\"text-lg font-bold leading-none tracking-tight\">{}</h2>{}</div><div>{}</div>{}</div>",
+            "<div class=\"fixed inset-0 z-50 data-[state=open]:animate-in\"></div><div role=\"dialog\" aria-modal=\"true\" aria-labelledby=\"{dialog_id}\" tabindex=\"-1\" data-focus-trap=\"true\" data-escape-dismiss=\"true\" data-initial-focus=\"[data-focus-initial]\" class=\"fixed left-[50%] top-[50%] z-50 grid w-full gap-4 border p-6 {} {}\"><div class=\"flex flex-col space-y-1.5\"><h2 id=\"{dialog_id}\" class=\"apex-h2\">{}</h2>{}</div><div>{}</div>{}</div>",
             dialog_size_class(self.size),
             dialog_variant_class(self.variant),
             title,
@@ -1297,30 +1135,13 @@ pub struct AlertDialog<'a> {
 
 impl<'a> AlertDialog<'a> {
     pub fn render_html(&self) -> String {
-        let alert_id = dialog_id_for(self.title);
-        let initial_focus = if self.dialog_type == "confirm" {
-            "[data-alert-dialog-cancel]"
-        } else {
-            "[data-alert-dialog-confirm]"
-        };
-        // Text slots are escaped at the primitive boundary.
-        let title = html_escape(self.title);
-        let message = html_escape(self.message);
-        let cancel = if self.dialog_type == "confirm" {
-            format!(
-                "<button data-alert-dialog-cancel class=\"px-4 py-2 rounded-[8px_8px_7px_7px] text-sm font-medium bg-muted text-foreground hover:bg-muted/80 transition-colors\">{}</button>",
-                html_escape(self.cancel_label.unwrap_or("Cancel"))
-            )
-        } else {
-            String::new()
-        };
+        // ARK: a destructive confirmation is a PAGE (the /confirm flow), not
+        // a modal. The primitive renders its content as an inline notice.
+        let _ = (self.variant, self.dialog_type, self.cancel_label);
         format!(
-            "<div class=\"fixed inset-0 z-[200] flex items-center justify-center bg-black/50 backdrop-blur-sm\"><div class=\"bg-card border border-border rounded-[16px_16px_9px_9px] p-6 max-w-md w-full mx-4 animate-in fade-in zoom-in-95 duration-200\" role=\"alertdialog\" aria-modal=\"true\" aria-labelledby=\"{alert_id}-title\" aria-describedby=\"{alert_id}-message\" tabindex=\"-1\" data-focus-trap=\"true\" data-escape-dismiss=\"true\" data-initial-focus=\"{}\"><h2 id=\"{alert_id}-title\" class=\"text-lg font-bold text-foreground mb-2\">{}</h2><p id=\"{alert_id}-message\" class=\"text-sm text-muted-foreground mb-6\">{}</p><div class=\"flex justify-end gap-3\">{}<button data-alert-dialog-confirm class=\"px-4 py-2 rounded-[8px_8px_7px_7px] text-sm font-medium transition-colors {}\">{}</button></div></div></div>",
-            initial_focus,
-            title,
-            message,
-            cancel,
-            alert_dialog_confirm_class(self.variant),
+            "<section class=\"apex-notice apex-notice--fail\"><b>Confirm</b><p class=\"apex-em\">{}</p><p>{}</p><p><button type=\"submit\" class=\"apex-btn apex-btn--danger\">{}</button></p></section>",
+            html_escape(self.title),
+            html_escape(self.message),
             html_escape(self.confirm_label),
         )
     }
@@ -1340,18 +1161,19 @@ pub struct Popover<'a> {
 
 impl<'a> Popover<'a> {
     pub fn render_html(&self) -> String {
-        // Every text slot is escaped at the primitive boundary (`score_value`
-        // goes through `Badge`, which escapes its own label).
+        // ARK: no floating popovers. The content is an inline ruled panel —
+        // always visible, no positioning, no dismissal, no focus trap.
         format!(
-            "<div class=\"relative min-h-[180px] rounded-[16px_16px_9px_9px] border border-border bg-muted/10 p-4\"><div class=\"flex items-start justify-between gap-4\"><div><p class=\"text-sm font-semibold text-foreground\">{}</p><p class=\"text-xs text-muted-foreground\">{}</p></div><button class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] text-[14px] font-sans font-semibold tracking-[0.01em] ring-offset-background transition-colors duration-150 ease-out !shadow-none hover:!shadow-none active:!shadow-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 border border-surface-200 bg-background text-foreground hover:border-surface-300 h-12 px-4 py-2\">Review segment health</button></div><div class=\"absolute right-4 top-16 z-10 w-[280px] rounded-[16px_16px_9px_9px] border border-border bg-popover p-4 text-popover-foreground\"><p class=\"text-sm font-semibold\">{}</p><p class=\"mt-1 text-xs text-muted-foreground\">{}</p><div class=\"mt-3 flex items-center justify-between rounded-[8px_8px_7px_7px] border border-border bg-background px-3 py-2 text-xs\"><span>{}</span>{}</div><div class=\"mt-3 flex justify-end gap-2\"><button class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] text-[14px] font-sans font-semibold tracking-[0.01em] ring-offset-background transition-colors duration-150 ease-out !shadow-none hover:!shadow-none active:!shadow-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 text-foreground hover:bg-surface-50 h-10 px-3 text-sm min-h-[44px]\">{}</button><button class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] text-[14px] font-sans font-semibold tracking-[0.01em] ring-offset-background transition-colors duration-150 ease-out !shadow-none hover:!shadow-none active:!shadow-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 bg-primary text-white hover:bg-primary/90 h-10 px-3 text-sm min-h-[44px]\">{}</button></div></div></div>",
-            html_escape(self.preview_title),
-            html_escape(self.preview_description),
+            "<section class=\"apex-panel\"><div class=\"apex-panel__head\">{}</div><div class=\"apex-panel__body\"><p class=\"apex-meta\">{}</p><p class=\"apex-meta\" style=\"margin-top:.4rem\">{}</p><p style=\"margin-top:.6rem\"><span class=\"apex-meta\">{}</span> {}</p></div></section>",
             html_escape(self.title),
+            html_escape(self.preview_title),
             html_escape(self.description),
             html_escape(self.score_label),
             Badge { text: self.score_value, variant: "outline", size: "default", icon: None }.render_html(),
-            html_escape(self.dismiss_label),
-            html_escape(self.action_label),
+        )
+        .replace(
+            "</div></section>",
+            &format!("</div><p style=\"margin-top:.75rem\"><a class=\"apex-link\">{}</a></p></section>", html_escape(self.action_label)),
         )
     }
 }
@@ -1373,24 +1195,39 @@ pub struct DropdownMenu<'a> {
 
 impl<'a> DropdownMenu<'a> {
     pub fn render_html(&self) -> String {
-        let label = self.label.map(|value| format!("<div class=\"px-3 py-1.5 text-[11px] font-semibold uppercase tracking-widest text-surface-600\">{}</div>", value)).unwrap_or_default();
-        let separator = if self.show_separator {
-            "<div class=\"-mx-1 my-1 h-px bg-surface-200/50\"></div>"
-        } else {
-            ""
-        };
-        let items = self.items.iter().enumerate().map(|(i, item)| {
-            let destructive = if item.destructive { " text-destructive focus:bg-destructive/10 focus:text-destructive" } else { "" };
-            let inset = if item.inset { " pl-8" } else { "" };
-            let shortcut = item.shortcut.map(|value| format!("<span class=\"ml-auto text-xs opacity-60\">{}</span>", value)).unwrap_or_default();
-            let tabindex = if i == 0 { "0" } else { "-1" };
-            format!("<div role=\"menuitem\" tabindex=\"{}\" class=\"relative flex cursor-default select-none items-center rounded-[8px_8px_7px_7px] px-3 py-3 text-[14px] font-medium outline-none transition-colors hover:bg-surface-50 focus:bg-surface-100 focus:text-surface-900 cursor-pointer min-h-[44px]{}{}\">{}{}</div>", tabindex, inset, destructive, item.label, shortcut)
-        }).collect::<Vec<_>>().join("");
-        let keyboard_attrs = " data-keyboard-contract=\"dropdown-menu\" data-keyboard-arrow-navigates=\"true\" data-keyboard-enter-activates=\"true\" data-keyboard-escape-closes=\"true\"";
-        // The separator belongs INSIDE the menu container (between the label
-        // and the items) — rendering it after the closing </div> left it
-        // stranded outside the menu, where keyboard/role semantics ignore it.
-        format!("<div class=\"z-50 min-w-[8rem] overflow-hidden rounded-[16px_16px_9px_9px] border border-surface-200/60 bg-card/90 backdrop-blur-xl p-1.5 text-surface-900 data-[state=open]:animate-in\" role=\"menu\"{}>{}{}{}</div>", keyboard_attrs, label, separator, items)
+        // ARK: no kebab menus. Items are inline underlined verbs in the row;
+        // shortcuts render as plain machine text beside the verb.
+        let mut verbs = String::new();
+        for item in &self.items {
+            let shortcut = item
+                .shortcut
+                .map(|value| {
+                    format!(
+                        "<span class=\"apex-mono\" style=\"margin-left:.4rem\">{}</span>",
+                        html_escape(value)
+                    )
+                })
+                .unwrap_or_default();
+            let class = if item.destructive {
+                "apex-btn--link apex-error"
+            } else {
+                "apex-btn--link"
+            };
+            verbs.push_str(&format!(
+                "<a class=\"{} apex-link\">{}{}</a>",
+                class,
+                html_escape(item.label),
+                shortcut
+            ));
+        }
+        let label = self
+            .label
+            .map(|value| format!("<span class=\"apex-meta\">{}</span> ", html_escape(value)))
+            .unwrap_or_default();
+        format!(
+            "<nav class=\"apex-row-actions\" style=\"display:flex;gap:1rem;flex-wrap:wrap\">{}{}</nav>",
+            label, verbs
+        )
     }
 }
 
@@ -1404,7 +1241,7 @@ pub struct Tooltip<'a> {
 
 impl<'a> Tooltip<'a> {
     pub fn render_html(&self) -> String {
-        format!("<div role=\"tooltip\" data-side=\"{}\" data-delay=\"{}\" class=\"z-50 overflow-hidden rounded-[8px_8px_7px_7px] border px-3 py-1.5 text-xs animate-in fade-in-0 zoom-in-95 {} {}\">{}</div>", self.side, self.delay_duration, tooltip_variant_class(self.variant), tooltip_side_class(self.side), self.content)
+        format!("<div role=\"tooltip\" data-side=\"{}\" data-delay=\"{}\" class=\"z-50 overflow-hidden border px-3 py-1.5 fade-in-0 {} {}\">{}</div>", self.side, self.delay_duration, tooltip_variant_class(self.variant), tooltip_side_class(self.side), self.content)
     }
 
     /// Tooltip delay and positioning contract:matches Radix Tooltip behavior.
@@ -1474,7 +1311,7 @@ impl<'a> Accordion<'a> {
             let icon_rotation = if is_open { " rotate-180" } else { "" };
 
             format!(
-                "<div class=\"border-b border-surface-100 last:border-0\" data-state=\"{}\" data-value=\"{}\"><h3 class=\"flex\"><button type=\"button\" aria-expanded=\"{}\" aria-controls=\"accordion-panel-{}\" id=\"accordion-trigger-{}\" class=\"flex flex-1 items-center justify-between py-4 font-medium transition-all hover:underline [&[data-state=open]>svg]:rotate-180\" data-state=\"{}\"><span>{}</span><svg class=\"h-4 w-4 shrink-0 transition-transform duration-200{}\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"m6 9 6 6 6-6\"/></svg></button></h3><div id=\"accordion-panel-{}\" role=\"region\" aria-labelledby=\"accordion-trigger-{}\" class=\"{}\" data-state=\"{}\"><div class=\"pb-4 pt-0\">{}</div></div></div>",
+                "<div class=\"border-b\" data-state=\"{}\" data-value=\"{}\"><h3 class=\"flex apex-h3\"><button type=\"button\" aria-expanded=\"{}\" aria-controls=\"accordion-panel-{}\" id=\"accordion-trigger-{}\" class=\"flex flex-1 items-center justify-between py-4 [&[data-state=open]>svg]:rotate-180 apex-btn\" data-state=\"{}\"><span>{}</span><svg class=\"h-4 w-4 shrink-0 duration-200{}\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"m6 9 6 6 6-6\"/></svg></button></h3><div id=\"accordion-panel-{}\" role=\"region\" aria-labelledby=\"accordion-trigger-{}\" class=\"{}\" data-state=\"{}\"><div class=\"pb-4 pt-0\">{}</div></div></div>",
                 state, item.value, is_open, i, i, state, item.trigger_label,
                 icon_rotation, i, i, content_class, state, item.content,
             )
@@ -1539,7 +1376,7 @@ pub struct ScrollArea<'a> {
 
 impl<'a> ScrollArea<'a> {
     pub fn render_html(&self) -> String {
-        format!("<div class=\"relative {} scrollbar-thin scrollbar-track-transparent scrollbar-thumb-border hover:scrollbar-thumb-muted-foreground/50\">{}</div>", scroll_area_orientation_class(self.orientation), self.content)
+        format!("<div class=\"relative {} scrollbar-thin scrollbar-track-transparent scrollbar-thumb-border\">{}</div>", scroll_area_orientation_class(self.orientation), self.content)
     }
 }
 
@@ -1590,10 +1427,18 @@ impl<'a> ApexLineChart<'a> {
             self.description,
             self.last_updated_label,
             self.height,
-            &self.series.iter().map(|series| ChartLegendItem { key: series.key, name: series.name, color: series.color }).collect::<Vec<_>>(),
+            &self
+                .series
+                .iter()
+                .map(|series| ChartLegendItem {
+                    key: series.key,
+                    name: series.name,
+                    color: series.color,
+                })
+                .collect::<Vec<_>>(),
             self.data_count,
             self.empty_state_reason,
-            "<div data-chart-kind=\"line\" class=\"rounded-sm border border-border/50 bg-background/40\"></div>",
+            "<div data-chart-kind=\"line\" class=\"border border-border/50\"></div>",
         )
     }
 }
@@ -1620,7 +1465,7 @@ impl<'a> ApexBarChart<'a> {
             &self.bars.iter().map(|series| ChartLegendItem { key: series.key, name: series.name, color: series.color }).collect::<Vec<_>>(),
             self.data_count,
             self.empty_state_reason,
-            &format!("<div data-chart-kind=\"bar\" data-layout=\"{}\" class=\"rounded-sm border border-border/50 bg-background/40\"></div>", self.layout),
+            &format!("<div data-chart-kind=\"bar\" data-layout=\"{}\" class=\"border border-border/50\"></div>", self.layout),
         )
     }
 }
@@ -1643,10 +1488,18 @@ impl<'a> ApexAreaChart<'a> {
             self.description,
             self.last_updated_label,
             self.height,
-            &self.areas.iter().map(|series| ChartLegendItem { key: series.key, name: series.name, color: series.color }).collect::<Vec<_>>(),
+            &self
+                .areas
+                .iter()
+                .map(|series| ChartLegendItem {
+                    key: series.key,
+                    name: series.name,
+                    color: series.color,
+                })
+                .collect::<Vec<_>>(),
             self.data_count,
             self.empty_state_reason,
-            "<div data-chart-kind=\"area\" class=\"rounded-sm border border-border/50 bg-background/40\"></div>",
+            "<div data-chart-kind=\"area\" class=\"border border-border/50\"></div>",
         )
     }
 }
@@ -1680,15 +1533,10 @@ impl<'a> ApexPieChart<'a> {
             let labels = self
                 .slices
                 .iter()
-                .map(|slice| {
-                    format!(
-                        "<div class=\"text-xs text-muted-foreground\">{} ({})</div>",
-                        slice.label, slice.value
-                    )
-                })
+                .map(|slice| format!("<div class=\"\">{} ({})</div>", slice.label, slice.value))
                 .collect::<Vec<_>>()
                 .join("");
-            format!("{}<div data-chart-kind=\"pie\" data-inner-radius=\"{}\" data-outer-radius=\"{}\" class=\"rounded-sm border border-border/50 bg-background/40\">{}</div>", chart_legend_markup(&legend), self.inner_radius, self.outer_radius, labels)
+            format!("{}<div data-chart-kind=\"pie\" data-inner-radius=\"{}\" data-outer-radius=\"{}\" class=\"border border-border/50\">{}</div>", chart_legend_markup(&legend), self.inner_radius, self.outer_radius, labels)
         };
         render_chart_frame(
             self.title,
@@ -1716,7 +1564,7 @@ pub struct Table<'a> {
 impl<'a> Table<'a> {
     pub fn render_html(&self) -> String {
         let headers = self.columns.iter().map(|column| {
-            format!("<th scope=\"col\" class=\"h-12 px-4 align-middle font-semibold text-muted-foreground text-[10px] uppercase tracking-[0.14em] font-mono bg-muted/20 whitespace-nowrap {}\">{}</th>", table_align_class(column.align), column.label)
+            format!("<th scope=\"col\" class=\"h-12 px-4 align-middle whitespace-nowrap {}\">{}</th>", table_align_class(column.align), column.label)
         }).collect::<Vec<_>>().join("");
         let rows = if self.rows.is_empty() {
             let colspan = self.columns.len().max(1);
@@ -1725,28 +1573,23 @@ impl<'a> Table<'a> {
             // matching the standalone EmptyState styling.
             format!(
                 "<tr class=\"border-b\"><td colspan=\"{colspan}\" class=\"p-10\">\
-<div class=\"apex-empty-state flex flex-col items-center justify-center px-6 text-center\">\
-<h3 class=\"text-[15px] font-bold text-foreground mb-1\">Nothing here yet</h3>\
-<p class=\"mx-auto max-w-[320px] text-sm text-muted-foreground leading-relaxed\">Entries appear here as soon as one is created. Use the page's create action to add the first one.</p>\
+<div class=\"apex-empty-state flex flex-col items-center justify-center px-6\">\
+<h3 class=\"mb-1 apex-h3\">Nothing here yet</h3>\
+<p class=\"mx-auto max-w-[320px]\">Entries appear here as soon as one is created. Use the page's create action to add the first one.</p>\
 </div></td></tr>"
             )
         } else {
             self.rows.iter().map(|row| {
                 let cells = row.iter().enumerate().map(|(index, value)| {
                     let align = self.columns.get(index).map(|column| table_align_class(column.align)).unwrap_or("text-left");
-                    format!("<td class=\"p-4 align-middle apex-metric-number whitespace-nowrap {}\">{}</td>", align, value)
+                    format!("<td class=\"p-4 align-middle apex-figure whitespace-nowrap {}\">{}</td>", align, value)
                 }).collect::<Vec<_>>().join("");
-                format!("<tr class=\"border-b transition-colors hover:bg-muted/50 min-h-[44px]\">{}</tr>", cells)
+                format!("<tr class=\"border-b min-h-[44px]\">{}</tr>", cells)
             }).collect::<Vec<_>>().join("")
         };
         let caption = self
             .caption
-            .map(|value| {
-                format!(
-                    "<caption class=\"mt-4 text-sm text-muted-foreground\">{}</caption>",
-                    value
-                )
-            })
+            .map(|value| format!("<caption class=\"mt-4\">{}</caption>", value))
             .unwrap_or_default();
         // Review §4.8 / R2's filed item: a wide table scrolls horizontally at
         // mobile, so the scroll container is a keyboard-reachable named
@@ -1761,22 +1604,30 @@ impl<'a> Table<'a> {
             }
             _ => "Scrollable data table".to_string(),
         };
-        format!("<div class=\"apex-table-wrap relative w-full overflow-x-auto\" tabindex=\"0\" role=\"region\" aria-label=\"{region_label}\"><table class=\"apex-table w-full min-w-[640px] caption-bottom text-sm\"><thead class=\"sticky top-0 z-10 bg-background\"><tr>{}</tr></thead><tbody>{}</tbody>{}</table></div>", headers, rows, caption)
+        format!("<div class=\"apex-table-wrap relative w-full overflow-x-auto\" tabindex=\"0\" role=\"region\" aria-label=\"{region_label}\"><table class=\"apex-table w-full min-w-[640px] caption-bottom\"><thead class=\"sticky top-0 z-10\"><tr>{}</tr></thead><tbody>{}</tbody>{}</table></div>", headers, rows, caption)
     }
 }
 
 impl<'a> Toast<'a> {
     pub fn render_html(&self) -> String {
-        let title = self
-            .title
-            .map(|value| format!("<div class=\"text-sm font-semibold\">{}</div>", value))
-            .unwrap_or_default();
+        // ARK: outcomes are written into the page as a status line — no
+        // overlay, no dismiss control, no icons.
         let description = self
             .description
-            .map(|value| format!("<div class=\"text-sm opacity-90\">{}</div>", value))
+            .map(|value| format!(" {}", html_escape(value)))
             .unwrap_or_default();
-        let action = self.action_label.map(|value| format!("<button class=\"inline-flex h-8 shrink-0 items-center justify-center rounded-[8px_8px_7px_7px] border bg-transparent px-3 text-sm font-medium ring-offset-background transition-colors hover:bg-secondary\">{}</button>", value)).unwrap_or_default();
-        format!("<div class=\"group pointer-events-auto relative flex w-full items-center justify-between space-x-4 overflow-hidden rounded-[16px_16px_9px_9px] border p-4 pr-8 transition-all {}\" role=\"status\"><div class=\"flex items-start gap-3\">{}<div class=\"grid gap-1\">{}{}</div></div>{}<button class=\"absolute right-2 top-2 rounded-[8px_8px_7px_7px] p-1 text-muted-foreground\" aria-label=\"Close notification\">{}</button></div>", toast_variant_class(self.variant), toast_icon_markup(self.variant), title, description, action, primitive_icon("x", "h-4 w-4"))
+        let action = self
+            .action_label
+            .map(|value| format!(" {}", html_escape(value)))
+            .unwrap_or_default();
+        let title = self
+            .title
+            .map(|value| format!("<b>{}</b>", html_escape(value)))
+            .unwrap_or_default();
+        format!(
+            "<p class=\"apex-statusline\" role=\"status\">{}{}{}</p>",
+            title, description, action
+        )
     }
 }
 
@@ -1802,10 +1653,10 @@ impl PaginationControls {
             } else {
                 ""
             };
-            format!("<button class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] text-[14px] font-sans font-semibold tracking-[0.01em] border border-surface-200 bg-background text-foreground hover:border-surface-300 h-10 px-3 text-sm min-h-[44px]\"{}>{}</button>", disabled_attr, label)
+            format!("<button class=\"inline-flex items-center justify-center whitespace-nowrap border h-10 px-3 min-h-[44px] apex-btn\"{}>{}</button>", disabled_attr, label)
         };
         format!(
-            "<div class=\"flex items-center gap-2\" role=\"navigation\" aria-label=\"Pagination controls\">{}{}<span class=\"px-2 text-sm text-muted-foreground\">Page {} of {}</span>{}{}</div>",
+            "<div class=\"flex items-center gap-2\" role=\"navigation\" aria-label=\"Pagination controls\">{}{}<span class=\"px-2\">Page {} of {}</span>{}{}</div>",
             button("First", is_first_page),
             button("Previous", is_first_page),
             safe_page,
@@ -1835,13 +1686,13 @@ impl PaginationControls {
         let link = |label: &str, target_page: usize, disabled: bool| {
             if disabled {
                 return format!(
-                    "<button class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] text-[14px] font-sans font-semibold tracking-[0.01em] border border-surface-200 bg-background text-foreground hover:border-surface-300 h-10 px-3 text-sm min-h-[44px]\" disabled aria-disabled=\"true\">{}</button>",
+                    "<button class=\"inline-flex items-center justify-center whitespace-nowrap border h-10 px-3 min-h-[44px] apex-btn\" disabled aria-disabled=\"true\">{}</button>",
                     label,
                 );
             }
 
             format!(
-                "<a href=\"{}?page={}{}\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] text-[14px] font-sans font-semibold tracking-[0.01em] border border-surface-200 bg-background text-foreground hover:border-surface-300 h-10 px-3 text-sm min-h-[44px]\">{}</a>",
+                "<a href=\"{}?page={}{}\" class=\"inline-flex items-center justify-center whitespace-nowrap border h-10 px-3 min-h-[44px] apex-em apex-btn\">{}</a>",
                 base_path,
                 target_page,
                 preserved,
@@ -1849,7 +1700,7 @@ impl PaginationControls {
             )
         };
         format!(
-            "<div class=\"flex flex-wrap items-center gap-2\" role=\"navigation\" aria-label=\"Pagination controls\" data-current-page=\"{}\" data-total-pages=\"{}\">{}{}<span class=\"px-2 text-sm text-muted-foreground\">Page {} of {}</span>{}{}</div>",
+            "<div class=\"flex flex-wrap items-center gap-2\" role=\"navigation\" aria-label=\"Pagination controls\" data-current-page=\"{}\" data-total-pages=\"{}\">{}{}<span class=\"px-2\">Page {} of {}</span>{}{}</div>",
             current_page,
             safe_total_pages,
             link("First", 1, current_page == 1),
@@ -1888,7 +1739,7 @@ impl<'a> Tabs<'a> {
                 let tabindex = if tab.active { "0" } else { "-1" };
                 let tabpanel_id = format!("tabpanel-{}", i);
                 format!(
-                    "<button type=\"button\" role=\"tab\" aria-selected=\"{}\" aria-controls=\"{}\" tabindex=\"{}\" data-state=\"{}\" class=\"inline-flex items-center justify-center whitespace-nowrap px-3 py-3 text-[14px] font-medium ring-offset-background transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 min-h-[44px] {}\">{}</button>",
+                    "<button type=\"button\" role=\"tab\" aria-selected=\"{}\" aria-controls=\"{}\" tabindex=\"{}\" data-state=\"{}\" class=\"inline-flex items-center justify-center whitespace-nowrap px-3 py-3 min-h-[44px] {} apex-btn\">{}</button>",
                     aria_selected, tabpanel_id, tabindex, state,
                     tabs_trigger_variant_class(self.variant),
                     tab.label,
@@ -1897,7 +1748,7 @@ impl<'a> Tabs<'a> {
             .collect::<Vec<_>>()
             .join("");
         format!(
-            "<div><div role=\"tablist\" class=\"inline-flex items-center justify-center transition-all duration-300 {}\">{}</div><div role=\"tabpanel\" id=\"tabpanel-0\" aria-labelledby=\"tab-0\" class=\"mt-2 ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">{}</div></div>",
+            "<div><div role=\"tablist\" class=\"inline-flex items-center justify-center {}\">{}</div><div role=\"tabpanel\" id=\"tabpanel-0\" aria-labelledby=\"tab-0\" class=\"mt-2\">{}</div></div>",
             tabs_list_variant_class(self.variant),
             triggers,
             self.content_html,
@@ -1907,16 +1758,12 @@ impl<'a> Tabs<'a> {
 
 impl<'a> Card<'a> {
     pub fn render_html(&self) -> String {
-        let interactive = if self.interactive {
-            " cursor-pointer hover:border-surface-950 hover:bg-surface-50 active:scale-[0.99]"
-        } else {
-            ""
-        };
+        // ARK: one panel recipe. `interactive` changes nothing visually —
+        // panels are not buttons and carry no hover lift.
+        let _ = self.interactive;
         format!(
-            "<div class=\"apex-card rounded-[16px_16px_9px_9px] border border-surface-200 bg-card text-surface-950 transition-premium {} {}{}\"><div class=\"flex flex-col space-y-2 min-w-0 mb-4\"><h3 class=\"text-sm font-bold tracking-tight leading-tight break-words text-surface-400\">{}</h3></div><div class=\"min-w-0\">{}</div></div>",
-            card_variant_class(self.variant),
+            "<section class=\"apex-panel {}\"><div class=\"apex-panel__head\"><h3 class=\"apex-h3\">{}</h3></div><div class=\"apex-panel__body\">{}</div></section>",
             card_padding_class(self.padding),
-            interactive,
             self.title,
             self.body,
         )
@@ -1924,43 +1771,36 @@ impl<'a> Card<'a> {
 }
 
 fn button_variant_class(variant: &str) -> &'static str {
+    // ARK: primary = ink fill; secondary/outline = 2px ink rule; ghost/link =
+    // the underlined verb; destructive = red rule (never the brand fill).
     match variant {
-        "destructive" => "bg-primary text-white hover:bg-brand-700",
-        "outline" => "border border-surface-200 bg-background text-foreground hover:border-surface-300",
-        "secondary" => "border border-surface-200 bg-background text-foreground hover:border-surface-300",
-        "ghost" => "text-foreground hover:bg-surface-50",
-        "link" => "text-primary font-semibold underline decoration-brand-200 underline-offset-4 hover:decoration-primary",
-        _ => "bg-primary text-white border border-brand-700 hover:bg-brand-700",
+        "destructive" => "apex-btn apex-btn--danger",
+        "outline" | "secondary" => "",
+        "ghost" | "link" => "apex-btn--link",
+        _ => "apex-btn--primary",
     }
 }
 
 fn button_size_class(size: &str) -> &'static str {
+    // ARK sizes are padding steps inside the primitive; sm is the one
+    // compact step the law defines.
     match size {
-        // Retuned sm: compact control scale — no larger than the default
-        // button's padding with a smaller type step.
-        "sm" => "px-3.5 py-1.5 text-xs tracking-tight",
-        "lg" => "px-8 py-4 text-[15px] tracking-tight",
-        "xl" => "px-10 py-5 text-[17px] tracking-tight",
-        "icon" => "h-10 w-10",
-        _ => "px-6 py-3 text-[13px] tracking-tight",
+        "sm" => "apex-btn--sm",
+        _ => "",
     }
 }
 
 fn input_variant_class(variant: &str) -> &'static str {
+    // ARK: the control carries one 1px ink rule; the invalid state thickens
+    // it to the destruction red. No rings, no tints.
     match variant {
-        "error" => "border-primary focus-visible:ring-primary/20 focus-visible:border-primary",
-        "success" => "border-success focus-visible:ring-success/20 focus-visible:border-success",
-        "ghost" => "border-transparent bg-transparent hover:bg-surface-50",
-        _ => "border-surface-200",
+        "error" => "apex-input-error",
+        _ => "",
     }
 }
 
-fn input_size_class(size: &str) -> &'static str {
-    match size {
-        "sm" => "h-10 px-3 text-[13px] rounded-[8px_8px_7px_7px]",
-        "lg" => "h-14 px-6 text-[16px] rounded-[8px_8px_7px_7px]",
-        _ => "h-12 px-4 text-[14px] rounded-[8px_8px_7px_7px]",
-    }
+fn input_size_class(_size: &str) -> &'static str {
+    ""
 }
 
 fn textarea_resize_class(resize: &str) -> &'static str {
@@ -2101,25 +1941,23 @@ fn progress_indicator_class(variant: &str) -> &'static str {
 }
 
 fn badge_variant_class(variant: &str) -> &'static str {
-    match variant {
-        "secondary" => {
-            "border-transparent bg-secondary text-secondary-foreground hover:bg-secondary/80"
-        }
-        "destructive" => {
-            "border-transparent bg-destructive text-destructive-foreground hover:bg-destructive/90"
-        }
-        "outline" => "text-foreground hover:bg-accent hover:text-accent-foreground",
-        "success" => "border border-success/30 bg-success/15 text-foreground hover:bg-success/20 ",
-        "warning" => "border border-warning/35 bg-warning/20 text-foreground hover:bg-warning/25 ",
-        "error" => {
-            "border-transparent bg-destructive text-destructive-foreground hover:bg-destructive/90 "
-        }
-        "info" => "border-transparent bg-info-700 text-white hover:bg-info-700/90 ",
-        "ghost" => "border-transparent bg-muted text-muted-foreground hover:bg-muted/80",
-        "outline-success" => "text-foreground border-success/35 bg-success/15",
-        "outline-warning" => "text-foreground border-warning/35 bg-warning/20",
-        "outline-error" => "text-destructive border-destructive/30 bg-destructive/5",
-        _ => "border-transparent bg-primary text-white hover:bg-primary/90 ",
+    // ARK: a badge is a STATUS WORD with its 8px square, never a pill. The
+    // legacy composite variants ("outline-warning", "solid-success", …) map
+    // through their severity word.
+    if variant.contains("warning") {
+        "apex-status apex-status--warn"
+    } else if variant.contains("destructive")
+        || variant.contains("error")
+        || variant.contains("fail")
+    {
+        "apex-status apex-status--fail"
+    } else if variant.contains("success")
+        || variant.contains("default")
+        || variant.contains("secondary")
+    {
+        "apex-status apex-status--on"
+    } else {
+        "apex-status"
     }
 }
 
@@ -2131,14 +1969,9 @@ fn badge_size_class(size: &str) -> &'static str {
     }
 }
 
-fn card_variant_class(variant: &str) -> &'static str {
-    match variant {
-        "ghost" => "border-transparent shadow-none",
-        "outline" => "border-border bg-transparent",
-        "elevated" => "shadow-premium-hover hover:border-primary/30",
-        "inset" => "border-border bg-muted/30 shadow-inner",
-        _ => "shadow-premium hover:border-primary/30 hover:bg-muted/40 hover:shadow-premium-hover",
-    }
+fn card_variant_class(_variant: &str) -> &'static str {
+    // ARK: one panel recipe — a 1px ink rule, no elevation, no hover lift.
+    ""
 }
 
 fn card_padding_class(padding: &str) -> &'static str {
@@ -2173,26 +2006,18 @@ fn avatar_status_class(status: &str) -> &'static str {
     }
 }
 
-fn skeleton_variant_class(variant: &str) -> &'static str {
-    match variant {
-        "card" => "bg-surface-200/50 rounded-sm",
-        "text" => "bg-surface-100 h-4 w-full rounded-sm",
-        "circle" => "bg-surface-100 rounded-full",
-        _ => "bg-surface-100",
-    }
+fn skeleton_variant_class(_variant: &str) -> &'static str {
+    // ARK: loading is blank ruled rows, never shimmering shapes.
+    "apex-loading"
 }
 
 fn status_indicator_config(status: &str) -> (&str, &str, &str) {
-    const DOT_SUCCESS: &str =
-        "<span class=\"mr-1 h-2 w-2 rounded-full bg-success-500\" aria-hidden=\"true\"></span>";
-    const DOT_INFO: &str =
-        "<span class=\"mr-1 h-2 w-2 rounded-full bg-info-500\" aria-hidden=\"true\"></span>";
-    const DOT_WARNING: &str =
-        "<span class=\"mr-1 h-2 w-2 rounded-full bg-warning-500\" aria-hidden=\"true\"></span>";
-    const DOT_ERROR: &str =
-        "<span class=\"mr-1 h-2 w-2 rounded-full bg-destructive\" aria-hidden=\"true\"></span>";
+    const DOT_SUCCESS: &str = "<span class=\"mr-1 h-2 w-2\" aria-hidden=\"true\"></span>";
+    const DOT_INFO: &str = "<span class=\"mr-1 h-2 w-2\" aria-hidden=\"true\"></span>";
+    const DOT_WARNING: &str = "<span class=\"mr-1 h-2 w-2\" aria-hidden=\"true\"></span>";
+    const DOT_ERROR: &str = "<span class=\"mr-1 h-2 w-2\" aria-hidden=\"true\"></span>";
     const DOT_OUTLINE: &str =
-        "<span class=\"mr-1 h-2 w-2 rounded-full border border-current\" aria-hidden=\"true\"></span>";
+        "<span class=\"mr-1 h-2 w-2 border border-current\" aria-hidden=\"true\"></span>";
     match status.to_ascii_lowercase().as_str() {
         "draft" => ("Draft", "secondary", DOT_OUTLINE),
         "scheduled" => ("Scheduled", "info", DOT_INFO),
@@ -2207,7 +2032,7 @@ fn status_indicator_config(status: &str) -> (&str, &str, &str) {
         "queued" => (
             "Queued",
             "secondary",
-            "<span class=\"mr-1 h-2 w-2 rounded-full bg-muted-foreground\" aria-hidden=\"true\"></span>",
+            "<span class=\"mr-1 h-2 w-2\" aria-hidden=\"true\"></span>",
         ),
         "failed" => ("Failed", "error", DOT_ERROR),
         // ── Control-plane vocabulary ────────────────────────────────
@@ -2303,14 +2128,9 @@ fn scroll_area_orientation_class(orientation: &str) -> &'static str {
     }
 }
 
-fn toast_variant_class(variant: &str) -> &'static str {
-    match variant {
-        "success" => "border-success/30 bg-success/10 backdrop-blur-xl text-success-700",
-        "destructive" => "destructive group border-destructive/30 bg-destructive/10 backdrop-blur-xl text-destructive",
-        "warning" => "border-warning/30 bg-warning/10 backdrop-blur-xl text-warning-700",
-        "info" => "border-primary/30 bg-primary/10 backdrop-blur-xl text-primary-700",
-        _ => "border-surface-200 bg-card/90 backdrop-blur-xl text-surface-900",
-    }
+fn toast_variant_class(_variant: &str) -> &'static str {
+    // ARK: outcomes are a status line in the page, never a floating toast.
+    "apex-statusline"
 }
 
 fn toast_icon_markup(variant: &str) -> String {
@@ -2338,17 +2158,12 @@ fn chart_empty_state_markup(reason: &str) -> String {
     // No outer border/background here — the surrounding chart frame already provides the
     // single visible boundary. Adding another border created a triple-stacked look when
     // the chart frame itself was nested inside a card.
-    format!("<div class=\"apex-chart-empty flex min-h-[220px] flex-col items-center justify-center gap-3 p-6 text-center text-sm text-muted-foreground\"><svg aria-hidden=\"true\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\" class=\"h-7 w-7 opacity-40\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" d=\"M3 3v18h18M7 15l3-3 3 3 5-5\"/></svg><p class=\"max-w-xs leading-5\">{}</p></div>", chart_empty_description(reason))
+    format!("<div class=\"apex-empty-state flex min-h-[220px] flex-col items-center justify-center gap-3 p-6\"><svg aria-hidden=\"true\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\" class=\"h-7 w-7\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" d=\"M3 3v18h18M7 15l3-3 3 3 5-5\"/></svg><p class=\"max-w-xs\">{}</p></div>", chart_empty_description(reason))
 }
 
 fn chart_meta_markup(last_updated_label: Option<&str>) -> String {
     last_updated_label
-        .map(|value| {
-            format!(
-                "<p class=\"mt-1 text-xs text-muted-foreground\">Last updated {}</p>",
-                value
-            )
-        })
+        .map(|value| format!("<p class=\"mt-1\">Last updated {}</p>", value))
         .unwrap_or_default()
 }
 
@@ -2359,7 +2174,7 @@ fn chart_legend_markup(items: &[ChartLegendItem<'_>]) -> String {
 
     let entries = items
         .iter()
-        .map(|item| format!("<div class=\"inline-flex items-center gap-2 text-xs text-muted-foreground\"><span class=\"h-2.5 w-2.5 rounded-sm\" style=\"background-color: {}\" aria-hidden=\"true\"></span><span>{}</span></div>", item.color, item.name))
+        .map(|item| format!("<div class=\"inline-flex items-center gap-2\"><span class=\"h-2.5 w-2.5\" style=\"background-color: {}\" aria-hidden=\"true\"></span><span>{}</span></div>", item.color, item.name))
         .collect::<Vec<_>>()
         .join("");
 
@@ -2376,8 +2191,12 @@ fn render_chart_frame(
     let header = if title.is_some() || description.is_some() {
         format!(
             "<div class=\"flex flex-col space-y-1.5 p-6\">{}{}{}</div>",
-            title.map(|value| format!("<h3 class=\"font-display font-bold leading-tight tracking-tight break-words\">{}</h3>", value)).unwrap_or_default(),
-            description.map(|value| format!("<p class=\"font-display text-sm text-muted-foreground break-words\">{}</p>", value)).unwrap_or_default(),
+            title
+                .map(|value| format!("<h3 class=\"break-words apex-h3\">{}</h3>", value))
+                .unwrap_or_default(),
+            description
+                .map(|value| format!("<p class=\"break-words\">{}</p>", value))
+                .unwrap_or_default(),
             chart_meta_markup(last_updated_label),
         )
     } else {
@@ -2387,7 +2206,7 @@ fn render_chart_frame(
     // The chart frame is almost always wrapped in a panel/card by the page layout.
     // Use a transparent border and no inner padding so we don't double-frame nor
     // double-pad the chart inside that card.
-    format!("<div class=\"apex-chart-frame rounded-sm border border-transparent bg-transparent text-card-foreground\">{}<div style=\"height: {}px\">{}</div></div>", header, height, content)
+    format!("<div class=\"apex-chart-frame border border-transparent\">{}<div style=\"height: {}px\">{}</div></div>", header, height, content)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2747,7 +2566,7 @@ pub fn render_sortable_header(
         _ => ("⇅", "none"),
     };
     format!(
-        "<th scope=\"col\" class=\"h-12 px-4 align-middle font-semibold text-muted-foreground text-[10px] uppercase tracking-[0.14em] font-mono bg-muted/20 whitespace-nowrap cursor-pointer select-none hover:bg-muted/40 transition-colors\" aria-sort=\"{}\" data-sort-key=\"{}\"><div class=\"flex items-center gap-1\">{}<span class=\"text-muted-foreground/60\">{}</span></div></th>",
+        "<th scope=\"col\" class=\"h-12 px-4 align-middle whitespace-nowrap\" aria-sort=\"{}\" data-sort-key=\"{}\"><div class=\"flex items-center gap-1\">{}<span class=\"\">{}</span></div></th>",
         aria_sort, sort_key, label, indicator,
     )
 }
@@ -2760,7 +2579,7 @@ pub fn render_row_checkbox(selected: bool) -> String {
         String::new()
     };
     format!(
-        "<td class=\"w-12 p-4 align-middle\"><button type=\"button\" role=\"checkbox\" aria-checked=\"{}\" aria-label=\"Select row\" class=\"peer shrink-0 border border-input ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 h-4 w-4 rounded-sm data-[state=checked]:bg-primary data-[state=checked]:text-white data-[state=checked]:border-primary\" data-state=\"{}\">{}</button></td>",
+        "<td class=\"w-12 p-4 align-middle\"><button type=\"button\" role=\"checkbox\" aria-checked=\"{}\" aria-label=\"Select row\" class=\"peer shrink-0 border h-4 w-4 data-[state=checked]:bg-primary data-[state=checked]:text-white data-[state=checked]:border-primary apex-btn apex-btn--primary\" data-state=\"{}\">{}</button></td>",
         selected,
         if selected { "checked" } else { "unchecked" },
         indicator,
@@ -2799,7 +2618,7 @@ pub struct SkeletonDimensioned {
 impl SkeletonDimensioned {
     pub fn render_html(&self) -> String {
         format!(
-            "<div class=\"animate-pulse {} {}\" style=\"width: {}; height: {};\" aria-hidden=\"true\"></div>",
+            "<div class=\"{} {}\" style=\"width: {}; height: {};\" aria-hidden=\"true\"></div>",
             skeleton_variant_class(self.variant),
             self.rounded,
             self.width,
@@ -2879,7 +2698,7 @@ impl ChartInteractionContract {
 /// Renderable chart axis with gridlines.
 pub fn render_chart_axis(label: &str, side: &str) -> String {
     format!(
-        "<g class=\"chart-axis chart-axis-{}\" aria-label=\"{}\"><line class=\"axis-line\" stroke=\"rgb(var( --border))\" /><text class=\"axis-label text-xs fill-muted-foreground\">{}</text></g>",
+        "<g class=\"chart-axis chart-axis-{}\" aria-label=\"{}\"><line class=\"axis-line\" stroke=\"rgb(var( --border))\" /><text class=\"axis-label\">{}</text></g>",
         side, label, label,
     )
 }
@@ -3020,21 +2839,22 @@ mod tests {
         }
         .render_html();
 
-        assert!(html.contains("bg-primary"));
-        assert!(html.contains("text-white"));
-        assert!(html.contains("px-8 py-4 text-[15px] tracking-tight"));
+        // ARK: destructive is the red-rule variant; every control composes
+        // the apex-btn primitive, and ARK is icon-free as chrome.
+        assert!(html.contains("apex-btn"));
+        assert!(html.contains("apex-btn--danger"), "{html}");
         assert!(!html.contains("uppercase"));
         assert!(html.contains("disabled aria-disabled=\"true\""));
-        assert!(html.contains("<span class=\"mr-2\"><svg></svg></span>"));
-        assert!(html.contains("<span class=\"ml-2\"><svg></svg></span>"));
-        assert!(html
-            .contains("focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"));
-        // Unification: the pressed state is active:scale, transitions ride
-        // the ease-premium curve, and the !shadow-none overrides are gone.
-        assert!(html.contains("active:scale-[0.98]"));
-        assert!(html.contains("ease-premium"));
-        assert!(!html.contains("hover:!shadow-none"));
-        assert!(!html.contains("active:!shadow-none"));
+        assert!(
+            !html.contains("<svg") && !html.contains("mr-2"),
+            "no icon chrome: {html}"
+        );
+        // ARK: focus is the global 3px double outline; no ring utilities, no
+        // pressed-scale, no premium easing, no shadows.
+        assert!(!html.contains("focus-visible:ring"));
+        assert!(!html.contains("scale-"));
+        assert!(!html.contains("ease-premium"));
+        assert!(!html.contains("shadow"));
     }
 
     #[test]
@@ -3062,10 +2882,12 @@ mod tests {
         }
         .render_html();
 
-        assert!(loading.contains("animate-spin"));
+        // ARK: loading changes the verb and the border, never a spinner.
+        assert!(!loading.contains("animate-spin"));
+        assert!(loading.contains("aria-busy=\"true\""));
+        assert!(loading.contains("apex-btn--busy"));
         assert!(!loading.contains("<span class=\"mr-2\"><svg></svg></span>"));
         assert!(icon_only.contains("data-size=\"icon\""));
-        assert!(icon_only.contains("h-10 w-10"));
     }
 
     #[test]
@@ -3082,9 +2904,14 @@ mod tests {
         }
         .render_html();
 
-        assert!(html.contains("bg-background"));
-        assert!(html.contains("text-foreground"));
-        assert!(!html.contains("bg-white text-surface-950"));
+        // ARK: outline/secondary compose the base primitive (2px ink rule);
+        // the focus is the global outline, so the dark-mode ring utilities
+        // cannot return.
+        assert!(html.contains("apex-btn"), "{html}");
+        assert!(
+            !html.contains("ring-") && !html.contains("text-foreground"),
+            "{html}"
+        );
     }
 
     #[test]
@@ -3106,13 +2933,13 @@ mod tests {
         }
         .render_html();
 
-        assert!(html.contains("relative"));
-        assert!(html.contains("pl-10 pr-10"));
-        assert!(html.contains("border-primary"));
+        assert!(html.contains("apex-input"));
+        assert!(html.contains("apex-input-error"));
         assert!(html.contains("Required"));
         assert!(html.contains("placeholder=\"email\""));
         // Spiral-Lock DNA: the concentric two-arms focus replaced the ring.
-        assert!(html.contains("apex-focus-ring"));
+        // ARK: focus is the one global 3px double outline; no per-control ring.
+        assert!(!html.contains("apex-focus-ring"));
     }
 
     #[test]
@@ -3134,9 +2961,9 @@ mod tests {
         }
         .render_html();
 
-        assert!(html.contains("h-10 px-3 text-[13px] rounded-[8px_8px_7px_7px]"));
+        assert!(html.contains("apex-input"));
         assert!(html.contains("disabled aria-disabled=\"true\""));
-        assert!(html.contains("border-surface-200"));
+        assert!(!html.contains("rounded-["));
     }
 
     #[test]
@@ -3153,8 +2980,9 @@ mod tests {
         }
         .render_html();
 
-        assert!(html.contains("resize-none"));
-        assert!(html.contains("Limit 10 characters · 3 entered"));
+        assert!(html.contains("apex-textarea"));
+        assert!(html.contains("maxlength=\"10\""));
+        assert!(html.contains("aria-describedby"));
         assert!(html.contains("maxlength=\"10\""));
         assert!(html.contains("absolute bottom-2 right-2"));
     }
@@ -3301,12 +3129,12 @@ mod tests {
         }
         .render_html();
 
-        assert!(html.contains("bg-success/15"));
+        assert!(html.contains("apex-status apex-status--on"), "{html}");
         // Badges are small uppercase status pills (rounded-full, semibold).
-        assert!(html.contains("rounded-full"));
-        assert!(html.contains("font-semibold"));
-        assert!(html.contains("px-2 py-0.5 text-[10px]"));
-        assert!(html.contains("<span class=\"mr-1\"><svg></svg></span>"));
+        assert!(!html.contains("rounded-full"));
+        assert!(!html.contains("font-semibold"));
+        assert!(!html.contains("text-[10px]"));
+        assert!(!html.contains("<svg"), "no icon markup: {html}");
 
         let warning = Badge {
             text: "Warning",
@@ -3315,7 +3143,7 @@ mod tests {
             icon: None,
         }
         .render_html();
-        assert!(warning.contains("border-warning/35 bg-warning/20"));
+        assert!(warning.contains("apex-status--warn"), "{warning}");
     }
 
     #[test]
@@ -3529,8 +3357,8 @@ mod tests {
         }
         .render_html();
 
-        assert!(html.contains("h-16 w-16 rounded-full"));
-        assert!(html.contains("ring-success"));
+        assert!(html.contains("apex-avatar"), "{html}");
+        assert!(!html.contains("rounded-full") && !html.contains("ring-"));
         assert!(html.contains(">AL<"));
     }
 
@@ -3584,8 +3412,8 @@ mod tests {
             class_name: "h-10 w-10",
         }
         .render_html();
-        assert!(html.contains("animate-pulse"));
-        assert!(html.contains("rounded-sm"));
+        assert!(html.contains("apex-loading"), "{html}");
+        assert!(!html.contains("rounded"));
         assert!(html.contains("h-10 w-10"));
     }
 
@@ -3765,9 +3593,7 @@ mod tests {
         }
         .render_html();
 
-        assert!(
-            html.contains("rounded-[16px_16px_9px_9px] border border-border bg-popover p-4 text-popover-foreground")
-        );
+        assert!(html.contains("apex-panel"), "{html}");
         assert!(html.contains("Segment risk summary"));
         assert!(html.contains("Open report"));
     }
@@ -3794,18 +3620,23 @@ mod tests {
         }
         .render_html();
 
-        assert!(html.contains("role=\"menu\""));
+        assert!(html.contains("apex-row-actions"), "{html}");
         assert!(html.contains("Actions"));
         assert!(html.contains("⌘E"));
-        assert!(html.contains("text-destructive"));
-        // The separator must live INSIDE the menu container, before the
-        // items — not stranded after the closing </div>.
-        let menu_pos = html.find("role=\"menu\"").expect("menu role");
-        let separator_pos = html.find("bg-surface-200/50").expect("separator rendered");
-        let item_pos = html.find("role=\"menuitem\"").expect("menu items");
         assert!(
-            menu_pos < separator_pos && separator_pos < item_pos,
-            "separator must sit inside the menu container, before the items"
+            html.contains("apex-error") || html.contains("apex-btn--link"),
+            "{html}"
+        );
+        // ARK: no menu role, no separator element, no menuitem roving
+        // focus — the items render as inline underlined verbs in the row.
+        assert!(!html.contains("role=\"menu\""));
+        assert!(!html.contains("role=\"menuitem\""));
+        assert!(!html.contains("show_separator"));
+        assert!(html.contains("apex-row-actions"), "{html}");
+        assert!(html.contains("Edit") && html.contains("Delete"), "{html}");
+        assert!(
+            html.contains("⌘E"),
+            "the shortcut renders as machine text: {html}"
         );
     }
 
@@ -3867,8 +3698,11 @@ mod tests {
         assert!(html.contains("role=\"status\""));
         assert!(html.contains("Saved"));
         assert!(html.contains("Undo"));
-        assert!(html.contains("border-success/30"));
-        assert!(html.contains("Close notification"));
+        assert!(html.contains("apex-statusline"), "{html}");
+        assert!(
+            !html.contains("Close notification"),
+            "no dismiss control: {html}"
+        );
     }
 
     #[test]
@@ -3940,12 +3774,18 @@ mod tests {
         .render_html();
 
         assert!(html.contains("min-w-[640px]"));
-        assert!(html.contains("sticky top-0 z-10 bg-background"));
+        assert!(
+            html.contains("apex-table-wrap") || html.contains("apex-loading"),
+            "{html}"
+        );
         assert!(html.contains("Delivery summary"));
         assert!(html.contains("text-right"));
         assert!(html.contains("Delivered"));
         assert!(html.contains("overflow-x-auto"));
-        assert!(html.contains("apex-metric-number"));
+        assert!(
+            html.contains("apex-figure") || html.contains("apex-num"),
+            "{html}"
+        );
     }
 
     /// Review §4.8 / R2's filed item: the horizontally scrollable table
@@ -4064,7 +3904,10 @@ mod tests {
         }
         .render_html();
 
-        assert!(html.contains("border-border bg-transparent"));
+        assert!(
+            !html.contains("shadow") && !html.contains("hover:"),
+            "{html}"
+        );
         assert!(html.contains("p-8"));
         assert!(html.contains("cursor-pointer"));
         assert!(html.contains("42,000 emails"));
@@ -4498,7 +4341,7 @@ mod tests {
         }
         .render_html();
 
-        assert!(html.contains("animate-pulse"));
+        assert!(html.contains("apex-loading"), "{html}");
         assert!(html.contains("width: 200px"));
         assert!(html.contains("height: 16px"));
         assert!(html.contains("aria-hidden=\"true\""));

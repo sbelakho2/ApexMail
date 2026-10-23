@@ -1494,12 +1494,12 @@ fn inject_opt_in_auto_refresh(
     );
     let pill = match params.refresh_secs {
         Some(secs) => format!(
-            "<div role=\"status\" class=\"fixed bottom-4 right-4 z-50 flex items-center gap-2 rounded-sm border border-surface-300 bg-card px-3 py-2 text-xs shadow-premium\"><span class=\"inline-block h-2 w-2 rounded-full bg-success-500\" aria-hidden=\"true\"></span><span class=\"font-bold\">Live — auto-refresh every {secs}s</span><span class=\"text-muted-foreground\">{updated}</span><a class=\"font-bold text-primary underline\" href=\"{path}\" aria-label=\"Pause auto-refresh\">Pause</a></div>",
+            "<div role=\"status\" class=\"apex-statusline\"><span class=\"apex-status apex-status--on\">Live</span><span class=\"apex-em\">Live — auto-refresh every {secs}s</span><span class=\"\">{updated}</span><a class=\"apex-em apex-link\" href=\"{path}\" aria-label=\"Pause auto-refresh\">Pause</a></div>",
             updated = updated,
             path = crate::shell::html_escape(path),
         ),
         None => format!(
-            "<div role=\"status\" class=\"fixed bottom-4 right-4 z-50 flex items-center gap-2 rounded-sm border border-surface-300 bg-card px-3 py-2 text-xs shadow-premium\"><span class=\"inline-block h-2 w-2 rounded-full bg-surface-400\" aria-hidden=\"true\"></span><span class=\"font-bold\">Live view</span><span class=\"text-muted-foreground\" aria-hidden=\"true\">Auto-refresh:</span><a class=\"apex-refresh-option\" href=\"{path}?refresh=10\">10s</a><a class=\"apex-refresh-option\" href=\"{path}?refresh=30\">30s</a><a class=\"apex-refresh-option\" href=\"{path}?refresh=60\">60s</a></div>",
+            "<div role=\"status\" class=\"apex-statusline\"><span class=\"apex-status apex-status--on\">Live</span><span class=\"apex-em\">Live view</span><span class=\"\" aria-hidden=\"true\">Auto-refresh:</span><a class=\"apex-refresh-option\" href=\"{path}?refresh=10\">10s</a><a class=\"apex-refresh-option\" href=\"{path}?refresh=30\">30s</a><a class=\"apex-refresh-option\" href=\"{path}?refresh=60\">60s</a></div>",
             path = crate::shell::html_escape(path),
         ),
     };
@@ -1556,7 +1556,7 @@ fn render_flash_banners(mut html: String, flash: &[crate::flash::FlashMessage]) 
                 }
             };
             format!(
-                "<div role=\"status\" aria-label=\"{label}\" class=\"apex-flash mb-6 flex items-start gap-3 rounded-[12px_12px_8px_8px] border {border} px-4 py-3\"><span aria-hidden=\"true\" class=\"mt-0.5 font-bold\">{icon}</span><p class=\"text-sm font-medium\">{}</p></div>",
+                "<div role=\"status\" aria-label=\"{label}\" class=\"apex-flash mb-6 flex items-start gap-3 border {border} px-4 py-3\"><span aria-hidden=\"true\" class=\"mt-0.5 apex-em\">{icon}</span><p class=\"apex-em\">{}</p></div>",
                 crate::shell::html_escape(&message.text),
             )
         })
@@ -1618,7 +1618,7 @@ fn inject_form_field_state(html: String, fields: Option<&FormFieldData>) -> Stri
             .iter()
             .map(|(label, value)| {
                 format!(
-                    "<div class=\"apex-flash mb-6 rounded-sm border border-success-300 bg-success-50 px-4 py-3\" role=\"status\"><p class=\"text-xs font-bold uppercase tracking-widest text-success-900\">{}</p><code class=\"mt-1 block font-mono text-sm bg-muted/40 rounded px-2 py-1.5 break-all select-text text-surface-800\">{}</code><p class=\"mt-1 text-xs text-muted-foreground\">Shown once — select the value to copy it. It will not be displayed again.</p></div>",
+                    "<div class=\"apex-flash mb-6 border px-4 py-3\" role=\"status\"><p class=\"apex-em\">{}</p><code class=\"mt-1 block px-2 py-1.5 break-all apex-select\">{}</code><p class=\"mt-1\">Shown once — select the value to copy it. It will not be displayed again.</p></div>",
                     crate::shell::html_escape(label),
                     crate::shell::html_escape(value),
                 )
@@ -2003,11 +2003,11 @@ fn rewrite_input_tag(tag: &str, map: &FormFieldData) -> String {
 fn field_error_paragraph(error_id: Option<&str>, error: &str) -> String {
     match error_id {
         Some(id) => format!(
-            "<p id=\"{id}\" class=\"text-xs text-destructive mt-1\" role=\"alert\">{}</p>",
+            "<p id=\"{id}\" class=\"apex-error mt-1\" role=\"alert\">{}</p>",
             crate::shell::html_escape(error)
         ),
         None => format!(
-            "<p class=\"text-xs text-destructive mt-1\" role=\"alert\">{}</p>",
+            "<p class=\"apex-error mt-1\" role=\"alert\">{}</p>",
             crate::shell::html_escape(error)
         ),
     }
@@ -2765,9 +2765,9 @@ fn legal_redirect_page(origin: &str, target: &str) -> String {
 <meta http-equiv=\"refresh\" content=\"0; url={origin}{target}\">\
 <link rel=\"canonical\" href=\"{origin}{target}\">\
 </head>\
-<body><main class=\"min-h-screen flex flex-col items-center justify-center gap-4 p-8 text-center\">\
-<h1 class=\"text-2xl font-bold\">This page has moved</h1>\
-<p class=\"text-sm\">The canonical location is <a class=\"font-bold underline\" href=\"{origin}{target}\">{origin}{target}</a>.</p>\
+<body><main class=\"min-h-screen flex flex-col items-center justify-center gap-4 p-8\">\
+<h1 class=\"apex-page-title\">This page has moved</h1>\
+<p class=\"\">The canonical location is <a class=\"apex-em apex-link\" href=\"{origin}{target}\">{origin}{target}</a>.</p>\
 </main></body>\
 </html>",
         origin = crate::shell::html_escape(origin),
@@ -3139,7 +3139,7 @@ mod tests {
     #[test]
     fn control_plane_routes_use_dark_theme() {
         let html = render_route("control-plane", "/dashboard").unwrap();
-        assert!(html.contains("<body class=\"antialiased bg-background text-surface-950\">"));
+        assert!(html.contains("<body class=\"\">"));
         assert!(html.contains("data-user-role=\"admin\""));
         assert!(html.contains("data-theme-storage-key=\"apexmail-ui:theme\""));
     }
@@ -4291,7 +4291,7 @@ mod tests {
         assert!(html.contains("aria-invalid=\"true\""));
         // Secret renders as a selectable mono chip, not prose.
         assert!(html.contains("whsec_abc123"));
-        assert!(html.contains("select-text"));
+        assert!(html.contains("apex-select"));
         assert!(html.contains("Shown once"));
     }
 

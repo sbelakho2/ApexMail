@@ -36,71 +36,52 @@ needs_rebuild() {
     [[ -n "$newer_input" ]]
 }
 
-# Resolve the Tailwind CLI for this host:
-#   1. the vendored v3.4.17 binary (apps/marketing-zola/tailwindcss) when it
-#      is executable here;
-#   2. `tailwindcss` on PATH (a host/CI install of the same major);
-#   3. otherwise FAIL loud — with the official download URL for this
-#      platform — instead of a bare "not found" (review §9/build robustness).
-resolve_tailwind_cli() {
-    local vendored="apps/marketing-zola/tailwindcss"
-    if [[ -x "$vendored" ]]; then
-        printf '%s' "$vendored"
-        return 0
-    fi
-    if command -v tailwindcss >/dev/null 2>&1; then
-        command -v tailwindcss
-        return 0
-    fi
-    local os arch url
-    os="$(uname -s | tr '[:upper:]' '[:lower:]')"
-    case "$os" in
-        darwin) os="macos" ;;
-        linux) os="linux" ;;
-    esac
-    arch="$(uname -m)"
-    case "$arch" in
-        arm64|aarch64) arch="arm64" ;;
-        x86_64|amd64) arch="x64" ;;
-    esac
-    url="https://github.com/tailwindlabs/tailwindcss/releases/download/v3.4.17/tailwindcss-${os}-${arch}"
-    error "Tailwind CLI not found: ${vendored} is not executable on this host and no 'tailwindcss' on PATH. Install the official v3.4.17 build for ${os}-${arch}: ${url} (see services/mail-server/crates/ui-foundation/README.md)"
+# Build a stylesheet with cssgen (all-Rust; no Tailwind, no JavaScript).
+# Runs inside services/mail-server because cssgen resolves --content globs
+# against the process working directory.
+run_cssgen() {
+    local out="$1"
+    shift
+    ( cd services/mail-server && cargo run -q -p ui-foundation --bin cssgen -- "$@" )
+    chmod 644 "$out" 2>/dev/null || true
 }
 
 build_rust_ui_css() {
-    local tailwind_cli
-    local config="services/mail-server/crates/ui-foundation/tailwind.config.js"
-    local input="services/mail-server/crates/ui-foundation/assets/globals.input.css"
-    local output="services/mail-server/crates/ui-foundation/assets/globals.css"
+    local dir="services/mail-server/crates/ui-foundation"
+    local output="$dir/assets/globals.css"
 
-    if ! needs_rebuild "$output" "$config" "$input" "services/mail-server/crates/ui-foundation/src"; then
+    if ! needs_rebuild "$output" \
+        "$dir/src" "$dir/assets/ark.css" "$dir/assets/globals.input.css" \
+        "services/mail-server/crates/api-server/src"; then
         return
     fi
 
-    tailwind_cli="$(resolve_tailwind_cli)"
-    log "Building Rust UI stylesheet..."
-    "$tailwind_cli" -c "$config" -i "$input" -o "$output"
+    log "Building Rust UI stylesheet (cssgen)..."
+    run_cssgen "$output" \
+        --ark "crates/ui-foundation/assets/ark.css" \
+        --include "crates/ui-foundation/assets/globals.input.css" \
+        --content "crates/ui-foundation/src/**/*.rs" \
+        --content "crates/api-server/src/**/*.rs" \
+        --content "crates/ui-foundation/assets/globals.input.css" \
+        --out "crates/ui-foundation/assets/globals.css"
 }
 
 build_marketing_static_site() {
-    local tailwind_cli
-    local css_input="apps/marketing-zola/static/css/input.css"
     local css_output="apps/marketing-zola/static/css/styles.css"
 
     if needs_rebuild "$css_output" \
-        "apps/marketing-zola/tailwind.config.js" \
-        "$css_input" \
+        "apps/marketing-zola/static/css/ark.css" \
+        "apps/marketing-zola/static/css/input.css" \
         "apps/marketing-zola/templates" \
-        "apps/marketing-zola/content" \
-        "apps/marketing-zola/static/js"; then
-        tailwind_cli="$(resolve_tailwind_cli)"
-        log "Building marketing stylesheet..."
-        "$tailwind_cli" -c apps/marketing-zola/tailwind.config.js -i "$css_input" -o "$css_output" --minify
-        # A umask-077 shell produced a 0600 styles.css (dogfood 2026-10-08);
-        # zola then copied it 0600 into public/, the image preserved the mode,
-        # and the api-server (uid 10001) 404'd /css/styles.css — every
-        # marketing page rendered unstyled. The artifact must stay readable.
-        chmod 644 "$css_output"
+        "apps/marketing-zola/content"; then
+        log "Building marketing stylesheet (cssgen)..."
+        run_cssgen "$css_output" \
+            --ark "../../apps/marketing-zola/static/css/ark.css" \
+            --include "../../apps/marketing-zola/static/css/input.css" \
+            --content "../../apps/marketing-zola/templates/**/*.html" \
+            --content "../../apps/marketing-zola/content/**/*.md" \
+            --content "../../apps/marketing-zola/static/css/input.css" \
+            --out "../../apps/marketing-zola/static/css/styles.css"
     fi
 
     if needs_rebuild "apps/marketing-zola/public/index.html" \

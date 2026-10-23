@@ -13,25 +13,25 @@
 
 {% block content %}
 <div class="max-w-3xl mx-auto px-6 py-20 lg:py-32">
-  <h1 class="mb-4 text-surface-950 [overflow-wrap:anywhere]">{{ section.title }}</h1>
+  <h1 class="mb-4 break-words apex-page-title">{{ section.title }}</h1>
   {% if section.extra.last_updated %}
   {# Machine-readable, localized date — same contract as prose.html. #}
-  <p class="text-surface-400 mb-12 text-xs font-bold tracking-widest">
+  <p class="mb-12 apex-em">
     {% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['last_updated'] %}{{ i18n_data[l]['a11y']['last_updated'] }}{% else %}Last updated:{% endif %}
     <time datetime="{{ section.extra.last_updated }}">{{ section.extra.last_updated }}</time>
   </p>
   {% endif %}
-  <div class="prose max-w-none">
+  <div class="apex-prose">
     {# Content is rendered from trusted Markdown source files only (legal/policy pages). #}
     {# |safe is acceptable because the content author is the site owner, not end users. #}
     {{ section.content | safe }}
   </div>
   {% if section.pages %}
-  <div class="mt-12 border-t border-surface-200 pt-8">
-    <h2 class="text-lg font-semibold text-surface-950 mb-4">{% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['related'] %}{{ i18n_data[l]['a11y']['related'] }}{% else %}Related{% endif %}</h2>
+  <div class="mt-12 border-t pt-8">
+    <h2 class="mb-4 apex-h2">{% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['related'] %}{{ i18n_data[l]['a11y']['related'] }}{% else %}Related{% endif %}</h2>
     <ul class="space-y-2">
       {% for page in section.pages %}
-      <li><a href="{{ page.permalink }}" class="text-brand-700 hover:underline">{{ page.title }}</a></li>
+      <li><a href="{{ page.permalink }}" class="apex-link">{{ page.title }}</a></li>
       {% endfor %}
     </ul>
   </div>

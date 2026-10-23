@@ -14,16 +14,16 @@ Regulierte SaaS-Teams brauchen mehr als eine Versand-API. Sie brauchen klare Ver
 ApexMail bietet Sicherheits- und Datenschutz-Workflows rund um die E-Mail-Zustellung, einschließlich Zugriffskontrollen, auditfähiger Tarife, Werkzeugen für Betroffenenanfragen und aktueller Dokumentation für die Beschaffungsprüfung.
 
 <div class="grid grid-cols-1 md:grid-cols-3 gap-6 my-12">
-  <div class="bg-surface-900 border border-surface-800 rounded-lg p-6">
-    <h3 class="text-xl font-semibold mb-3">Audit- und Zugriffskontrollen</h3>
+  <div class="border p-6">
+    <h3 class="mb-3 apex-h3">Audit- und Zugriffskontrollen</h3>
     <p>Business und Enterprise enthalten Identity- und Audit-Funktionen zur Laufzeit. Konfiguration und operativer Betrieb bleiben in der Verantwortung des Kunden.</p>
   </div>
-  <div class="bg-surface-900 border border-surface-800 rounded-lg p-6">
-    <h3 class="text-xl font-semibold mb-3">Aktuelle Compliance-Position</h3>
+  <div class="border p-6">
+    <h3 class="mb-3 apex-h3">Aktuelle Compliance-Position</h3>
     <p>DSGVO-orientierte Verarbeitungsdokumentation und eine AVV sind verfügbar. HIPAA-Verfügbarkeit wird derzeit nicht angeboten.</p>
   </div>
-  <div class="bg-surface-900 border border-surface-800 rounded-lg p-6">
-    <h3 class="text-xl font-semibold mb-3">Security-Review</h3>
+  <div class="border p-6">
+    <h3 class="mb-3 apex-h3">Security-Review</h3>
     <p>Qualifizierte Interessenten können aktuelle Dokumentation anfordern und den Umfang vertraglicher Sicherheits- oder Bereitstellungszusagen besprechen.</p>
   </div>
 </div>

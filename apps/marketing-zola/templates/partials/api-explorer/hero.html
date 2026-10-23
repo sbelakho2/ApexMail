@@ -5,30 +5,30 @@
    live server requests" — a direct contradiction of the lanes below
    it. Copy now states exactly what runs and what cannot escape. #}
 
-<section class="relative overflow-hidden bg-surface-950 pt-28 pb-14 text-white sm:pt-32">
-  <div class="absolute inset-0 bg-[radial-gradient(circle_at_12%_14%,rgba(239,68,68,0.16),transparent_42%),radial-gradient(circle_at_84%_10%,rgba(255,255,255,0.08),transparent_36%)]"></div>
+<section class="relative overflow-hidden pt-28 pb-14 sm:pt-32">
+  <div class="absolute inset-0"></div>
   <div class="relative w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
     <div class="grid gap-8 lg:grid-cols-[1.1fr_0.9fr] lg:items-end">
       <div class="max-w-3xl">
-        <div class="inline-flex items-center gap-2 px-3 py-1 rounded-sm border border-white/20 bg-surface-50/5 text-[11px] font-bold tracking-[0.18em] text-white/80 uppercase">
+        <div class="inline-flex items-center gap-2 px-3 py-1 border apex-em apex-section-head">
           API Workbench
         </div>
-        <h1 class="mt-5 text-4xl font-bold tracking-tight sm:text-5xl lg:text-6xl">
+        <h1 class="mt-5 apex-page-title">
            Run Real API Requests
         </h1>
-        <p class="mt-4 text-base leading-7 text-white/75 sm:text-lg">
+        <p class="mt-4">
            Tune the payload, press send, and the request executes against an isolated
            ApexMail sandbox with a real API key — real validation, real queuing,
            real delivery attempts, and the verbatim response.
         </p>
       </div>
 
-      <div class="rounded-sm border border-white/15 bg-black/25 p-5">
-        <p class="text-xs font-bold tracking-[0.22em] text-white/60 uppercase">How the sandbox works</p>
-        <div class="mt-4 space-y-3 text-sm text-white/80">
-          <p class="rounded-sm border border-white/10 bg-black/20 px-4 py-3">Requests run against an isolated ApexMail sandbox — the same handlers, queue and worker as production.</p>
-          <p class="rounded-sm border border-white/10 bg-black/20 px-4 py-3">Sandbox messages cannot be delivered to real recipients: every recipient must end in <span class="font-mono">@example.com</span> (RFC 2606 reserved).</p>
-          <p class="rounded-sm border border-white/10 bg-black/20 px-4 py-3">Responses are the real status codes, latency and JSON bodies — not simulations.</p>
+      <div class="border p-5">
+        <p class="apex-em">How the sandbox works</p>
+        <div class="mt-4 space-y-3">
+          <p class="border px-4 py-3">Requests run against an isolated ApexMail sandbox — the same handlers, queue and worker as production.</p>
+          <p class="border px-4 py-3">Sandbox messages cannot be delivered to real recipients: every recipient must end in <span class="">@example.com</span> (RFC 2606 reserved).</p>
+          <p class="border px-4 py-3">Responses are the real status codes, latency and JSON bodies — not simulations.</p>
         </div>
       </div>
     </div>

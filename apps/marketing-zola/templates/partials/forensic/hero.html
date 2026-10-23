@@ -5,118 +5,112 @@
    an example instead. #}
 {# Rewritten from ForensicHero.tsx — aligned with actual features #}
 
-<section class="relative min-h-[80vh] flex items-center pt-32 pb-20 bg-surface-50">
+<section class="relative min-h-[80vh] flex items-center pt-32 pb-20">
   <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 relative">
     <div class="grid lg:grid-cols-2 gap-12 lg:gap-16 items-center">
       {# Left - Copy #}
       <div>
-        <div class="animate-in inline-flex items-center gap-2 px-3 py-1 rounded-sm bg-surface-100/50 text-surface-950 border border-surface-200 text-xs font-medium mb-6 uppercase">
-          <svg class="w-4 h-4 text-surface-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+        <div class="mb-6 apex-meta">
           Email Debugging
         </div>
 
-        <h1 class="animate-in delay-100 text-4xl lg:text-6xl font-semibold text-surface-950 mb-6 leading-tight tracking-tight">
-          Full Visibility<br /><span class="text-surface-950">Into Every Email</span>
+        <h1 class="mb-6 apex-page-title">
+          Full Visibility<br /><span class="">Into Every Email</span>
         </h1>
 
-        <p class="animate-in delay-200 text-xl text-surface-600 mb-10 leading-relaxed font-medium">
+        <p class="mb-10 apex-em">
           Track every email from API acceptance to recipient-server response. Event streams, bounce diagnostics,
           and delivery analytics &mdash; so debugging never means guessing.
         </p>
 
-        <div class="animate-in delay-300 flex flex-col sm:flex-row gap-4">
-          <a href="{{ config.extra.app_url }}/signup" class="btn-primary btn-primary--lg">Start Free</a>
-          <a href="/docs/analytics/" class="btn-secondary btn-secondary--lg">View Documentation</a>
+        <div class="flex flex-col sm:flex-row gap-4">
+          <a href="{{ config.extra.app_url }}/signup" class="apex-btn apex-btn--primary">Start Free</a>
+          <a href="/docs/analytics/" class="apex-btn">View Documentation</a>
         </div>
 
-        <div class="animate-in delay-400 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6 mt-12 pt-8 border-t border-surface-200">
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6 mt-12 pt-8 border-t">
           <div>
-            <div class="text-2xl lg:text-3xl font-semibold text-surface-950 tabular-nums">Events</div>
-            <div class="text-xs font-medium text-surface-500">Event Streaming</div>
+            <div class="tabular-nums apex-em">Events</div>
+            <div class="apex-em">Event Streaming</div>
           </div>
           <div>
-            <div class="text-2xl lg:text-3xl font-semibold text-surface-950 tabular-nums">Every Event</div>
-            <div class="text-xs font-medium text-surface-500">Tracked &amp; Logged</div>
+            <div class="tabular-nums apex-em">Every Event</div>
+            <div class="apex-em">Tracked &amp; Logged</div>
           </div>
           <div>
-            <div class="text-2xl lg:text-3xl font-semibold text-surface-950 tabular-nums">Webhooks</div>
-            <div class="text-xs font-medium text-surface-500">Signed Delivery</div>
+            <div class="tabular-nums apex-em">Webhooks</div>
+            <div class="apex-em">Signed Delivery</div>
           </div>
         </div>
       </div>
 
       {# Right - Event Timeline Visual #}
-      <div class="animate-in delay-200 relative">
-        <div class="bg-surface-50 border border-surface-200 rounded-lg p-8">
-          <div class="flex items-center justify-between mb-8 pb-4 border-b border-surface-100">
+      <div class="relative">
+        <div class="border p-8">
+          <div class="flex items-center justify-between mb-8 pb-4 border-b">
             <div class="flex items-center gap-3">
-              <div class="w-10 h-10 rounded-sm bg-surface-100/50 flex items-center justify-center border border-surface-200">
-                <svg class="w-5 h-5 text-surface-950" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+              <div class="w-10 h-10 flex items-center justify-center border">
               </div>
               <div>
-                <div class="text-surface-950 font-semibold text-sm">Event Timeline</div>
-                <div class="text-xs font-medium text-surface-500 font-mono">msg_7f3d8a2b</div>
+                <div class="apex-em">Event Timeline</div>
+                <div class="apex-em">msg_7f3d8a2b</div>
               </div>
             </div>
           </div>
 
           <div class="relative pl-8 space-y-4">
-            <div class="absolute left-[11px] top-2 bottom-2 w-0.5 bg-surface-100"></div>
-            <div class="animate-in relative">
-              <div class="absolute -left-[25px] w-3 h-3 rounded-sm bg-surface-950 border-2 border-white z-10"></div>
-              <div class="bg-surface-100 border border-surface-200 rounded-lg p-4 transition-shadow hover:shadow-sm">
+            <div class="absolute left-[11px] top-2 bottom-2 w-0.5"></div>
+            <div class="relative">
+              <div class="absolute -left-[25px] w-3 h-3 border-2 z-10"></div>
+              <div class="border p-4">
                 <div class="flex items-center justify-between mb-1">
-                  <span class="text-surface-950 font-medium text-sm">API Accepted</span>
-                  <span class="text-xs font-medium text-surface-500 font-mono">14:32:01</span>
+                  <span class="apex-em">API Accepted</span>
+                  <span class="apex-em">14:32:01</span>
                 </div>
                 <div class="flex items-center gap-1">
-                  <svg class="w-4 h-4 text-success-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-                  <span class="text-xs font-medium text-surface-600">queued</span>
+                  <span class="apex-em">queued</span>
                 </div>
               </div>
             </div>
-            <div class="animate-in relative">
-              <div class="absolute -left-[25px] w-3 h-3 rounded-sm bg-surface-950 border-2 border-white z-10"></div>
-              <div class="bg-surface-100 border border-surface-200 rounded-lg p-4 transition-shadow hover:shadow-sm">
+            <div class="relative">
+              <div class="absolute -left-[25px] w-3 h-3 border-2 z-10"></div>
+              <div class="border p-4">
                 <div class="flex items-center justify-between mb-1">
-                  <span class="text-surface-950 font-medium text-sm">DKIM Signed</span>
-                  <span class="text-xs font-medium text-surface-500 font-mono">14:32:02</span>
+                  <span class="apex-em">DKIM Signed</span>
+                  <span class="apex-em">14:32:02</span>
                 </div>
                 <div class="flex items-center gap-1">
-                  <svg class="w-4 h-4 text-success-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-                  <span class="text-xs font-medium text-surface-600">authenticated</span>
+                  <span class="apex-em">authenticated</span>
                 </div>
               </div>
             </div>
-            <div class="animate-in relative">
-              <div class="absolute -left-[25px] w-3 h-3 rounded-sm bg-success-500 border-2 border-white z-10"></div>
-              <div class="bg-surface-100 border border-surface-200 rounded-lg p-4 transition-shadow hover:shadow-sm">
+            <div class="relative">
+              <div class="absolute -left-[25px] w-3 h-3 border-2 z-10"></div>
+              <div class="border p-4">
                 <div class="flex items-center justify-between mb-1">
-                  <span class="text-surface-950 font-medium text-sm">Delivered</span>
-                  <span class="text-xs font-medium text-surface-500 font-mono">14:32:18</span>
+                  <span class="apex-em">Delivered</span>
+                  <span class="apex-em">14:32:18</span>
                 </div>
                 <div class="flex items-center gap-1">
-                  <svg class="w-4 h-4 text-success-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-                  <span class="text-xs font-medium text-success-600">delivered</span>
+                  <span class="apex-em">delivered</span>
                 </div>
               </div>
             </div>
-            <div class="animate-in relative">
-              <div class="absolute -left-[25px] w-3 h-3 rounded-sm bg-info-500 border-2 border-white z-10"></div>
-              <div class="bg-surface-100 border border-surface-200 rounded-lg p-4 transition-shadow hover:shadow-sm">
+            <div class="relative">
+              <div class="absolute -left-[25px] w-3 h-3 border-2 z-10"></div>
+              <div class="border p-4">
                 <div class="flex items-center justify-between mb-1">
-                  <span class="text-surface-950 font-medium text-sm">Opened</span>
-                  <span class="text-xs font-medium text-surface-500 font-mono">14:45:33</span>
+                  <span class="apex-em">Opened</span>
+                  <span class="apex-em">14:45:33</span>
                 </div>
                 <div class="flex items-center gap-1">
-                  <svg class="w-4 h-4 text-info-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-                  <span class="text-xs font-medium text-info-600">opened</span>
+                  <span class="apex-em">opened</span>
                 </div>
               </div>
             </div>
           </div>
 
-          <p class="mt-8 pt-6 border-t border-surface-100 text-xs font-medium text-surface-500">
+          <p class="mt-8 pt-6 border-t apex-em">
             Illustrative example trace — the console timeline is searchable by message ID; this static export has no search control.
           </p>
         </div>

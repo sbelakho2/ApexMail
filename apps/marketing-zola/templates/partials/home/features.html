@@ -1,37 +1,41 @@
-{# Features Section #}
-<section class="py-20 lg:py-32 bg-surface-50">
-  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-    <div class="text-center mb-12">
-      <span class="k-arc-label">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_features"] and i18n_data[l]["home_features"]["eyebrow"] %}{{ i18n_data[l]["home_features"]["eyebrow"] }}{% else %}Capabilities{% endif %}</span>
-      <h2 class="text-surface-950 mb-6 tracking-tighter text-4xl lg:text-6xl">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_features"] and i18n_data[l]["home_features"]["heading_1"] %}{{ i18n_data[l]["home_features"]["heading_1"] }}{% else %}Send, diagnose and operate email.{% endif %}<br /><span class="text-brand-500">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_features"] and i18n_data[l]["home_features"]["heading_2"] %}{{ i18n_data[l]["home_features"]["heading_2"] }}{% else %}Built for predictable delivery.{% endif %}</span></h2>
-      <p class="text-surface-600 max-w-2xl mx-auto text-lg leading-[1.5]">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_features"] and i18n_data[l]["home_features"]["subtitle"] %}{{ i18n_data[l]["home_features"]["subtitle"] }}{% else %}Email infrastructure for developers who need predictable API behavior and delivery visibility.{% endif %}</p>
-    </div>
-    {# Balanced four-item arrangement: 1-up → 2×2 → 4-up (the previous
-       lg:grid-cols-3 left a three-plus-orphan row). #}
-    <div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-6">
-      <div class="card-dna">
-        <div class="flex items-center justify-between mb-4"><span class="ix">01</span></div>
-        <h3 class="text-base font-bold text-surface-950 mb-4 tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_features"] and i18n_data[l]["home_features"]["card_1_title"] %}{{ i18n_data[l]["home_features"]["card_1_title"] }}{% else %}Low-latency API{% endif %}</h3>
-        <p class="text-surface-600 text-[13px] leading-[1.6]">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_features"] and i18n_data[l]["home_features"]["card_1_desc"] %}{{ i18n_data[l]["home_features"]["card_1_desc"] }}{% else %}Enterprise SLA targets 500ms P95 API responses at the gateway, with the same production API path available from the first send.{% endif %}</p>
-      </div>
-      <div class="card-dna">
-        <div class="flex items-center justify-between mb-4"><span class="ix">02</span></div>
-        <h3 class="text-base font-bold text-surface-950 mb-4 tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_features"] and i18n_data[l]["home_features"]["card_2_title"] %}{{ i18n_data[l]["home_features"]["card_2_title"] }}{% else %}Enterprise Security{% endif %}</h3>
-        <p class="text-surface-600 text-[13px] leading-[1.6]">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_features"] and i18n_data[l]["home_features"]["card_2_desc"] %}{{ i18n_data[l]["home_features"]["card_2_desc"] }}{% else %}AES-256 encryption at rest, TLS 1.2+ required for API/SMTP, TLS 1.3 preferred where supported. DKIM, SPF, DMARC, DANE, and MTA-STS built in.{% endif %}</p>
-      </div>
-      <div class="card-dna">
-        <div class="flex items-center justify-between mb-4"><span class="ix">03</span></div>
-        <h3 class="text-base font-bold text-surface-950 mb-4 tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_features"] and i18n_data[l]["home_features"]["card_3_title"] %}{{ i18n_data[l]["home_features"]["card_3_title"] }}{% else %}Delivery Tracking{% endif %}</h3>
-        <p class="text-surface-600 text-[13px] leading-[1.6]">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_features"] and i18n_data[l]["home_features"]["card_3_desc"] %}{{ i18n_data[l]["home_features"]["card_3_desc"] }}{% else %}Track every email from send to delivery. Opens, clicks, bounces, and complaints in real time.{% endif %}</p>
-      </div>
-      <div class="card-dna">
-        <div class="flex items-center justify-between mb-4"><span class="ix">04</span></div>
-        <h3 class="text-base font-bold text-surface-950 mb-4 tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_features"] and i18n_data[l]["home_features"]["card_4_title"] %}{{ i18n_data[l]["home_features"]["card_4_title"] }}{% else %}Delivery Analytics{% endif %}</h3>
-        <p class="text-surface-600 text-[13px] leading-[1.6]">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_features"] and i18n_data[l]["home_features"]["card_4_desc"] %}{{ i18n_data[l]["home_features"]["card_4_desc"] }}{% else %}Opens, clicks, bounces, and complaints feed analytics and webhooks, with Enterprise webhook delivery targets measured at P95.{% endif %}</p>
-      </div>
-    </div>
-    <div class="mt-14 text-center">
-      <a href="{{ lp }}/features/" class="k-arc-label features-see-all">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_features"] and i18n_data[l]["home_features"]["see_all"] %}{{ i18n_data[l]["home_features"]["see_all"] }}{% else %}All features →{% endif %}</a>
-    </div>
+{# Features section — ARK ledger (lane T). The four capability cards are a
+   ruled table now: capability, what it does. Copy is unchanged; only the
+   rendering moved from icon+heading cards to the vocabulary. #}
+<section class="apex-mkt-section" aria-label="Capabilities">
+  <span class="apex-section-label">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_features"] and i18n_data[l]["home_features"]["eyebrow"] %}{{ i18n_data[l]["home_features"]["eyebrow"] }}{% else %}Capabilities{% endif %}</span>
+  <h2 class="apex-h2">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_features"] and i18n_data[l]["home_features"]["heading_1"] %}{{ i18n_data[l]["home_features"]["heading_1"] }}{% else %}Send, diagnose and operate email.{% endif %}</h2>
+  <p class="apex-lead max-w-3xl">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_features"] and i18n_data[l]["home_features"]["subtitle"] %}{{ i18n_data[l]["home_features"]["subtitle"] }}{% else %}Email infrastructure for developers who need predictable API behavior and delivery visibility.{% endif %}</p>
+
+  <div class="apex-table-wrap mt-8">
+    <table class="apex-table">
+      <caption class="sr-only">Core capabilities.</caption>
+      <thead>
+        <tr>
+          <th scope="col">Capability</th>
+          <th scope="col">What it does</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="apex-key">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_features"] and i18n_data[l]["home_features"]["card_1_title"] %}{{ i18n_data[l]["home_features"]["card_1_title"] }}{% else %}Low-latency API{% endif %}</td>
+          <td class="break-words">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_features"] and i18n_data[l]["home_features"]["card_1_desc"] %}{{ i18n_data[l]["home_features"]["card_1_desc"] }}{% else %}Enterprise SLA targets 500ms P95 API responses at the gateway, with the same production API path available from the first send.{% endif %}</td>
+        </tr>
+        <tr>
+          <td class="apex-key">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_features"] and i18n_data[l]["home_features"]["card_2_title"] %}{{ i18n_data[l]["home_features"]["card_2_title"] }}{% else %}Enterprise Security{% endif %}</td>
+          <td class="break-words">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_features"] and i18n_data[l]["home_features"]["card_2_desc"] %}{{ i18n_data[l]["home_features"]["card_2_desc"] }}{% else %}AES-256 encryption at rest, TLS 1.2+ required for API/SMTP, TLS 1.3 preferred where supported. DKIM, SPF, DMARC, DANE, and MTA-STS built in.{% endif %}</td>
+        </tr>
+        <tr>
+          <td class="apex-key">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_features"] and i18n_data[l]["home_features"]["card_3_title"] %}{{ i18n_data[l]["home_features"]["card_3_title"] }}{% else %}Delivery Tracking{% endif %}</td>
+          <td class="break-words">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_features"] and i18n_data[l]["home_features"]["card_3_desc"] %}{{ i18n_data[l]["home_features"]["card_3_desc"] }}{% else %}Track every email from send to delivery. Opens, clicks, bounces, and complaints in real time.{% endif %}</td>
+        </tr>
+        <tr>
+          <td class="apex-key">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_features"] and i18n_data[l]["home_features"]["card_4_title"] %}{{ i18n_data[l]["home_features"]["card_4_title"] }}{% else %}Delivery Analytics{% endif %}</td>
+          <td class="break-words">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_features"] and i18n_data[l]["home_features"]["card_4_desc"] %}{{ i18n_data[l]["home_features"]["card_4_desc"] }}{% else %}Opens, clicks, bounces, and complaints feed analytics and webhooks, with Enterprise webhook delivery targets measured at P95.{% endif %}</td>
+        </tr>
+      </tbody>
+    </table>
   </div>
+  <p class="mt-8">
+    <a href="{{ lp }}/features/">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_features"] and i18n_data[l]["home_features"]["see_all"] %}{{ i18n_data[l]["home_features"]["see_all"] }}{% else %}All features{% endif %}</a>
+  </p>
 </section>

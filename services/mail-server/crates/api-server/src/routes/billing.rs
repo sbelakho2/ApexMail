@@ -1863,23 +1863,23 @@ fn render_invoice_html(invoice: &LegacyInvoiceDto, style_nonce: &str) -> String 
   <meta charset="utf-8">
   <title>Invoice {invoice_number}</title>
   <style nonce="{style_nonce}">
-    body {{ font-family:ui-monospace, 'JetBrains Mono', monospace; font-size: 12px; color: #18181b; margin: 40px; }}
+    body {{ font-family:'Overpass',-apple-system,'Segoe UI',Arial,sans-serif; font-size: 13px; color: #0E141B; margin: 40px; }}
     .header {{ display: flex; justify-content: space-between; margin-bottom: 40px; }}
-    .logo {{ font-size: 24px; font-weight: bold; color: #09090b; }}
+    .logo {{ font-family:Arial,Helvetica,sans-serif; font-size: 22px; font-weight: bold; letter-spacing: -0.04em; }}
     .invoice-info {{ text-align: right; }}
     .invoice-number {{ font-size: 18px; font-weight: bold; }}
     .addresses {{ display: flex; justify-content: space-between; margin-bottom: 40px; }}
     .address {{ width: 45%; }}
-    .address h3 {{ font-size: 10px; text-transform: uppercase; color: #71717a; margin-bottom: 10px; }}
+    .address h3 {{ font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: #5B6B7A; margin-bottom: 10px; }}
     table {{ width: 100%; border-collapse: collapse; margin-bottom: 30px; }}
-    th {{ background: #f4f4f5; padding: 12px; text-align: left; font-weight: 600; border-bottom: 2px solid #d4d4d8; }}
-    td {{ padding: 12px; border-bottom: 1px solid #e4e4e7; }}
+    th {{ background: transparent; padding: 12px 12px 12px 0; text-align: left; font-weight: 600; text-transform: uppercase; font-size: 10px; letter-spacing: 0.08em; color: #5B6B7A; border-bottom: 2px solid #0E141B; }}
+    td {{ padding: 12px 12px 12px 0; border-bottom: 1px solid #C4CDD5; }}
     .amount {{ text-align: right; }}
     .totals {{ margin-left: auto; width: 300px; }}
     .totals table {{ margin-bottom: 0; }}
     .totals td {{ border: none; padding: 8px 12px; }}
-    .total-row {{ font-weight: bold; font-size: 14px; background: #f4f4f5; }}
-    .footer {{ margin-top: 60px; padding-top: 20px; border-top: 1px solid #e4e4e7; font-size: 10px; color: #71717a; }}
+    .total-row {{ font-weight: 600; font-size: 14px; }}
+    .footer {{ margin-top: 60px; padding-top: 20px; border-top: 2px solid #0E141B; font-size: 10px; color: #5B6B7A; }}
     .vat-note {{ font-style: italic; margin-top: 20px; }}
   </style>
 </head>

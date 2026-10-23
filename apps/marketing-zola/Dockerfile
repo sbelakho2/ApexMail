@@ -11,10 +11,9 @@ FROM debian:bookworm-slim AS builder
 # without pipefail a failed download would be masked by tar's success.
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-# Builder-stage tooling (curl/xz); reproducibility is governed by the
-# pinned zola/tailwind downloads below, not the apt set, and version-pinning
-# curl against the moving bookworm-slim tag would break on every point
-# release.
+# Builder-stage tooling (curl/xz); reproducibility is governed by the pinned
+# zola download below, not the apt set, and version-pinning curl against the
+# moving bookworm-slim tag would break on every point release.
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
@@ -36,26 +35,22 @@ ARG SOURCE_REVISION=unknown
 ARG TARGETARCH
 RUN set -eux; \
         case "${TARGETARCH:-amd64}" in \
-            amd64) ZOLA_ARCH='x86_64';  TW_ARCH='x64'   ;; \
-            arm64) ZOLA_ARCH='aarch64'; TW_ARCH='arm64' ;; \
+            amd64) ZOLA_ARCH='x86_64'  ;; \
+            arm64) ZOLA_ARCH='aarch64' ;; \
             *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
         esac; \
         curl -sL "https://github.com/getzola/zola/releases/download/v0.22.1/zola-v0.22.1-${ZOLA_ARCH}-unknown-linux-gnu.tar.gz" \
-            | tar xz -C /usr/local/bin; \
-        curl -sLo /usr/local/bin/tailwindcss \
-            "https://github.com/tailwindlabs/tailwindcss/releases/download/v3.4.17/tailwindcss-linux-${TW_ARCH}"; \
-        chmod +x /usr/local/bin/tailwindcss
+            | tar xz -C /usr/local/bin
 
 # Copy source
 COPY . .
 
-# Build CSS and Zola site
-RUN tailwindcss -i static/css/input.css -o static/css/styles.css --minify
-# Note: the dark-mode media query's :root:not(.light) guard so the JS toggle
-# can override OS-level dark mode is authored in static/css/input.css and the
-# pinned Tailwind v3.4.17 preserves it verbatim (verified against the pinned
-# binary, 2026-10-07). The old post-build sed that re-added the guard is gone:
-# with the guard authored, it double-applied it (:not(.light):not(.light)).
+# The stylesheet is a COMMITTED artifact built by cssgen (the all-Rust CSS
+# generator in ui-foundation; no Tailwind, no JavaScript anywhere in the
+# repo). CI regenerates and gate-checks it (cssgen --check) before the
+# Docker build runs, so the image just ships the verified file. The
+# dark-mode media query's :root:not(.light) guard is authored in the
+# authority (ark.css) and passes through cssgen verbatim.
 # Cachebust @font-face src URLs in the built CSS so they match the cachebusted
 # <link rel=preload> URLs that base.html emits via Zola's get_url(cachebust=true).
 # Without this, browsers fetch each font twice on a cold cache (preload with
@@ -74,7 +69,7 @@ RUN zola build
 # pinned toolchain versions). The api-server serves public/** as-is, so this
 # file is the deployment's own record of which HTML/CSS/assets it shipped.
 RUN set -eux; \
-    printf '{"source_revision":"%s","zola":"0.22.1","tailwindcss":"3.4.17","styled_sheet":"css/styles.css"}\n' \
+    printf '{"source_revision":"%s","zola":"0.22.1","cssgen":"rust-ui-foundation","styled_sheet":"css/styles.css"}\n' \
         "${SOURCE_REVISION}" > public/build-provenance.json
 
 # =============================================================================

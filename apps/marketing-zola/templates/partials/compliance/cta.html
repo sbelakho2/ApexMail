@@ -1,64 +1,56 @@
 {# ── Compliance CTA ───────────────────────────────────────────── #}
-{# Converted from compliance/ComplianceCTA.tsx                   #}
+{# ARK rework (lane T): icons deleted, the trust-signal card grid #}
+{# became a ledger table, the rhetorical heading states the offer.#}
 
-<section class="py-20 lg:py-32 relative bg-surface-100">
+<section class="py-20 lg:py-32 relative">
   <div class="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 relative">
-    <div class="animate-in bg-surface-50 rounded-sm border border-surface-200 p-8 md:p-12 text-center">
-      <h2 class="text-3xl md:text-4xl font-bold text-surface-950 mb-6 tracking-tight">
-        {% if i18n_data and i18n_data[l] and i18n_data[l]["compliance"] and i18n_data[l]["compliance"]["cta_title"] %}{{ i18n_data[l]["compliance"]["cta_title"] }}{% else %}Ready to Sleep Better at Night?{% endif %}
+    <div class="border p-8 md:p-12">
+      <h2 class="mb-6 apex-h2">
+        {% if i18n_data and i18n_data[l] and i18n_data[l]["compliance"] and i18n_data[l]["compliance"]["cta_title"] %}{{ i18n_data[l]["compliance"]["cta_title"] }}{% else %}Compliance you can show an auditor{% endif %}
       </h2>
-      <p class="text-lg text-surface-600 mb-8 max-w-2xl mx-auto leading-relaxed">
+      <p class="mb-8 max-w-2xl mx-auto">
         {% if i18n_data and i18n_data[l] and i18n_data[l]["compliance"] and i18n_data[l]["compliance"]["cta_subtitle"] %}{{ i18n_data[l]["compliance"]["cta_subtitle"] }}{% else %}ApexMail provides email infrastructure with GDPR-oriented workflows, audit-capable plans, and a factual security-review process. HIPAA availability is not currently offered.{% endif %}
       </p>
 
       <div class="flex flex-col sm:flex-row gap-4 justify-center mb-12">
-        <a href="{{ config.extra.app_url }}/signup" class="btn-primary">
+        <a href="{{ config.extra.app_url }}/signup" class="apex-btn apex-btn--primary">
           {% if i18n_data and i18n_data[l] and i18n_data[l]["cta"] and i18n_data[l]["cta"]["cta_button"] %}{{ i18n_data[l]["cta"]["cta_button"] }}{% else %}Start Free{% endif %}
-          <svg class="w-4 h-4 ml-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
         </a>
-        <a href="{{ lp }}/contact/security/?topic=compliance-review" class="btn-secondary">
-          <svg class="w-4 h-4 mr-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="0" ry="0"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+        <a href="{{ lp }}/contact/security/?topic=compliance-review" class="apex-btn">
           {% if i18n_data and i18n_data[l] and i18n_data[l]["compliance"] and i18n_data[l]["compliance"]["cta_contact"] %}{{ i18n_data[l]["compliance"]["cta_contact"] }}{% else %}Talk to Compliance Team{% endif %}
         </a>
       </div>
 
-      {# Trust Signals #}
-      <div class="grid grid-cols-2 md:grid-cols-4 gap-6 pt-8 border-t border-surface-100">
-        <div class="flex flex-col items-center">
-          <div class="w-10 h-10 rounded-sm bg-surface-100 flex items-center justify-center mb-3 border border-surface-200 text-surface-950">
-            <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-          </div>
-          <div class="text-surface-950 font-bold text-xs tracking-widest mb-0.5 uppercase">Security controls</div>
-          <div class="text-xs text-surface-500 font-bold tracking-tight">Plan-gated features</div>
-        </div>
-        <div class="flex flex-col items-center">
-          <div class="w-10 h-10 rounded-sm bg-surface-100 flex items-center justify-center mb-3 border border-surface-200 text-surface-950">
-            <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="0" ry="0"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-          </div>
-          <div class="text-surface-950 font-bold text-xs tracking-widest mb-0.5 uppercase">GDPR DSR</div>
-          <div class="text-xs text-surface-500 font-bold tracking-tight">Workflow APIs</div>
-        </div>
-        <div class="flex flex-col items-center">
-          <div class="w-10 h-10 rounded-sm bg-surface-100 flex items-center justify-center mb-3 border border-surface-200 text-surface-950">
-            <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
-          </div>
-          <div class="text-surface-950 font-bold text-xs tracking-widest mb-0.5 uppercase">HIPAA availability</div>
-          <div class="text-xs text-surface-500 font-bold tracking-tight">Not currently offered</div>
-        </div>
-        <div class="flex flex-col items-center">
-          <div class="w-10 h-10 rounded-sm bg-surface-100 flex items-center justify-center mb-3 border border-surface-200 text-surface-950">
-            <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
-          </div>
-          <div class="text-surface-950 font-bold text-xs tracking-widest mb-0.5 uppercase">SIG / CAIQ / HECVAT</div>
-          <div class="text-xs text-surface-500 font-bold tracking-tight">Reviewed on request</div>
-        </div>
+      {# Trust signals as a ledger, not an icon card grid. #}
+      <div class="pt-8 border-t">
+        <table class="apex-table">
+          <caption class="sr-only">Compliance posture.</caption>
+          <tbody>
+            <tr>
+              <th scope="row">Security controls</th>
+              <td>Plan-gated features</td>
+            </tr>
+            <tr>
+              <th scope="row">GDPR DSR</th>
+              <td>Workflow APIs</td>
+            </tr>
+            <tr>
+              <th scope="row">HIPAA availability</th>
+              <td>Not currently offered</td>
+            </tr>
+            <tr>
+              <th scope="row">SIG / CAIQ / HECVAT</th>
+              <td>Reviewed on request</td>
+            </tr>
+          </tbody>
+        </table>
       </div>
     </div>
 
-    <p class="animate-in delay-300 text-center text-sm font-medium text-surface-500 mt-8">
+    <p class="mt-8 apex-em">
       Current security documentation and applicable questionnaire material can be reviewed during an Enterprise evaluation.
       <br />
-      Contact <a href="mailto:compliance@apexmail.ee" class="text-surface-950 hover:text-brand-700 transition-colors">compliance@apexmail.ee</a> for the current review materials.
+      Contact <a href="mailto:compliance@apexmail.ee" class="apex-link">compliance@apexmail.ee</a> for the current review materials.
     </p>
   </div>
 </section>

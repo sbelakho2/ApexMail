@@ -119,15 +119,15 @@ fn main() {
             Ok(raw) => {
                 let revision = json_field(&raw, "source_revision");
                 let zola = json_field(&raw, "zola");
-                let tailwind = json_field(&raw, "tailwindcss");
+                let cssgen = json_field(&raw, "cssgen");
                 let sheet = json_field(&raw, "styled_sheet");
                 match (revision, sheet) {
                     (Some(revision), Some(sheet)) if !sheet.is_empty() => {
                         if public_dir.join(&sheet).is_file() {
                             println!(
-                                "cargo:rustc-env=APX_MARKETING_PROVENANCE=revision={revision} zola={} tailwindcss={} styled_sheet={sheet}",
+                                "cargo:rustc-env=APX_MARKETING_PROVENANCE=revision={revision} zola={} cssgen={} styled_sheet={sheet}",
                                 zola.unwrap_or_default(),
-                                tailwind.unwrap_or_default(),
+                                cssgen.unwrap_or_default(),
                             );
                             provenance_note = format!("stamped revision={revision}");
                         } else {

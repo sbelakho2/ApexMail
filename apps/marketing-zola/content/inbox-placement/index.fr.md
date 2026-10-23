@@ -16,8 +16,8 @@ en conséquence.
 ## Ce que nous mesurons
 
 <div class="grid grid-cols-1 md:grid-cols-2 gap-6 my-10">
-  <div class="bg-surface-900 border border-surface-800 rounded-lg p-6">
-    <h3 class="text-xl font-semibold mb-3">Google Postmaster Tools</h3>
+  <div class="border p-6">
+    <h3 class="mb-3 apex-h3">Google Postmaster Tools</h3>
     <ul class="list-disc pl-5 space-y-1">
       <li>Réputation du domaine : HIGH / MEDIUM / LOW / BAD</li>
       <li>Réputation IP par IP d'envoi</li>
@@ -27,8 +27,8 @@ en conséquence.
       <li>Répartition des erreurs de livraison</li>
     </ul>
   </div>
-  <div class="bg-surface-900 border border-surface-800 rounded-lg p-6">
-    <h3 class="text-xl font-semibold mb-3">Microsoft SNDS</h3>
+  <div class="border p-6">
+    <h3 class="mb-3 apex-h3">Microsoft SNDS</h3>
     <ul class="list-disc pl-5 space-y-1">
       <li>Résultat du filtre : GREEN / YELLOW / RED</li>
       <li>Taux de plainte par IP</li>

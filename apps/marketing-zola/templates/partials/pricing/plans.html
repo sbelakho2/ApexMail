@@ -1,14 +1,17 @@
-{# ── Pricing Plans ────────────────────────────────────────────── #}
-{# Converted from pricing/PricingPlans.tsx                       #}
-{#                                                               #}
+{# ── Pricing Plans — ONE ledger (ARK round, lane T) ───────────── #}
 {# Commercial authority: data/pricing.json (itself pinned against #}
-{# platform-catalog by tools/validate_pricing_drift.py).         #}
+{# platform-catalog by tools/validate_pricing_drift.py).          #}
 {#   * plan_name / plan_price literals below are the exact strings #}
 {#     validate_pricing_drift.py reads from this file — the same   #}
 {#     gate also re-checks the rendered prices in public/; do not  #}
 {#     edit them by hand without running the gate.                 #}
-{#   * volumes, limits, retention and the launch allowance are     #}
-{#     DERIVED from pricing.json in this template.                 #}
+{#   * volumes, users, IPs, domains and support levels are DERIVED #}
+{#     from pricing.json in this template.                         #}
+{#   * the Annual and Overage cells are the formatted decimal      #}
+{#     mirrors of annual_price_per_month and overage_per_1k in     #}
+{#     data/pricing.json (price_yearly/12 and the per-1,000        #}
+{#     overage rate); Tera has no fixed-decimal filter, so the     #}
+{#     formatting lives here under the same drift gate.            #}
 {# ─────────────────────────────────────────────────────────────── #}
 {% set pricing_data = load_data(path="data/pricing.json", format="json") %}
 {% set p_free = pricing_data.plans[0] %}
@@ -18,228 +21,248 @@
 {% set p_business = pricing_data.plans[4] %}
 {% set p_enterprise = pricing_data.plans[5] %}
 {% set launch = pricing_data.free_launch_allowance %}
-{# Localized accessible labels for the plan cards (i18n.json wins, English
-   fallback otherwise). #}
-{% set plan_region_label = "plan" %}
-{% if i18n_data and i18n_data[l] and i18n_data[l]["pricing"] and i18n_data[l]["pricing"]["plan"] %}{% set plan_region_label = i18n_data[l]["pricing"]["plan"] %}{% endif %}
-{% set plan_price_aria_label = "per month" %}
-{% if i18n_data and i18n_data[l] and i18n_data[l]["pricing"] and i18n_data[l]["pricing"]["per_month"] %}{% set plan_price_aria_label = i18n_data[l]["pricing"]["per_month"] %}{% endif %}
-{# Singular/plural labels pre-computed (Tera expressions have no inline if). #}
-{% set free_domains_label = p_free.included_domains ~ " sending domain" %}{% if p_free.included_domains != 1 %}{% set free_domains_label = p_free.included_domains ~ " sending domains" %}{% endif %}
-{% set free_users_label = p_free.included_users ~ " team member" %}{% if p_free.included_users != 1 %}{% set free_users_label = p_free.included_users ~ " team members" %}{% endif %}
-{% set growth_ip_label = p_growth.included_ips ~ " dedicated IP included" %}{% if p_growth.included_ips != 1 %}{% set growth_ip_label = p_growth.included_ips ~ " dedicated IPs included" %}{% endif %}
-{% set business_ip_label = p_business.included_ips ~ " dedicated IP included; second assigned where useful" %}
+
+{% set plan_name = "Free" %}{% set plan_price = "€0" %}
+{% set plan_name = "Developer" %}{% set plan_price = "€20" %}
+{% set plan_name = "Pro" %}{% set plan_price = "€89" %}
+{% set plan_name = "Growth" %}{% set plan_price = "€229" %}
+{% set plan_name = "Business" %}{% set plan_price = "€699" %}
 
   <div id="plans" class="scroll-mt-20 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-    <div class="mb-16 py-10 border-y border-surface-200">
-      <div class="grid grid-cols-1 gap-x-6 gap-y-4 text-center sm:grid-cols-2 lg:grid-cols-5 lg:items-center">
-        <div class="text-xs font-bold uppercase text-surface-400 tracking-[0.05em]">Operational Controls:</div>
-        <span class="min-w-0 justify-center text-xs font-bold text-surface-950 tracking-widest flex items-center gap-2">
-          <div class="w-1.5 h-1.5 bg-brand-500"></div> Audit logs
-        </span>
-        <span class="min-w-0 justify-center text-xs font-bold text-surface-950 tracking-widest flex items-center gap-2">
-          <div class="w-1.5 h-1.5 bg-brand-500"></div> GDPR workflows
-        </span>
-        <span class="min-w-0 justify-center text-xs font-bold text-surface-950 tracking-widest flex items-center gap-2">
-          <div class="w-1.5 h-1.5 bg-brand-500"></div> SAML SSO
-        </span>
-        <span class="min-w-0 justify-center text-xs font-bold text-surface-950 tracking-widest flex items-center gap-2">
-          <div class="w-1.5 h-1.5 bg-brand-500"></div> Contract review
-        </span>
-      </div>
+    <div class="apex-section-head">
+      <h2 class="apex-h2">Plans</h2>
+      <span class="apex-section-aside">Operational controls: audit logs, GDPR workflows, SAML SSO, contract review</span>
+    </div>
+    <p class="apex-meta">Prices per workspace and month. Included volume resets monthly; overage applies per 1,000 emails above the plan volume. Every new account also receives a one-time {{ launch.emails_display }}-email launch allowance for its first {{ launch.window_days }} days.</p>
+
+    <div class="apex-table-wrap mt-6">
+      <table class="apex-table">
+        <caption class="sr-only">ApexMail subscription plans: price, volume, overage, dedicated IPs, users and support per plan.</caption>
+        <thead>
+          <tr>
+            <th scope="col">Plan</th>
+            <th scope="col" class="apex-num">Monthly</th>
+            <th scope="col" class="apex-num">Annual, per month</th>
+            <th scope="col" class="apex-num">Included volume</th>
+            <th scope="col" class="apex-num">Overage per 1,000</th>
+            <th scope="col" class="apex-num">Dedicated IPs</th>
+            <th scope="col" class="apex-num">Users</th>
+            <th scope="col">Support</th>
+            <th scope="col"><span class="sr-only">Action</span></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th scope="row" class="apex-key">{{ p_free.name }}</th>
+            <td class="apex-num">{{ p_free.monthly_price_display }}</td>
+            <td class="apex-num">€0</td>
+            <td class="apex-num">{{ p_free.included_volume_display }}</td>
+            <td class="apex-num">—</td>
+            <td class="apex-num">{{ p_free.included_ips }}</td>
+            <td class="apex-num">{{ p_free.included_users }}</td>
+            <td>{{ p_free.support | capitalize }}</td>
+            <td><a href="{{ config.extra.app_url }}/signup" class="apex-btn apex-btn--sm">Start Free</a></td>
+          </tr>
+          <tr>
+            <th scope="row" class="apex-key">{{ p_developer.name }}</th>
+            <td class="apex-num">{{ p_developer.monthly_price_display }}</td>
+            <td class="apex-num">€16.67</td>
+            <td class="apex-num">{{ p_developer.included_volume_display }}</td>
+            <td class="apex-num">€0.80</td>
+            <td class="apex-num">{{ p_developer.included_ips }}</td>
+            <td class="apex-num">{{ p_developer.included_users }}</td>
+            <td>{{ p_developer.support | capitalize }}</td>
+            <td><a href="{{ config.extra.app_url }}/signup?plan=starter" class="apex-btn apex-btn--sm">Start Developer</a></td>
+          </tr>
+          <tr>
+            <th scope="row" class="apex-key">{{ p_pro.name }}</th>
+            <td class="apex-num">{{ p_pro.monthly_price_display }}</td>
+            <td class="apex-num">€74.17</td>
+            <td class="apex-num">{{ p_pro.included_volume_display }}</td>
+            <td class="apex-num">€0.60</td>
+            <td class="apex-num">Add-on</td>
+            <td class="apex-num">{{ p_pro.included_users }}</td>
+            <td>{{ p_pro.support | capitalize }}</td>
+            <td><a href="{{ config.extra.app_url }}/signup?plan=pro" class="apex-btn apex-btn--sm">Start Pro</a></td>
+          </tr>
+          <tr>
+            <th scope="row" class="apex-key">{{ p_growth.name }}</th>
+            <td class="apex-num">{{ p_growth.monthly_price_display }}</td>
+            <td class="apex-num">€190.83</td>
+            <td class="apex-num">{{ p_growth.included_volume_display }}</td>
+            <td class="apex-num">€0.35</td>
+            <td class="apex-num">{{ p_growth.included_ips }} included</td>
+            <td class="apex-num">{{ p_growth.included_users }}</td>
+            <td>{{ p_growth.support | capitalize }}</td>
+            <td><a href="{{ config.extra.app_url }}/signup?plan=growth" class="apex-btn apex-btn--sm">Start Growth</a></td>
+          </tr>
+          <tr>
+            <th scope="row" class="apex-key">{{ p_business.name }}</th>
+            <td class="apex-num">{{ p_business.monthly_price_display }}</td>
+            <td class="apex-num">€582.50</td>
+            <td class="apex-num">{{ p_business.included_volume_display }}</td>
+            <td class="apex-num">€0.35</td>
+            <td class="apex-num">{{ p_business.included_ips }} included</td>
+            <td class="apex-num">{{ p_business.included_users }}</td>
+            <td>{{ p_business.support | capitalize }}</td>
+            <td><a href="{{ config.extra.app_url }}/signup?plan=scale" class="apex-btn apex-btn--sm">Start Business</a></td>
+          </tr>
+          <tr>
+            <th scope="row" class="apex-key">{{ p_enterprise.name }}</th>
+            <td class="apex-num">from €1,750</td>
+            <td class="apex-num">€1,458.33</td>
+            <td class="apex-num">{{ p_enterprise.included_volume_display }}</td>
+            <td class="apex-num">€0.35</td>
+            <td class="apex-num">up to {{ p_enterprise.included_ips }} included</td>
+            <td class="apex-num">Unlimited</td>
+            <td>{{ p_enterprise.support | capitalize }}</td>
+            <td><a href="{{ lp }}/contact/sales/" class="apex-btn apex-btn--sm">Contact sales</a></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="apex-footnote">Annual subscriptions are billed at {{ pricing_data.annual_billing_months }}&times; the monthly price (about {{ pricing_data.annual_savings_percent }}% less than twelve monthly payments); the Annual column shows that yearly total divided by twelve. Enterprise Cloud requires an annual contract; a second Business dedicated IP is assigned where traffic justifies it. All totals exclude VAT.</p>
+
+    {# ── Enterprise infrastructure: the deployment ledger ── #}
+    <div class="apex-section-head mt-16">
+      <h2 class="apex-h2">Enterprise infrastructure</h2>
+      <span class="apex-section-aside">Deployment models beyond the shared cloud</span>
+    </div>
+    <p class="apex-meta">Deployment models scoped to your operational and compliance requirements.</p>
+    <div class="apex-table-wrap mt-6">
+      <table class="apex-table">
+        <caption class="sr-only">Enterprise deployment models and their scope.</caption>
+        <thead>
+          <tr>
+            <th scope="col">Model</th>
+            <th scope="col" class="apex-num">Price</th>
+            <th scope="col">Scope</th>
+            <th scope="col"><span class="sr-only">Action</span></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th scope="row" class="apex-key">Enterprise Cloud</th>
+            <td class="apex-num">from €1,750/mo, annual contract</td>
+            <td class="break-words">Contractual features on shared-adjacent infrastructure: {{ p_enterprise.included_volume_display }} emails/month, SSO, white-label, 730-day event retention, CSM, 99.9% SLA with tiered credits.</td>
+            <td><a href="{{ lp }}/contact/sales/" class="apex-btn apex-btn--sm">Contact sales</a></td>
+          </tr>
+          <tr>
+            <th scope="row" class="apex-key">Dedicated Tenant</th>
+            <td class="apex-num">from €4,000/mo, 12-month minimum, €10k&ndash;€40k setup</td>
+            <td class="break-words">Isolated single-tenant ApexMail in our EEA infrastructure: separate queues, storage boundary and monitoring, scoped to your workload — <a href="{{ lp }}/private-cloud/">how it works</a>.</td>
+            <td><a href="{{ lp }}/contact/sales/" class="apex-btn apex-btn--sm">Architecture review</a></td>
+          </tr>
+          <tr>
+            <th scope="row" class="apex-key">BYOC</th>
+            <td class="apex-num">from €6,500/mo, plus setup</td>
+            <td class="break-words">Customer-controlled environment: ApexMail running in your cloud account, your keys, your boundaries — <a href="{{ lp }}/private-cloud/">BYOC details</a>.</td>
+            <td><a href="{{ lp }}/contact/sales/" class="apex-btn apex-btn--sm">Architecture review</a></td>
+          </tr>
+        </tbody>
+      </table>
     </div>
 
-    {# ── Self-serve ladder (review 2026-09-08 §7): Row 1 = Free →
-       Developer → Pro → Growth; Row 2 = one larger Business card.
-       Enterprise Infrastructure is a visually separated 3-card section
-       below. Prices are plain tabular numerals — scannable, not
-       decorative. ── #}
-    <div class="grid md:grid-cols-2 lg:grid-cols-4 gap-6">
-      {# Free #}
-      {% set plan_name = "Free" %}{% set plan_price = "€0" %}
-      {% set plan_features = [
-        p_free.included_volume_display ~ " emails/month",
-        "One-time " ~ launch.emails_display ~ "-email launch allowance (first " ~ launch.window_days ~ " days)",
-        free_domains_label,
-        free_users_label,
-        "REST API + SMTP relay",
-        p_free.retention_days ~ "-day event retention",
-        "Community support"] %}
-      {% set plan_period = "/month" %}{% set plan_description = "Development, testing, and learning." %}{% set plan_cta_label = "Start Free" %}{% set plan_cta_url = config.extra.app_url ~ "/signup" %}{% set plan_cta_aria_label = "Start Free - Free plan at €0/month" %}{% set plan_is_popular = false %}{% set plan_is_enterprise = false %}{% set plan_button_primary = false %}
-      {% include "partials/pricing/card.html" %}
-
-      {# Developer #}
-      {% set plan_name = "Developer" %}{% set plan_price = "€20" %}
-      {% set plan_features = [
-        p_developer.included_volume_display ~ " emails/month",
-        p_developer.included_domains ~ " sending domains",
-        p_developer.included_users ~ " team members",
-        "Webhooks and custom templates",
-        "Advanced analytics and data export",
-        p_developer.retention_days ~ "-day event retention",
-        "Email support"] %}
-      {% set plan_period = "/month" %}{% set plan_description = "For developers wiring up production email." %}{% set plan_cta_label = "Start Developer" %}{% set plan_cta_url = config.extra.app_url ~ "/signup?plan=starter" %}{% set plan_cta_aria_label = "Start Developer - Developer plan at €20/month" %}{% set plan_is_popular = false %}{% set plan_is_enterprise = false %}{% set plan_button_primary = false %}
-      {% include "partials/pricing/card.html" %}
-
-      {# Pro #}
-      {% set plan_name = "Pro" %}{% set plan_price = "€89" %}
-      {% set plan_features = [
-        p_pro.included_volume_display ~ " emails/month",
-        p_pro.included_domains ~ " sending domains",
-        p_pro.included_users ~ " team members",
-        "Send-time optimization",
-        "Advanced analytics and data export",
-        "Dedicated IP add-on (€49 first / €69 additional)",
-        "Priority onboarding",
-        p_pro.retention_days ~ "-day event retention"] %}
-      {% set plan_period = "/month" %}{% set plan_description = "For scaling teams that need deliverability controls." %}{% set plan_cta_label = "Start Pro" %}{% set plan_cta_url = config.extra.app_url ~ "/signup?plan=pro" %}{% set plan_cta_aria_label = "Start Pro - Pro plan at €89/month" %}{% set plan_is_popular = true %}{% set plan_popular_label = "Most Popular" %}{% set plan_is_enterprise = false %}{% set plan_button_primary = true %}
-      {% include "partials/pricing/card.html" %}
-
-      {# Growth #}
-      {% set plan_name = "Growth" %}{% set plan_price = "€229" %}
-      {% set plan_features = [
-        p_growth.included_volume_display ~ " emails/month",
-        p_growth.included_domains ~ " sending domains",
-        p_growth.included_users ~ " team members",
-        growth_ip_label,
-        "Advanced analytics and data export",
-        p_growth.retention_days ~ "-day event retention",
-        "Email support"] %}
-      {% set plan_period = "/month" %}{% set plan_description = "For teams that need advanced deliverability features." %}{% set plan_cta_label = "Start Growth" %}{% set plan_cta_url = config.extra.app_url ~ "/signup?plan=growth" %}{% set plan_cta_aria_label = "Start Growth - Growth plan at €229/month" %}{% set plan_is_popular = false %}{% set plan_is_enterprise = false %}{% set plan_button_primary = false %}
-      {% include "partials/pricing/card.html" %}
-
+    {# ── Contract and platform lines (owner pricing plan) ── #}
+    <div class="apex-section-head mt-16">
+      <h2 class="apex-h2">Contract and platform lines</h2>
+      <span class="apex-section-aside">Annual-contract and approved-setup lines</span>
+    </div>
+    <p class="apex-meta">For regulated senders, platforms and teams that need mailboxes in the same account. Sold on contract or an approved billing setup, never through public Checkout.</p>
+    <div class="apex-table-wrap mt-6">
+      <table class="apex-table">
+        <caption class="sr-only">Contract and platform lines.</caption>
+        <thead>
+          <tr>
+            <th scope="col">Line</th>
+            <th scope="col">EUR list price</th>
+            <th scope="col">USD list price</th>
+            <th scope="col">Scope</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for line in pricing_data.contract_lines %}
+          <tr>
+            <th scope="row" class="apex-key">{{ line.name }}</th>
+            <td class="break-words">{{ line.eur_display }}</td>
+            <td class="break-words">{{ line.usd_display }}</td>
+            <td class="break-words">{{ line.description }} <a href="{{ lp }}/contact/sales/">Talk to sales</a></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
     </div>
 
-    {# ── Row 2: the larger Business card (2M volume, isolation) ── #}
-    <div class="mt-6 max-w-3xl mx-auto">
-      {% set plan_name = "Business" %}{% set plan_price = "€699" %}
-      {% set plan_features = [
-        p_business.included_volume_display ~ " emails/month",
-        "Unlimited sending domains",
-        p_business.included_users ~ " team members",
-        business_ip_label,
-        "SAML SSO and inbound email",
-        "Tenant isolation per customer",
-        "99.9% SLA with tiered service credits",
-        "Priority support"] %}
-      {% set plan_period = "/month" %}{% set plan_description = "For high-volume senders needing isolation." %}{% set plan_cta_label = "Start Business" %}{% set plan_cta_url = config.extra.app_url ~ "/signup?plan=scale" %}{% set plan_cta_aria_label = "Start Business - Business plan at €699/month" %}{% set plan_is_popular = false %}{% set plan_is_enterprise = false %}{% set plan_button_primary = false %}
-      {% include "partials/pricing/card.html" %}
+    {# ── Paid add-ons ── #}
+    <div class="apex-table-wrap mt-10">
+      <table class="apex-table">
+        <caption class="sr-only">Paid add-ons.</caption>
+        <thead>
+          <tr>
+            <th scope="col">Add-on</th>
+            <th scope="col">EUR</th>
+            <th scope="col">USD</th>
+            <th scope="col">Unit</th>
+            <th scope="col">Availability</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for addon in pricing_data.addons %}
+          <tr>
+            <th scope="row" class="apex-key">{{ addon.name }}</th>
+            <td class="break-words">{{ addon.display }}</td>
+            <td class="break-words">{{ addon.usd_display }}</td>
+            <td class="break-words">{{ addon.unit }}</td>
+            <td class="break-words">{{ addon.availability }}
+              {# The sovereignty argument sits next to the EU-only add-on (owner
+                 directive 2026-10-16): the row states the price; the linked page
+                 argues the mode, its fail-closed behaviour and the receipts. #}
+              {% if addon.id == "eu_only_routing" %}
+                <a href="{{ lp }}/eu-sovereign/">{% if i18n_data and i18n_data[l] and i18n_data[l]["pricing"] and i18n_data[l]["pricing"]["eu_only_details"] %}{{ i18n_data[l]["pricing"]["eu_only_details"] }}{% else %}How EU-only routing works{% endif %}</a>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
     </div>
 
-    {# ── Enterprise Infrastructure (review §7): three EQUAL cards —
-       Enterprise Cloud, Dedicated Tenant, BYOC. Contractual features,
-       isolated tenancy, customer-controlled environment. ── #}
-    <div class="mt-16 pt-10 border-t border-surface-200">
-      <h2 class="text-2xl font-bold text-surface-950 tracking-tight mb-2">Enterprise infrastructure</h2>
-      <p class="text-sm text-surface-500 mb-8">Deployment models beyond the shared cloud — scoped to your operational and compliance requirements.</p>
-      <div class="grid md:grid-cols-3 gap-6">
-        <div class="card-dna p-6 flex flex-col">
-          <span class="k-arc-label">enterprise cloud</span>
-          <div class="flex items-baseline gap-2 mt-3 mb-1">
-            {# "from €1,750" is the runtime price pinned by validate_pricing_drift.py. #}
-            <span class="price-value" style="font-size:24px">from €1,750</span>
-            <span class="text-sm text-surface-500">/mo, annual contract</span>
-          </div>
-          {# The Enterprise retention term is a literal because
-             tools/validate_pricing_drift.py pins "730-day event retention"
-             in this file against the runtime catalog. #}
-          <p class="text-sm text-surface-600 mt-2 flex-1">Contractual features on shared-adjacent infrastructure: {{ p_enterprise.included_volume_display }} emails/month, SSO, white-label, 730-day event retention, CSM, 99.9% SLA with tiered credits.</p>
-          <a href="{{ lp }}/contact/sales/" class="btn-secondary mt-4">Contact sales</a>
-        </div>
-        <div class="card-dna p-6 flex flex-col">
-          <span class="k-arc-label">dedicated tenant</span>
-          <div class="flex items-baseline gap-2 mt-3 mb-1">
-            <span class="price-value" style="font-size:24px">from €4,000</span>
-            <span class="text-sm text-surface-500">/mo + setup</span>
-          </div>
-          <p class="text-sm text-surface-600 mt-2 flex-1">Isolated single-tenant ApexMail in our EEA infrastructure: separate queues, storage boundary and monitoring, scoped to your workload — <a href="{{ lp }}/private-cloud/" class="text-brand-500 font-semibold hover:underline">how it works</a>.</p>
-          <a href="{{ lp }}/contact/sales/" class="btn-secondary mt-4">Architecture review</a>
-        </div>
-        <div class="card-dna p-6 flex flex-col">
-          <span class="k-arc-label">byoc</span>
-          <div class="flex items-baseline gap-2 mt-3 mb-1">
-            <span class="price-value" style="font-size:24px">from €6,500</span>
-            <span class="text-sm text-surface-500">/mo + setup</span>
-          </div>
-          <p class="text-sm text-surface-600 mt-2 flex-1">Customer-controlled environment: ApexMail running in your cloud account, your keys, your boundaries — <a href="{{ lp }}/private-cloud/" class="text-brand-500 font-semibold hover:underline">BYOC details</a>.</p>
-          <a href="{{ lp }}/contact/sales/" class="btn-secondary mt-4">Architecture review</a>
-        </div>
-      </div>
+    <p class="mt-6 max-w-3xl">Pay-as-you-go usage pricing is available for approved billing accounts: no subscription commitment, volume-priced email and API usage. <a href="{{ lp }}/contact/sales/">Talk to sales</a> for configuration.</p>
+
+    {# ── Product proof (factual, plan-scoped) ──────────────────────── #}
+    <div class="apex-section-head mt-16">
+      <h2 class="apex-h2">What the tiers package</h2>
+    </div>
+    <div class="apex-table-wrap mt-6">
+      <table class="apex-table">
+        <caption class="sr-only">What each tier area packages.</caption>
+        <thead>
+          <tr>
+            <th scope="col">Area</th>
+            <th scope="col">Substance</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th scope="row" class="apex-key">Deliverability</th>
+            <td class="break-words">Dedicated IP pools, warm-up state, provider throttling, send-time optimization, inbox-placement tests, and postmaster polling are packaged into paid tiers instead of sold as vague services.</td>
+          </tr>
+          <tr>
+            <th scope="row" class="apex-key">Compliance</th>
+            <td class="break-words">Enterprise combines identity controls, governed contract review, and implementation planning. HIPAA availability is not currently offered.</td>
+          </tr>
+          <tr>
+            <th scope="row" class="apex-key">Enterprise</th>
+            <td class="break-words">Enterprise Cloud starts at €1,750/month (annual contract) and funds dedicated onboarding, CSM coverage and SLA commitments. Dedicated Tenant and BYOC deployments are quoted and contracted separately.</td>
+          </tr>
+        </tbody>
+      </table>
     </div>
 
-    {# ── Contract lines (owner pricing plan): Compliance, Platform and
-       Mailboxes. Dedicated Tenant is the deployment card above (same
-       €4,000/mo floor, 12-month minimum, €10k–€40k setup). Sold on contract
-       or an approved billing setup, never through public Checkout. Rendered
-       from the addons/contract_lines blocks in data/pricing.json. ── #}
-    <div class="mt-16 pt-10 border-t border-surface-200">
-      <h2 class="text-2xl font-bold text-surface-950 tracking-tight mb-2">Contract and platform lines</h2>
-      <p class="text-sm text-surface-500 mb-8">Annual-contract and approved-setup lines for regulated senders, platforms and teams that need mailboxes in the same account. Dedicated Tenant is quoted in the deployment cards above.</p>
-      <div class="grid md:grid-cols-3 gap-6">
-        {% for line in pricing_data.contract_lines %}{% if line.id != "dedicated_tenant" %}
-        <div class="card-dna p-6 flex flex-col">
-          <span class="k-arc-label">{{ line.name | lower }}</span>
-          <div class="flex items-baseline gap-2 mt-3 mb-1">
-            <span class="price-value" style="font-size:20px">{{ line.eur_display }}</span>
-          </div>
-          <p class="text-xs text-surface-400 mb-2">{{ line.usd_display }}</p>
-          <p class="text-sm text-surface-600 mt-2 flex-1">{{ line.description }}</p>
-          <a href="{{ lp }}/contact/sales/" class="btn-secondary mt-4">Talk to sales</a>
-        </div>
-        {% endif %}{% endfor %}
-      </div>
-      <div class="grid md:grid-cols-3 gap-6 mt-6">
-        {% for addon in pricing_data.addons %}
-        <div class="p-5 bg-surface-50 rounded-lg border border-surface-200">
-          <span class="block font-bold text-surface-950 mb-1">{{ addon.name }}</span>
-          <span class="block text-sm text-surface-500 font-medium">{{ addon.display }} <span class="text-surface-400">({{ addon.usd_display }})</span> — {{ addon.unit }}, {{ addon.availability | lower }}</span>
-          {# The sovereignty argument sits next to the EU-only add-on (owner
-             directive 2026-10-16): the row states the price; the linked page
-             argues the mode, its fail-closed behaviour and the receipts. #}
-          {% if addon.id == "eu_only_routing" %}
-          <a href="{{ lp }}/eu-sovereign/" class="inline-block mt-3 text-xs font-bold tracking-wide text-brand-600 hover:underline">{% if i18n_data and i18n_data[l] and i18n_data[l]["pricing"] and i18n_data[l]["pricing"]["eu_only_details"] %}{{ i18n_data[l]["pricing"]["eu_only_details"] }}{% else %}How EU-only routing works{% endif %} &rarr;</a>
-          {% endif %}
-        </div>
-        {% endfor %}
-      </div>
-    </div>
-
-    <p class="mt-6 text-center text-sm text-surface-600">Pay-as-you-go usage pricing is available for approved billing accounts: no subscription commitment, volume-priced email and API usage. <a href="{{ lp }}/contact/sales/" class="font-bold text-brand-600 hover:underline">Talk to sales</a> for configuration.</p>
-
-    {# ── Product Proof ─────────────────────────────────────────────── #}
-    <div class="animate-in delay-500 mt-16 text-center">
-      <div class="grid grid-cols-1 md:grid-cols-3 gap-6 max-w-5xl mx-auto text-left mb-12">
-        <div class="p-6 bg-surface-50 rounded-lg border border-surface-200 flex flex-col">
-          <div class="text-xs font-bold text-brand-500 tracking-widest mb-3 uppercase">Deliverability</div>
-          <h3 class="text-lg font-bold text-surface-950 mb-2">Isolation where it changes outcomes</h3>
-          <p class="text-sm text-surface-600 leading-relaxed">Dedicated IP pools, warm-up state, provider throttling, send-time optimization, inbox-placement tests, and postmaster polling are packaged into paid tiers instead of sold as vague services.</p>
-        </div>
-        <div class="p-6 bg-surface-50 rounded-lg border border-surface-200 flex flex-col">
-          <div class="text-xs font-bold text-brand-500 tracking-widest mb-3 uppercase">Compliance</div>
-          <h3 class="text-lg font-bold text-surface-950 mb-2">Workflows before certificates</h3>
-          <p class="text-sm text-surface-600 leading-relaxed">Enterprise combines identity controls, governed contract review, and implementation planning. HIPAA availability is not currently offered.</p>
-        </div>
-        <div class="p-6 bg-surface-50 rounded-lg border border-surface-200 flex flex-col">
-          <div class="text-xs font-bold text-brand-500 tracking-widest mb-3 uppercase">Enterprise</div>
-          <h3 class="text-lg font-bold text-surface-950 mb-2">Priced for real ownership</h3>
-          <p class="text-sm text-surface-600 leading-relaxed">Enterprise Cloud starts at €1,750/month (annual contract) and funds dedicated onboarding, CSM coverage and SLA commitments. Dedicated Tenant and BYOC deployments are quoted and contracted separately.</p>
-        </div>
-      </div>
-
-      <div class="flex flex-wrap justify-center items-center gap-x-6 gap-y-2 mb-12">
-        <a href="{{ lp }}/sla/" class="inline-flex items-center gap-1.5 text-xs font-bold tracking-widest text-surface-400 hover:text-brand-500 transition-colors">
-          <svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
-          View SLA details
-        </a>
-        <a href="{{ lp }}/compliance/" class="inline-flex items-center gap-1.5 text-xs font-bold tracking-widest text-surface-400 hover:text-brand-500 transition-colors">
-          <svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
-          View compliance documentation
-        </a>
-        <a href="{{ lp }}/private-cloud/" class="inline-flex items-center gap-1.5 text-xs font-bold tracking-widest text-surface-400 hover:text-brand-500 transition-colors">
-          <svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
-          Review private deployment options
-        </a>
-      </div>
-    </div>
+    <p class="mt-8 flex flex-wrap gap-x-6 gap-y-2">
+      <a href="{{ lp }}/sla/">View SLA details</a>
+      <a href="{{ lp }}/compliance/">View compliance documentation</a>
+      <a href="{{ lp }}/private-cloud/">Review private deployment options</a>
+    </p>
 
   </div>

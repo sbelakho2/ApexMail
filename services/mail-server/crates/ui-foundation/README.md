@@ -44,26 +44,27 @@ outcome:
 
 ## Embedded assets and the stylesheet authority
 
-* `assets/globals.input.css` is the **authored authority** (tokens, layer
-  components, utilities) and `assets/globals.css` is the **compiled
-  artifact** served at `/assets/globals.css?v=<content hash>`
-  (`lib.rs::globals_css_url`). Regenerate the artifact with the repo recipe:
-  `apps/marketing-zola/tailwindcss -c crates/ui-foundation/tailwind.config.js
-  -i crates/ui-foundation/assets/globals.input.css -o
-  crates/ui-foundation/assets/globals.css` (from `services/mail-server`).
-  Do not hand-edit `globals.css`; `tokens.rs::source_artifact_drift` and the
-  class-integrity gate fail when the two diverge.
-* Tailwind CLI resolution (`tools/dev-start.sh::resolve_tailwind_cli`): the
-  vendored `apps/marketing-zola/tailwindcss` (official v3.4.17) is used when
-  it is executable on the current host; otherwise a `tailwindcss` on `PATH`
-  is used; otherwise the build fails with the official download URL for the
-  host platform
-  (`https://github.com/tailwindlabs/tailwindcss/releases/download/v3.4.17/tailwindcss-<macos|linux>-<arm64|x64>`).
-  Re-fetch the vendored binary from that URL when a checkout has a
-  foreign-platform copy.
-* `tailwind.config.js` scans every renderer that can emit a class:
-  `./src/**/*.rs`, `./assets/globals.input.css`, and
-  `../../api-server/src/**/*.rs`.
+* `assets/ark.css` is the **authored authority** (fonts, tokens, base, the
+  apex-* vocabulary) and `assets/globals.input.css` holds authored console
+  extras; `assets/globals.css` is the **compiled artifact** served at
+  `/assets/globals.css?v=<content hash>` (`lib.rs::globals_css_url`). The
+  build is ALL-RUST (`crates/ui-foundation/src/bin/cssgen.rs`) — no
+  Tailwind, no JavaScript anywhere in the pipeline. Regenerate the artifact
+  with the repo recipe (from `services/mail-server`):
+  `cargo run -p ui-foundation --bin cssgen -- --ark
+  crates/ui-foundation/assets/ark.css --include
+  crates/ui-foundation/assets/globals.input.css --content
+  'crates/ui-foundation/src/**/*.rs' --content
+  'crates/api-server/src/**/*.rs' --content
+  'crates/ui-foundation/assets/globals.input.css' --out
+  crates/ui-foundation/assets/globals.css`. Do not hand-edit `globals.css`;
+  `tokens.rs::source_artifact_drift` and the class-integrity gate fail when
+  the artifact is stale. cssgen resolves ONLY the structural utility
+  whitelist (layout grammar) plus the fixed KiwiCaptcha widget list — a
+  colour/typography/effect utility cannot compile, so every design decision
+  physically lives in ark.css. `tools/check_ark_law.py` bans design
+  utilities in the renderers; `tools/check_ark_mirror.py` keeps the
+  marketing copy of ark.css byte-identical.
 * Icons come from `baselines/web/icons.baseline.txt` through `icons.rs`
   (24×24 viewBox, `currentColor`, round caps, escaped class names).
 

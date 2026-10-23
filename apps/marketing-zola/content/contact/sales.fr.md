@@ -13,33 +13,35 @@ Pour un achat Enterprise, une revue de sécurité ou la planification d'un cloud
 
 ## Formulaire de demande commerciale
 
-<div id="enquiry-submitted" class="form-banner form-banner--success" role="status" hidden>
-  <p><strong>Merci — votre demande a bien été reçue.</strong> Notre équipe l'examine et répond sous 2 jours ouvrés.</p>
+<div id="enquiry-submitted" class="apex-notice apex-notice--ok" role="status" hidden>
+  <b>Reçue</b>
+  <p>Merci — votre demande a bien été reçue. Notre équipe l'examine et répond sous 2 jours ouvrés.</p>
 </div>
-<div id="enquiry-error" class="form-banner form-banner--error" role="alert" hidden>
-  <p><strong>Votre demande n'a pas pu être acceptée.</strong> Vérifiez les champs obligatoires (une adresse e-mail professionnelle valide est requise) puis réessayez.</p>
+<div id="enquiry-error" class="apex-notice apex-notice--fail" role="alert" hidden>
+  <b>Non acceptée</b>
+  <p>Votre demande n'a pas pu être acceptée. Vérifiez les champs obligatoires (une adresse e-mail professionnelle valide est requise) puis réessayez.</p>
 </div>
 <form id="sales-contact-form" class="space-y-6 max-w-2xl" method="POST" action="https://api.apexmail.ee/v1/contact/sales">
   <input type="hidden" name="page_language" value="fr" />
-  <div>
-    <label for="company" class="block text-xs font-bold tracking-widest text-surface-600 uppercase mb-2">Entreprise <span class="text-red-500">*</span></label>
+  <div class="apex-field">
+    <label for="company" class="apex-label">Entreprise <span class="">*</span></label>
     <input type="text" id="company" name="company" required maxlength="200"
-      class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-surface-50 focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none"
+      class="apex-input"
       placeholder="Nom de votre organisation" />
   </div>
 
-  <div>
-    <label for="work-email" class="block text-xs font-bold tracking-widest text-surface-600 uppercase mb-2">Email professionnel <span class="text-red-500">*</span></label>
+  <div class="apex-field">
+    <label for="work-email" class="apex-label">Email professionnel <span class="">*</span></label>
     <input type="email" id="work-email" name="work_email" required autocomplete="email"
-      class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-surface-50 focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none"
+      class="apex-input"
       placeholder="vous@entreprise.com" />
   </div>
 
   <div class="grid sm:grid-cols-2 gap-6">
-    <div>
-      <label for="monthly-volume" class="block text-xs font-bold tracking-widest text-surface-600 uppercase mb-2">Volume d'emails mensuel <span class="text-red-500">*</span></label>
-      <select id="monthly-volume" name="monthly_volume" required
-        class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-surface-50 focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none">
+    <div class="apex-field">
+      <label for="monthly-volume" class="apex-label">Volume d'emails mensuel <span class="">*</span></label>
+      <div class="apex-select-wrap">
+      <select id="monthly-volume" name="monthly_volume" required>
         <option value="" disabled selected>Sélectionnez une tranche de volume</option>
         <option value="lt_50k">Moins de 50 000</option>
         <option value="50k_150k">50 000 – 150 000</option>
@@ -50,19 +52,20 @@ Pour un achat Enterprise, une revue de sécurité ou la planification d'un cloud
         <option value="10m_plus">Plus de 10 millions</option>
       </select>
     </div>
+    </div>
 
-    <div>
-      <label for="peak-hourly-volume" class="block text-xs font-bold tracking-widest text-surface-600 uppercase mb-2">Pic de volume horaire</label>
+    <div class="apex-field">
+      <label for="peak-hourly-volume" class="apex-label">Pic de volume horaire</label>
       <input type="text" id="peak-hourly-volume" name="peak_hourly_volume" maxlength="200"
-        class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-surface-50 focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none"
+        class="apex-input"
         placeholder="ex. 50 000 par heure" />
     </div>
   </div>
 
-  <div>
-    <label for="current-provider" class="block text-xs font-bold tracking-widest text-surface-600 uppercase mb-2">Fournisseur actuel</label>
-    <select id="current-provider" name="current_provider"
-      class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-surface-50 focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none">
+  <div class="apex-field">
+    <label for="current-provider" class="apex-label">Fournisseur actuel</label>
+    <div class="apex-select-wrap">
+      <select id="current-provider" name="current_provider">
       <option value="" selected>Sélectionnez le fournisseur actuel (le cas échéant)</option>
       <option value="sendgrid">SendGrid (Twilio)</option>
       <option value="postmark">Postmark (ActiveCampaign)</option>
@@ -75,64 +78,65 @@ Pour un achat Enterprise, une revue de sécurité ou la planification d'un cloud
       <option value="none">Aucun fournisseur actuel</option>
       <option value="multiple">Plusieurs fournisseurs</option>
     </select>
+    </div>
   </div>
 
-  <fieldset class="border border-surface-200 p-4">
-    <legend class="text-xs font-bold tracking-widest text-surface-600 uppercase px-2">Préférence de déploiement</legend>
+  <fieldset class="border p-4">
+    <legend class="px-2">Préférence de déploiement</legend>
     <div class="space-y-3 mt-3">
-      <label class="flex items-center gap-3 text-sm text-surface-700">
-        <input type="radio" name="deployment_preference" value="shared" checked class="accent-brand-500" />
+      <label class="apex-check">
+        <input type="radio" name="deployment_preference" value="shared" checked />
         <span><strong>Cloud mutualisé</strong> — Infrastructure UE multi-tenant</span>
       </label>
-      <label class="flex items-center gap-3 text-sm text-surface-700">
-        <input type="radio" name="deployment_preference" value="dedicated" class="accent-brand-500" />
+      <label class="apex-check">
+        <input type="radio" name="deployment_preference" value="dedicated" />
         <span><strong>Tenance dédiée</strong> — Infrastructure isolée mono-tenant</span>
       </label>
-      <label class="flex items-center gap-3 text-sm text-surface-700">
-        <input type="radio" name="deployment_preference" value="byoc" class="accent-brand-500" />
+      <label class="apex-check">
+        <input type="radio" name="deployment_preference" value="byoc" />
         <span><strong>BYOC / Déploiement privé</strong> — Déploiement géré dans votre compte cloud</span>
       </label>
-      <label class="flex items-center gap-3 text-sm text-surface-700">
-        <input type="radio" name="deployment_preference" value="not_sure" class="accent-brand-500" />
+      <label class="apex-check">
+        <input type="radio" name="deployment_preference" value="not_sure" />
         <span><strong>Pas encore décidé</strong> — Besoin d'aide pour choisir le bon modèle</span>
       </label>
     </div>
   </fieldset>
 
-  <fieldset class="border border-surface-200 p-4">
-    <legend class="text-xs font-bold tracking-widest text-surface-600 uppercase px-2">Exigences de conformité <span class="text-xs font-normal text-surface-400 normal-case tracking-normal">(cochez tout ce qui s'applique)</span></legend>
+  <fieldset class="border p-4">
+    <legend class="px-2">Exigences de conformité <span class="">(cochez tout ce qui s'applique)</span></legend>
     <div class="space-y-3 mt-3">
-      <label class="flex items-center gap-3 text-sm text-surface-700">
-        <input type="checkbox" name="compliance_needs" value="gdpr" class="accent-brand-500" />
+      <label class="apex-check">
+        <input type="checkbox" name="compliance_needs" value="gdpr" />
         <span>RGPD / revue de déploiement pour la résidence des données</span>
       </label>
-      <label class="flex items-center gap-3 text-sm text-surface-700">
-        <input type="checkbox" name="compliance_needs" value="hipaa" class="accent-brand-500" />
+      <label class="apex-check">
+        <input type="checkbox" name="compliance_needs" value="hipaa" />
         <span>Cas d'usage HIPAA (non proposé actuellement ; discuter des alternatives)</span>
       </label>
-      <label class="flex items-center gap-3 text-sm text-surface-700">
-        <input type="checkbox" name="compliance_needs" value="ccpa" class="accent-brand-500" />
+      <label class="apex-check">
+        <input type="checkbox" name="compliance_needs" value="ccpa" />
         <span>CCPA / lois américaines sur la vie privée des États</span>
       </label>
-      <label class="flex items-center gap-3 text-sm text-surface-700">
-        <input type="checkbox" name="compliance_needs" value="fedramp" class="accent-brand-500" />
+      <label class="apex-check">
+        <input type="checkbox" name="compliance_needs" value="fedramp" />
         <span>FedRAMP / Secteur public</span>
       </label>
-      <label class="flex items-center gap-3 text-sm text-surface-700">
-        <input type="checkbox" name="compliance_needs" value="regional_residency" class="accent-brand-500" />
+      <label class="apex-check">
+        <input type="checkbox" name="compliance_needs" value="regional_residency" />
         <span>Exigence spécifique de résidence régionale des données</span>
       </label>
-      <label class="flex items-center gap-3 text-sm text-surface-700">
-        <input type="checkbox" name="compliance_needs" value="dpf" class="accent-brand-500" />
+      <label class="apex-check">
+        <input type="checkbox" name="compliance_needs" value="dpf" />
         <span>EU-US Data Privacy Framework</span>
       </label>
     </div>
   </fieldset>
 
-  <div>
-    <label for="target-timeline" class="block text-xs font-bold tracking-widest text-surface-600 uppercase mb-2">Calendrier visé</label>
-    <select id="target-timeline" name="target_timeline"
-      class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-surface-50 focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none">
+  <div class="apex-field">
+    <label for="target-timeline" class="apex-label">Calendrier visé</label>
+    <div class="apex-select-wrap">
+      <select id="target-timeline" name="target_timeline">
       <option value="" selected>Sélectionnez un calendrier</option>
       <option value="immediate">Immédiat (sous 2 semaines)</option>
       <option value="30_days">Sous 30 jours</option>
@@ -140,12 +144,13 @@ Pour un achat Enterprise, une revue de sécurité ou la planification d'un cloud
       <option value="6_months">Sous 6 mois</option>
       <option value="exploring">En exploration — pas de calendrier fixe</option>
     </select>
+    </div>
   </div>
 
-  <div>
-    <label for="security-review" class="block text-xs font-bold tracking-widest text-surface-600 uppercase mb-2">Besoins de revue de sécurité</label>
-    <select id="security-review" name="security_review_needs"
-      class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-surface-50 focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none">
+  <div class="apex-field">
+    <label for="security-review" class="apex-label">Besoins de revue de sécurité</label>
+    <div class="apex-select-wrap">
+      <select id="security-review" name="security_review_needs">
       <option value="" selected>Sélectionnez le niveau de revue</option>
       <option value="standard">Standard — questionnaire de sécurité traité au cas par cas à partir du matériel de revue actuel (aucun pack SIG/CAIQ/HECVAT standardisé n'est inclus dans l'offre)</option>
       <option value="detailed">Détaillé — questionnaire de sécurité personnalisé requis</option>
@@ -153,23 +158,22 @@ Pour un achat Enterprise, une revue de sécurité ou la planification d'un cloud
       <option value="on_site">Audit sur site ou revue d'architecture requis</option>
       <option value="none">Aucune revue de sécurité requise à ce stade</option>
     </select>
+    </div>
   </div>
 
-  <div>
-    <label for="additional-context" class="block text-xs font-bold tracking-widest text-surface-600 uppercase mb-2">Contexte complémentaire</label>
+  <div class="apex-field">
+    <label for="additional-context" class="apex-label">Contexte complémentaire</label>
     <textarea id="additional-context" name="additional_context" rows="4" maxlength="2000"
-      class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-surface-50 focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none resize-y"
       placeholder="Exigences d'intégration spécifiques, plans de migration, besoins d'architecture de sécurité ou tout autre contexte nous aidant à préparer la bonne recommandation."></textarea>
   </div>
 
   <div>
     <button type="submit"
-      class="btn-primary px-8 py-4 text-base uppercase w-full sm:w-auto">
+      class="apex-btn apex-btn--primary w-full sm:w-auto">
       Envoyer la demande
-      <svg class="w-4 h-4 ml-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
     </button>
   </div>
-  <p class="form-privacy-note">En envoyant ce formulaire, vous acceptez notre <a href="/fr/privacy/">politique de confidentialité</a>. Nous utilisons ces informations uniquement pour répondre à votre demande (RGPD art. 13).</p>
+  <p class="apex-footnote">En envoyant ce formulaire, vous acceptez notre <a href="/fr/privacy/">politique de confidentialité</a>. Nous utilisons ces informations uniquement pour répondre à votre demande (RGPD art. 13).</p>
 </form>
 
 ## Les étapes suivantes

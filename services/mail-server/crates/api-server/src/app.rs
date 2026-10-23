@@ -2579,7 +2579,7 @@ fn branded_not_found(config: &Config, host: Option<&str>) -> Response {
         inner
     } else {
         format!(
-            "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Page Not Found — ApexMail</title><link rel=\"stylesheet\" href=\"/assets/globals.css\"></head><body class=\"antialiased bg-background text-surface-950\">{}</body></html>",
+            "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Page Not Found — ApexMail</title><link rel=\"stylesheet\" href=\"/assets/globals.css\"></head><body class=\"\">{}</body></html>",
             inner,
         )
     };
@@ -5444,7 +5444,9 @@ mod tests {
             "every form must carry its own hidden token input"
         );
         assert_eq!(
-            two_forms.matches("class=\"kiwi-container\"").count(),
+            two_forms
+                .matches("class=\"kiwi-container apex-input\"")
+                .count(),
             2,
             "every form must carry its own widget instance"
         );
