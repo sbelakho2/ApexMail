@@ -92,7 +92,7 @@
       {# Zero-JS policy: dark mode follows prefers-color-scheme only, so
          there is no theme toggle button (it would be a dead control). #}
       <div class="hidden lg:flex items-center gap-3">
-        <a href="{{ config.extra.app_url }}/login" class="px-3 py-2 apex-em apex-btn apex-btn--sm">
+        <a href="{{ config.extra.app_url }}/login" class="px-3 py-2 apex-btn apex-btn--sm">
           {% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["signin"] %}{{ i18n_data[l]["header"]["signin"] }}{% else %}Sign In{% endif %}
         </a>
         <a href="{{ config.extra.app_url }}/signup" class="apex-btn apex-btn--primary">
@@ -158,15 +158,15 @@
         </div>
       </div>
 
-      <a href="{{ lp }}/pricing/" {% if current_path_value == "/pricing" or current_path_value == "/pricing/" %}aria-current="page"{% endif %} class="block px-3 py-3 apex-em apex-btn">{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["pricing"] %}{{ i18n_data[l]["header"]["pricing"] }}{% else %}Pricing{% endif %}</a>
-      <a href="{{ lp }}/eu-sovereign/" {% if current_path_value == "/eu-sovereign" or current_path_value == "/eu-sovereign/" %}aria-current="page"{% endif %} class="block px-3 py-3 apex-em apex-btn">{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["sovereignty"] %}{{ i18n_data[l]["header"]["sovereignty"] }}{% else %}Sovereignty{% endif %}</a>
-      <a href="{{ lp }}/compliance/" {% if current_path_value == "/compliance" or current_path_value == "/compliance/" %}aria-current="page"{% endif %} class="block px-3 py-3 apex-em apex-btn">{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["compliance"] %}{{ i18n_data[l]["header"]["compliance"] }}{% else %}Compliance{% endif %}</a>
-      <a href="{{ lp }}/solutions/enterprise/" {% if current_path_value == "/solutions/enterprise" or current_path_value == "/solutions/enterprise/" %}aria-current="page"{% endif %} class="block px-3 py-3 apex-em apex-btn">{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["enterprise"] %}{{ i18n_data[l]["header"]["enterprise"] }}{% else %}Enterprise{% endif %}</a>
+      <a href="{{ lp }}/pricing/" {% if current_path_value == "/pricing" or current_path_value == "/pricing/" %}aria-current="page"{% endif %} class="block px-3 py-3 apex-btn">{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["pricing"] %}{{ i18n_data[l]["header"]["pricing"] }}{% else %}Pricing{% endif %}</a>
+      <a href="{{ lp }}/eu-sovereign/" {% if current_path_value == "/eu-sovereign" or current_path_value == "/eu-sovereign/" %}aria-current="page"{% endif %} class="block px-3 py-3 apex-btn">{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["sovereignty"] %}{{ i18n_data[l]["header"]["sovereignty"] }}{% else %}Sovereignty{% endif %}</a>
+      <a href="{{ lp }}/compliance/" {% if current_path_value == "/compliance" or current_path_value == "/compliance/" %}aria-current="page"{% endif %} class="block px-3 py-3 apex-btn">{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["compliance"] %}{{ i18n_data[l]["header"]["compliance"] }}{% else %}Compliance{% endif %}</a>
+      <a href="{{ lp }}/solutions/enterprise/" {% if current_path_value == "/solutions/enterprise" or current_path_value == "/solutions/enterprise/" %}aria-current="page"{% endif %} class="block px-3 py-3 apex-btn">{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["enterprise"] %}{{ i18n_data[l]["header"]["enterprise"] }}{% else %}Enterprise{% endif %}</a>
 
       <div class="pt-6 border-t space-y-3 px-3">
         {# Theme toggle removed with the zero-JS migration: dark mode
            follows the OS prefers-color-scheme setting. #}
-        <a href="{{ config.extra.app_url }}/login" class="block w-full py-3 border apex-em apex-btn">
+        <a href="{{ config.extra.app_url }}/login" class="block w-full py-3 apex-btn">
           {% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["signin"] %}{{ i18n_data[l]["header"]["signin"] }}{% else %}Sign In{% endif %}
         </a>
         <a href="{{ config.extra.app_url }}/signup" class="block w-full apex-btn apex-btn--primary py-3">

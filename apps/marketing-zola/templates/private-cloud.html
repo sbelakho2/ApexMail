@@ -21,10 +21,10 @@
    scroll-mt so the sticky header never covers it. #}
 <nav aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['private_cloud_jump'] %}{{ i18n_data[l]['a11y']['private_cloud_jump'] }}{% else %}Private cloud sections{% endif %}" class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pb-4">
   <div class="flex flex-wrap gap-2 justify-center">
-    <a href="#deployment-options" class="px-3 py-1.5 border apex-em apex-btn apex-btn--sm">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["hero_badge"] %}{{ i18n_data[l]["private_cloud"]["hero_badge"] }}{% else %}Deployment models{% endif %}</a>
-    <a href="#security-isolation" class="px-3 py-1.5 border apex-em apex-btn apex-btn--sm">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["security_title"] %}{{ i18n_data[l]["private_cloud"]["security_title"] }}{% else %}Isolation{% endif %}</a>
-    <a href="#dedicated-ips" class="px-3 py-1.5 border apex-em apex-btn apex-btn--sm">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["dedicated_title"] %}{{ i18n_data[l]["private_cloud"]["dedicated_title"] }}{% else %}Dedicated IPs{% endif %}</a>
-    <a href="#architecture-review" class="px-3 py-1.5 border apex-em apex-btn apex-btn--sm">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["cta_button"] %}{{ i18n_data[l]["private_cloud"]["cta_button"] }}{% else %}Architecture review{% endif %}</a>
+    <a href="#deployment-options" class="px-3 py-1.5 apex-btn apex-btn--sm">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["hero_badge"] %}{{ i18n_data[l]["private_cloud"]["hero_badge"] }}{% else %}Deployment models{% endif %}</a>
+    <a href="#security-isolation" class="px-3 py-1.5 apex-btn apex-btn--sm">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["security_title"] %}{{ i18n_data[l]["private_cloud"]["security_title"] }}{% else %}Isolation{% endif %}</a>
+    <a href="#dedicated-ips" class="px-3 py-1.5 apex-btn apex-btn--sm">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["dedicated_title"] %}{{ i18n_data[l]["private_cloud"]["dedicated_title"] }}{% else %}Dedicated IPs{% endif %}</a>
+    <a href="#architecture-review" class="px-3 py-1.5 apex-btn apex-btn--sm">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["cta_button"] %}{{ i18n_data[l]["private_cloud"]["cta_button"] }}{% else %}Architecture review{% endif %}</a>
   </div>
 </nav>
 

@@ -27,7 +27,7 @@
             </li>
             {% endfor %}
           </ul>
-          <a href="/docs/api/" class="inline-flex items-center gap-2 apex-em apex-link">
+          <a href="/docs/api/" class="inline-flex items-center gap-2 apex-link">
             {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["detail_api_cta"] %}{{ i18n_data[l]["features"]["detail_api_cta"] }}{% else %}Read API Docs{% endif %}
             <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
           </a>
@@ -86,7 +86,7 @@ print(detail.json()["data"]["status"])  # 'queued'</code></pre>
             </li>
             {% endfor %}
           </ul>
-          <a href="{{ lp }}/compliance/" class="inline-flex items-center gap-2 apex-em apex-link">
+          <a href="{{ lp }}/compliance/" class="inline-flex items-center gap-2 apex-link">
             {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["detail_compliance_cta"] %}{{ i18n_data[l]["features"]["detail_compliance_cta"] }}{% else %}Learn About Compliance{% endif %}
             <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
           </a>
@@ -145,7 +145,7 @@ message_id = resp.json()["data"]["id"]</code></pre>
             </li>
             {% endfor %}
           </ul>
-          <a href="/docs/analytics/" class="inline-flex items-center gap-2 apex-em apex-link">
+          <a href="/docs/analytics/" class="inline-flex items-center gap-2 apex-link">
             {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["detail_insights_cta"] %}{{ i18n_data[l]["features"]["detail_insights_cta"] }}{% else %}View Analytics Docs{% endif %}
             <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
           </a>

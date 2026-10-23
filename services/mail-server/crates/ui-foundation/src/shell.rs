@@ -327,10 +327,9 @@ impl<'a> ShellHeader<'a> {
                     {mobile_toggle}\
                     <form method=\"get\" action=\"/campaigns\" role=\"search\" class=\"relative hidden md:block\">\
                         <label class=\"sr-only apex-label\" for=\"global-search\">Search campaigns</label>\
-                        <div class=\"flex items-center gap-2 px-3 py-1.5 border min-w-[220px] apex-em\">\
-                            <svg xmlns=\"http://www.w3.org/2000/svg\" width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><circle cx=\"11\" cy=\"11\" r=\"8\"/><path d=\"m21 21-4.3-4.3\"/></svg>\
+                        <div class=\"flex items-center gap-2 min-w-[220px]\">\
                             <input id=\"global-search\" type=\"search\" name=\"query\" placeholder=\"Search campaigns…\" class=\"w-full apex-input\" />\
-                            <button type=\"submit\" class=\"apex-btn\">Search</button>\
+                            <button type=\"submit\" class=\"apex-btn apex-btn--sm\">Search</button>\
                         </div>\
                     </form>\
                 </div>\
@@ -338,9 +337,7 @@ impl<'a> ShellHeader<'a> {
                     {plan_label_block}\
                     <div class=\"flex items-center gap-3 pl-2 min-w-0\">\
                         {identity_block}\
-                        <div class=\"apex-avatar relative flex shrink-0 h-9 w-9 border items-center justify-center\" aria-label=\"Signed in as {avatar}\">\
-                            <span class=\"apex-em\">{avatar}</span>\
-                        </div>\
+                        <span class=\"apex-avatar\" aria-label=\"Signed in as {avatar}\">{avatar}</span>\
                     </div>\
                 </div>\
             </header>",
@@ -666,13 +663,13 @@ fn render_marketing_header() -> String {
          <svg xmlns=\"http://www.w3.org/2000/svg\" class=\"w-5 h-5\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><polygon points=\"13 2 3 14 12 14 11 22 21 10 12 10 13 2\"/></svg>\
          </div><span class=\"apex-em\">ApexMail</span></a>\
          <div class=\"hidden lg:flex items-center gap-6\">\
-         <a href=\"/features\" class=\"apex-em apex-link\">Features</a>\
-         <a href=\"/pricing\" class=\"apex-em apex-link\">Pricing</a>\
-         <a href=\"/docs\" class=\"apex-em apex-link\">Docs</a>\
+         <a href=\"/features\" class=\"apex-link\">Features</a>\
+         <a href=\"/pricing\" class=\"apex-link\">Pricing</a>\
+         <a href=\"/docs\" class=\"apex-link\">Docs</a>\
          </div>\
          <div class=\"flex items-center gap-3\">\
-         <a href=\"/login\" class=\"px-3 py-2 apex-em apex-btn\">Login</a>\
-         <a href=\"/signup\" class=\"apex-btn apex-btn--primary px-4 py-2 apex-em\">Get Started</a>\
+         <a href=\"/login\" class=\"px-3 py-2 apex-btn\">Login</a>\
+         <a href=\"/signup\" class=\"apex-btn apex-btn--primary px-4 py-2\">Get Started</a>\
          </div></div></nav></header>"
         .to_string()
 }

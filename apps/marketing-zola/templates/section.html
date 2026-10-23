@@ -43,7 +43,7 @@
   {% if section.pages or section.subsections %}
   <div class="mx-auto max-w-3xl px-6 py-12">
     {% for page in section.pages %}
-    <a href="{{ page.permalink }}" class="block mb-4 p-6 border apex-btn">
+    <a href="{{ page.permalink }}" class="block mb-4 p-6 apex-btn">
       <h2 class="apex-h2">{{ page.title }}</h2>
       {% if page.description %}<p class="mt-2">{{ page.description }}</p>{% endif %}
     </a>
@@ -52,7 +52,7 @@
        nested indexes stay discoverable. #}
     {% for sub in section.subsections %}
     {% set subsec = get_section(path=sub) %}
-    <a href="{{ subsec.permalink }}" class="block mb-4 p-6 border apex-btn">
+    <a href="{{ subsec.permalink }}" class="block mb-4 p-6 apex-btn">
       <h2 class="apex-h2">{{ subsec.title }}</h2>
       {% if subsec.description %}<p class="mt-2">{{ subsec.description }}</p>{% endif %}
     </a>
@@ -70,9 +70,9 @@
         {% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['no_entries_body'] %}{{ i18n_data[l]['a11y']['no_entries_body'] }}{% else %}This index has no published entries yet. Start with the quickstart, the API reference, or contact us if you expected something here.{% endif %}
       </p>
       <div class="mt-4 flex flex-wrap gap-3">
-        <a href="/quickstart/" class="apex-em apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]['footer'] and i18n_data[l]['footer']['documentation'] %}{{ i18n_data[l]['footer']['documentation'] }}{% else %}Quickstart{% endif %}</a>
-        <a href="/docs/" class="apex-em apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]['header'] and i18n_data[l]['header']['documentation'] %}{{ i18n_data[l]['header']['documentation'] }}{% else %}Documentation{% endif %}</a>
-        <a href="{{ lp }}/contact/" class="apex-em apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]['footer'] and i18n_data[l]['footer']['contact'] %}{{ i18n_data[l]['footer']['contact'] }}{% else %}Contact{% endif %}</a>
+        <a href="/quickstart/" class="apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]['footer'] and i18n_data[l]['footer']['documentation'] %}{{ i18n_data[l]['footer']['documentation'] }}{% else %}Quickstart{% endif %}</a>
+        <a href="/docs/" class="apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]['header'] and i18n_data[l]['header']['documentation'] %}{{ i18n_data[l]['header']['documentation'] }}{% else %}Documentation{% endif %}</a>
+        <a href="{{ lp }}/contact/" class="apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]['footer'] and i18n_data[l]['footer']['contact'] %}{{ i18n_data[l]['footer']['contact'] }}{% else %}Contact{% endif %}</a>
       </div>
     </div>
   </div>

@@ -1,0 +1,109 @@
+/*
+ * ApexMail syntax palette — the ARK document law applied to code.
+ *
+ * giallo emits spans with z-* classes from an upstream "github-light" theme;
+ * this file REPLACES that theme: the palette is ARK tokens only (ink
+ * structure, blue for names and constants, red for errors and removals,
+ * amber for diff warnings), so the block flips with the theme by
+ * construction and no third-party colours (green, purple, GitHub blue)
+ * survive. The class names stay as giallo emits them.
+ */
+
+.z-code {
+  color: rgb(var(--foreground));
+  background-color: rgb(var(--background));
+}
+
+.z-hl { background-color: rgb(var(--secondary)); }
+
+.giallo-ln { color: rgb(var(--surface-500)); }
+
+/* Comments and brackets: the quiet layer. */
+.z-comment,
+.z-punctuation.z-definition.z-comment,
+.z-brackethighlighter.z-tag,
+.z-brackethighlighter.z-curly,
+.z-brackethighlighter.z-round,
+.z-brackethighlighter.z-square,
+.z-brackethighlighter.z-angle,
+.z-brackethighlighter.z-quote { color: rgb(var(--muted-foreground)); }
+
+/* Names, constants, types, links: interaction blue. */
+.z-constant,
+.z-support,
+.z-support.z-constant,
+.z-support.z-variable,
+.z-meta.z-module-reference,
+.z-meta.z-separator,
+.z-meta.z-output,
+.z-meta.z-diff.z-header,
+.z-entity.z-name,
+.z-entity.z-name.z-constant,
+.z-variable,
+.z-variable.z-language,
+.z-variable.z-other.z-constant,
+.z-variable.z-other.z-enummember,
+.z-storage.z-type,
+.z-markup.z-heading,
+.z-markup.z-inline.z-raw,
+.z-punctuation.z-definition.z-string,
+.z-string.z-other.z-link,
+.z-constant.z-other.z-reference.z-link { color: rgb(var(--accent-text)); }
+
+/* Keywords, strings and plain code: ink. */
+.z-keyword,
+.z-storage,
+.z-storage.z-modifier.z-package,
+.z-storage.z-modifier.z-import,
+.z-storage.z-type.z-java,
+.z-entity.z-name.z-tag,
+.z-variable.z-other,
+.z-variable.z-parameter.z-function,
+.z-source,
+.z-source.z-regexp,
+.z-string.z-regexp,
+.z-string.z-regexp.z-character-class,
+.z-string.z-regexp.z-arbitrary-repitition,
+.z-string.z-comment,
+.z-source.z-ruby.z-embedded,
+.z-markup.z-italic,
+.z-markup.z-bold,
+.z-markup.z-underline,
+.z-markup.z-strikethrough { color: rgb(var(--foreground)); }
+
+/* Removals and errors: destruction red. */
+.z-invalid,
+.z-invalid.z-broken,
+.z-invalid.z-deprecated,
+.z-invalid.z-illegal,
+.z-invalid.z-unimplemented,
+.z-message.z-error,
+.z-brackethighlighter.z-unmatched,
+.z-markup.z-deleted,
+.z-punctuation.z-definition.z-deleted,
+.z-meta.z-diff.z-header.z-from-file { color: rgb(var(--destructive)); }
+
+/* Insertions and quotes: verified blue (no green exists). */
+.z-markup.z-quote,
+.z-markup.z-inserted,
+.z-punctuation.z-definition.z-inserted,
+.z-meta.z-diff.z-header.z-to-file,
+.z-constant.z-character.z-escape { color: rgb(var(--accent-text)); }
+
+/* Changed lines: caution amber. */
+.z-markup.z-changed,
+.z-punctuation.z-definition.z-changed,
+.z-meta.z-diff.z-range { color: rgb(var(--warning)); }
+
+.z-markup.z-ignored,
+.z-markup.z-untracked {
+  color: rgb(var(--background));
+  background-color: rgb(var(--accent-text));
+}
+
+.z-carriage-return {
+  color: rgb(var(--destructive-foreground));
+  background-color: rgb(var(--destructive));
+}
+
+.z-punctuation.z-definition.z-list.z-begin.z-markdown { color: rgb(var(--warning)); }

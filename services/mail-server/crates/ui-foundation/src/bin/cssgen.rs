@@ -79,7 +79,9 @@ fn main() -> ExitCode {
 
     let mut sheet = String::new();
     sheet.push_str(BANNER);
+    sheet.push_str("@layer base {\n");
     sheet.push_str(BASE_RESET);
+    sheet.push_str("}\n");
 
     for path in std::iter::once(&ark).chain(includes.iter()) {
         let css = match fs::read_to_string(path) {
@@ -228,7 +230,7 @@ const BANNER: &str = r#"/* ApexMail compiled stylesheet — ALL-RUST BUILD (cssg
 /// Preflight-equivalent reset: everything ark.css and the vocabulary rely
 /// on, and nothing more.
 const BASE_RESET: &str = r#"/* ── base reset ── */
-*, ::before, ::after { box-sizing: border-box; border-width: 0; border-style: solid; border-color: rgb(var(--border, 196 205 213)); }
+*, ::before, ::after { box-sizing: border-box; border-width: 0; border-style: solid; border-color: rgb(var(--border, 196 205 213)); border-radius: 0; }
 html { -webkit-text-size-adjust: 100%; tab-size: 4; }
 body { margin: 0; }
 hr { height: 0; color: inherit; border-top-width: 1px; }

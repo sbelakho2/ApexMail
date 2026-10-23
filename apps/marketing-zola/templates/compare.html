@@ -16,9 +16,9 @@
    reader's language tree. #}
 <nav aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['compare_jump'] %}{{ i18n_data[l]['a11y']['compare_jump'] }}{% else %}Comparison sections{% endif %}" class="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 pt-8">
   <div class="flex flex-wrap items-center gap-2 apex-em apex-section-head">
-    <a href="#comparison" class="px-3 py-1.5 border apex-btn apex-btn--sm">{% if i18n_data and i18n_data[l] and i18n_data[l]["compare"] and i18n_data[l]["compare"]["hero_title"] %}{{ i18n_data[l]["compare"]["hero_title"] }}{% else %}Comparison{% endif %}</a>
-    <a href="{{ lp }}/compare/methodology/" class="px-3 py-1.5 border apex-btn apex-btn--sm">{% if i18n_data and i18n_data[l] and i18n_data[l]["compare"] and i18n_data[l]["compare"]["table_methodology"] %}{{ i18n_data[l]["compare"]["table_methodology"] }}{% else %}Methodology{% endif %}</a>
-    <a href="#decision-guide" class="px-3 py-1.5 border apex-btn apex-btn--sm">{% if i18n_data and i18n_data[l] and i18n_data[l]["compare"] and i18n_data[l]["compare"]["cta_title"] %}{{ i18n_data[l]["compare"]["cta_title"] }}{% else %}Decision guide{% endif %}</a>
+    <a href="#comparison" class="px-3 py-1.5 apex-btn apex-btn--sm">{% if i18n_data and i18n_data[l] and i18n_data[l]["compare"] and i18n_data[l]["compare"]["hero_title"] %}{{ i18n_data[l]["compare"]["hero_title"] }}{% else %}Comparison{% endif %}</a>
+    <a href="{{ lp }}/compare/methodology/" class="px-3 py-1.5 apex-btn apex-btn--sm">{% if i18n_data and i18n_data[l] and i18n_data[l]["compare"] and i18n_data[l]["compare"]["table_methodology"] %}{{ i18n_data[l]["compare"]["table_methodology"] }}{% else %}Methodology{% endif %}</a>
+    <a href="#decision-guide" class="px-3 py-1.5 apex-btn apex-btn--sm">{% if i18n_data and i18n_data[l] and i18n_data[l]["compare"] and i18n_data[l]["compare"]["cta_title"] %}{{ i18n_data[l]["compare"]["cta_title"] }}{% else %}Decision guide{% endif %}</a>
   </div>
 </nav>
 

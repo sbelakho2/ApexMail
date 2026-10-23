@@ -5444,9 +5444,7 @@ mod tests {
             "every form must carry its own hidden token input"
         );
         assert_eq!(
-            two_forms
-                .matches("class=\"kiwi-container apex-input\"")
-                .count(),
+            two_forms.matches("class=\"kiwi-container\"").count(),
             2,
             "every form must carry its own widget instance"
         );

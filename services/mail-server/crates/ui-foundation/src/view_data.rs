@@ -837,7 +837,7 @@ pub fn render_data_cell(cell: &DataCell) -> String {
             html_escape(value),
         ),
         DataCell::Link { href, text } => format!(
-            "<a href=\"{}\" class=\"apex-em apex-link\">{}</a>",
+            "<a href=\"{}\" class=\"apex-link\">{}</a>",
             attribute_escape(href),
             html_escape(text)
         ),

@@ -1494,7 +1494,7 @@ fn inject_opt_in_auto_refresh(
     );
     let pill = match params.refresh_secs {
         Some(secs) => format!(
-            "<div role=\"status\" class=\"apex-statusline\"><span class=\"apex-status apex-status--on\">Live</span><span class=\"apex-em\">Live — auto-refresh every {secs}s</span><span class=\"\">{updated}</span><a class=\"apex-em apex-link\" href=\"{path}\" aria-label=\"Pause auto-refresh\">Pause</a></div>",
+            "<div role=\"status\" class=\"apex-statusline\"><span class=\"apex-status apex-status--on\">Live</span><span class=\"apex-em\">Live — auto-refresh every {secs}s</span><span class=\"\">{updated}</span><a class=\"apex-link\" href=\"{path}\" aria-label=\"Pause auto-refresh\">Pause</a></div>",
             updated = updated,
             path = crate::shell::html_escape(path),
         ),
@@ -2767,7 +2767,7 @@ fn legal_redirect_page(origin: &str, target: &str) -> String {
 </head>\
 <body><main class=\"min-h-screen flex flex-col items-center justify-center gap-4 p-8\">\
 <h1 class=\"apex-page-title\">This page has moved</h1>\
-<p class=\"\">The canonical location is <a class=\"apex-em apex-link\" href=\"{origin}{target}\">{origin}{target}</a>.</p>\
+<p class=\"\">The canonical location is <a class=\"apex-link\" href=\"{origin}{target}\">{origin}{target}</a>.</p>\
 </main></body>\
 </html>",
         origin = crate::shell::html_escape(origin),

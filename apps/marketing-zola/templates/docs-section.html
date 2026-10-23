@@ -19,7 +19,7 @@
 
       {# First-send onboarding leads the documentation hub: the fastest path
          for a new integration is a real send, not a reference crawl. #}
-      <a href="/quickstart/" class="mt-8 flex flex-col sm:flex-row sm:items-center gap-4 border p-5 apex-btn">
+      <a href="/quickstart/" class="mt-8 flex flex-col sm:flex-row sm:items-center gap-4 p-5 apex-btn">
         <div class="flex-1">
           <p class="apex-em">{% if i18n_data and i18n_data[l] and i18n_data[l]['docs'] and i18n_data[l]['docs']['first_send_title'] %}{{ i18n_data[l]['docs']['first_send_title'] }}{% else %}Send your first email{% endif %}</p>
           <p class="mt-1">{% if i18n_data and i18n_data[l] and i18n_data[l]['docs'] and i18n_data[l]['docs']['first_send_desc'] %}{{ i18n_data[l]['docs']['first_send_desc'] }}{% else %}Verify a domain, copy a request, and watch it move from accepted to delivered in the quickstart.{% endif %}</p>
@@ -28,15 +28,15 @@
       </a>
 
       <div class="mt-8 grid gap-3 md:grid-cols-3">
-        <a href="/api-explorer/" class="border p-5 apex-btn">
+        <a href="/api-explorer/" class="p-5 apex-btn">
           <p class="apex-em">API Explorer</p>
           <p class="mt-2">Run real requests against the isolated live sandbox.</p>
         </a>
-        <a href="{{ lp }}/compliance/" class="border p-5 apex-btn">
+        <a href="{{ lp }}/compliance/" class="p-5 apex-btn">
           <p class="apex-em">Compliance</p>
           <p class="mt-2">Review controls for regulated deployments and private cloud rollouts.</p>
         </a>
-        <a href="{{ lp }}/status/" class="border p-5 apex-btn">
+        <a href="{{ lp }}/status/" class="p-5 apex-btn">
           <p class="apex-em">Status</p>
           <p class="mt-2">Check service health and rollout readiness before launch.</p>
         </a>
@@ -53,7 +53,7 @@
       </div>
       <div class="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
         {% for page in section.pages %}
-        <a href="{{ page.permalink }}" class="block border p-6 apex-btn">
+        <a href="{{ page.permalink }}" class="block p-6 apex-btn">
           <h3 class="apex-h3">{{ page.title }}</h3>
           {% if page.description %}<p class="mt-3">{{ page.description }}</p>{% endif %}
         </a>
@@ -63,7 +63,7 @@
            page remains discoverable exactly as before. #}
         {% for sub in section.subsections %}
         {% set subsec = get_section(path=sub) %}
-        <a href="{{ subsec.permalink }}" class="block border p-6 apex-btn">
+        <a href="{{ subsec.permalink }}" class="block p-6 apex-btn">
           <h3 class="apex-h3">{{ subsec.title }}</h3>
           {% if subsec.description %}<p class="mt-3">{{ subsec.description }}</p>{% endif %}
         </a>
@@ -81,9 +81,9 @@
         <h2 class="apex-h2">{% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['no_guides'] %}{{ i18n_data[l]['a11y']['no_guides'] }}{% else %}Guides are being prepared.{% endif %}</h2>
         <p class="mt-2">{% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['no_guides_body'] %}{{ i18n_data[l]['a11y']['no_guides_body'] }}{% else %}No guides are published in this index yet. The API reference, the quickstart, and support are available now.{% endif %}</p>
         <div class="mt-4 flex flex-wrap gap-4">
-          <a href="/docs/api/" class="apex-em apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]['footer'] and i18n_data[l]['footer']['api_reference'] %}{{ i18n_data[l]['footer']['api_reference'] }}{% else %}API Reference{% endif %}</a>
-          <a href="/quickstart/" class="apex-em apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]['docs'] and i18n_data[l]['docs']['first_send_title'] %}{{ i18n_data[l]['docs']['first_send_title'] }}{% else %}Send your first email{% endif %}</a>
-          <a href="mailto:{{ config.extra.support_email }}" class="apex-em apex-link">{{ config.extra.support_email }}</a>
+          <a href="/docs/api/" class="apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]['footer'] and i18n_data[l]['footer']['api_reference'] %}{{ i18n_data[l]['footer']['api_reference'] }}{% else %}API Reference{% endif %}</a>
+          <a href="/quickstart/" class="apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]['docs'] and i18n_data[l]['docs']['first_send_title'] %}{{ i18n_data[l]['docs']['first_send_title'] }}{% else %}Send your first email{% endif %}</a>
+          <a href="mailto:{{ config.extra.support_email }}" class="apex-link">{{ config.extra.support_email }}</a>
         </div>
       </div>
     </div>

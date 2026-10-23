@@ -22359,9 +22359,10 @@ mod adversarial_outage_tests {
             FlashMessage::error("Broke <bad>"),
             FlashMessage::info("Heads up"),
         ]);
-        assert!(banner.contains("Success:"));
-        assert!(banner.contains("Error:"));
-        assert!(banner.contains("Notice:"));
+        // ARK notice labels: Done / Failure / Notice.
+        assert!(banner.contains("Done"));
+        assert!(banner.contains("Failure"));
+        assert!(banner.contains("Notice"));
         assert!(banner.contains("Saved &lt;ok&gt;"), "{banner}");
         assert!(!banner.contains("<ok>"));
     }

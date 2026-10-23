@@ -1173,8 +1173,8 @@ impl<'a> EmptyState<'a> {
             .map(|text| format!("<p class=\"mx-auto max-w-[320px]\">{}</p>", text))
             .unwrap_or_default();
         let action = match (self.action_label, self.action_href) {
-            (Some(label), Some(href)) => format!("<a href=\"{}\" class=\"inline-flex items-center justify-center whitespace-nowrap border h-10 px-3 min-h-[44px] mt-6 apex-em apex-btn\">{}</a>", href, label),
-            (Some(label), None) => format!("<button type=\"button\" class=\"inline-flex items-center justify-center whitespace-nowrap border h-10 px-3 min-h-[44px] mt-6 apex-btn\">{}</button>", label),
+            (Some(label), Some(href)) => format!("<a href=\"{}\" class=\"inline-flex items-center justify-center whitespace-nowrap h-10 px-3 min-h-[44px] mt-6 apex-btn\">{}</a>", href, label),
+            (Some(label), None) => format!("<button type=\"button\" class=\"inline-flex items-center justify-center whitespace-nowrap h-10 px-3 min-h-[44px] mt-6 apex-btn\">{}</button>", label),
             _ => String::new(),
         };
         format!(
@@ -1801,13 +1801,34 @@ impl<'a> Table<'a> {
 </div></td></tr>"
             )
         } else {
-            self.rows.iter().map(|row| {
-                let cells = row.iter().enumerate().map(|(index, value)| {
-                    let align = self.columns.get(index).map(|column| table_align_class(column.align)).unwrap_or("text-left");
-                    format!("<td class=\"p-4 align-middle apex-figure whitespace-nowrap {}\">{}</td>", align, value)
-                }).collect::<Vec<_>>().join("");
-                format!("<tr class=\"border-b min-h-[44px]\">{}</tr>", cells)
-            }).collect::<Vec<_>>().join("")
+            self.rows
+                .iter()
+                .map(|row| {
+                    let cells = row
+                        .iter()
+                        .enumerate()
+                        .map(|(index, value)| {
+                            let align = self
+                                .columns
+                                .get(index)
+                                .map(|column| table_align_class(column.align))
+                                .unwrap_or("text-left");
+                            let cell_class = if align == "text-right" {
+                                "apex-num".to_string()
+                            } else {
+                                align.to_string()
+                            };
+                            format!(
+                                "<td class=\"p-4 align-middle {}\">{}</td>",
+                                cell_class, value
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("");
+                    format!("<tr class=\"border-b min-h-[44px]\">{}</tr>", cells)
+                })
+                .collect::<Vec<_>>()
+                .join("")
         };
         let caption = self
             .caption
@@ -1875,7 +1896,7 @@ impl PaginationControls {
             } else {
                 ""
             };
-            format!("<button class=\"inline-flex items-center justify-center whitespace-nowrap border h-10 px-3 min-h-[44px] apex-btn\"{}>{}</button>", disabled_attr, label)
+            format!("<button class=\"inline-flex items-center justify-center whitespace-nowrap h-10 px-3 min-h-[44px] apex-btn\"{}>{}</button>", disabled_attr, label)
         };
         format!(
             "<div class=\"flex items-center gap-2\" role=\"navigation\" aria-label=\"Pagination controls\">{}{}<span class=\"px-2\">Page {} of {}</span>{}{}</div>",
@@ -1907,22 +1928,15 @@ impl PaginationControls {
         let _ = persistence_key;
         let link = |label: &str, target_page: usize, disabled: bool| {
             if disabled {
-                return format!(
-                    "<button class=\"inline-flex items-center justify-center whitespace-nowrap border h-10 px-3 min-h-[44px] apex-btn\" disabled aria-disabled=\"true\">{}</button>",
-                    label,
-                );
+                return format!("<span class=\"apex-meta\">{}</span>", label);
             }
-
             format!(
-                "<a href=\"{}?page={}{}\" class=\"inline-flex items-center justify-center whitespace-nowrap border h-10 px-3 min-h-[44px] apex-em apex-btn\">{}</a>",
-                base_path,
-                target_page,
-                preserved,
-                label,
+                "<a href=\"{}?page={}{}\">{}</a>",
+                base_path, target_page, preserved, label
             )
         };
         format!(
-            "<div class=\"flex flex-wrap items-center gap-2\" role=\"navigation\" aria-label=\"Pagination controls\" data-current-page=\"{}\" data-total-pages=\"{}\">{}{}<span class=\"px-2\">Page {} of {}</span>{}{}</div>",
+            "<nav class=\"apex-pager\" role=\"navigation\" aria-label=\"Pagination controls\" data-current-page=\"{}\" data-total-pages=\"{}\">{}{}<span class=\"apex-pager__sentence\">Page {} of {}</span>{}{}</div>",
             current_page,
             safe_total_pages,
             link("First", 1, current_page == 1),

@@ -20,62 +20,62 @@
         </p>
         <div class="flex items-center gap-3">
           {% if config.extra.github_url %}
-          <a href="{{ config.extra.github_url }}" target="_blank" rel="noopener noreferrer" class="apex-em apex-link">GitHub</a>
+          <a href="{{ config.extra.github_url }}" target="_blank" rel="noopener noreferrer" class="apex-link">GitHub</a>
           {% endif %}
           {% if config.extra.twitter_url %}
-          <a href="{{ config.extra.twitter_url }}" target="_blank" rel="noopener noreferrer" class="apex-em apex-link">Twitter</a>
+          <a href="{{ config.extra.twitter_url }}" target="_blank" rel="noopener noreferrer" class="apex-link">Twitter</a>
           {% endif %}
-          <a href="{{ config.extra.linkedin_url }}" target="_blank" rel="noopener noreferrer" class="apex-em apex-link">LinkedIn</a>
-          <a href="mailto:{{ config.extra.support_email }}" class="apex-em apex-link">Email</a>
+          <a href="{{ config.extra.linkedin_url }}" target="_blank" rel="noopener noreferrer" class="apex-link">LinkedIn</a>
+          <a href="mailto:{{ config.extra.support_email }}" class="apex-link">Email</a>
         </div>
       </div>
       <div>
         <h3 class="mb-6 apex-h3">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["footer_product_heading"] %}{{ i18n_data[l]["footer"]["footer_product_heading"] }}{% else %}Product{% endif %}</h3>
         <ul class="space-y-4">
-          <li><a href="{{ lp }}/features/" class="apex-em apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["features"] %}{{ i18n_data[l]["footer"]["features"] }}{% else %}Features{% endif %}</a></li>
-          <li><a href="{{ lp }}/pricing/" class="apex-em apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["pricing"] %}{{ i18n_data[l]["footer"]["pricing"] }}{% else %}Pricing{% endif %}</a></li>
-          <li><a href="{{ lp }}/security/" class="apex-em apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["security"] %}{{ i18n_data[l]["footer"]["security"] }}{% else %}Security{% endif %}</a></li>
-          <li><a href="{{ lp }}/solutions/enterprise/" class="apex-em apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["enterprise"] %}{{ i18n_data[l]["footer"]["enterprise"] }}{% else %}Enterprise{% endif %}</a></li>
+          <li><a href="{{ lp }}/features/" class="apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["features"] %}{{ i18n_data[l]["footer"]["features"] }}{% else %}Features{% endif %}</a></li>
+          <li><a href="{{ lp }}/pricing/" class="apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["pricing"] %}{{ i18n_data[l]["footer"]["pricing"] }}{% else %}Pricing{% endif %}</a></li>
+          <li><a href="{{ lp }}/security/" class="apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["security"] %}{{ i18n_data[l]["footer"]["security"] }}{% else %}Security{% endif %}</a></li>
+          <li><a href="{{ lp }}/solutions/enterprise/" class="apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["enterprise"] %}{{ i18n_data[l]["footer"]["enterprise"] }}{% else %}Enterprise{% endif %}</a></li>
           {# EU-sovereign argument: footer-linked on every page (2026-10-16). #}
-          <li><a href="{{ lp }}/eu-sovereign/" class="apex-em apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["sovereignty"] %}{{ i18n_data[l]["footer"]["sovereignty"] }}{% else %}Sovereignty{% endif %}</a></li>
+          <li><a href="{{ lp }}/eu-sovereign/" class="apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["sovereignty"] %}{{ i18n_data[l]["footer"]["sovereignty"] }}{% else %}Sovereignty{% endif %}</a></li>
           {# email-logs/ exists in EN only (no de/fr/es content pages yet) —
              link it un-prefixed exactly like the other English-only targets
              above (/docs/, /api-explorer/); {{ lp }}/email-logs/ was a 404
              on every locale page (deploy/tests/broken-links.sh finding). #}
-          <li><a href="/email-logs/" class="apex-em apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["forensic_tools"] %}{{ i18n_data[l]["footer"]["forensic_tools"] }}{% else %}Delivery Diagnostics{% endif %}</a></li>
+          <li><a href="/email-logs/" class="apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["forensic_tools"] %}{{ i18n_data[l]["footer"]["forensic_tools"] }}{% else %}Delivery Diagnostics{% endif %}</a></li>
         </ul>
       </div>
       <div>
         <h3 class="mb-6 apex-h3">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["developers_heading"] %}{{ i18n_data[l]["footer"]["developers_heading"] }}{% else %}Developers{% endif %}</h3>
         <ul class="space-y-4">
-          <li><a href="/docs/" class="apex-em apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["documentation"] %}{{ i18n_data[l]["footer"]["documentation"] }}{% else %}Documentation{% endif %}</a></li>
-          <li><a href="/docs/api/" class="apex-em apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["api_reference"] %}{{ i18n_data[l]["footer"]["api_reference"] }}{% else %}API Reference{% endif %}</a></li>
-          <li><a href="/docs/sdks/" class="apex-em apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["sdks"] %}{{ i18n_data[l]["footer"]["sdks"] }}{% else %}SDKs{% endif %}</a></li>
-          <li><a href="/api-explorer/" class="apex-em apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["api_explorer"] %}{{ i18n_data[l]["footer"]["api_explorer"] }}{% else %}API Explorer{% endif %}</a></li>
-          <li><a href="{{ lp }}/status/" class="apex-em apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["status_page"] %}{{ i18n_data[l]["footer"]["status_page"] }}{% else %}Status Page{% endif %}</a></li>
+          <li><a href="/docs/" class="apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["documentation"] %}{{ i18n_data[l]["footer"]["documentation"] }}{% else %}Documentation{% endif %}</a></li>
+          <li><a href="/docs/api/" class="apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["api_reference"] %}{{ i18n_data[l]["footer"]["api_reference"] }}{% else %}API Reference{% endif %}</a></li>
+          <li><a href="/docs/sdks/" class="apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["sdks"] %}{{ i18n_data[l]["footer"]["sdks"] }}{% else %}SDKs{% endif %}</a></li>
+          <li><a href="/api-explorer/" class="apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["api_explorer"] %}{{ i18n_data[l]["footer"]["api_explorer"] }}{% else %}API Explorer{% endif %}</a></li>
+          <li><a href="{{ lp }}/status/" class="apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["status_page"] %}{{ i18n_data[l]["footer"]["status_page"] }}{% else %}Status Page{% endif %}</a></li>
         </ul>
       </div>
       <div>
         <h3 class="mb-6 apex-h3">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["footer_company_heading"] %}{{ i18n_data[l]["footer"]["footer_company_heading"] }}{% else %}Company{% endif %}</h3>
         <ul class="space-y-4">
-          <li><a href="{{ lp }}/solutions/" class="apex-em apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["use_cases"] %}{{ i18n_data[l]["footer"]["use_cases"] }}{% else %}Use Cases{% endif %}</a></li>
-          <li><a href="{{ lp }}/compare/" class="apex-em apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["compare"] %}{{ i18n_data[l]["footer"]["compare"] }}{% else %}Compare{% endif %}</a></li>
-          <li><a href="{{ lp }}/contact/" class="apex-em apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["contact"] %}{{ i18n_data[l]["footer"]["contact"] }}{% else %}Contact{% endif %}</a></li>
-          <li><a href="{{ config.extra.app_url }}" target="_blank" rel="noopener noreferrer" class="apex-em apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["log_in"] %}{{ i18n_data[l]["footer"]["log_in"] }}{% else %}Log In{% endif %}</a></li>
+          <li><a href="{{ lp }}/solutions/" class="apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["use_cases"] %}{{ i18n_data[l]["footer"]["use_cases"] }}{% else %}Use Cases{% endif %}</a></li>
+          <li><a href="{{ lp }}/compare/" class="apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["compare"] %}{{ i18n_data[l]["footer"]["compare"] }}{% else %}Compare{% endif %}</a></li>
+          <li><a href="{{ lp }}/contact/" class="apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["contact"] %}{{ i18n_data[l]["footer"]["contact"] }}{% else %}Contact{% endif %}</a></li>
+          <li><a href="{{ config.extra.app_url }}" target="_blank" rel="noopener noreferrer" class="apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["log_in"] %}{{ i18n_data[l]["footer"]["log_in"] }}{% else %}Log In{% endif %}</a></li>
         </ul>
       </div>
       <div>
         <h3 class="mb-6 apex-h3">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["footer_legal_heading"] %}{{ i18n_data[l]["footer"]["footer_legal_heading"] }}{% else %}Legal{% endif %}</h3>
         <ul class="space-y-4">
-          <li><a href="{{ lp }}/privacy/" class="apex-em apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["privacy"] %}{{ i18n_data[l]["footer"]["privacy"] }}{% else %}Privacy{% endif %}</a></li>
+          <li><a href="{{ lp }}/privacy/" class="apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["privacy"] %}{{ i18n_data[l]["footer"]["privacy"] }}{% else %}Privacy{% endif %}</a></li>
           {# CCPA notice: deliberately footer-linked on every page (conspicuous placement). #}
           {# The privacy folder is a true Zola section (_index.md), so the leaf page is a #}
           {# section child — `zola check` reports zero orphans. #}
-          <li><a href="/privacy/do-not-sell/" class="apex-em apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["your_privacy_choices"] %}{{ i18n_data[l]["footer"]["your_privacy_choices"] }}{% else %}Your Privacy Choices{% endif %}</a></li>
-          <li><a href="{{ lp }}/terms/" class="apex-em apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["terms"] %}{{ i18n_data[l]["footer"]["terms"] }}{% else %}Terms{% endif %}</a></li>
-          <li><a href="{{ lp }}/cookies/" class="apex-em apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["cookies"] %}{{ i18n_data[l]["footer"]["cookies"] }}{% else %}Cookies{% endif %}</a></li>
-          <li><a href="{{ lp }}/dpa/" class="apex-em apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["dpa"] %}{{ i18n_data[l]["footer"]["dpa"] }}{% else %}DPA{% endif %}</a></li>
-          <li><a href="{{ lp }}/sla/" class="apex-em apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["sla"] %}{{ i18n_data[l]["footer"]["sla"] }}{% else %}SLA{% endif %}</a></li>
+          <li><a href="/privacy/do-not-sell/" class="apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["your_privacy_choices"] %}{{ i18n_data[l]["footer"]["your_privacy_choices"] }}{% else %}Your Privacy Choices{% endif %}</a></li>
+          <li><a href="{{ lp }}/terms/" class="apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["terms"] %}{{ i18n_data[l]["footer"]["terms"] }}{% else %}Terms{% endif %}</a></li>
+          <li><a href="{{ lp }}/cookies/" class="apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["cookies"] %}{{ i18n_data[l]["footer"]["cookies"] }}{% else %}Cookies{% endif %}</a></li>
+          <li><a href="{{ lp }}/dpa/" class="apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["dpa"] %}{{ i18n_data[l]["footer"]["dpa"] }}{% else %}DPA{% endif %}</a></li>
+          <li><a href="{{ lp }}/sla/" class="apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["sla"] %}{{ i18n_data[l]["footer"]["sla"] }}{% else %}SLA{% endif %}</a></li>
         </ul>
       </div>
     </div>

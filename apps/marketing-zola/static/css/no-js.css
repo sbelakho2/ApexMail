@@ -1,118 +1,61 @@
-/* ── CSS-only interactivity (zero client scripting) ─────────── */
-/* All interactive patterns use native HTML + CSS only:
-   - Desktop dropdowns: :focus-within on native <details>
-   - Mobile menu: native <details> disclosure
-   - FAQ accordions: <details>/<summary>
-   - Deployment tabs: radio buttons + :checked
-   - Testimonials: scroll-snap
-   - Cookie consent: server-side cookie map
-   - Back-to-top: anchor + scroll-behavior
-*/
+/* ── CSS-only interactivity (zero client scripting) ─────────────────────
+   All interactive patterns use native HTML + CSS: <details> disclosures,
+   radio + :checked tabs, scroll-snap rails, :target banners, and a
+   server-side cookie map. Styled exclusively with ARK tokens so every rule
+   flips with the theme by construction; the typography, spacing and colour
+   scale live in the authority (styles.css) — this file only adds the
+   behaviour-specific structural rules the authority cannot know about. */
 
 html { scroll-behavior: smooth; }
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
 }
 
-/* ── Skip Link ──────────────────────────────────────────────── */
-/* Single consolidated rule set (design audit item 15): the element
-   carries the id; the old duplicate .skip-to-content class block was
-   fully overridden by this id-scoped rule and deleted. Background is
-   the brand red — white-on-white made the focused link invisible
-   (1:1). */
+/* ── Skip link ─────────────────────────────────────────────────────────
+   The shared ARK skip-link mechanic: clipped until focused, then a paper
+   block with the 2px ink rule, pinned top-left. */
 #skip-to-content {
   position: absolute;
   left: -9999px;
   top: 1rem;
   z-index: 10000;
-  padding: 12px 24px;
-  border-radius: 0;
-  background: rgb(var(--brand-600));
-  color: #fff;
-  border: 1px solid rgb(var(--surface-950));
-  font-size: 13px;
-  font-weight: bold;
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
+  padding: 0.625rem 1rem;
+  background: rgb(var(--background));
+  color: rgb(var(--foreground));
+  border: 2px solid rgb(var(--foreground));
+  font-family: var(--font-sans);
+  font-size: 0.875rem;
+  font-weight: 600;
   text-decoration: none;
-  transition: top 0.2s cubic-bezier(0.23, 1, 0.32, 1);
 }
-
 #skip-to-content:focus {
   left: 1rem;
 }
 
-/* ── Focus Rings ────────────────────────────────────────────── */
-:focus-visible {
-  outline: 2px solid rgb(var(--primary));
-  outline-offset: 2px;
-}
-button:focus-visible,
-a:focus-visible,
-input:focus-visible,
-select:focus-visible,
-textarea:focus-visible {
-  outline: 2px solid rgb(var(--primary));
-  outline-offset: 2px;
-}
-:focus:not(:focus-visible) {
-  outline: none;
-}
+/* Focus is the authority's law (`:focus-visible` paints the 3px double ink
+   outline globally); this sheet deliberately adds no rings of its own. */
 
-/* ── Header Dropdowns (<details> disclosure, design audit item 5) ──
-   Native disclosure widgets: click/Enter/Space toggles and the open state
-   is real markup — no frozen aria-expanded, no JS-kitchen-sink ARIA. (No
-   Escape promise: browsers do not consistently close <details> on Escape
-   without script.) The chevron rotates with the open state. */
+/* ── Header dropdowns (<details> disclosure) ─────────────────────────── */
 details[data-dropdown] > summary {
   cursor: pointer;
   list-style: none;
   min-height: 44px;
 }
-details[data-dropdown] > summary::-webkit-details-marker {
-  display: none;
-}
-details[data-dropdown] > summary .dropdown-chevron {
-  transition: transform 150ms ease;
-}
-details[data-dropdown][open] > summary .dropdown-chevron {
-  transform: rotate(180deg);
-}
-details[data-dropdown][open] > summary {
-  color: rgb(var(--surface-950));
-}
-details[data-dropdown][open] > [data-dropdown-menu] {
-  display: block;
-}
-/* When CLOSED the <details> user-agent stylesheet hides the panel.
-   The old unconditional `display: block` overrode that, rendering
-   EVERY dropdown panel simultaneously (overlapping text in the nav). */
+details[data-dropdown] > summary::-webkit-details-marker { display: none; }
+details[data-dropdown][open] > summary { color: rgb(var(--foreground)); }
+details[data-dropdown][open] > [data-dropdown-menu] { display: block; }
 
-/* ── Mobile Menu (native <details> disclosure) ──────────────────
-   The hamburger is the <summary> of #mobile-nav; the panel is a child of
-   the disclosure, so the closed state is genuinely hidden by the element
-   itself (and by the details:not([open]) rule at the end of this file).
-   The panel is absolutely positioned against the sticky #site-header so it
-   spans the viewport width even though the <details> sits in the header
-   row. Focusability and the expanded state are the element's own semantics
-   — no checkbox hack, no proxy focus ring. */
+/* ── Mobile menu (native <details> disclosure) ───────────────────────── */
 #mobile-nav > summary {
   list-style: none;
   cursor: pointer;
 }
 #mobile-nav > summary::-webkit-details-marker { display: none; }
 #mobile-nav > summary::marker { content: ""; }
-#mobile-nav > summary:focus-visible {
-  outline: 2px solid rgb(var(--primary));
-  outline-offset: 2px;
-}
-/* Ensure the close icon is hidden by default (overrides header partial) */
 #menu-icon-close { display: none; }
 #mobile-nav[open] #menu-icon-open { display: none !important; }
 #mobile-nav[open] #menu-icon-close { display: block !important; }
-#mobile-nav[open] > summary {
-  background: rgb(var(--surface-100));
-}
+#mobile-nav[open] > summary { background: rgb(var(--secondary)); }
 
 @media (max-width: 1023.98px) {
   #mobile-nav[open] .mobile-nav-panel {
@@ -122,31 +65,24 @@ details[data-dropdown][open] > [data-dropdown-menu] {
     top: 100%;
     max-height: calc(100vh - 4rem);
     overflow-y: auto;
-    border-top: 1px solid rgb(var(--surface-200));
-    box-shadow: 0 12px 24px rgb(9 9 11 / 0.06);
+    border-top: 1px solid rgb(var(--foreground));
   }
 }
 
-/* ── FAQ Accordion (<details>/<summary>) ────────────────────── */
+/* ── FAQ accordion (<details>/<summary>) ─────────────────────────────── */
 details.faq-item summary {
   cursor: pointer;
   list-style: none;
 }
 details.faq-item summary::-webkit-details-marker { display: none; }
 details.faq-item summary::marker { display: none; }
-details.faq-item .faq-icon {
-  transition: transform 200ms ease;
-}
-details.faq-item[open] .faq-icon {
-  transform: rotate(180deg);
-  color: rgb(var(--brand-600));
-}
+details.faq-item .faq-icon { color: rgb(var(--muted-foreground)); }
+details.faq-item[open] .faq-icon { color: rgb(var(--foreground)); }
 
-/* ── Deployment Options (radio tabs) ────────────────────────── */
-/* Visually hidden but FOCUSABLE: `display:none` removed the radios from
-   the tab order entirely, so keyboard users could never switch panels
-   (pointer-only labels). The clipped technique keeps them in the tab
-   order and the a11y tree; the ring is painted on the visible <label>. */
+/* ── Deployment options (radio tabs) ─────────────────────────────────── */
+/* Visually hidden but FOCUSABLE: display:none would remove the radios from
+   the tab order. The checked state paints the visible label with the ink
+   fill and paper text (tokens flip, so dark mode needs no twin rule). */
 .deploy-radio {
   position: absolute;
   width: 1px;
@@ -163,34 +99,8 @@ details.faq-item[open] .faq-icon {
 #deploy-dedicated:checked ~ .deploy-tabs [for="deploy-dedicated"],
 #deploy-private:checked ~ .deploy-tabs [for="deploy-private"],
 #deploy-byoc:checked ~ .deploy-tabs [for="deploy-byoc"] {
-  background-color: rgb(var(--surface-900));
-  color: white;
-  box-shadow: 0 1px 2px 0 rgba(0,0,0,0.05);
-}
-#deploy-shared:focus-visible ~ .deploy-tabs [for="deploy-shared"],
-#deploy-dedicated:focus-visible ~ .deploy-tabs [for="deploy-dedicated"],
-#deploy-private:focus-visible ~ .deploy-tabs [for="deploy-private"],
-#deploy-byoc:focus-visible ~ .deploy-tabs [for="deploy-byoc"] {
-  outline: 2px solid rgb(var(--primary));
-  outline-offset: 2px;
-}
-html.dark #deploy-shared:checked ~ .deploy-tabs [for="deploy-shared"],
-html.dark #deploy-dedicated:checked ~ .deploy-tabs [for="deploy-dedicated"],
-html.dark #deploy-private:checked ~ .deploy-tabs [for="deploy-private"],
-html.dark #deploy-byoc:checked ~ .deploy-tabs [for="deploy-byoc"] {
-  background-color: rgb(var(--brand-700));
-  border-color: rgb(var(--brand-500));
-  color: rgb(255 255 255);
-}
-@media (prefers-color-scheme: dark) {
-  html:not(.light) #deploy-shared:checked ~ .deploy-tabs [for="deploy-shared"],
-  html:not(.light) #deploy-dedicated:checked ~ .deploy-tabs [for="deploy-dedicated"],
-  html:not(.light) #deploy-private:checked ~ .deploy-tabs [for="deploy-private"],
-  html:not(.light) #deploy-byoc:checked ~ .deploy-tabs [for="deploy-byoc"] {
-    background-color: rgb(var(--brand-700));
-    border-color: rgb(var(--brand-500));
-    color: rgb(255 255 255);
-  }
+  background-color: rgb(var(--foreground));
+  color: rgb(var(--background));
 }
 #deploy-shared:checked ~ .deploy-panels #panel-shared,
 #deploy-dedicated:checked ~ .deploy-panels #panel-dedicated,
@@ -199,43 +109,22 @@ html.dark #deploy-byoc:checked ~ .deploy-tabs [for="deploy-byoc"] {
   display: block;
 }
 
-/* ── Pricing calculator billing-cycle pills (radio + :has(:checked)) ──
-   The calculator's Monthly/Annual segmented control (templates/
-   partials/pricing/calculator.html). The radios live INSIDE their
-   labels (bigger hit area), so the checked state styles the pill via
-   :has() — the only pure-CSS way to style an ancestor. Visual-only
-   progressive enhancement: browsers without :has() render both pills
-   unselected; the radio still posts correctly. Same pattern family as
-   the deploy-tabs rules above (those can use ~ because their radios
-   sit outside the labels). */
+/* ── Pricing calculator billing-cycle pills (radio + :has(:checked)) ─── */
 .billing-pill {
   padding: 0.5rem 1rem;
   font-size: 0.75rem;
   font-weight: 700;
   letter-spacing: 0.05em;
-  color: rgb(var(--surface-500));
+  color: rgb(var(--muted-foreground));
   cursor: pointer;
 }
-/* Dark cards: zinc-500 on zinc-950 is 4.12 — step up one shade. */
-@media (prefers-color-scheme: dark) {
-  :root:not(.light) .billing-pill { color: rgb(var(--surface-600)); }
-}
-html.dark .billing-pill { color: rgb(var(--surface-600)); }
-.billing-pill:hover { color: rgb(var(--surface-950)); }
+.billing-pill:hover { color: rgb(var(--foreground)); }
 .billing-pill:has(input:checked) {
-  /* Theme-stable literals: --surface-950 flips to near-white in dark
-     mode, which put white text on a white pill (contrast 1.04). */
-  background-color: #18181b;
-  color: #fff;
-}
-/* Keyboard focus on the radio rings its pill, mirroring the mobile
-   menu-toggle treatment. */
-.billing-pill:has(input:focus-visible) {
-  outline: 2px solid rgb(var(--primary));
-  outline-offset: 2px;
+  background-color: rgb(var(--foreground));
+  color: rgb(var(--background));
 }
 
-/* ── Testimonials (scroll-snap) ─────────────────────────────── */
+/* ── Testimonials (scroll-snap) ──────────────────────────────────────── */
 .testimonials-track {
   display: flex;
   overflow-x: auto;
@@ -245,143 +134,28 @@ html.dark .billing-pill { color: rgb(var(--surface-600)); }
   gap: 1.5rem;
 }
 .testimonials-track::-webkit-scrollbar { display: none; }
-.testimonials-track > .testimonial-card,
-.testimonials-track > .apex-card,
-.testimonials-track > .card-dna {
+.testimonials-track > .apex-panel,
+.testimonials-track > .apex-card {
   scroll-snap-align: start;
   flex: 0 0 100%;
   min-width: 0;
 }
 
-/* ── Back-to-Top (CSS-only visibility via :target or fixed) ── */
-#back-to-top {
-  /* Always visible as a simple anchor link — no JS scroll detection needed */
-  opacity: 0.7;
-  transition: opacity 200ms;
-}
-#top[data-js="true"] #back-to-top {
-  opacity: 0;
-  pointer-events: none;
-  transform: translateY(8px);
-  transition: opacity 200ms, transform 200ms;
-}
-#top[data-js="true"] #back-to-top.is-visible {
-  opacity: 0.7;
-  pointer-events: auto;
-  transform: translateY(0);
-}
-#back-to-top:hover {
-  opacity: 1;
-}
+/* ── Back to top ─────────────────────────────────────────────────────── */
+#back-to-top { opacity: 0.8; }
+#back-to-top:hover { opacity: 1; }
+#cookie-consent-banner:not([hidden]) ~ #back-to-top { display: none; }
 
-#cookie-consent-banner:not([hidden]) ~ #back-to-top {
-  display: none;
-}
-
-/* ── Contact-form PRG banners (zero-JS :target reveal) ──────────
-   The api-server contact endpoints (POST /v1/contact/{sales,
-   enterprise,security}) redirect back to these static pages with
-   `?submitted=true#enquiry-submitted` (success) or `?error=…#
-   enquiry-error` (failure). A query parameter alone cannot be read
-   without client script, so the banners ship hidden in the static
-   markup and the CSS :target selector — driven by the fragment the
-   redirect carries — reveals them. Works identically on the static
-   host and the api-server's marketing mirror (same HTML). */
+/* ── Contact-form PRG banners (zero-JS :target reveal) ───────────────── */
 .form-banner { display: none; }
 .form-banner:target { display: block; }
 .form-banner p { margin: 0; }
-.form-banner--success,
-.form-banner--error {
-  max-width: 42rem;
-  margin-bottom: 1.5rem;
-  padding: 1rem 1.25rem;
-  font-size: 0.875rem;
-  line-height: 1.5;
-  border: 1px solid;
-  border-left-width: 4px;
-}
-.form-banner--success {
-  background: rgb(var(--success-50, 248 250 252));
-  border-color: rgb(var(--success-200, 134 239 172));
-  color: rgb(var(--success-900, 20 83 45));
-}
-.form-banner--error {
-  background: rgb(var(--danger-50, 253 242 248));
-  border-color: rgb(var(--danger-200, 244 146 176));
-  color: rgb(var(--danger-900, 76 5 25));
-}
 
-/* GDPR Art. 13 point-of-collection notice under each contact form's
-   submit button (all locales). */
-.form-privacy-note {
-  margin-top: 1rem;
-  font-size: 0.75rem;
-  line-height: 1.5;
-  color: rgb(var(--surface-500));
-}
-.form-privacy-note a {
-  color: rgb(var(--surface-700));
-  text-decoration: underline;
-  text-underline-offset: 2px;
-}
-.form-privacy-note a:hover { color: rgb(var(--brand-600)); }
+/* ── Cookie banner recorded state ────────────────────────────────────── */
+#cookie-consent-banner[data-consent-state="recorded"] { display: none; }
 
-/* ── Cookie banner recorded-consent state (no-JS) ─────────────
-   After a choice is made, the api-server /consent endpoint sets the
-   apexmail_consent cookie (Domain=.apexmail.ee). Because the site is
-   static, hiding the banner is server-side: the marketing container's
-   nginx serves a sub_filter variant that flips the banner's
-   data-consent-state attribute from "pending" to "recorded" whenever
-   the cookie is present (and the api-server makes the same flip when
-   it serves these pages directly). This rule collapses the banner —
-   and restores the back-to-top link the banner suppressed. */
-#cookie-consent-banner[data-consent-state="recorded"] {
-  display: none !important;
-}
-#cookie-consent-banner[data-consent-state="recorded"] ~ #back-to-top {
-  display: inline-flex;
-}
+/* ── Status refresh notice ───────────────────────────────────────────── */
+.status-refresh-notice { border-top: 1px solid rgb(var(--surface-300)); }
 
-/* ── Status page auto-refresh indicator ──────────────────────── */
-.status-refresh-notice {
-  font-size: 0.75rem;
-  color: rgb(var(--surface-500));
-  text-align: center;
-  padding: 0.5rem;
-}
-
-/* ── Private Cloud latency comparison ────────────────────────── */
-.compare-hero-wedge { clip-path: polygon(100% 0, 0% 0, 100% 100%); }
-
+/* ── Structural helpers the authority does not carry ─────────────────── */
 .progress-width-98 { width: 98%; }
-.progress-width-96 { width: 96%; }
-.progress-width-94 { width: 94%; }
-.progress-width-87 { width: 87%; }
-.progress-width-72 { width: 72%; }
-
-.latency-width-2 { --bar-width: 2%; }
-.latency-width-8 { --bar-width: 8%; }
-.latency-width-65 { --bar-width: 65%; }
-.latency-width-100 { --bar-width: 100%; }
-
-@keyframes grow-bar {
-  from { width: 0; }
-  to { width: var(--bar-width, 0%); }
-}
-
-.latency-bar {
-  width: var(--bar-width, 0%);
-  animation: grow-bar 1s cubic-bezier(0.22, 1, 0.36, 1) both;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .latency-bar { animation: none; }
-}
-
-/* ── Details closed-state enforcement (2026-09-07) ──────────────────
-   Both the nav dropdowns and the FAQ accordions were rendering their
-   content ALWAYS visible — the <details> user-agent closed-state
-   hiding was defeated. This author-level rule restores it. */
-details:not([open]) > *:not(summary) {
-  display: none !important;
-}

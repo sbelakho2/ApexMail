@@ -1,0 +1,161 @@
+/* ── CSS-only interactivity (zero client scripting) ─────────────────────
+   All interactive patterns use native HTML + CSS: <details> disclosures,
+   radio + :checked tabs, scroll-snap rails, :target banners, and a
+   server-side cookie map. Styled exclusively with ARK tokens so every rule
+   flips with the theme by construction; the typography, spacing and colour
+   scale live in the authority (styles.css) — this file only adds the
+   behaviour-specific structural rules the authority cannot know about. */
+
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+}
+
+/* ── Skip link ─────────────────────────────────────────────────────────
+   The shared ARK skip-link mechanic: clipped until focused, then a paper
+   block with the 2px ink rule, pinned top-left. */
+#skip-to-content {
+  position: absolute;
+  left: -9999px;
+  top: 1rem;
+  z-index: 10000;
+  padding: 0.625rem 1rem;
+  background: rgb(var(--background));
+  color: rgb(var(--foreground));
+  border: 2px solid rgb(var(--foreground));
+  font-family: var(--font-sans);
+  font-size: 0.875rem;
+  font-weight: 600;
+  text-decoration: none;
+}
+#skip-to-content:focus {
+  left: 1rem;
+}
+
+/* Focus is the authority's law (`:focus-visible` paints the 3px double ink
+   outline globally); this sheet deliberately adds no rings of its own. */
+
+/* ── Header dropdowns (<details> disclosure) ─────────────────────────── */
+details[data-dropdown] > summary {
+  cursor: pointer;
+  list-style: none;
+  min-height: 44px;
+}
+details[data-dropdown] > summary::-webkit-details-marker { display: none; }
+details[data-dropdown][open] > summary { color: rgb(var(--foreground)); }
+details[data-dropdown][open] > [data-dropdown-menu] { display: block; }
+
+/* ── Mobile menu (native <details> disclosure) ───────────────────────── */
+#mobile-nav > summary {
+  list-style: none;
+  cursor: pointer;
+}
+#mobile-nav > summary::-webkit-details-marker { display: none; }
+#mobile-nav > summary::marker { content: ""; }
+#menu-icon-close { display: none; }
+#mobile-nav[open] #menu-icon-open { display: none !important; }
+#mobile-nav[open] #menu-icon-close { display: block !important; }
+#mobile-nav[open] > summary { background: rgb(var(--secondary)); }
+
+@media (max-width: 1023.98px) {
+  #mobile-nav[open] .mobile-nav-panel {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 100%;
+    max-height: calc(100vh - 4rem);
+    overflow-y: auto;
+    border-top: 1px solid rgb(var(--foreground));
+  }
+}
+
+/* ── FAQ accordion (<details>/<summary>) ─────────────────────────────── */
+details.faq-item summary {
+  cursor: pointer;
+  list-style: none;
+}
+details.faq-item summary::-webkit-details-marker { display: none; }
+details.faq-item summary::marker { display: none; }
+details.faq-item .faq-icon { color: rgb(var(--muted-foreground)); }
+details.faq-item[open] .faq-icon { color: rgb(var(--foreground)); }
+
+/* ── Deployment options (radio tabs) ─────────────────────────────────── */
+/* Visually hidden but FOCUSABLE: display:none would remove the radios from
+   the tab order. The checked state paints the visible label with the ink
+   fill and paper text (tokens flip, so dark mode needs no twin rule). */
+.deploy-radio {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+.deploy-panel { display: none; }
+#deploy-shared:checked ~ .deploy-tabs [for="deploy-shared"],
+#deploy-dedicated:checked ~ .deploy-tabs [for="deploy-dedicated"],
+#deploy-private:checked ~ .deploy-tabs [for="deploy-private"],
+#deploy-byoc:checked ~ .deploy-tabs [for="deploy-byoc"] {
+  background-color: rgb(var(--foreground));
+  color: rgb(var(--background));
+}
+#deploy-shared:checked ~ .deploy-panels #panel-shared,
+#deploy-dedicated:checked ~ .deploy-panels #panel-dedicated,
+#deploy-private:checked ~ .deploy-panels #panel-private,
+#deploy-byoc:checked ~ .deploy-panels #panel-byoc {
+  display: block;
+}
+
+/* ── Pricing calculator billing-cycle pills (radio + :has(:checked)) ─── */
+.billing-pill {
+  padding: 0.5rem 1rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: rgb(var(--muted-foreground));
+  cursor: pointer;
+}
+.billing-pill:hover { color: rgb(var(--foreground)); }
+.billing-pill:has(input:checked) {
+  background-color: rgb(var(--foreground));
+  color: rgb(var(--background));
+}
+
+/* ── Testimonials (scroll-snap) ──────────────────────────────────────── */
+.testimonials-track {
+  display: flex;
+  overflow-x: auto;
+  scroll-snap-type: x mandatory;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+  gap: 1.5rem;
+}
+.testimonials-track::-webkit-scrollbar { display: none; }
+.testimonials-track > .apex-panel,
+.testimonials-track > .apex-card {
+  scroll-snap-align: start;
+  flex: 0 0 100%;
+  min-width: 0;
+}
+
+/* ── Back to top ─────────────────────────────────────────────────────── */
+#back-to-top { opacity: 0.8; }
+#back-to-top:hover { opacity: 1; }
+#cookie-consent-banner:not([hidden]) ~ #back-to-top { display: none; }
+
+/* ── Contact-form PRG banners (zero-JS :target reveal) ───────────────── */
+.form-banner { display: none; }
+.form-banner:target { display: block; }
+.form-banner p { margin: 0; }
+
+/* ── Cookie banner recorded state ────────────────────────────────────── */
+#cookie-consent-banner[data-consent-state="recorded"] { display: none; }
+
+/* ── Status refresh notice ───────────────────────────────────────────── */
+.status-refresh-notice { border-top: 1px solid rgb(var(--surface-300)); }
+
+/* ── Structural helpers the authority does not carry ─────────────────── */
+.progress-width-98 { width: 98%; }
