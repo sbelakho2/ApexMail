@@ -6,7 +6,6 @@
 //! preserved byte-for-byte. Design tokens and Tailwind classes are identical
 //! to the archived browser UI contract.
 
-use crate::icons::{render_icon, IconRenderOptions};
 use crate::primitives::*;
 use crate::shell::*;
 use crate::view_data::{
@@ -14,18 +13,6 @@ use crate::view_data::{
     DemoViewerData, DemosPageData, ListPageData, SalesAutonomyData, SalesDeadLetterData,
     SalesDecisionData, SalesOverviewData, SalesPageData,
 };
-
-fn ui_icon(name: &str, class_name: &str) -> String {
-    render_icon(
-        name,
-        IconRenderOptions {
-            size: 18,
-            stroke_width: 2.0,
-            class_name: Some(class_name),
-        },
-    )
-    .unwrap_or_default()
-}
 
 // ─── Root layouts ───────────────────────────────────────────
 
@@ -4903,9 +4890,7 @@ pub fn web_events_page() -> String {
         ],
         rows: vec![],
     };
-    let search = format!(
-        "<form method=\"get\" action=\"/events\" role=\"search\" class=\"flex flex-col gap-2 sm:flex-row\"><label class=\"sr-only apex-label\" for=\"events-search\">Filter events</label><input id=\"events-search\" type=\"search\" name=\"query\" placeholder=\"Filter events...\" class=\"apex-input flex-1\" /><button type=\"submit\" class=\"px-4 py-2 apex-btn\">Apply</button></form>",
-    );
+    let search = "<form method=\"get\" action=\"/events\" role=\"search\" class=\"flex flex-col gap-2 sm:flex-row\"><label class=\"sr-only apex-label\" for=\"events-search\">Filter events</label><input id=\"events-search\" type=\"search\" name=\"query\" placeholder=\"Filter events...\" class=\"apex-input flex-1\" /><button type=\"submit\" class=\"px-4 py-2 apex-btn\">Apply</button></form>";
     format!(
         "<div class=\"space-y-6\">\
 <h1 class=\"apex-page-title\">Events</h1>\
