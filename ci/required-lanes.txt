@@ -1,0 +1,31 @@
+# ci/required-lanes.txt — the lanes a release blessing MUST record (T1, plan
+# rule 1: "Required means recorded"). One lane id per line; blank lines and
+# #-comments are ignored. A blessing whose requiredLanes map is missing a row
+# for any lane here, or records it as anything other than ok, is refused by
+# the deploy host (ci/pipeline.sh blessing_refused_reason).
+#
+# Stage lanes (ci/stages/*.sh — one row each, always required):
+fetch
+validate
+docs
+ui
+test
+security
+#
+# Test-stage sub-lanes that CI runs as required (ci/stages/test.sh):
+test.rust
+test.sdk-python
+test.sdk-go
+test.sdk-java
+test.sdk-ruby
+test.sdk-php
+test.sdk-typescript
+test.browsers
+test.php
+test.coverage-ratchet
+#
+# Gate lanes added by the plan (Tests & enforcement, "Gates to add or fix");
+# a row lands here when its work package does:
+validate.waivers
+validate.stub-ban
+validate.invariants

@@ -1,0 +1,223 @@
+# docs/invariants.toml - the 27 critical invariants (T14).
+#
+# Source of truth: ApexMail-Plan-and-Review.pdf, "Tests & enforcement",
+# "Critical invariants" table, checked at 61e3db3. Each invariant names at
+# least one existing code anchor and one gate; tools/check_invariants.py
+# fails when the anchor is gone, when the gate is not a required lane, or
+# when the invariant itself disappears.
+
+[[invariant]]
+id = "I1"
+statement = "An invoice total equals the sum of its lines, rounded per line to the cent, in one currency"
+code = ["billing-common", "billing-service", "accounting-core"]
+test_anchors = ["accounting-core"]
+plan_test_today = "Unit tests"
+gates = ["T4", "T2", "T3"]
+
+[[invariant]]
+id = "I2"
+statement = "A cancelled subscription is never charged again"
+code = ["billing-service subscriptions.rs", "renewal sweep"]
+test_anchors = ["billing-service"]
+plan_test_today = "Cancel and sweep tests (98a60a5c); dogfood M23, manual"
+gates = ["T4", "T6"]
+
+[[invariant]]
+id = "I3"
+statement = "The ledger balances, and each payment webhook applies at most once"
+code = ["accounting-core", "billing-service"]
+test_anchors = ["accounting-core"]
+plan_test_today = "51 tests in accounting-core"
+gates = ["T4", "T3"]
+
+[[invariant]]
+id = "I4"
+statement = "An EU-only tenant's message never takes a non-EU hop"
+code = ["routing policy", "outbound-mta"]
+test_anchors = ["outbound-mta"]
+plan_test_today = "Routing tests (B1, B4)"
+gates = ["T4", "T6"]
+
+[[invariant]]
+id = "I5"
+statement = "Every routed message has a receipt that verifies, and any change breaks it"
+code = ["receipts (migration 255)"]
+test_anchors = ["migrations"]
+plan_test_today = "Sign and verify tests"
+gates = ["T4"]
+
+[[invariant]]
+id = "I6"
+statement = "A suppressed address is never sent to, on any send path"
+code = ["api-server", "worker-processors", "sales dispatcher", "compat endpoints"]
+test_anchors = ["worker-processors"]
+plan_test_today = "Dogfood M09, manual"
+gates = ["T4", "T5"]
+
+[[invariant]]
+id = "I7"
+statement = "Every route enforces its auth and tenant scope"
+code = ["api-server and services"]
+test_anchors = ["api-server"]
+plan_test_today = "57 cross-tenant tests; dogfood authz probes, manual"
+gates = ["T5"]
+
+[[invariant]]
+id = "I8"
+statement = "A sandbox key sends only to the sink"
+code = ["api-server explorer sandbox"]
+test_anchors = ["api-server"]
+plan_test_today = "Explorer tests"
+gates = ["T5", "S18"]
+
+[[invariant]]
+id = "I9"
+statement = "Erasure removes or anonymises the subject in every store, and retained stores state a reason"
+code = ["compliance gdpr_automation.rs"]
+test_anchors = ["compliance"]
+plan_test_today = "Erasure tests, without mail_journal"
+gates = ["T11"]
+
+[[invariant]]
+id = "I10"
+statement = "No contact is allowed without an authoritative, approved, in-date policy row"
+code = ["sales-autopilot legal_policy.rs"]
+test_anchors = ["sales-autopilot"]
+plan_test_today = "Exhaustive unit tests of the pure functions"
+gates = ["T4"]
+
+[[invariant]]
+id = "I11"
+statement = "Every autonomous message carries the AI disclosure and an audit row, and cites canonical ids for price or legal claims"
+code = ["sales-autopilot"]
+test_anchors = ["sales-autopilot"]
+plan_test_today = "None"
+gates = ["S19", "S15", "T17"]
+
+[[invariant]]
+id = "I12"
+statement = "Discovery never contacts a host outside the allowlist, and a CAPTCHA or robots refusal excludes the host"
+code = ["sales-autopilot discovery/"]
+test_anchors = ["sales-autopilot"]
+plan_test_today = "Challenge-detection tests"
+gates = ["S10"]
+
+[[invariant]]
+id = "I13"
+statement = "Posterior counts equal exposures, holdout accounts are never contacted, and sequential tests hold alpha"
+code = ["sales-autopilot experiments.rs"]
+test_anchors = ["sales-autopilot"]
+plan_test_today = "Unit tests"
+gates = ["T15"]
+
+[[invariant]]
+id = "I14"
+statement = "Every public capability or location claim matches the topology and readiness stage"
+code = ["marketing site", "capability-registry.json", "governance.rs"]
+test_anchors = ["tools/check_capability_claims.py"]
+plan_test_today = "check_capability_claims.py, without location entries"
+gates = ["T12"]
+
+[[invariant]]
+id = "I15"
+statement = "No parser panics on any input"
+code = ["mta", "imap-server", "mail-proto", "edge-cases", "webhook handlers"]
+test_anchors = ["tools/check_rust_panic_paths.py"]
+plan_test_today = "2 fuzz targets, never run; check_rust_panic_paths"
+gates = ["T7"]
+
+[[invariant]]
+id = "I16"
+statement = "Pending migrations apply to a restored backup without data loss"
+code = ["migrator"]
+test_anchors = ["migrator"]
+plan_test_today = "Migrator tests; migration_lint"
+gates = ["T13"]
+
+[[invariant]]
+id = "I17"
+statement = "The latest backup restores within the recovery-time objective"
+code = ["ha", "backups"]
+test_anchors = ["ha"]
+plan_test_today = "None"
+gates = ["T13"]
+
+[[invariant]]
+id = "I18"
+statement = "Every route is in the OpenAPI spec, and every SDK call reaches a real route"
+code = ["api-server", "devex-service", "SDKs"]
+test_anchors = ["devex-service"]
+plan_test_today = "Section check in openapi_contract.rs; mocked SDK tests"
+gates = ["T8", "T9"]
+
+[[invariant]]
+id = "I19"
+statement = "Every gate fails on its known-bad fixture"
+code = ["tools/"]
+test_anchors = ["tools"]
+plan_test_today = "20 of 55 Python tools; 22 gates that CI runs have none"
+gates = ["T10"]
+
+[[invariant]]
+id = "I20"
+statement = "Only a signed, lane-complete blessing deploys"
+code = ["ci/"]
+test_anchors = ["ci"]
+plan_test_today = "Stage-level, unsigned check"
+gates = ["T1"]
+
+[[invariant]]
+id = "I21"
+statement = "No tenant exceeds its rate budget or starves another, and queue claims are exactly-once"
+code = ["rate-limiter", "queue-provider"]
+test_anchors = ["rate-limiter"]
+plan_test_today = "Unit tests; load-isolation test at a 12,000 ops/s floor"
+gates = ["T4", "T13"]
+
+[[invariant]]
+id = "I22"
+statement = "No autonomous action happens unless an active, owner-approved policy pack covers the account and the action"
+code = ["sales-autopilot dispatcher (S21)"]
+test_anchors = ["sales-autopilot"]
+plan_test_today = "None (packs not built)"
+gates = ["S21", "T14"]
+
+[[invariant]]
+id = "I23"
+statement = "Hosting and dedicated-IP provisioning stay in Finland, and the public register says so"
+code = ["api-server ip_provider.rs; tools/generate_subprocessors.py"]
+test_anchors = ["tools/generate_subprocessors.py"]
+plan_test_today = "None"
+gates = ["V24", "T12"]
+
+[[invariant]]
+id = "I24"
+statement = "Every stored copy of a message body is encrypted at rest and has a retention window"
+code = ["mta inbound_messages; mailstore-core storage.rs"]
+test_anchors = ["mailstore-core"]
+plan_test_today = "Mailstore encryption tests only"
+gates = ["V19", "T11"]
+
+[[invariant]]
+id = "I25"
+statement = "A data-subject request reaches every store holding that person, sales data included"
+code = ["compliance gdpr_automation.rs"]
+test_anchors = ["compliance"]
+plan_test_today = "Store-map tests without the sales tables"
+gates = ["V23", "T11"]
+
+[[invariant]]
+id = "I26"
+statement = "Every stored-card charge carries shopperInteraction: ContAuth, and the live URL carries the merchant prefix"
+code = ["billing-service maintenance.rs", "overage.rs; tools/check_prod_billing_wiring.py"]
+test_anchors = ["tools/check_prod_billing_wiring.py"]
+plan_test_today = "The gate requires the wrong URL"
+gates = ["V1"]
+
+[[invariant]]
+id = "I27"
+statement = "A message addressed to several tenants is visible to each with only its own recipients"
+code = ["mta inbound.rs"]
+test_anchors = ["mta"]
+plan_test_today = "None"
+gates = ["V13"]

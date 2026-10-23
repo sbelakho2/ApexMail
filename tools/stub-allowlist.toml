@@ -1,0 +1,70 @@
+# tools/stub-allowlist.toml - named, owned, expiring exceptions to the stub ban.
+#
+# Each entry pins the SHA-256 of the exact offending line (first 16 hex chars),
+# so an exception cannot follow edited code around. Every entry carries a
+# reason, an owner and an expiry at most 14 days out (the same discipline as
+# ci/waivers.toml); check_no_stubs.py fails on an expired entry.
+# Generated 2026-10-23 from the scanner's own report.
+
+[[allow]]
+path = "services/mail-server/crates/imap-proto-patched/src/parser/rfc3501.rs"
+line = 484
+marker = "TODO"
+line_hash = "b1075908335e45cf"
+reason = "vendored upstream parser note (nom-5 continuation-response decoding); tracked for the imap-proto refresh"
+owner = "owner"
+expires = "2026-11-06"
+
+[[allow]]
+path = "services/mail-server/crates/ui-foundation/src/migration_tests.rs"
+line = 32
+marker = "TODO"
+line_hash = "8ef9efd20a4bd6e4"
+reason = "absence-assertion list: the gate asserts rendered pages carry NO such marker"
+owner = "owner"
+expires = "2026-11-06"
+
+[[allow]]
+path = "services/mail-server/crates/ui-foundation/src/migration_tests.rs"
+line = 33
+marker = "FIXME"
+line_hash = "65ebff134c977b22"
+reason = "absence-assertion list: the gate asserts rendered pages carry NO such marker"
+owner = "owner"
+expires = "2026-11-06"
+
+[[allow]]
+path = "tools/check_topology_contracts.py"
+line = 16
+marker = "TODO"
+line_hash = "81eff9f65797eb56"
+reason = "inherent self-reference in a gate that names the markers it bans"
+owner = "owner"
+expires = "2026-11-06"
+
+[[allow]]
+path = "tools/README.md"
+line = 33
+marker = "todo!()"
+line_hash = "4e8121004fcff7c4"
+reason = "documentation of the ban itself: it names the markers to describe them"
+owner = "owner"
+expires = "2026-11-06"
+
+[[allow]]
+path = "tools/check_feature_entitlements.py"
+line = 13
+marker = "NotYetImplemented"
+line_hash = "47edbffb707a1e17"
+reason = "entitlements model documentation naming the FeatureClass"
+owner = "owner"
+expires = "2026-11-06"
+
+[[allow]]
+path = "tools/check_feature_entitlements.py"
+line = 56
+marker = "NotYetImplemented"
+line_hash = "3a140cd5b48ac885"
+reason = "entitlements model documentation naming the FeatureClass"
+owner = "owner"
+expires = "2026-11-06"

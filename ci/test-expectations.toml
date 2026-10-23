@@ -1,0 +1,481 @@
+# ci/test-expectations.toml — what every package must prove (T14).
+#
+# Source of truth: ApexMail-Plan-and-Review.pdf, "Tests & enforcement"
+# (pages 3-8 of the section), checked at 61e3db3. Every workspace crate
+# and every package outside it appears here exactly once. A package
+# missing from this file fails tools/check_invariants.py, and so does a
+# declared kind whose evidence cannot be found in the tree.
+#
+# kinds used here (each has a mechanical evidence rule in
+# tools/check_invariants.py):
+#   unit     - #[test]-family tests in the package
+#   fuzz     - a fuzz target named for the package under fuzz-tests/
+#   corpus   - a committed corpus directory named for the package
+#   golden   - committed golden fixtures for the package
+#   matrix   - covered by the T5 all-routes auth/tenant matrix
+#   journey  - covered by a committed browser journey spec (T6)
+#   lane     - runs as a required lane in ci/required-lanes.txt
+#
+# Kind evidence must EXIST today; planned kinds are tracked per work
+# package in the [planned] tables at the end, keyed by WP id, and move up
+# into required_kinds as their WP lands (plan rule 7).
+
+[package.api-server]
+tier = 1
+role = "REST API and SSR console"
+required_kinds = ["unit", "journey"]
+plan_requires = """All-routes matrix (T5); OpenAPI drift (T8); product journeys (T6); diff-mode mutants (T3)"""
+
+[package.compliance]
+tier = 1
+role = "GDPR, consent, claims registry, audit"
+required_kinds = ["unit", "journey"]
+plan_requires = """Erasure completeness incl. mail_journal (T11); governance seed from config (T12); spec-vs-route check (T8)"""
+
+[package.sales-autopilot]
+tier = 1
+role = "Outbound sales engine"
+required_kinds = ["unit", "journey"]
+plan_requires = """Statistics simulations (T15); no-bypass test (S10); disclosure, canonical-answer tests (S15,S17,S19); every send path calls revalidate_execution (I10)"""
+
+[package.enterprise]
+tier = 1
+role = "SSO, sub-accounts, field encryption, dedicated tenant"
+required_kinds = ["unit"]
+plan_requires = """SSO assertion tamper and replay tests; sub-account scope in the matrix (T5); encryption round-trip property tests (T4)"""
+
+[package.billing-service]
+tier = 1
+role = "Subscriptions, Adyen, renewals"
+required_kinds = ["unit", "journey"]
+plan_requires = """Event-order property tests for cancel/resume/renewal (I2); webhook replay idempotency (I3); Adyen test journey (T6)"""
+
+[package.mta]
+tier = 1
+role = "SMTP inbound and submission"
+required_kinds = ["unit"]
+plan_requires = """Fuzz SMTP commands and MIME (T7); submission auth in the matrix; EU-only routing property test (I4)"""
+
+[package.tracking-service]
+tier = 1
+role = "Open and click tracking, signed IDs"
+required_kinds = ["unit"]
+plan_requires = """Token tamper and expiry property tests; fuzz the token decoder (T7); per-tenant event isolation (T5)"""
+
+[package.outbound-mta]
+tier = 1
+role = "EU-only relay"
+required_kinds = ["unit"]
+plan_requires = """Non-EU hop impossible (I4); throttling and MTA-STS/DANE tests when B2 lands; SES stub sees no calls (T6)"""
+
+[package.isolation]
+tier = 1
+role = "Tenant data isolation and encryption"
+required_kinds = ["unit"]
+plan_requires = """Cross-tenant matrix (T5); encryption round-trip and tamper property tests (T4)"""
+
+[package.accounting-core]
+tier = 1
+role = "Statutory accounting"
+required_kinds = ["unit"]
+plan_requires = """Double-entry and VAT property tests (I1, I3); period-close and FX rounding tests; mutation ratchet (T3)"""
+
+[package.apexmail-lib]
+tier = 1
+role = "Crypto, IDs, validation"
+required_kinds = ["unit", "fuzz"]
+plan_requires = """Known-answer vectors for every crypto primitive; fuzz validators (T7)"""
+
+[package.ato-protection]
+tier = 1
+role = "Account-takeover prevention"
+required_kinds = ["unit"]
+plan_requires = """Lockout and step-up in the login journey (T6); bypass mutants (T3)"""
+
+[package.migrator]
+tier = 1
+role = "Deploy-time migration gate"
+required_kinds = ["unit"]
+plan_requires = """Apply pending migrations to a restored backup (I16, T13); destructive-migration marker test"""
+
+[package.billing-common]
+tier = 1
+role = "Shared billing logic"
+required_kinds = ["unit"]
+plan_requires = """Totals, rounding and currency property tests (I1)"""
+
+[package.billing-entitlements]
+tier = 1
+role = "Runtime feature entitlements"
+required_kinds = ["unit"]
+plan_requires = """Plan x feature matrix against platform-catalog; a downgrade removes access"""
+
+[package.sales-knowledge]
+tier = 1
+role = "Shared claim validator"
+required_kinds = ["unit"]
+plan_requires = """Table tests per claim kind; adversarial unbacked-claim cases; mutation ratchet (T3)"""
+
+[package.platform-catalog]
+tier = 1
+role = "Plan and price source of truth"
+required_kinds = ["unit"]
+plan_requires = """Catalog equals marketing pricing equals checkout; canonical pricing answers render from it (S15)"""
+
+[package.auth-server]
+tier = 1
+role = "Status and retained-auth server"
+required_kinds = ["unit"]
+plan_requires = """Include its routes in the matrix (T5)"""
+
+[package.ui-foundation]
+tier = 2
+role = "SSR UI components, golden tests"
+required_kinds = ["unit", "golden"]
+plan_requires = """Refresh the stale pricing and terms baselines; fail when a baseline differs from rendered output"""
+
+[package.worker-processors]
+tier = 2
+role = "Queue workers"
+required_kinds = ["unit"]
+plan_requires = """Idempotent retry per job kind; poison-message handling; suppression check on every send path (I6)"""
+
+[package.ai-service]
+tier = 2
+role = "Mailbot, classifier, chat"
+required_kinds = ["unit"]
+plan_requires = """Evaluation set with a regression floor (T17); disclosure on every path"""
+
+[package.imap-server]
+tier = 2
+role = "IMAP4rev1"
+required_kinds = ["unit"]
+plan_requires = """Fuzz the IMAP command parser (T7); mailbox isolation in the matrix (T5)"""
+
+[package.analytics]
+tier = 2
+role = "Query engine, churn, send-time optimisation"
+required_kinds = ["unit"]
+plan_requires = """Tenant filter on every ClickHouse query (T5); aggregation property tests"""
+
+[package.ddos-protection]
+tier = 2
+role = "DDoS protection (in production, api-server)"
+required_kinds = ["unit"]
+plan_requires = """Health and probe paths never throttled; a steady legitimate client never blocked (both broke 22 Oct, a2f3b08); attack-traffic corpus"""
+
+[package.inbox-placement]
+tier = 2
+role = "Seed-based placement tests"
+required_kinds = ["unit"]
+plan_requires = """Classifier accuracy on a labelled set; IMAP poller timeouts; feeds S11"""
+
+[package.ha]
+tier = 2
+role = "Health, failover, backup"
+required_kinds = ["unit"]
+plan_requires = """Restore drill and failover tests (T13); fencing tests"""
+
+[package.waf-engine]
+tier = 2
+role = "Web application firewall (in production, api-server)"
+required_kinds = ["unit", "fuzz"]
+plan_requires = """A legitimate-traffic corpus of recorded browser sessions must pass with zero blocks (it blocked real browsers on their second page on 22 Oct); attack corpus; fuzz HTTP requests (T7)"""
+
+[package.mailstore-core]
+tier = 2
+role = "Mail storage and journal"
+required_kinds = ["unit"]
+plan_requires = """Store-and-retrieve round-trip property tests; journal retention and erasure (T11)"""
+
+[package.spam-filter]
+tier = 2
+role = "Spam filter"
+required_kinds = ["unit"]
+plan_requires = """Labelled corpus with precision and recall floors"""
+
+[package.apexmail-db]
+tier = 2
+role = "Pool and repositories"
+required_kinds = ["unit"]
+plan_requires = """Every repository query carries a tenant filter (static check plus T5)"""
+
+[package.edge-cases]
+tier = 2
+role = "EAI, attachments, calendar"
+required_kinds = ["unit"]
+plan_requires = """Fuzz attachment and calendar parsing (T7)"""
+
+[package.observability-service]
+tier = 2
+role = "Alerts, metrics, SLOs"
+required_kinds = ["unit"]
+plan_requires = """Make the compose alert smoke a required lane"""
+
+[package.email-grader]
+tier = 2
+role = "Deliverability grading"
+required_kinds = ["unit"]
+plan_requires = """Golden reports for 20 DNS configurations; powers S11"""
+
+[package.devex-service]
+tier = 2
+role = "OpenAPI, SDK manager, webhook tester"
+required_kinds = ["unit"]
+plan_requires = """OpenAPI output feeds T8; webhook tester isolation"""
+
+[package.sandbox]
+tier = 2
+role = "Attachment inspection (in production, mta)"
+required_kinds = ["unit", "fuzz"]
+plan_requires = """Fuzz archives and attachments (T7); nesting and decompression-size limits"""
+
+[package.template-renderer]
+tier = 2
+role = "Sandboxed templates"
+required_kinds = ["unit"]
+plan_requires = """Escaping property tests (no injection); resource limits; fuzz (T7)"""
+
+[package.ids-engine]
+tier = 2
+role = "Intrusion detection (in production, mta)"
+required_kinds = ["unit"]
+plan_requires = """Replay of benign SMTP sessions with zero alerts; fuzz SMTP sessions (T7)"""
+
+[package.threat-intel]
+tier = 2
+role = "Feed ingestion, reputation"
+required_kinds = ["unit", "fuzz"]
+plan_requires = """Fuzz feed parsers; stale-feed alarm test"""
+
+[package.dlp-engine]
+tier = 2
+role = "Data-loss prevention (in production)"
+required_kinds = ["unit"]
+plan_requires = """Labelled message corpus with precision and recall floors; fuzz message bodies (T7)"""
+
+[package.imap-proto-patched]
+tier = 2
+role = "IMAP protocol parser"
+required_kinds = ["unit"]
+plan_requires = """Run its existing fuzz target nightly (T7)"""
+
+[package.mail-common]
+tier = 2
+role = "Shared types and config"
+required_kinds = ["unit"]
+plan_requires = """Config parsing fails closed on unknown keys"""
+
+[package.ai-embeddings]
+tier = 2
+role = "Embeddings and vector search"
+required_kinds = ["unit"]
+plan_requires = """Tenant filter on similarity search (T5)"""
+
+[package.rate-limiter]
+tier = 2
+role = "Rate limiting"
+required_kinds = ["unit"]
+plan_requires = """Budget never exceeded under concurrency; a steady legitimate client never starved (I21)"""
+
+[package.dns-resolver]
+tier = 2
+role = "Cached DNS"
+required_kinds = ["unit"]
+plan_requires = """TTL and negative-cache tests; fuzz record parsing (T7)"""
+
+[package.queue-provider]
+tier = 2
+role = "Postgres job queue"
+required_kinds = ["unit"]
+plan_requires = """Fairness and exactly-once claim property tests (I21)"""
+
+[package.fingerprint]
+tier = 2
+role = "TLS and HTTP/2 fingerprinting (in production, security crates)"
+required_kinds = ["unit"]
+plan_requires = """Known-answer tests for current browsers' TLS and HTTP/2 fingerprints"""
+
+[package.pattern-matcher]
+tier = 2
+role = "Aho-Corasick matching"
+required_kinds = ["unit"]
+plan_requires = """No production crate uses it: wire it in or mark it test-only (G2). If kept, a differential test against a naive matcher"""
+
+[package.pdf-renderer]
+tier = 2
+role = "Typst documents"
+required_kinds = ["unit"]
+plan_requires = """Golden PDFs for invoice, DPA, order form and S11 report"""
+
+[package.mail-proto]
+tier = 2
+role = "Protocol definitions"
+required_kinds = ["unit", "fuzz"]
+plan_requires = """Run its existing fuzz target nightly (T7)"""
+
+[package.integration-tests]
+tier = 3
+role = "Cross-crate tests"
+required_kinds = ["unit"]
+plan_requires = """Run against the T6 stack"""
+
+[package.fuzz-tests]
+tier = 3
+role = "Fuzz and property helpers"
+required_kinds = ["unit"]
+plan_requires = """Hosts the T7 targets; holds all property-test uses today"""
+
+[package.functional-tests]
+tier = 3
+role = "Functional tests"
+required_kinds = ["unit"]
+plan_requires = """Run against the T6 stack"""
+
+[package.smoke-tests]
+tier = 3
+role = "Smoke tests"
+required_kinds = ["unit"]
+plan_requires = """Run after each deploy in the verify stage"""
+
+[package.load-tests]
+tier = 3
+role = "Load and stress tests"
+required_kinds = ["unit"]
+plan_requires = """Own SLO lane (T13)"""
+
+[package.perf-tests]
+tier = 3
+role = "Benchmarks"
+required_kinds = ["unit"]
+plan_requires = """Regression threshold in the T13 lane"""
+
+[package."packages/sdk-typescript"]
+tier = 2
+role = "TypeScript SDK"
+required_kinds = ["unit"]
+plan_requires = "Live suite against the T6 stack; npm provenance (T9)"
+
+[package."packages/sdk-python"]
+tier = 2
+role = "Python SDK"
+required_kinds = ["unit"]
+plan_requires = "Live suite; PyPI trusted publishing (T9)"
+
+[package."packages/sdk-go"]
+tier = 2
+role = "Go SDK"
+required_kinds = ["unit"]
+plan_requires = "Live suite; module tag (T9)"
+
+[package."packages/sdk-java"]
+tier = 2
+role = "Java SDK"
+required_kinds = ["unit"]
+plan_requires = "Live suite; Maven Central (T9)"
+
+[package."packages/sdk-php"]
+tier = 2
+role = "PHP SDK"
+required_kinds = ["unit"]
+plan_requires = "Live suite; Packagist (T9)"
+
+[package."packages/sdk-ruby"]
+tier = 2
+role = "Ruby SDK"
+required_kinds = ["unit"]
+plan_requires = "A Minitest suite; live suite; RubyGems (T9)"
+
+[package."packages/contract"]
+tier = 2
+role = "send-contract.json"
+required_kinds = []
+plan_requires = "Validate live responses against it (T9)"
+
+[package."packages/smtp-auth-proxy"]
+tier = 2
+role = "smtp-auth-proxy"
+required_kinds = ["unit"]
+plan_requires = "Refuses unauthenticated relay; requires TLS; accepts valid credentials (T16)"
+
+[package."apps/ai"]
+tier = 3
+role = "AI training scripts"
+required_kinds = []
+plan_requires = "A pytest suite, or retire the scripts (T16)"
+
+[package."apps/marketing-zola"]
+tier = 3
+role = "Marketing site"
+required_kinds = []
+plan_requires = "Link, contrast, layout, i18n, legal-identity, pricing and capability-claims gates (T10, T12)"
+
+[package."tools"]
+tier = 3
+role = "70 tools (55 Python, 15 shell)"
+required_kinds = []
+plan_requires = "A self-test for every tool CI invokes; meta-gate (T10)"
+
+[package."ci"]
+tier = 3
+role = "Pipeline shell"
+required_kinds = []
+plan_requires = "Lane-level, signed blessing cases (T1)"
+
+[package."deploy"]
+tier = 3
+role = "Scripts and configs"
+required_kinds = []
+plan_requires = "Restore drill; a test for secret-file bridging in entrypoint-wrapper.sh (T13)"
+
+[package."tests/browser"]
+tier = 3
+role = "Playwright specs"
+required_kinds = []
+plan_requires = "ApexMail journey specs on the T6 stack (T6)"
+
+# Planned kinds by work package (plan rule 7). Each entry moves up into
+# required_kinds when its WP lands; check_invariants.py verifies the WP id
+# exists in the plan's index so an entry cannot silently rot.
+# Planned kinds by work package (plan rule 7). Each entry moves up into
+# required_kinds when its WP lands; check_invariants.py verifies the WP id
+# exists in the plan's index so an entry cannot silently rot.
+
+# Planned kinds by work package (plan rule 7): each row moves into the
+# owning package's required_kinds when its work package lands.
+
+# Planned kinds by work package (plan rule 7): each row moves into the
+# owning package's required_kinds when its work package lands.
+
+[planned.T4]
+packages = ["billing-service", "billing-common", "accounting-core", "isolation", "enterprise", "sales-autopilot", "tracking-service", "apexmail-lib", "rate-limiter", "queue-provider", "mailstore-core", "template-renderer"]
+kind = "property"
+invariants = ["I1", "I2", "I3", "I4", "I6", "I10", "I21"]
+
+[planned.T5]
+packages = ["api-server", "auth-server", "isolation", "enterprise", "imap-server", "apexmail-db", "ai-embeddings", "analytics", "api-server", "api-server"]
+kind = "matrix"
+
+[planned.T7]
+packages = ["mta", "imap-server", "tracking-service", "apexmail-lib", "edge-cases", "waf-engine", "sandbox", "template-renderer", "ids-engine", "threat-intel", "dlp-engine", "dns-resolver", "mail-proto", "imap-proto-patched", "edge-cases", "template-renderer", "mta", "tracking-service", "imap-server", "mta", "tracking-service", "imap-server"]
+kind = "fuzz"
+
+[planned.T15]
+packages = ["sales-autopilot"]
+kind = "property"
+
+[planned.T17]
+packages = ["ai-service"]
+kind = "eval"
+
+[planned.T2]
+packages = ["ids-engine", "dlp-engine", "email-grader"]
+kind = "golden"
+
+[planned.V4]
+packages = ["pdf-renderer"]
+kind = "golden"
+
+[planned.T6]
+packages = ["ddos-protection", "waf-engine", "spam-filter", "ddos-protection", "waf-engine", "spam-filter"]
+kind = "corpus"

@@ -1,0 +1,17 @@
+# ci/waivers.toml — dated waivers for advisory lanes (T1, plan rule 3).
+#
+# A lane that cannot run required needs a waiver HERE, not a silent skip:
+#
+#   [[waiver]]
+#   lane   = "test.coverage-ratchet"        # a lane from ci/required-lanes.txt
+#   reason = "coverage rig cannot read lcov on the new runner (#42)"
+#   owner  = "owner"
+#   written = "2026-10-22"                  # the day the waiver was written
+#   expires = "2026-11-01"                  # at most 14 days past `written`
+#
+# tools/check_waivers.py (the `validate.waivers` lane) fails the run when a
+# waiver is expired, exceeds the 14-day maximum, names a lane that does not
+# exist, or is missing a field. An expired waiver is REMOVED and the lane is
+# run — it is never renewed silently.
+#
+# Today: no waivers. Every lane above is required.

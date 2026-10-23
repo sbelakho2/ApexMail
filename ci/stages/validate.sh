@@ -308,6 +308,22 @@ validate_repo_gates() {
         ci_check "SDK version lockstep (packages/check_versions.py)" \
             python3 packages/check_versions.py
         ci_check "rust panic paths" python3 tools/check_rust_panic_paths.py
+        # Plan "Tests & enforcement" rule 7 (WP T14): every package declares
+        # what it must prove, and every critical invariant names a live test
+        # anchor. Both fail the run.
+        ci_check "invariant and expectations registry" python3 tools/check_invariants.py
+        # The owner's stub ban (0 gaps or scaffolding): todo!(), unimplemented!(),
+        # TODO/FIXME markers and NotYetImplemented states in product code fail
+        # the run; exceptions live in tools/stub-allowlist.toml, pinned by line
+        # hash with a reason and a 14-day expiry.
+        ci_check "stub ban" python3 tools/check_no_stubs.py
+        # Plan rule 3 (WP T1): an advisory lane needs a dated waiver; an
+        # expired one fails the run.
+        ci_check "lane waivers" python3 tools/check_waivers.py
+        # T10: every gate proves it can fail on known-bad input.
+        ci_check "stub ban self-test" python3 tools/check_no_stubs.py --self-test
+        ci_check "invariant registry self-test" python3 tools/check_invariants.py --self-test
+        ci_check "waiver gate self-test" python3 tools/check_waivers.py --self-test
         ci_check "outbound delivery contract" python3 tools/check_outbound_delivery_contract.py
         ci_check "topology contracts" python3 tools/check_topology_contracts.py
         ci_check "security posture (managed-cloud baseline)" python3 tools/check_security_posture.py

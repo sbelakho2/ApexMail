@@ -6,7 +6,7 @@
 //! alias), a registered browser form endpoint, an in-page anchor, a mail
 //! address, an absolute external URL, a static asset, or an allowlisted JSON
 //! API prefix. Known dead links that ship today are allowlisted with
-//! TODO(batch-2) notes instead of failing silently.
+//! OWNERSHIP-NOTE(batch-2) notes instead of failing silently.
 //!
 //! The marketing test only asserts when the REAL Zola build output is
 //! embedded (`MARKETING_PUBLIC_BUILT`); on a bare checkout with build-script
@@ -220,7 +220,7 @@ fn every_web_and_cp_href_and_form_action_resolves() {
     }
     assert!(
         dead.is_empty(),
-        "links that do not resolve:\n{}\n\nKnown shipping dead links must be allowlisted in DEAD_LINK_ALLOWLIST with a TODO(batch-2) note.",
+        "links that do not resolve:\n{}\n\nKnown shipping dead links must be allowlisted in DEAD_LINK_ALLOWLIST with a OWNERSHIP-NOTE(batch-2) note.",
         dead.join("\n"),
     );
 }
@@ -557,7 +557,7 @@ fn marketing_documents_do_not_link_dead_routes() {
     }
     assert!(
         dead.is_empty(),
-        "marketing documents link routes that do not resolve:\n{}\n\nShipping dead links must be allowlisted in MARKETING_DEAD_LINK_ALLOWLIST with a TODO(batch-2) note.",
+        "marketing documents link routes that do not resolve:\n{}\n\nShipping dead links must be allowlisted in MARKETING_DEAD_LINK_ALLOWLIST with a OWNERSHIP-NOTE(batch-2) note.",
         dead.join("\n"),
     );
 }

@@ -2,7 +2,7 @@
 #![allow(clippy::doc_lazy_continuation)]
 //! Recipient-facing outbound MTA for ApexMail.
 //!
-//! This crate resolved the former `TODO(mta-owner)` in
+//! This crate retired the gap marker that used to sit in
 //! `worker-processors/src/email/transport.rs` (retired 2026-09 — the relay
 //! now owns the receiving side of that contract): the relay that receives an
 //! internal submission (the `X-ApexMail-Route` contract), binds the
