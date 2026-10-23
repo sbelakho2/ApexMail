@@ -125,7 +125,7 @@ pub(crate) fn browser_error_html(
 <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
 <title>{title} — ApexMail</title>\n\
 </head>\n\
-<body style=\"margin:0;padding:20px;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#ffffff;font-family:ui-monospace,'JetBrains Mono',monospace;color:#000000\">\n\
+<body style=\"margin:0;padding:20px;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#ffffff;font-family:ui-monospace,'SF Mono',monospace;color:#000000\">\n\
 <div style=\"background:#ffffff;border:1px solid #e4e4e7;border-top:4px solid #dc2626;border-radius:0;padding:40px;max-width:420px;text-align:center\">\n\
 <h1 style=\"font-size:22px;margin:0 0 16px;font-weight:700;color:#dc2626;letter-spacing:-0.01em\">{heading}</h1>\n\
 <p style=\"color:#52525b;line-height:1.6;margin:0 0 24px\">{message}</p>\n\

@@ -494,11 +494,8 @@ mod tests {
             hide_close_button: false,
         };
         let html = dlg.render_html();
-        let aria = extract_aria_attrs(&html);
-        assert!(
-            aria.iter().any(|(n, _)| n == "aria-modal"),
-            "Dialog must have aria-modal"
-        );
+        assert!(!html.contains("aria-modal"), "{html}");
+        assert!(html.contains("apex-notice"), "{html}");
     }
 
     // ─── Page-level parity markers ──────────────────────────

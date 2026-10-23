@@ -1,8 +1,8 @@
 {
   "asset_authority": "console: ui-foundation GLOBALS_CSS -> assets/globals.css; marketing: apps/marketing-zola/public -> css/, fonts/, images/, root files",
-  "css_sha256": "dcf34c4aa27c560110bb5456fb7146809aaf6de9236bcfb1298da5a0561ee099",
+  "css_sha256": "79e92e27e63d538ff49cfb4cb611fc923def1cd9269f3b484f53ee323c253a97",
   "marketing_sha256": "7b1740b6198ae4a52ec4b26ca9ca631ab9ca4b9d3fac884e680c419c643c8dd3",
-  "renderer_sha256": "5d495b04c24b503b903812e3c76baa28a2d2570375b13d26d477db2a48e6bf9e",
+  "renderer_sha256": "6cd8c3a3be650df43c73aa7c446dad381ec7a3f87d97b368c729d83ae149d7a2",
   "fixtures": [
     {
       "id": "web-home-desktop",

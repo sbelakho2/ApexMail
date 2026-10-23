@@ -688,7 +688,6 @@ fn resolve_utility(token: &str) -> Option<String> {
                 &format!(".{}", escape_selector(&positive_token)),
                 &format!(".{}", escape_selector(token)),
             )
-            .replace(": 0px", ": 0px")
             .replace(": ", ": -")
             .replace(": -0px", ": 0px")
             .replace(": -auto", ": auto");

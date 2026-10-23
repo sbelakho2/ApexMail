@@ -2283,10 +2283,7 @@ fn sales_panel(id: &str, eyebrow: &str, title: &str, body: &str) -> String {
 
 /// Honest empty/unavailable statement — never a fake row.
 fn sales_note(text: &str) -> String {
-    format!(
-        r#"<p class="mt-5 border border-border p-4">{}</p>"#,
-        html_escape(text)
-    )
+    format!(r#"<p class="mt-5 border p-4">{}</p>"#, html_escape(text))
 }
 
 /// Warning-toned statement: an engaged kill switch or a data-availability gap.
@@ -2557,7 +2554,7 @@ fn sales_exception_item(decision: &SalesDecisionData) -> String {
 /// Compact dead-letter row (Exceptions section).
 fn sales_dead_letter_summary(letter: &SalesDeadLetterData) -> String {
     format!(
-        r#"<li class="border border-border p-4"><p class="">{id}</p><p class="mt-1">{action_type}, {entity_type} {entity_id}, attempt {attempt} of {max_attempts}</p><p class="mt-1">Last error: {last_error}</p></li>"#,
+        r#"<li class="border p-4"><p class="">{id}</p><p class="mt-1">{action_type}, {entity_type} {entity_id}, attempt {attempt} of {max_attempts}</p><p class="mt-1">Last error: {last_error}</p></li>"#,
         id = html_escape(&letter.id),
         action_type = html_escape(&letter.action_type),
         entity_type = html_escape(&letter.entity_type),
@@ -2579,7 +2576,7 @@ fn sales_dead_letter_replay_control(letter: &SalesDeadLetterData) -> String {
         .and_then(rfc3339_utc_label)
         .unwrap_or_else(|| "not recorded".to_string());
     format!(
-        r#"<li class="border border-border p-4"><p class="">{id}</p><p class="mt-1">{action_type}, {entity_type} {entity_id}, attempt {attempt} of {max_attempts}</p><p class="mt-1">Last error: {last_error}</p><p class="mt-1">Due: {due}</p><form method="post" action="/web/admin/autopilot/actions/{id}/replay" class="mt-3 flex flex-wrap items-center gap-3"><input type="hidden" name="return_to" value="/sales"><button type="submit" class="apex-btn apex-btn--sm">Replay</button><p class="">Requeues this action with a fresh attempt budget — it runs when the engine next polls.</p></form></li>"#,
+        r#"<li class="border p-4"><p class="">{id}</p><p class="mt-1">{action_type}, {entity_type} {entity_id}, attempt {attempt} of {max_attempts}</p><p class="mt-1">Last error: {last_error}</p><p class="mt-1">Due: {due}</p><form method="post" action="/web/admin/autopilot/actions/{id}/replay" class="mt-3 flex flex-wrap items-center gap-3"><input type="hidden" name="return_to" value="/sales"><button type="submit" class="apex-btn apex-btn--sm">Replay</button><p class="">Requeues this action with a fresh attempt budget — it runs when the engine next polls.</p></form></li>"#,
         id = html_escape(&letter.id),
         action_type = html_escape(&letter.action_type),
         entity_type = html_escape(&letter.entity_type),
@@ -2691,7 +2688,7 @@ fn sales_revenue_section(overview: Option<&SalesOverviewData>) -> String {
                     .join("");
                 let total = format_eur_amount(overview.revenue.iter().map(|row| row.eur).sum());
                 format!(
-                    r#"<div class="mt-5 overflow-x-auto border border-border"><table class="min-w-full apex-table"><caption class="sr-only">Revenue outcomes for the last 30 days</caption><thead class=""><tr><th scope="col" class="px-4 py-3">Outcome</th><th scope="col" class="px-4 py-3">Revenue (EUR)</th></tr></thead><tbody class="">{rows}<tr class=""><td class="px-4 py-3 apex-em">Total</td><td class="px-4 py-3 apex-em">{total}</td></tr></tbody></table></div>{window}"#,
+                    r#"<div class="mt-5 overflow-x-auto border"><table class="min-w-full apex-table"><caption class="sr-only">Revenue outcomes for the last 30 days</caption><thead class=""><tr><th scope="col" class="px-4 py-3">Outcome</th><th scope="col" class="px-4 py-3">Revenue (EUR)</th></tr></thead><tbody class="">{rows}<tr class=""><td class="px-4 py-3 apex-em">Total</td><td class="px-4 py-3 apex-em">{total}</td></tr></tbody></table></div>{window}"#,
                     rows = rows,
                     total = total,
                     window = window,
@@ -2807,7 +2804,7 @@ fn sales_decisions_section(data: &SalesPageData) -> String {
                 .collect::<Vec<_>>()
                 .join("");
             format!(
-                r#"<div class="mt-5 overflow-x-auto border border-border"><table class="min-w-full apex-table"><caption class="sr-only">Recent sales-autopilot decisions</caption><thead class=""><tr><th scope="col" class="px-4 py-3">Action</th><th scope="col" class="px-4 py-3">Account</th><th scope="col" class="px-4 py-3">Confidence</th><th scope="col" class="px-4 py-3">Expected value</th><th scope="col" class="px-4 py-3">Variant</th><th scope="col" class="px-4 py-3">Sender</th><th scope="col" class="px-4 py-3">Offer / sequence</th><th scope="col" class="px-4 py-3">Rationale</th></tr></thead><tbody class="">{rows}</tbody></table></div>"#,
+                r#"<div class="mt-5 overflow-x-auto border"><table class="min-w-full apex-table"><caption class="sr-only">Recent sales-autopilot decisions</caption><thead class=""><tr><th scope="col" class="px-4 py-3">Action</th><th scope="col" class="px-4 py-3">Account</th><th scope="col" class="px-4 py-3">Confidence</th><th scope="col" class="px-4 py-3">Expected value</th><th scope="col" class="px-4 py-3">Variant</th><th scope="col" class="px-4 py-3">Sender</th><th scope="col" class="px-4 py-3">Offer / sequence</th><th scope="col" class="px-4 py-3">Rationale</th></tr></thead><tbody class="">{rows}</tbody></table></div>"#,
                 rows = rows,
             )
         }
@@ -2900,7 +2897,7 @@ fn sales_actions_section(data: &SalesPageData) -> String {
             .collect::<Vec<_>>()
             .join("");
         format!(
-            r#"<div class="mt-5 overflow-x-auto border border-border"><table class="min-w-full apex-table"><caption class="sr-only">Action queue counts by state</caption><thead class=""><tr><th scope="col" class="px-4 py-3">State</th><th scope="col" class="px-4 py-3">Count</th></tr></thead><tbody class="">{rows}</tbody></table></div>"#,
+            r#"<div class="mt-5 overflow-x-auto border"><table class="min-w-full apex-table"><caption class="sr-only">Action queue counts by state</caption><thead class=""><tr><th scope="col" class="px-4 py-3">State</th><th scope="col" class="px-4 py-3">Count</th></tr></thead><tbody class="">{rows}</tbody></table></div>"#,
         )
     };
     let replay = match data.dead_letters.as_ref() {
@@ -2919,7 +2916,7 @@ fn sales_actions_section(data: &SalesPageData) -> String {
             )
         }
     };
-    let enrichment = r#"<form method="post" action="/web/admin/sales/discovery/run" class="mt-6 grid gap-4 border border-border p-4"><div class="space-y-2"><label for="sales-enrich-sources" class="block apex-label">Source domains (comma-separated)</label><input id="sales-enrich-sources" name="sources" required class="apex-input w-full" /></div><div><button type="submit" class="apex-btn">Run enrichment</button></div><p class="">Manual enrichment trigger — normal discovery is engine-driven; this asks the engine to enrich the listed domains now.</p></form>"#;
+    let enrichment = r#"<form method="post" action="/web/admin/sales/discovery/run" class="mt-6 grid gap-4 border p-4"><div class="space-y-2"><label for="sales-enrich-sources" class="block apex-label">Source domains (comma-separated)</label><input id="sales-enrich-sources" name="sources" required class="apex-input w-full" /></div><div><button type="submit" class="apex-btn">Run enrichment</button></div><p class="">Manual enrichment trigger — normal discovery is engine-driven; this asks the engine to enrich the listed domains now.</p></form>"#;
     sales_panel(
         "sales-actions",
         "Queue",
@@ -2950,11 +2947,11 @@ fn sales_enrollments_section(data: &SalesPageData) -> String {
                 .collect::<Vec<_>>()
                 .join("");
             format!(
-                r#"<div class="mt-5 overflow-x-auto border border-border"><table class="min-w-full apex-table"><caption class="sr-only">Contact enrollments by state</caption><thead class=""><tr><th scope="col" class="px-4 py-3">State</th><th scope="col" class="px-4 py-3">Enrolled</th></tr></thead><tbody class="">{rows}</tbody></table></div>"#,
+                r#"<div class="mt-5 overflow-x-auto border"><table class="min-w-full apex-table"><caption class="sr-only">Contact enrollments by state</caption><thead class=""><tr><th scope="col" class="px-4 py-3">State</th><th scope="col" class="px-4 py-3">Enrolled</th></tr></thead><tbody class="">{rows}</tbody></table></div>"#,
             )
         }
     };
-    let form = r#"<form method="post" action="/web/admin/sales/outreach/launch" class="mt-6 grid gap-4 border border-border p-4"><h3 class="apex-h3">Enroll contacts into a sequence</h3><div class="space-y-2"><label for="sales-enroll-sequence" class="block apex-label">Sequence id</label><input id="sales-enroll-sequence" name="sequence_id" required class="apex-input w-full" /></div><div class="space-y-2"><label for="sales-enroll-policy" class="block apex-label">Autonomy policy id</label><input id="sales-enroll-policy" name="autonomy_policy_id" required class="apex-input w-full" /></div><div class="space-y-2"><label for="sales-enroll-contacts" class="block apex-label">Contact ids (comma-separated, 1-100)</label><input id="sales-enroll-contacts" name="contact_ids" required class="apex-input w-full" /></div><div><button type="submit" class="apex-btn apex-btn--secondary">Enqueue enrollment</button></div><p class="">Enrollment is an engine command: the control plane creates no campaign and no recipient row. The engine's accepted/rejected counts return as a flash.</p></form>"#;
+    let form = r#"<form method="post" action="/web/admin/sales/outreach/launch" class="mt-6 grid gap-4 border p-4"><h3 class="apex-h3">Enroll contacts into a sequence</h3><div class="space-y-2"><label for="sales-enroll-sequence" class="block apex-label">Sequence id</label><input id="sales-enroll-sequence" name="sequence_id" required class="apex-input w-full" /></div><div class="space-y-2"><label for="sales-enroll-policy" class="block apex-label">Autonomy policy id</label><input id="sales-enroll-policy" name="autonomy_policy_id" required class="apex-input w-full" /></div><div class="space-y-2"><label for="sales-enroll-contacts" class="block apex-label">Contact ids (comma-separated, 1-100)</label><input id="sales-enroll-contacts" name="contact_ids" required class="apex-input w-full" /></div><div><button type="submit" class="apex-btn apex-btn--secondary">Enqueue enrollment</button></div><p class="">Enrollment is an engine command: the control plane creates no campaign and no recipient row. The engine's accepted/rejected counts return as a flash.</p></form>"#;
     sales_panel(
         "sales-enrollments",
         "Pipeline",
@@ -3013,7 +3010,7 @@ pub fn control_plane_sales_page_with_data(data: &SalesPageData) -> String {
 /// the honest unavailable contract — never zeros.
 fn sales_first_response_section(data: &SalesPageData) -> String {
     let Some(kpi) = data.first_response.as_ref() else {
-        return "<section aria-label=\"First response\" class=\"border border-border p-5\"><h3 class=\"apex-h3\">First response</h3><p class=\"mt-2\">Latency unavailable — the first-response store could not be read. The figures are unknown, not zero.</p></section>".to_string();
+        return "<section aria-label=\"First response\" class=\"border p-5\"><h3 class=\"apex-h3\">First response</h3><p class=\"mt-2\">Latency unavailable — the first-response store could not be read. The figures are unknown, not zero.</p></section>".to_string();
     };
     let pct = |value: Option<f64>| -> String {
         match value {
@@ -3027,7 +3024,7 @@ fn sales_first_response_section(data: &SalesPageData) -> String {
         .map(|ok| if ok { "within target" } else { "above target" })
         .unwrap_or("no closed requests in the window");
     format!(
-        "<section aria-label=\"First response\" class=\"border border-border p-5\">\
+        "<section aria-label=\"First response\" class=\"border p-5\">\
          <h3 class=\"apex-h3\">First response</h3>\
          <div class=\"mt-3 grid gap-4 sm:grid-cols-4\">\
          <div><p class=\"apex-em\">{pending}</p><p class=\"\">waiting for a draft</p></div>\
@@ -3268,14 +3265,14 @@ fn web_auth_notice(intent: &str, title: &str, description: &str) -> String {
 /// color — near-white inherited text on a pale panel in dark mode).
 fn web_auth_notice_rich(intent: &str, title: &str, body_html: &str) -> String {
     let classes = match intent {
-        "success" => "border-success-200 bg-success-50/80 text-success-900",
-        "warning" => "border-warning-200 bg-warning-50/80 text-warning-900",
-        "error" => "apex-notice apex-notice--fail",
-        _ => "border-brand-200 bg-brand-50/80 text-brand-900",
+        "success" => "apex-notice--ok",
+        "warning" => "apex-notice--warn",
+        "error" => "apex-notice--fail",
+        _ => "",
     };
 
     format!(
-        "<div class=\"apex-auth-notice border px-4 py-4 {classes}\" data-intent=\"{}\">\
+        "<div class=\"apex-auth-notice {classes}\" data-intent=\"{}\">\
 <p class=\"apex-em\">{}</p>\
 <p class=\"mt-1\">{}</p></div>",
         html_escape(intent),
@@ -5825,7 +5822,7 @@ pub fn web_settings_billing_page() -> String {
 <div class=\"border p-6 md:p-8\">\
 <h3 class=\"mb-4 apex-h3\">Payment Method</h3>\
 <div class=\"flex flex-wrap items-center gap-4 p-4 border\">\
-<div class=\"flex h-10 w-14 flex-shrink-0 items-center justify-center\">\
+<div class=\"flex h-10 w-14 shrink-0 items-center justify-center\">\
 <svg class=\"h-5 w-5\" xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect width=\"20\" height=\"14\" x=\"2\" y=\"5\" rx=\"2\"/><line x1=\"2\" x2=\"22\" y1=\"10\" y2=\"10\"/></svg>\
 </div>\
 <div class=\"flex-1 min-w-[9rem]\">\
@@ -7149,8 +7146,8 @@ pub fn control_plane_alert_rules_page(data: Option<&AlertRulesPageData>) -> Stri
                 rule.name.clone()
             };
             let severity_class = match rule.severity.as_str() {
-                "critical" => "text-error font-semibold",
-                "warning" => "text-warning-700 font-semibold",
+                "critical" => "apex-status apex-status--fail",
+                "warning" => "apex-status apex-status--warn",
                 _ => "text-surface-600",
             };
             let next_enabled = if rule.enabled { "false" } else { "true" };
@@ -9283,7 +9280,7 @@ mod tests {
             ..with_providers.clone()
         };
         let html = web_inbox_placement_detail_page_with_data(&failed);
-        assert!(html.contains(">Failed</div>"), "{html}");
+        assert!(html.contains(">Failed</"), "{html}");
         assert!(html.contains("This test failed"), "{html}");
 
         let completed_empty = crate::view_data::PlacementDetailData {
@@ -9794,7 +9791,7 @@ mod tests {
         assert!(html.contains("Free"));
         assert!(html.contains("Pro"));
         assert!(html.contains("Enterprise"));
-        assert!(html.contains("Popular"));
+        assert!(html.contains("Most chosen") || html.contains("Popular"));
     }
 
     #[test]

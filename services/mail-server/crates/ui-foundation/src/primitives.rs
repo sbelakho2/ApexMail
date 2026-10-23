@@ -33,8 +33,6 @@
 //! The `*BehaviorContract` structs below document the behaviour each legacy
 //! widget *would* need; they are not evidence that it is implemented.
 
-use crate::icons::{render_icon, IconRenderOptions};
-
 /// Escape HTML special characters in attribute/text interpolation.
 fn html_escape(text: &str) -> String {
     let mut escaped = String::with_capacity(text.len());
@@ -60,37 +58,6 @@ fn html_escape(text: &str) -> String {
 #[allow(dead_code)]
 fn next_dialog_id() -> String {
     "apex-dialog".to_string()
-}
-
-fn dialog_id_for(title: &str) -> String {
-    let slug: String = title
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    let trimmed = slug.trim_matches('-').to_string();
-    if trimmed.is_empty() {
-        "apex-dialog".to_string()
-    } else {
-        format!("apex-dialog-{trimmed}")
-    }
-}
-
-fn primitive_icon(name: &str, class_name: &str) -> String {
-    render_icon(
-        name,
-        IconRenderOptions {
-            size: 18,
-            stroke_width: 2.0,
-            class_name: Some(class_name),
-        },
-    )
-    .unwrap_or_default()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -277,6 +244,248 @@ pub const PRIMITIVES: &[PrimitiveSpec] = &[
         status: "implemented",
     },
 ];
+
+fn status_indicator_config(status: &str) -> (&str, &str, &str) {
+    const DOT_SUCCESS: &str = "<span class=\"mr-1 h-2 w-2\" aria-hidden=\"true\"></span>";
+    const DOT_INFO: &str = "<span class=\"mr-1 h-2 w-2\" aria-hidden=\"true\"></span>";
+    const DOT_WARNING: &str = "<span class=\"mr-1 h-2 w-2\" aria-hidden=\"true\"></span>";
+    const DOT_ERROR: &str = "<span class=\"mr-1 h-2 w-2\" aria-hidden=\"true\"></span>";
+    const DOT_OUTLINE: &str =
+        "<span class=\"mr-1 h-2 w-2 border border-current\" aria-hidden=\"true\"></span>";
+    match status.to_ascii_lowercase().as_str() {
+        "draft" => ("Draft", "secondary", DOT_OUTLINE),
+        "scheduled" => ("Scheduled", "info", DOT_INFO),
+        "sending" => ("Sending", "warning", DOT_WARNING),
+        "sent" => ("Sent", "success", DOT_SUCCESS),
+        "paused" => ("Paused", "outline", DOT_OUTLINE),
+        "subscribed" => ("Subscribed", "success", DOT_SUCCESS),
+        "unsubscribed" => ("Unsubscribed", "secondary", DOT_OUTLINE),
+        "bounced" => ("Bounced", "warning", DOT_WARNING),
+        "complained" => ("Complained", "error", DOT_ERROR),
+        "delivered" => ("Delivered", "success", DOT_SUCCESS),
+        "queued" => (
+            "Queued",
+            "secondary",
+            "<span class=\"mr-1 h-2 w-2\" aria-hidden=\"true\"></span>",
+        ),
+        "failed" => ("Failed", "error", DOT_ERROR),
+        // ── Control-plane vocabulary ────────────────────────────────
+        // Active tenants, verified domains, healthy fleet states, and
+        // finished work previously fell through to gray. Severity words
+        // (critical/high/…) map so alerts triage by color.
+        "active" => ("Active", "success", DOT_SUCCESS),
+        "verified" => ("Verified", "success", DOT_SUCCESS),
+        "healthy" => ("Healthy", "success", DOT_SUCCESS),
+        "operational" => ("Operational", "success", DOT_SUCCESS),
+        "ready" => ("Ready", "success", DOT_SUCCESS),
+        "online" => ("Online", "success", DOT_SUCCESS),
+        "completed" => ("Completed", "success", DOT_SUCCESS),
+        "approved" => ("Approved", "success", DOT_SUCCESS),
+        "suspended" => ("Suspended", "outline-error", DOT_ERROR),
+        "blocked" => ("Blocked", "outline-error", DOT_ERROR),
+        "cancelled" | "canceled" => ("Cancelled", "secondary", DOT_OUTLINE),
+        "rejected" => ("Rejected", "secondary", DOT_OUTLINE),
+        "stopped" => ("Stopped", "secondary", DOT_OUTLINE),
+        "acknowledged" => ("Acknowledged", "outline", DOT_OUTLINE),
+        "critical" => ("Critical", "error", DOT_ERROR),
+        "high" => ("High", "error", DOT_ERROR),
+        "medium" => ("Medium", "warning", DOT_WARNING),
+        "low" => ("Low", "secondary", DOT_OUTLINE),
+        "escalated" => ("Escalated", "warning", DOT_WARNING),
+        "pending" => ("Pending", "outline", DOT_OUTLINE),
+        "invited" => ("Invited", "info", DOT_INFO),
+        "processing" => ("Processing", "info", DOT_INFO),
+        "in_progress" => ("In progress", "info", DOT_INFO),
+        "draining" => ("Draining", "warning", DOT_WARNING),
+        "new" => ("New", "secondary", DOT_OUTLINE),
+        "qualified" => ("Qualified", "info", DOT_INFO),
+        "proposal" => ("Proposal", "info", DOT_INFO),
+        // MFA/secret enrollment vocabulary (review §7 Operators: "Replace
+        // reused sent/draft MFA labels with Enabled/Not configured"). The
+        // values are the wire vocabulary the CP loaders emit.
+        "enabled" => ("Enabled", "success", DOT_SUCCESS),
+        "not_configured" => ("Not configured", "secondary", DOT_OUTLINE),
+        _ => (status, "secondary", DOT_OUTLINE),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_chart_shell(
+    title: Option<&str>,
+    description: Option<&str>,
+    last_updated_label: Option<&str>,
+    height: usize,
+    legend_items: &[ChartLegendItem<'_>],
+    data_count: usize,
+    empty_state_reason: &str,
+    chart_markup: &str,
+) -> String {
+    let content = if data_count == 0 {
+        chart_empty_state_markup(empty_state_reason)
+    } else {
+        format!("{}{}", chart_legend_markup(legend_items), chart_markup)
+    };
+
+    render_chart_frame(title, description, last_updated_label, height, &content)
+}
+
+fn chart_empty_state_markup(reason: &str) -> String {
+    // No outer border/background here — the surrounding chart frame already provides the
+    // single visible boundary. Adding another border created a triple-stacked look when
+    // the chart frame itself was nested inside a card.
+    format!("<div class=\"apex-empty-state flex min-h-[220px] flex-col items-center justify-center gap-3 p-6\"><svg aria-hidden=\"true\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\" class=\"h-7 w-7\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" d=\"M3 3v18h18M7 15l3-3 3 3 5-5\"/></svg><p class=\"max-w-xs\">{}</p></div>", chart_empty_description(reason))
+}
+
+fn chart_legend_markup(items: &[ChartLegendItem<'_>]) -> String {
+    if items.is_empty() {
+        return String::new();
+    }
+
+    let entries = items
+        .iter()
+        .map(|item| format!("<div class=\"inline-flex items-center gap-2\"><span class=\"h-2.5 w-2.5\" style=\"background-color: {}\" aria-hidden=\"true\"></span><span>{}</span></div>", item.color, item.name))
+        .collect::<Vec<_>>()
+        .join("");
+
+    format!("<div class=\"mb-3 flex flex-wrap items-center gap-x-4 gap-y-2\" aria-label=\"Chart legend\">{}</div>", entries)
+}
+
+fn render_chart_frame(
+    title: Option<&str>,
+    description: Option<&str>,
+    last_updated_label: Option<&str>,
+    height: usize,
+    content: &str,
+) -> String {
+    let header = if title.is_some() || description.is_some() {
+        format!(
+            "<div class=\"flex flex-col space-y-1.5 p-6\">{}{}{}</div>",
+            title
+                .map(|value| format!("<h3 class=\"break-words apex-h3\">{}</h3>", value))
+                .unwrap_or_default(),
+            description
+                .map(|value| format!("<p class=\"break-words\">{}</p>", value))
+                .unwrap_or_default(),
+            chart_meta_markup(last_updated_label),
+        )
+    } else {
+        String::new()
+    };
+
+    // The chart frame is almost always wrapped in a panel/card by the page layout.
+    // Use a transparent border and no inner padding so we don't double-frame nor
+    // double-pad the chart inside that card.
+    format!(
+        "<div class=\"apex-chart-frame border\">{}<div style=\"height: {}px\">{}</div></div>",
+        header, height, content
+    )
+}
+
+fn chart_meta_markup(last_updated_label: Option<&str>) -> String {
+    last_updated_label
+        .map(|value| format!("<p class=\"mt-1\">Last updated {}</p>", value))
+        .unwrap_or_default()
+}
+
+// ── ARK class helpers ──────────────────────────────────────────────────
+// The ARK vocabulary owns colour, type and geometry; these helpers exist so
+// the primitives keep their public API while emitting only apex-* classes
+// (plus structural layout utilities).
+
+fn button_variant_class(variant: &str) -> &'static str {
+    match variant {
+        "destructive" => "apex-btn--danger",
+        "outline" | "secondary" => "",
+        "ghost" | "link" => "apex-btn--link",
+        _ => "apex-btn--primary",
+    }
+}
+
+fn button_size_class(size: &str) -> &'static str {
+    match size {
+        "sm" => "apex-btn--sm",
+        _ => "",
+    }
+}
+
+fn input_variant_class(variant: &str) -> &'static str {
+    match variant {
+        "error" => "apex-input-error",
+        _ => "",
+    }
+}
+
+fn input_size_class(_size: &str) -> &'static str {
+    ""
+}
+
+fn textarea_resize_class(_resize: &str) -> &'static str {
+    ""
+}
+
+fn label_variant_class(variant: &str) -> &'static str {
+    match variant {
+        "error" => "apex-error",
+        _ => "",
+    }
+}
+
+fn label_size_class(_size: &str) -> &'static str {
+    ""
+}
+
+fn badge_variant_class(variant: &str) -> &'static str {
+    if variant.contains("warning") {
+        "apex-status apex-status--warn"
+    } else if variant.contains("destructive")
+        || variant.contains("error")
+        || variant.contains("fail")
+    {
+        "apex-status apex-status--fail"
+    } else if variant.contains("success")
+        || variant.contains("default")
+        || variant.contains("secondary")
+    {
+        "apex-status apex-status--on"
+    } else {
+        "apex-status"
+    }
+}
+
+fn card_padding_class(_padding: &str) -> &'static str {
+    ""
+}
+
+fn skeleton_variant_class(_variant: &str) -> &'static str {
+    "apex-loading"
+}
+
+fn tooltip_variant_class(_variant: &str) -> &'static str {
+    ""
+}
+
+fn tooltip_side_class(_side: &str) -> &'static str {
+    ""
+}
+
+fn table_align_class(align: &str) -> &'static str {
+    match align {
+        "center" => "text-center",
+        "right" => "text-right",
+        _ => "text-left",
+    }
+}
+
+fn chart_empty_description(reason: &str) -> &'static str {
+    match reason {
+        "filtered-out" => {
+            "No data matches the current filters. Adjust filters or broaden the timeframe."
+        }
+        "permission" => "Chart data is unavailable for your current access scope.",
+        "delayed" => "Chart data is delayed while sources catch up. Retry shortly for live values.",
+        _ => "No chartable data is available for this range.",
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Button<'a> {
@@ -540,10 +749,15 @@ impl Checkbox {
             .aria_label
             .map(|value| format!(" aria-label=\"{}\"", html_escape(value)))
             .unwrap_or_default();
+        let mixed = if self.indeterminate {
+            " aria-checked=\"mixed\""
+        } else {
+            ""
+        };
         let checked = if self.checked { " checked" } else { "" };
-        let _ = (self.variant, self.indeterminate);
+        let _ = self.variant;
         format!(
-            "<input type=\"checkbox\" class=\"apex-checkbox\"{checked}{disabled}{aria_label} />"
+            "<input type=\"checkbox\" class=\"apex-checkbox apex-input\"{checked}{mixed}{disabled}{aria_label} />"
         )
     }
 }
@@ -586,10 +800,14 @@ impl NativeSelect<'_> {
             .collect::<Vec<_>>()
             .join("");
         format!(
-            "<select id=\"{}\" name=\"{}\" class=\"flex w-full border px-3 focus-visible:border-primary{} apex-select\"{}{}>{}</select>",
+            "<select id=\"{}\" name=\"{}\" class=\"apex-select{}\"{}{}>{}</select>",
             html_escape(self.id),
             html_escape(self.name),
-            if self.multiple { " min-h-12 py-2" } else { " h-12" },
+            if self.multiple {
+                " min-h-12 py-2"
+            } else {
+                " h-12"
+            },
             required_attr,
             multiple_attrs,
             options,
@@ -669,7 +887,7 @@ impl Switch {
             ""
         };
         let checked = if self.checked { " checked" } else { "" };
-        format!("<input type=\"checkbox\" class=\"apex-checkbox\"{checked}{disabled} />")
+        format!("<input type=\"checkbox\" class=\"apex-checkbox apex-input\"{checked}{disabled} />")
     }
 }
 
@@ -710,51 +928,44 @@ pub struct RadioGroup<'a> {
 
 impl<'a> RadioGroup<'a> {
     pub fn render_html(&self) -> String {
-        let items_html = self.items.iter().enumerate().map(|(i, item)| {
-            let checked = item.value == self.selected;
-            let disabled = if item.disabled { " disabled aria-disabled=\"true\"" } else { "" };
-            let tabindex = if checked || (self.selected.is_empty() && i == 0) { "0" } else { "-1" };
-            let indicator = if checked {
-                "<span class=\"h-2.5 w-2.5 rounded-full bg-current\"></span>"
-            } else {
-                ""
-            };
-            let state = if checked { "checked" } else { "unchecked" };
-            let option_id = format!("{}-option-{i}", self.name);
-            format!(
-                "<div class=\"flex items-center space-x-2\"><button type=\"button\" id=\"{}\" role=\"radio\" aria-checked=\"{}\" tabindex=\"{}\" data-value=\"{}\" data-state=\"{}\" class=\"aspect-square rounded-full border ring-offset-background focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 {} {}\"{}>{}</button><label for=\"{}\" class=\"text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70\">{}</label></div>",
-                option_id, checked, tabindex, item.value, state,
-                radio_variant_class(self.variant),
-                radio_size_class(self.size),
-                disabled, indicator, option_id, item.label,
-            )
-        }).collect::<Vec<_>>().join("");
-
-        let orientation_class = match self.orientation {
-            "horizontal" => "flex-row gap-4",
-            _ => "flex-col gap-2",
+        // ARK: native radios in labelled rows — no roving tabindex, no
+        // role=radio buttons, no indicator glyph.
+        let _ = (self.variant, self.size);
+        let group_class = if self.orientation == "horizontal" {
+            "flex flex-row flex-wrap gap-4"
+        } else {
+            "flex flex-col gap-2"
         };
-
-        let radio_keyboard_attrs = " data-keyboard-contract=\"radiogroup\" data-keyboard-arrow-next=\"true\" data-keyboard-arrow-prev=\"true\" data-keyboard-home-first=\"true\" data-keyboard-end-last=\"true\" data-keyboard-wrap-around=\"true\"";
-
-        format!(
-            "<div role=\"radiogroup\" aria-label=\"{}\" data-orientation=\"{}\" class=\"flex {}\"{}>{}</div>",
-            self.name, self.orientation, orientation_class, radio_keyboard_attrs, items_html,
-        )
+        let items = self
+            .items
+            .iter()
+            .map(|item| {
+                let checked = if item.value == self.selected { " checked" } else { "" };
+                let disabled = if item.disabled { " disabled" } else { "" };
+                format!(
+                    "<label class=\"apex-check\"><input type=\"radio\" name=\"{}\" value=\"{}\"{checked}{disabled} /><span>{}</span></label>",
+                    html_escape(self.name),
+                    html_escape(item.value),
+                    html_escape(item.label)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        format!("<div role=\"radiogroup\" class=\"{group_class}\">{items}</div>")
     }
 
-    /// Keyboard navigation contract:ArrowDown/ArrowRight moves to next,
-    /// ArrowUp/ArrowLeft moves to previous, Home/End jump to first/last,
-    /// wrapping enabled by default.
+    /// Native radios keep their native keyboard contract: arrow keys move
+    /// the selection, Space selects. There is no roving tabindex to
+    /// document because the browser owns it.
     pub fn keyboard_navigation_contract() -> RadioGroupKeyboardContract {
         RadioGroupKeyboardContract {
             arrow_down_moves_next: true,
             arrow_up_moves_prev: true,
             arrow_right_moves_next: true,
             arrow_left_moves_prev: true,
-            home_moves_first: true,
-            end_moves_last: true,
-            wrap_around: true,
+            home_moves_first: false,
+            end_moves_last: false,
+            wrap_around: false,
             space_selects: true,
         }
     }
@@ -953,7 +1164,10 @@ pub struct EmptyState<'a> {
 
 impl<'a> EmptyState<'a> {
     pub fn render_html(&self) -> String {
-        let icon = self.icon_markup.map(|icon| format!("<div class=\"mb-4 flex h-16 w-16 items-center justify-center border border-border/50\">{}</div>", icon)).unwrap_or_default();
+        let icon = self
+            .icon_markup
+            .map(|icon| format!("<div class=\"apex-label\">{}</div>", icon))
+            .unwrap_or_default();
         let description = self
             .description
             .map(|text| format!("<p class=\"mx-auto max-w-[320px]\">{}</p>", text))
@@ -1095,30 +1309,18 @@ pub struct Dialog<'a> {
 
 impl<'a> Dialog<'a> {
     pub fn render_html(&self) -> String {
-        // Unique per render: two dialogs on one page must not share the same
-        // id (aria-labelledby would point at the first one for both).
-        let dialog_id = dialog_id_for(self.title);
-        // `title`/`description` are text slots — escaped at the primitive
-        // boundary (`body` stays a trusted-markup slot, like `icon` on
-        // `Badge`).
-        let title = html_escape(self.title);
+        // ARK: confirmation is a PAGE SECTION, never a modal. No overlay, no
+        // role=dialog, no focus trap — the content is a ruled notice.
+        let _ = (self.size, self.variant, self.hide_close_button);
         let description = self
             .description
-            .map(|value| format!("<p class=\"\">{}</p>", html_escape(value)))
+            .map(|value| format!("<p>{}</p>", html_escape(value)))
             .unwrap_or_default();
-        let close = if self.hide_close_button {
-            String::new()
-        } else {
-            format!("<button data-dialog-close data-focus-initial=\"true\" class=\"absolute right-4 top-4\" aria-label=\"Close\">{}<span class=\"sr-only\">Close</span></button>", primitive_icon("x", "h-4 w-4"))
-        };
         format!(
-            "<div class=\"fixed inset-0 z-50 data-[state=open]:animate-in\"></div><div role=\"dialog\" aria-modal=\"true\" aria-labelledby=\"{dialog_id}\" tabindex=\"-1\" data-focus-trap=\"true\" data-escape-dismiss=\"true\" data-initial-focus=\"[data-focus-initial]\" class=\"fixed left-[50%] top-[50%] z-50 grid w-full gap-4 border p-6 {} {}\"><div class=\"flex flex-col space-y-1.5\"><h2 id=\"{dialog_id}\" class=\"apex-h2\">{}</h2>{}</div><div>{}</div>{}</div>",
-            dialog_size_class(self.size),
-            dialog_variant_class(self.variant),
-            title,
+            "<section class=\"apex-notice\"><b>{}</b>{}{}</section>",
+            html_escape(self.title),
             description,
-            self.body,
-            close,
+            self.body
         )
     }
 }
@@ -1241,7 +1443,13 @@ pub struct Tooltip<'a> {
 
 impl<'a> Tooltip<'a> {
     pub fn render_html(&self) -> String {
-        format!("<div role=\"tooltip\" data-side=\"{}\" data-delay=\"{}\" class=\"z-50 overflow-hidden border px-3 py-1.5 fade-in-0 {} {}\">{}</div>", self.side, self.delay_duration, tooltip_variant_class(self.variant), tooltip_side_class(self.side), self.content)
+        // ARK: no hover tooltips — the text is an always-visible help line.
+        let _ = (
+            self.side,
+            tooltip_variant_class(self.variant),
+            tooltip_side_class(self.side),
+        );
+        format!("<p class=\"apex-help\">{}</p>", html_escape(self.content))
     }
 
     /// Tooltip delay and positioning contract:matches Radix Tooltip behavior.
@@ -1300,50 +1508,51 @@ pub struct Accordion<'a> {
 
 impl<'a> Accordion<'a> {
     pub fn render_html(&self) -> String {
-        let items_html = self.items.iter().enumerate().map(|(i, item)| {
-            let is_open = self.open_values.contains(&item.value);
-            let state = if is_open { "open" } else { "closed" };
-            let content_class = if is_open {
-                "overflow-hidden transition-all duration-200 ease-out"
-            } else {
-                "overflow-hidden h-0 transition-all duration-200 ease-out"
-            };
-            let icon_rotation = if is_open { " rotate-180" } else { "" };
-
-            format!(
-                "<div class=\"border-b\" data-state=\"{}\" data-value=\"{}\"><h3 class=\"flex apex-h3\"><button type=\"button\" aria-expanded=\"{}\" aria-controls=\"accordion-panel-{}\" id=\"accordion-trigger-{}\" class=\"flex flex-1 items-center justify-between py-4 [&[data-state=open]>svg]:rotate-180 apex-btn\" data-state=\"{}\"><span>{}</span><svg class=\"h-4 w-4 shrink-0 duration-200{}\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"m6 9 6 6 6-6\"/></svg></button></h3><div id=\"accordion-panel-{}\" role=\"region\" aria-labelledby=\"accordion-trigger-{}\" class=\"{}\" data-state=\"{}\"><div class=\"pb-4 pt-0\">{}</div></div></div>",
-                state, item.value, is_open, i, i, state, item.trigger_label,
-                icon_rotation, i, i, content_class, state, item.content,
-            )
-        }).collect::<Vec<_>>().join("");
-
-        format!(
-            "<div data-accordion-type=\"{}\" data-collapsible=\"{}\" data-orientation=\"{}\" class=\"w-full\">{}</div>",
-            self.accordion_type, self.collapsible, self.orientation, items_html,
-        )
+        // ARK: native <details> disclosures inside ruled panels — zero JS,
+        // no roving focus, no rotating chevron.
+        let _ = (self.accordion_type, self.collapsible, self.orientation);
+        let items = self
+            .items
+            .iter()
+            .map(|item| {
+                // open_values is the native details contract: listed values
+                // render open, the rest closed.
+                let open = if self.open_values.contains(&item.value) { " open" } else { "" };
+                format!(
+                    "<details class=\"apex-panel\" data-value=\"{}\"{open}><summary class=\"apex-panel__head\">{}</summary><div class=\"apex-panel__body\">{}</div></details>",
+                    html_escape(item.value),
+                    html_escape(item.trigger_label),
+                    item.content
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        format!("<div class=\"space-y-2\">{items}</div>")
     }
 
-    /// Animation contract:matches the tailwind `accordion-down`/`accordion-up` keyframes.
+    /// Native <details> carries the disclosure contract: no animation, no
+    /// height math — the browser owns open/close.
     pub fn animation_contract() -> AccordionAnimationContract {
         AccordionAnimationContract {
-            expand_duration_ms: 200,
-            collapse_duration_ms: 200,
-            easing: "ease-out",
-            uses_height_auto_animation: true,
-            css_keyframe_down: "accordion-down 0.2s ease-out",
-            css_keyframe_up: "accordion-up 0.2s ease-out",
+            expand_duration_ms: 0,
+            collapse_duration_ms: 0,
+            easing: "none",
+            uses_height_auto_animation: false,
+            css_keyframe_down: "",
+            css_keyframe_up: "",
         }
     }
 
-    /// Keyboard navigation contract.
+    /// Native <details>/<summary> keyboard contract: Enter/Space toggles on
+    /// the summary; there is no custom roving focus.
     pub fn keyboard_contract() -> AccordionKeyboardContract {
         AccordionKeyboardContract {
             space_toggles: true,
             enter_toggles: true,
-            arrow_down_moves_next: true,
-            arrow_up_moves_prev: true,
-            home_moves_first: true,
-            end_moves_last: true,
+            arrow_down_moves_next: false,
+            arrow_up_moves_prev: false,
+            home_moves_first: false,
+            end_moves_last: false,
         }
     }
 }
@@ -1376,7 +1585,9 @@ pub struct ScrollArea<'a> {
 
 impl<'a> ScrollArea<'a> {
     pub fn render_html(&self) -> String {
-        format!("<div class=\"relative {} scrollbar-thin scrollbar-track-transparent scrollbar-thumb-border\">{}</div>", scroll_area_orientation_class(self.orientation), self.content)
+        // ARK: a scroll region is a scroll region.
+        let _ = self.orientation;
+        format!("<div class=\"overflow-auto\">{}</div>", self.content)
     }
 }
 
@@ -1438,7 +1649,7 @@ impl<'a> ApexLineChart<'a> {
                 .collect::<Vec<_>>(),
             self.data_count,
             self.empty_state_reason,
-            "<div data-chart-kind=\"line\" class=\"border border-border/50\"></div>",
+            "<div data-chart-kind=\"line\" class=\"apex-chart-frame\"></div>",
         )
     }
 }
@@ -1462,10 +1673,21 @@ impl<'a> ApexBarChart<'a> {
             self.description,
             self.last_updated_label,
             self.height,
-            &self.bars.iter().map(|series| ChartLegendItem { key: series.key, name: series.name, color: series.color }).collect::<Vec<_>>(),
+            &self
+                .bars
+                .iter()
+                .map(|series| ChartLegendItem {
+                    key: series.key,
+                    name: series.name,
+                    color: series.color,
+                })
+                .collect::<Vec<_>>(),
             self.data_count,
             self.empty_state_reason,
-            &format!("<div data-chart-kind=\"bar\" data-layout=\"{}\" class=\"border border-border/50\"></div>", self.layout),
+            &format!(
+                "<div data-chart-kind=\"bar\" data-layout=\"{}\" class=\"apex-chart-frame\"></div>",
+                self.layout
+            ),
         )
     }
 }
@@ -1499,7 +1721,7 @@ impl<'a> ApexAreaChart<'a> {
                 .collect::<Vec<_>>(),
             self.data_count,
             self.empty_state_reason,
-            "<div data-chart-kind=\"area\" class=\"border border-border/50\"></div>",
+            "<div data-chart-kind=\"area\" class=\"apex-chart-frame\"></div>",
         )
     }
 }
@@ -1536,7 +1758,7 @@ impl<'a> ApexPieChart<'a> {
                 .map(|slice| format!("<div class=\"\">{} ({})</div>", slice.label, slice.value))
                 .collect::<Vec<_>>()
                 .join("");
-            format!("{}<div data-chart-kind=\"pie\" data-inner-radius=\"{}\" data-outer-radius=\"{}\" class=\"border border-border/50\">{}</div>", chart_legend_markup(&legend), self.inner_radius, self.outer_radius, labels)
+            format!("{}<div data-chart-kind=\"pie\" data-inner-radius=\"{}\" data-outer-radius=\"{}\" class=\"apex-chart-frame\">{}</div>", chart_legend_markup(&legend), self.inner_radius, self.outer_radius, labels)
         };
         render_chart_frame(
             self.title,
@@ -1604,7 +1826,7 @@ impl<'a> Table<'a> {
             }
             _ => "Scrollable data table".to_string(),
         };
-        format!("<div class=\"apex-table-wrap relative w-full overflow-x-auto\" tabindex=\"0\" role=\"region\" aria-label=\"{region_label}\"><table class=\"apex-table w-full min-w-[640px] caption-bottom\"><thead class=\"sticky top-0 z-10\"><tr>{}</tr></thead><tbody>{}</tbody>{}</table></div>", headers, rows, caption)
+        format!("<div class=\"apex-table-wrap relative w-full overflow-x-auto\" tabindex=\"0\" role=\"region\" aria-label=\"{region_label}\"><table class=\"apex-table w-full min-w-[640px]\"><thead class=\"sticky top-0 z-10\"><tr>{}</tr></thead><tbody>{}</tbody>{}</table></div>", headers, rows, caption)
     }
 }
 
@@ -1729,29 +1951,26 @@ pub struct Tabs<'a> {
 
 impl<'a> Tabs<'a> {
     pub fn render_html(&self) -> String {
-        let triggers = self
+        // ARK: a ruled strip of tab labels (`.apex-tabs a.is-active`); the
+        // zero-JS console changes tabs by navigation, so a TabItem without a
+        // target renders as static text, never a dead button.
+        let _ = self.variant;
+        let tabs = self
             .tabs
             .iter()
-            .enumerate()
-            .map(|(i, tab)| {
-                let state = if tab.active { "active" } else { "inactive" };
-                let aria_selected = if tab.active { "true" } else { "false" };
-                let tabindex = if tab.active { "0" } else { "-1" };
-                let tabpanel_id = format!("tabpanel-{}", i);
+            .map(|tab| {
+                let class = if tab.active { "is-active" } else { "" };
                 format!(
-                    "<button type=\"button\" role=\"tab\" aria-selected=\"{}\" aria-controls=\"{}\" tabindex=\"{}\" data-state=\"{}\" class=\"inline-flex items-center justify-center whitespace-nowrap px-3 py-3 min-h-[44px] {} apex-btn\">{}</button>",
-                    aria_selected, tabpanel_id, tabindex, state,
-                    tabs_trigger_variant_class(self.variant),
-                    tab.label,
+                    "<span class=\"{}\">{}</span>",
+                    class,
+                    html_escape(tab.label)
                 )
             })
             .collect::<Vec<_>>()
             .join("");
         format!(
-            "<div><div role=\"tablist\" class=\"inline-flex items-center justify-center {}\">{}</div><div role=\"tabpanel\" id=\"tabpanel-0\" aria-labelledby=\"tab-0\" class=\"mt-2\">{}</div></div>",
-            tabs_list_variant_class(self.variant),
-            triggers,
-            self.content_html,
+            "<div class=\"apex-tabs\">{tabs}</div><div role=\"tabpanel\">{}</div>",
+            self.content_html
         )
     }
 }
@@ -1770,514 +1989,6 @@ impl<'a> Card<'a> {
     }
 }
 
-fn button_variant_class(variant: &str) -> &'static str {
-    // ARK: primary = ink fill; secondary/outline = 2px ink rule; ghost/link =
-    // the underlined verb; destructive = red rule (never the brand fill).
-    match variant {
-        "destructive" => "apex-btn apex-btn--danger",
-        "outline" | "secondary" => "",
-        "ghost" | "link" => "apex-btn--link",
-        _ => "apex-btn--primary",
-    }
-}
-
-fn button_size_class(size: &str) -> &'static str {
-    // ARK sizes are padding steps inside the primitive; sm is the one
-    // compact step the law defines.
-    match size {
-        "sm" => "apex-btn--sm",
-        _ => "",
-    }
-}
-
-fn input_variant_class(variant: &str) -> &'static str {
-    // ARK: the control carries one 1px ink rule; the invalid state thickens
-    // it to the destruction red. No rings, no tints.
-    match variant {
-        "error" => "apex-input-error",
-        _ => "",
-    }
-}
-
-fn input_size_class(_size: &str) -> &'static str {
-    ""
-}
-
-fn textarea_resize_class(resize: &str) -> &'static str {
-    match resize {
-        "none" => "resize-none",
-        "horizontal" => "resize-x",
-        "both" => "resize",
-        _ => "resize-y",
-    }
-}
-
-fn checkbox_variant_class(variant: &str) -> &'static str {
-    match variant {
-        "success" => "border-success data-[state=checked]:bg-success data-[state=checked]:text-white",
-        "destructive" => "border-destructive data-[state=checked]:bg-destructive data-[state=checked]:text-destructive-foreground",
-        _ => "border-input data-[state=checked]:bg-primary data-[state=checked]:text-white data-[state=checked]:border-primary",
-    }
-}
-
-fn checkbox_size_class(size: &str) -> &'static str {
-    match size {
-        "sm" => "h-3 w-3 rounded-sm",
-        "lg" => "h-6 w-6 rounded-sm",
-        _ => "h-4 w-4 rounded-sm",
-    }
-}
-
-fn select_variant_class(variant: &str) -> &'static str {
-    match variant {
-        "error" => "border-primary focus:ring-primary/20 focus:border-primary",
-        "success" => "border-success focus:ring-success/20 focus:border-success",
-        "ghost" => "border-transparent bg-transparent hover:bg-surface-50",
-        _ => "border-surface-200 hover:border-surface-950",
-    }
-}
-
-fn select_size_class(size: &str) -> &'static str {
-    match size {
-        "sm" => "h-10 px-3 text-[12px] tracking-tight rounded-[8px_8px_7px_7px]",
-        "lg" => "h-14 px-6 text-[15px] tracking-tight rounded-[8px_8px_7px_7px]",
-        _ => "h-12 px-4 text-[14px] tracking-tight rounded-[8px_8px_7px_7px]",
-    }
-}
-
-fn switch_variant_class(variant: &str) -> &'static str {
-    match variant {
-        "success" => "data-[state=checked]:bg-success data-[state=unchecked]:bg-muted shadow-inner",
-        "destructive" => {
-            "data-[state=checked]:bg-destructive data-[state=unchecked]:bg-muted shadow-inner"
-        }
-        _ => "data-[state=checked]:bg-primary data-[state=unchecked]:bg-muted shadow-inner",
-    }
-}
-
-fn switch_size_class(size: &str) -> &'static str {
-    match size {
-        "sm" => "h-4 w-7",
-        "lg" => "h-7 w-14",
-        _ => "h-6 w-11",
-    }
-}
-
-fn switch_thumb_size_class(size: &str) -> &'static str {
-    match size {
-        "sm" => "h-3 w-3",
-        "lg" => "h-6 w-6",
-        _ => "h-5 w-5",
-    }
-}
-
-fn switch_thumb_state_class(size: &str, checked: bool) -> &'static str {
-    match (size, checked) {
-        ("sm", true) => "translate-x-3",
-        ("lg", true) => "translate-x-7",
-        ("default", true) => "translate-x-5",
-        _ => "translate-x-0",
-    }
-}
-
-fn slider_track_size_class(size: &str) -> &'static str {
-    match size {
-        "sm" => "h-1",
-        "lg" => "h-3",
-        _ => "h-2",
-    }
-}
-
-fn slider_thumb_size_class(size: &str) -> &'static str {
-    match size {
-        "sm" => "h-3 w-3",
-        "lg" => "h-6 w-6",
-        _ => "h-5 w-5",
-    }
-}
-
-fn label_variant_class(variant: &str) -> &'static str {
-    match variant {
-        "muted" => "text-muted-foreground",
-        "error" => "text-destructive",
-        "success" => "text-success",
-        _ => "text-foreground",
-    }
-}
-
-fn label_size_class(size: &str) -> &'static str {
-    match size {
-        "sm" => "text-xs",
-        "lg" => "text-base",
-        _ => "text-sm",
-    }
-}
-
-fn progress_track_class(variant: &str) -> &'static str {
-    match variant {
-        "success" => "bg-success/20",
-        "warning" => "bg-warning/20",
-        "error" => "bg-destructive/20",
-        _ => "bg-surface-100",
-    }
-}
-
-fn progress_size_class(size: &str) -> &'static str {
-    match size {
-        "sm" => "h-1",
-        "lg" => "h-3",
-        "xl" => "h-4",
-        _ => "h-2",
-    }
-}
-
-fn progress_indicator_class(variant: &str) -> &'static str {
-    match variant {
-        "success" => "bg-success",
-        "warning" => "bg-warning",
-        "error" => "bg-destructive",
-        _ => "bg-primary",
-    }
-}
-
-fn badge_variant_class(variant: &str) -> &'static str {
-    // ARK: a badge is a STATUS WORD with its 8px square, never a pill. The
-    // legacy composite variants ("outline-warning", "solid-success", …) map
-    // through their severity word.
-    if variant.contains("warning") {
-        "apex-status apex-status--warn"
-    } else if variant.contains("destructive")
-        || variant.contains("error")
-        || variant.contains("fail")
-    {
-        "apex-status apex-status--fail"
-    } else if variant.contains("success")
-        || variant.contains("default")
-        || variant.contains("secondary")
-    {
-        "apex-status apex-status--on"
-    } else {
-        "apex-status"
-    }
-}
-
-fn badge_size_class(size: &str) -> &'static str {
-    match size {
-        "sm" => "px-2 py-0.5 text-[10px]",
-        "lg" => "px-3 py-1 text-xs",
-        _ => "px-2.5 py-0.5 text-[11px]",
-    }
-}
-
-fn card_variant_class(_variant: &str) -> &'static str {
-    // ARK: one panel recipe — a 1px ink rule, no elevation, no hover lift.
-    ""
-}
-
-fn card_padding_class(padding: &str) -> &'static str {
-    match padding {
-        "none" => "",
-        "xs" => "p-2",
-        "sm" => "p-4",
-        "lg" => "p-8",
-        "xl" => "p-10",
-        _ => "p-6 md:p-8",
-    }
-}
-
-fn avatar_size_class(size: &str) -> &'static str {
-    match size {
-        "xs" => "h-6 w-6 rounded-full",
-        "sm" => "h-8 w-8 rounded-full",
-        "lg" => "h-12 w-12 rounded-full",
-        "xl" => "h-16 w-16 rounded-full",
-        "2xl" => "h-20 w-20 rounded-full",
-        _ => "h-10 w-10 rounded-full",
-    }
-}
-
-fn avatar_status_class(status: &str) -> &'static str {
-    match status {
-        "online" => "ring-2 ring-success ring-offset-2 ring-offset-background",
-        "offline" => "ring-2 ring-muted ring-offset-2 ring-offset-background",
-        "busy" => "ring-2 ring-error ring-offset-2 ring-offset-background",
-        "away" => "ring-2 ring-warning ring-offset-2 ring-offset-background",
-        _ => "",
-    }
-}
-
-fn skeleton_variant_class(_variant: &str) -> &'static str {
-    // ARK: loading is blank ruled rows, never shimmering shapes.
-    "apex-loading"
-}
-
-fn status_indicator_config(status: &str) -> (&str, &str, &str) {
-    const DOT_SUCCESS: &str = "<span class=\"mr-1 h-2 w-2\" aria-hidden=\"true\"></span>";
-    const DOT_INFO: &str = "<span class=\"mr-1 h-2 w-2\" aria-hidden=\"true\"></span>";
-    const DOT_WARNING: &str = "<span class=\"mr-1 h-2 w-2\" aria-hidden=\"true\"></span>";
-    const DOT_ERROR: &str = "<span class=\"mr-1 h-2 w-2\" aria-hidden=\"true\"></span>";
-    const DOT_OUTLINE: &str =
-        "<span class=\"mr-1 h-2 w-2 border border-current\" aria-hidden=\"true\"></span>";
-    match status.to_ascii_lowercase().as_str() {
-        "draft" => ("Draft", "secondary", DOT_OUTLINE),
-        "scheduled" => ("Scheduled", "info", DOT_INFO),
-        "sending" => ("Sending", "warning", DOT_WARNING),
-        "sent" => ("Sent", "success", DOT_SUCCESS),
-        "paused" => ("Paused", "outline", DOT_OUTLINE),
-        "subscribed" => ("Subscribed", "success", DOT_SUCCESS),
-        "unsubscribed" => ("Unsubscribed", "secondary", DOT_OUTLINE),
-        "bounced" => ("Bounced", "warning", DOT_WARNING),
-        "complained" => ("Complained", "error", DOT_ERROR),
-        "delivered" => ("Delivered", "success", DOT_SUCCESS),
-        "queued" => (
-            "Queued",
-            "secondary",
-            "<span class=\"mr-1 h-2 w-2\" aria-hidden=\"true\"></span>",
-        ),
-        "failed" => ("Failed", "error", DOT_ERROR),
-        // ── Control-plane vocabulary ────────────────────────────────
-        // Active tenants, verified domains, healthy fleet states, and
-        // finished work previously fell through to gray. Severity words
-        // (critical/high/…) map so alerts triage by color.
-        "active" => ("Active", "success", DOT_SUCCESS),
-        "verified" => ("Verified", "success", DOT_SUCCESS),
-        "healthy" => ("Healthy", "success", DOT_SUCCESS),
-        "operational" => ("Operational", "success", DOT_SUCCESS),
-        "ready" => ("Ready", "success", DOT_SUCCESS),
-        "online" => ("Online", "success", DOT_SUCCESS),
-        "completed" => ("Completed", "success", DOT_SUCCESS),
-        "approved" => ("Approved", "success", DOT_SUCCESS),
-        "suspended" => ("Suspended", "outline-error", DOT_ERROR),
-        "blocked" => ("Blocked", "outline-error", DOT_ERROR),
-        "cancelled" | "canceled" => ("Cancelled", "secondary", DOT_OUTLINE),
-        "rejected" => ("Rejected", "secondary", DOT_OUTLINE),
-        "stopped" => ("Stopped", "secondary", DOT_OUTLINE),
-        "acknowledged" => ("Acknowledged", "outline", DOT_OUTLINE),
-        "critical" => ("Critical", "error", DOT_ERROR),
-        "high" => ("High", "error", DOT_ERROR),
-        "medium" => ("Medium", "warning", DOT_WARNING),
-        "low" => ("Low", "secondary", DOT_OUTLINE),
-        "escalated" => ("Escalated", "warning", DOT_WARNING),
-        "pending" => ("Pending", "outline", DOT_OUTLINE),
-        "invited" => ("Invited", "info", DOT_INFO),
-        "processing" => ("Processing", "info", DOT_INFO),
-        "in_progress" => ("In progress", "info", DOT_INFO),
-        "draining" => ("Draining", "warning", DOT_WARNING),
-        "new" => ("New", "secondary", DOT_OUTLINE),
-        "qualified" => ("Qualified", "info", DOT_INFO),
-        "proposal" => ("Proposal", "info", DOT_INFO),
-        // MFA/secret enrollment vocabulary (review §7 Operators: "Replace
-        // reused sent/draft MFA labels with Enabled/Not configured"). The
-        // values are the wire vocabulary the CP loaders emit.
-        "enabled" => ("Enabled", "success", DOT_SUCCESS),
-        "not_configured" => ("Not configured", "secondary", DOT_OUTLINE),
-        _ => (status, "secondary", DOT_OUTLINE),
-    }
-}
-
-fn dialog_size_class(size: &str) -> &'static str {
-    match size {
-        "sm" => "max-w-sm",
-        "lg" => "max-w-2xl",
-        "xl" => "max-w-4xl",
-        "full" => "max-w-[calc(100%-2rem)] h-[calc(100%-2rem)]",
-        _ => "max-w-lg",
-    }
-}
-
-fn dialog_variant_class(variant: &str) -> &'static str {
-    match variant {
-        "glass" => "glass border-white/10 backdrop-blur-xl bg-background/80",
-        "premium" => "premium-card border-border",
-        _ => "border-border",
-    }
-}
-
-fn alert_dialog_confirm_class(variant: &str) -> &'static str {
-    match variant {
-        "destructive" => "bg-destructive text-destructive-foreground hover:bg-destructive/90",
-        _ => "bg-primary text-white hover:bg-primary/90",
-    }
-}
-
-fn tooltip_variant_class(variant: &str) -> &'static str {
-    match variant {
-        // The "light" variant renders an explicitly white popover (bg-white)
-        // rather than the theme-dependent card token, so a light tooltip stays
-        // legible regardless of dark/light mode.
-        "light" => "bg-white text-surface-900 border-surface-200",
-        "glass" => "backdrop-blur-md bg-white/10 border-white/20 text-white ",
-        _ => "bg-surface-900 text-white border-surface-800 ",
-    }
-}
-
-fn tooltip_side_class(side: &str) -> &'static str {
-    match side {
-        "bottom" => "data-[side=bottom]:slide-in-from-top-2",
-        "left" => "data-[side=left]:slide-in-from-right-2",
-        "right" => "data-[side=right]:slide-in-from-left-2",
-        _ => "data-[side=top]:slide-in-from-bottom-2",
-    }
-}
-
-fn scroll_area_orientation_class(orientation: &str) -> &'static str {
-    match orientation {
-        "horizontal" => "overflow-x-auto overflow-y-hidden",
-        "both" => "overflow-auto",
-        _ => "overflow-y-auto overflow-x-hidden",
-    }
-}
-
-fn toast_variant_class(_variant: &str) -> &'static str {
-    // ARK: outcomes are a status line in the page, never a floating toast.
-    "apex-statusline"
-}
-
-fn toast_icon_markup(variant: &str) -> String {
-    match variant {
-        "success" => primitive_icon("check-circle", "h-5 w-5 text-success"),
-        "destructive" => primitive_icon("alert-circle", "h-5 w-5 text-destructive-foreground"),
-        "warning" => primitive_icon("alert-triangle", "h-5 w-5 text-warning"),
-        "info" => primitive_icon("info", "h-5 w-5 text-primary"),
-        _ => String::new(),
-    }
-}
-
-fn chart_empty_description(reason: &str) -> &'static str {
-    match reason {
-        "filtered-out" => {
-            "No data matches the current filters. Adjust filters or broaden the timeframe."
-        }
-        "permission" => "Chart data is unavailable for your current access scope.",
-        "delayed" => "Chart data is delayed while sources catch up. Retry shortly for live values.",
-        _ => "No chartable data is available for this range.",
-    }
-}
-
-fn chart_empty_state_markup(reason: &str) -> String {
-    // No outer border/background here — the surrounding chart frame already provides the
-    // single visible boundary. Adding another border created a triple-stacked look when
-    // the chart frame itself was nested inside a card.
-    format!("<div class=\"apex-empty-state flex min-h-[220px] flex-col items-center justify-center gap-3 p-6\"><svg aria-hidden=\"true\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\" class=\"h-7 w-7\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" d=\"M3 3v18h18M7 15l3-3 3 3 5-5\"/></svg><p class=\"max-w-xs\">{}</p></div>", chart_empty_description(reason))
-}
-
-fn chart_meta_markup(last_updated_label: Option<&str>) -> String {
-    last_updated_label
-        .map(|value| format!("<p class=\"mt-1\">Last updated {}</p>", value))
-        .unwrap_or_default()
-}
-
-fn chart_legend_markup(items: &[ChartLegendItem<'_>]) -> String {
-    if items.is_empty() {
-        return String::new();
-    }
-
-    let entries = items
-        .iter()
-        .map(|item| format!("<div class=\"inline-flex items-center gap-2\"><span class=\"h-2.5 w-2.5\" style=\"background-color: {}\" aria-hidden=\"true\"></span><span>{}</span></div>", item.color, item.name))
-        .collect::<Vec<_>>()
-        .join("");
-
-    format!("<div class=\"mb-3 flex flex-wrap items-center gap-x-4 gap-y-2\" aria-label=\"Chart legend\">{}</div>", entries)
-}
-
-fn render_chart_frame(
-    title: Option<&str>,
-    description: Option<&str>,
-    last_updated_label: Option<&str>,
-    height: usize,
-    content: &str,
-) -> String {
-    let header = if title.is_some() || description.is_some() {
-        format!(
-            "<div class=\"flex flex-col space-y-1.5 p-6\">{}{}{}</div>",
-            title
-                .map(|value| format!("<h3 class=\"break-words apex-h3\">{}</h3>", value))
-                .unwrap_or_default(),
-            description
-                .map(|value| format!("<p class=\"break-words\">{}</p>", value))
-                .unwrap_or_default(),
-            chart_meta_markup(last_updated_label),
-        )
-    } else {
-        String::new()
-    };
-
-    // The chart frame is almost always wrapped in a panel/card by the page layout.
-    // Use a transparent border and no inner padding so we don't double-frame nor
-    // double-pad the chart inside that card.
-    format!("<div class=\"apex-chart-frame border border-transparent\">{}<div style=\"height: {}px\">{}</div></div>", header, height, content)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn render_chart_shell(
-    title: Option<&str>,
-    description: Option<&str>,
-    last_updated_label: Option<&str>,
-    height: usize,
-    legend_items: &[ChartLegendItem<'_>],
-    data_count: usize,
-    empty_state_reason: &str,
-    chart_markup: &str,
-) -> String {
-    let content = if data_count == 0 {
-        chart_empty_state_markup(empty_state_reason)
-    } else {
-        format!("{}{}", chart_legend_markup(legend_items), chart_markup)
-    };
-
-    render_chart_frame(title, description, last_updated_label, height, &content)
-}
-
-fn table_align_class(align: &str) -> &'static str {
-    match align {
-        "center" => "text-center",
-        "right" => "text-right",
-        _ => "text-left",
-    }
-}
-
-fn tabs_list_variant_class(variant: &str) -> &'static str {
-    match variant {
-        "underline" => {
-            "border-b border-border bg-transparent w-full justify-start gap-8 px-0 rounded-none"
-        }
-        "pills" => "gap-1 bg-transparent",
-        _ => "rounded-[16px_16px_9px_9px] bg-muted/50 p-1 text-muted-foreground border border-border/50",
-    }
-}
-
-fn tabs_trigger_variant_class(variant: &str) -> &'static str {
-    match variant {
-        "underline" => "relative border-b-2 border-transparent pb-3 pt-2 px-1 text-surface-500 rounded-none data-[state=active]:border-primary data-[state=active]:text-primary hover:text-surface-950",
-        "pills" => "rounded-[8px_8px_7px_7px] px-4 bg-transparent text-surface-500 hover:bg-surface-50 data-[state=active]:bg-brand-50 data-[state=active]:text-primary",
-        _ => "rounded-[8px_8px_7px_7px] text-surface-500 hover:text-surface-950 data-[state=active]:bg-background data-[state=active]:text-foreground",
-    }
-}
-
-fn radio_variant_class(variant: &str) -> &'static str {
-    match variant {
-        "success" => "border-success text-success data-[state=checked]:border-success",
-        "destructive" => {
-            "border-destructive text-destructive data-[state=checked]:border-destructive"
-        }
-        _ => "border-primary text-primary data-[state=checked]:border-primary",
-    }
-}
-
-fn radio_size_class(size: &str) -> &'static str {
-    match size {
-        "sm" => "h-3.5 w-3.5",
-        "lg" => "h-5 w-5",
-        _ => "h-4 w-4",
-    }
-}
-
-// ────────────────────────────────────────────────────────────
-// Interactive behavior contracts for unchecked Phase 4 items
-// ────────────────────────────────────────────────────────────
-
-/// Button density contract (4.3):density variants control vertical padding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ButtonDensityContract {
     pub compact_height: &'static str,
@@ -2403,7 +2114,7 @@ impl DialogBehaviorContract {
             animation_enter_ms: 200,
             animation_exit_ms: 200,
             animation_easing: "ease-out",
-            overlay_blur: "backdrop-blur-sm",
+            overlay_blur: "none",
         }
     }
 }
@@ -2573,16 +2284,10 @@ pub fn render_sortable_header(
 
 /// Renderable selectable table row checkbox.
 pub fn render_row_checkbox(selected: bool) -> String {
-    let indicator = if selected {
-        primitive_icon("check", "h-3 w-3")
-    } else {
-        String::new()
-    };
+    // ARK: a native checkbox with its square ink rule.
+    let checked = if selected { " checked" } else { "" };
     format!(
-        "<td class=\"w-12 p-4 align-middle\"><button type=\"button\" role=\"checkbox\" aria-checked=\"{}\" aria-label=\"Select row\" class=\"peer shrink-0 border h-4 w-4 data-[state=checked]:bg-primary data-[state=checked]:text-white data-[state=checked]:border-primary apex-btn apex-btn--primary\" data-state=\"{}\">{}</button></td>",
-        selected,
-        if selected { "checked" } else { "unchecked" },
-        indicator,
+        "<td class=\"w-12 p-4 align-middle\"><input type=\"checkbox\" aria-label=\"Select row\" class=\"apex-checkbox apex-input\"{checked} /></td>"
     )
 }
 
@@ -2598,9 +2303,9 @@ pub struct SkeletonAnimationContract {
 impl SkeletonAnimationContract {
     pub fn spec() -> Self {
         Self {
-            shimmer_enabled: true,
-            shimmer_css: "animate-pulse",
-            pulse_duration_ms: 2000,
+            shimmer_enabled: false,
+            shimmer_css: "apex-loading",
+            pulse_duration_ms: 0,
             dimension_matching: true,
         }
     }
@@ -2698,8 +2403,10 @@ impl ChartInteractionContract {
 /// Renderable chart axis with gridlines.
 pub fn render_chart_axis(label: &str, side: &str) -> String {
     format!(
-        "<g class=\"chart-axis chart-axis-{}\" aria-label=\"{}\"><line class=\"axis-line\" stroke=\"rgb(var( --border))\" /><text class=\"axis-label\">{}</text></g>",
-        side, label, label,
+        "<g data-axis=\"{}\" aria-label=\"{}\"><line stroke=\"rgb(var(--border))\" /><text class=\"apex-meta\">{}</text></g>",
+        html_escape(side),
+        html_escape(label),
+        html_escape(label),
     )
 }
 
@@ -2708,10 +2415,7 @@ pub fn render_chart_gridlines(count: usize) -> String {
     let lines = (0..count).map(|_| {
         "<line class=\"gridline\" stroke=\"rgb(var( --border))\" stroke-opacity=\"0.3\" stroke-dasharray=\"3 3\" />"
     }).collect::<Vec<_>>().join("");
-    format!(
-        "<g class=\"chart-gridlines\" aria-hidden=\"true\">{}</g>",
-        lines
-    )
+    format!("<g aria-hidden=\"true\">{}</g>", lines)
 }
 
 /// Routing behavior contracts (4.32):nested layouts, redirects, query params, hash, back/forward, scroll restoration.
@@ -2822,7 +2526,7 @@ mod tests {
 
         assert!(button.render_html().contains("Save"));
         assert!(input.render_html().contains("you@example.com"));
-        assert!(progress.render_html().contains("42%"));
+        assert!(progress.render_html().contains("42 of 100"));
     }
 
     #[test]
@@ -3040,11 +2744,10 @@ mod tests {
             filter_param: None,
         }
         .render_html();
-        // The custom combobox is not a native <select>; the name is exposed
-        // via data-field/data-value for the api-form serialization fallback.
+        // ARK: a native select carries name + the selected option.
         assert!(select.contains("name=\"audience\""));
         assert!(select.contains("data-field=\"audience\""));
-        assert!(select.contains("data-value=\"vip\""));
+        assert!(select.contains("<option value=\"vip\" selected>"));
 
         // Unnamed fields must not render a stale/empty name attribute.
         let unnamed = Input {
@@ -3078,9 +2781,8 @@ mod tests {
         }
         .render_html();
 
-        assert!(html.contains("data-state=\"indeterminate\""));
-        assert!(html.contains("h-6 w-6 rounded-sm"));
-        assert!(html.contains("border-success"));
+        assert!(html.contains("<input type=\"checkbox\""), "{html}");
+        assert!(html.contains("aria-checked=\"mixed\""), "{html}");
         assert!(html.contains("disabled aria-disabled=\"true\""));
     }
 
@@ -3096,8 +2798,7 @@ mod tests {
         }
         .render_html();
 
-        assert!(html.contains("text-destructive"));
-        assert!(html.contains("text-base"));
+        assert!(html.contains("apex-label"), "{html}");
         assert!(html.contains("Email"));
         assert!(html.contains("*</span>"));
     }
@@ -3113,10 +2814,9 @@ mod tests {
         }
         .render_html();
 
-        assert!(html.contains("bg-warning/20"));
-        assert!(html.contains("h-4"));
-        assert!(html.contains("bg-warning animate-progress"));
-        assert!(html.contains("67%"));
+        assert!(html.contains("67 of 100"), "{html}");
+        assert!(html.contains("role=\"progressbar\""), "{html}");
+        assert!(!html.contains("animate-"));
     }
 
     #[test]
@@ -3166,10 +2866,12 @@ mod tests {
         }
         .render_html();
         // The listbox is present but hidden (closed state).
-        assert!(html.contains("role=\"listbox\""));
-        assert!(html.contains("hidden"));
-        assert!(html.contains("data-value=\"starter\""));
-        assert!(html.contains("data-open=\"false\""));
+        assert!(html.contains("<select class=\"apex-select\""), "{html}");
+        assert!(
+            html.contains("<option value=\"starter\" selected>"),
+            "{html}"
+        );
+        assert!(!html.contains("role=\"listbox\""));
     }
 
     #[test]
@@ -3194,13 +2896,15 @@ mod tests {
             ],
         }
         .render_html();
-        assert!(html.contains("id=\"plan-option-0\""));
-        assert!(html.contains("id=\"plan-option-1\""));
-        assert!(html.contains("for=\"plan-option-1\""));
+        // ARK: labelled native radios — the label wraps the input, so no
+        // id/for wiring is needed (and none is emitted).
+        assert!(html.contains("<label class=\"apex-check\">"), "{html}");
         assert!(
-            html.contains("aria-labelledby=\"plan-option-1\"")
-                || html.contains("for=\"plan-option-1\"")
+            html.contains("value=\"starter\"") && html.contains("value=\"pro\""),
+            "{html}"
         );
+        assert!(html.contains("<span>Pro</span>"), "{html}");
+        assert!(!html.contains("for=\"plan-option"));
     }
 
     #[test]
@@ -3237,8 +2941,8 @@ mod tests {
             hide_close_button: false,
         }
         .render_html();
-        assert!(a.contains("id=\"apex-dialog-delete-campaign\""));
-        assert!(b.contains("id=\"apex-dialog-delete-list\""));
+        assert!(a.contains("<b>Delete campaign?</b>"), "{a}");
+        assert!(b.contains("<b>Delete list?</b>"), "{b}");
         assert_eq!(
             a,
             Dialog {
@@ -3281,27 +2985,10 @@ mod tests {
         }
         .render_html();
 
-        assert!(html.contains("data-open=\"true\""));
-        assert!(html.contains("border-success"));
-        assert!(html.contains("h-14 px-6 text-[15px] tracking-tight rounded-[8px_8px_7px_7px]"));
-        assert!(html.contains("Enterprise"));
-        assert!(html.contains("role=\"option\""));
-    }
-
-    #[test]
-    fn switch_supports_variants_sizes_and_checked_state() {
-        let html = Switch {
-            checked: true,
-            variant: "success",
-            size: "lg",
-            disabled: false,
-        }
-        .render_html();
-
-        assert!(html.contains("role=\"switch\""));
-        assert!(html.contains("data-[state=checked]:bg-success"));
-        assert!(html.contains("h-7 w-14"));
-        assert!(html.contains("translate-x-7"));
+        assert!(html.contains("<select class=\"apex-select\""), "{html}");
+        assert!(html.contains("Enterprise"), "{html}");
+        assert!(!html.contains("data-open"), "{html}");
+        assert!(!html.contains("role=\"option\""));
     }
 
     #[test]
@@ -3314,10 +3001,9 @@ mod tests {
         }
         .render_html();
 
-        assert!(html.contains("data-size=\"lg\""));
-        assert!(html.contains("bg-warning"));
-        assert!(html.contains("h-3"));
-        assert!(html.contains(">75<"));
+        assert!(html.contains("<input type=\"range\""), "{html}");
+        assert!(html.contains("value=\"75\""), "{html}");
+        assert!(!html.contains("data-size"));
     }
 
     #[test]
@@ -3340,10 +3026,11 @@ mod tests {
         }
         .render_html();
 
-        assert!(html.contains("role=\"tablist\""));
-        assert!(html.contains("data-[state=active]:border-primary"));
-        assert!(html.contains("data-state=\"active\""));
-        assert!(html.contains("<section>Panel</section>"));
+        // ARK: a ruled tab strip; the active item carries is-active.
+        assert!(html.contains("apex-tabs"), "{html}");
+        assert!(html.contains("class=\"is-active\""), "{html}");
+        assert!(html.contains("<section>Panel</section>"), "{html}");
+        assert!(!html.contains("data-state"));
     }
 
     #[test]
@@ -3550,12 +3237,11 @@ mod tests {
         }
         .render_html();
 
-        assert!(html.contains("role=\"dialog\""));
-        assert!(html.contains("data-focus-trap=\"true\""));
-        assert!(html.contains("data-dialog-close"));
-        assert!(html.contains("max-w-2xl"));
-        assert!(html.contains("glass border-white/10"));
-        assert!(html.contains("Close"));
+        assert!(html.contains("apex-notice"), "{html}");
+        assert!(html.contains("Campaign details"), "{html}");
+        assert!(html.contains("Review the selected audience."), "{html}");
+        assert!(!html.contains("role=\"dialog\"") && !html.contains("data-focus-trap"));
+        assert!(!html.contains("glass") && !html.contains("max-w-2xl"));
     }
 
     #[test]
@@ -3570,13 +3256,10 @@ mod tests {
         }
         .render_html();
 
-        assert!(html.contains("role=\"alertdialog\""));
-        assert!(html.contains("data-focus-trap=\"true\""));
-        assert!(html.contains("data-alert-dialog-cancel"));
-        assert!(html.contains("data-alert-dialog-confirm"));
-        assert!(html.contains("Delete domain"));
-        assert!(html.contains("Cancel"));
-        assert!(html.contains("bg-destructive text-destructive-foreground"));
+        assert!(html.contains("apex-notice apex-notice--fail"), "{html}");
+        assert!(html.contains("Delete domain"), "{html}");
+        assert!(html.contains("apex-btn--danger"), "{html}");
+        assert!(!html.contains("role=\"alertdialog\"") && !html.contains("data-focus-trap"));
     }
 
     #[test]
@@ -3668,9 +3351,10 @@ mod tests {
             delay_duration: 200,
         }
         .render_html();
-        assert!(html.contains("role=\"tooltip\""));
-        assert!(html.contains("data-delay=\"200\""));
-        assert!(html.contains("bg-white text-surface-900"));
+        // ARK: no hover tooltips — the text is an always-visible help line.
+        assert!(html.contains("apex-help"), "{html}");
+        assert!(html.contains("Helpful hint"), "{html}");
+        assert!(!html.contains("role=\"tooltip\""));
     }
 
     #[test]
@@ -3680,8 +3364,8 @@ mod tests {
             content: "<div>Rows</div>",
         }
         .render_html();
-        assert!(html.contains("overflow-auto"));
-        assert!(html.contains("scrollbar-thin"));
+        assert!(html.contains("overflow-auto"), "{html}");
+        assert!(!html.contains("scrollbar-"), "no custom scrollbar chrome");
         assert!(html.contains("Rows"));
     }
 
@@ -3846,11 +3530,10 @@ mod tests {
         }
         .render_html();
 
-        assert!(html.contains("role=\"tablist\""));
-        assert!(html.contains("role=\"tab\""));
-        assert!(html.contains("data-state=\"active\""));
-        assert!(html.contains("Overview"));
-        assert!(html.contains("Tab content"));
+        assert!(html.contains("apex-tabs"), "{html}");
+        assert!(html.contains("Overview"), "{html}");
+        assert!(html.contains("Tab content"), "{html}");
+        assert!(!html.contains("role=\"tab\""));
     }
 
     #[test]
@@ -3908,8 +3591,11 @@ mod tests {
             !html.contains("shadow") && !html.contains("hover:"),
             "{html}"
         );
-        assert!(html.contains("p-8"));
-        assert!(html.contains("cursor-pointer"));
+        assert!(html.contains("apex-panel"), "{html}");
+        assert!(
+            !html.contains("cursor-pointer"),
+            "panels are not buttons: {html}"
+        );
         assert!(html.contains("42,000 emails"));
     }
 
@@ -3945,30 +3631,16 @@ mod tests {
         }
         .render_html();
 
-        assert!(html.contains("role=\"radiogroup\""));
-        assert!(html.contains("role=\"radio\""));
-        assert!(html.contains("aria-checked=\"true\""));
-        assert!(html.contains("aria-checked=\"false\""));
-        assert!(html.contains("aria-disabled=\"true\""));
-        assert!(html.contains("data-state=\"checked\""));
-        assert!(html.contains("data-state=\"unchecked\""));
+        // ARK: a radiogroup of native radio inputs; checked/disabled are
+        // native attributes (native radios expose their own semantics).
+        assert!(html.contains("role=\"radiogroup\""), "{html}");
+        assert_eq!(html.matches("<input type=\"radio\"").count(), 3, "{html}");
+        assert!(html.contains(" checked"), "{html}");
+        assert!(html.contains(" disabled"), "{html}");
+        assert!(!html.contains("data-state"));
         assert!(html.contains("Free"));
         assert!(html.contains("Pro"));
         assert!(html.contains("Enterprise"));
-    }
-
-    #[test]
-    fn radio_group_variant_classes_map_correctly() {
-        assert!(radio_variant_class("default").contains("border-primary"));
-        assert!(radio_variant_class("success").contains("border-success"));
-        assert!(radio_variant_class("destructive").contains("border-destructive"));
-    }
-
-    #[test]
-    fn radio_group_size_classes_map_correctly() {
-        assert!(radio_size_class("sm").contains("h-3.5"));
-        assert!(radio_size_class("md").contains("h-4"));
-        assert!(radio_size_class("lg").contains("h-5"));
     }
 
     #[test]
@@ -3995,25 +3667,23 @@ mod tests {
         .render_html();
 
         assert!(html.contains("flex-row"));
-        assert!(html.contains("data-orientation=\"horizontal\""));
+        assert!(html.contains("role=\"radiogroup\""), "{html}");
     }
 
     #[test]
     fn radio_group_keyboard_contract_specifies_all_keys() {
         let kc = RadioGroup::keyboard_navigation_contract();
+        // Native radios: arrows move and Space selects; the browser owns the
+        // rest (no roving tabindex, no Home/End hijack, no custom wrap).
         assert!(kc.arrow_up_moves_prev);
         assert!(kc.arrow_down_moves_next);
         assert!(kc.arrow_left_moves_prev);
         assert!(kc.arrow_right_moves_next);
-        assert!(kc.home_moves_first);
-        assert!(kc.end_moves_last);
-        assert!(kc.wrap_around);
+        assert!(!kc.home_moves_first);
+        assert!(!kc.end_moves_last);
+        assert!(!kc.wrap_around);
         assert!(kc.space_selects);
     }
-
-    // ────────────────────────────────────────────────────────────
-    // Phase 4.18 Accordion — render + animation + keyboard
-    // ────────────────────────────────────────────────────────────
 
     #[test]
     fn accordion_renders_items_with_aria() {
@@ -4037,15 +3707,14 @@ mod tests {
         }
         .render_html();
 
-        assert!(html.contains("data-state=\"open\""));
-        assert!(html.contains("data-state=\"closed\""));
-        assert!(html.contains("aria-expanded=\"true\""));
-        assert!(html.contains("aria-expanded=\"false\""));
+        assert!(html.contains("<details"), "{html}");
+        assert!(html.contains("<summary"), "{html}");
+        assert!(!html.contains("data-state"));
         assert!(html.contains("What is ApexMail?"));
         assert!(html.contains("An email platform."));
         assert!(html.contains("Pricing?"));
         // closed content still in DOM (for animation), but has hidden attribute
-        assert!(html.contains("hidden"));
+        assert!(html.contains("<details"), "{html}");
     }
 
     #[test]
@@ -4075,21 +3744,20 @@ mod tests {
         }
         .render_html();
 
-        // Two open items × 3 data-state attrs each (wrapper, trigger, panel) = 6
-        // One closed item × 3 = 3
-        assert_eq!(html.matches("data-state=\"open\"").count(), 6);
-        assert_eq!(html.matches("data-state=\"closed\"").count(), 3);
+        // ARK: each item is one native <details> (no state attributes).
+        assert_eq!(html.matches("<details").count(), 3, "{html}");
     }
 
     #[test]
     fn accordion_animation_contract_values() {
         let ac = Accordion::animation_contract();
 
-        assert_eq!(ac.expand_duration_ms, 200);
-        assert_eq!(ac.collapse_duration_ms, 200);
-        assert_eq!(ac.easing, "ease-out");
-        assert!(ac.css_keyframe_down.contains("accordion-down"));
-        assert!(ac.css_keyframe_up.contains("accordion-up"));
+        // ARK: native <details> — no animation to configure.
+        assert_eq!(ac.expand_duration_ms, 0);
+        assert_eq!(ac.collapse_duration_ms, 0);
+        assert_eq!(ac.easing, "none");
+        assert!(!ac.uses_height_auto_animation);
+        assert!(ac.css_keyframe_down.is_empty());
     }
 
     #[test]
@@ -4098,10 +3766,10 @@ mod tests {
 
         assert!(kc.space_toggles);
         assert!(kc.enter_toggles);
-        assert!(kc.arrow_down_moves_next);
-        assert!(kc.arrow_up_moves_prev);
-        assert!(kc.home_moves_first);
-        assert!(kc.end_moves_last);
+        assert!(!kc.arrow_down_moves_next);
+        assert!(!kc.arrow_up_moves_prev);
+        assert!(!kc.home_moves_first);
+        assert!(!kc.end_moves_last);
     }
 
     // ────────────────────────────────────────────────────────────
@@ -4192,7 +3860,7 @@ mod tests {
         assert_eq!(c.animation_enter_ms, 200);
         assert_eq!(c.animation_exit_ms, 200);
         assert_eq!(c.animation_easing, "ease-out");
-        assert!(c.overlay_blur.contains("blur"));
+        assert_eq!(c.overlay_blur, "none", "modals are banned: no overlay blur");
         assert!(c.initial_focus_selector.contains("autofocus"));
     }
 
@@ -4309,13 +3977,17 @@ mod tests {
     #[test]
     fn render_row_checkbox_checked_and_unchecked() {
         let checked = render_row_checkbox(true);
-        assert!(checked.contains("aria-checked=\"true\""));
-        assert!(checked.contains("data-state=\"checked\""));
-        assert!(checked.contains("<svg"));
+        // ARK: a native checkbox with its checked attribute.
+        assert!(checked.contains("<input type=\"checkbox\""), "{checked}");
+        assert!(checked.contains(" checked"), "{checked}");
+        assert!(!checked.contains("data-state"));
 
         let unchecked = render_row_checkbox(false);
-        assert!(unchecked.contains("aria-checked=\"false\""));
-        assert!(unchecked.contains("data-state=\"unchecked\""));
+        assert!(
+            unchecked.contains("<input type=\"checkbox\""),
+            "{unchecked}"
+        );
+        assert!(!unchecked.contains(" checked"), "{unchecked}");
     }
 
     // ────────────────────────────────────────────────────────────
@@ -4325,9 +3997,10 @@ mod tests {
     #[test]
     fn skeleton_animation_contract_specifies_shimmer() {
         let c = SkeletonAnimationContract::spec();
-        assert!(c.shimmer_enabled);
-        assert_eq!(c.shimmer_css, "animate-pulse");
-        assert_eq!(c.pulse_duration_ms, 2000);
+        // ARK: loading is blank ruled rows — no shimmer, no pulse.
+        assert!(!c.shimmer_enabled);
+        assert_eq!(c.shimmer_css, "apex-loading");
+        assert_eq!(c.pulse_duration_ms, 0);
         assert!(c.dimension_matching);
     }
 
@@ -4383,7 +4056,7 @@ mod tests {
     #[test]
     fn render_chart_axis_produces_svg_group() {
         let html = render_chart_axis("Revenue", "bottom");
-        assert!(html.contains("chart-axis-bottom"));
+        assert!(html.contains("data-axis=\"bottom\""), "{html}");
         assert!(html.contains("Revenue"));
         assert!(html.contains("aria-label"));
     }
@@ -4451,20 +4124,18 @@ mod tests {
                 aria_label: Some("Select row"),
             }
             .render_html();
-            assert!(
-                html.contains(&format!("data-state=\"{state}\"")),
-                "{state}: {html}"
-            );
-            let truthy = checked || indeterminate;
+            assert!(html.contains("<input type=\"checkbox\""), "{state}: {html}");
             assert_eq!(
-                html.contains("aria-checked=\"true\""),
-                truthy,
-                "{state} aria-checked"
+                html.contains("aria-checked=\"mixed\""),
+                indeterminate,
+                "{state} aria-checked mixed"
             );
+            // ARK: no indicator glyph — the native checked attribute is the
+            // state, and indeterminate is aria-checked="mixed".
             assert_eq!(
-                html.contains("<svg"),
-                truthy,
-                "{state} must render an indicator only when on"
+                html.contains(" checked>") || html.contains(" checked "),
+                checked,
+                "{state} must render the checked attribute only when on"
             );
             assert!(html.contains("aria-label=\"Select row\""));
         }
@@ -4498,8 +4169,8 @@ mod tests {
             disabled: false,
         }
         .render_html();
-        assert!(on.contains("role=\"switch\" aria-checked=\"true\""));
-        assert!(off.contains("role=\"switch\" aria-checked=\"false\""));
+        assert!(on.contains("checked"));
+        assert!(!off.contains("checked"));
         assert_ne!(on, off);
 
         let slider_with = Slider {
@@ -4509,8 +4180,8 @@ mod tests {
             show_tooltip: true,
         }
         .render_html();
-        assert!(slider_with.contains(">40</span>"), "tooltip value");
-        assert!(slider_with.contains("width:40%"));
+        assert!(slider_with.contains("value=\"40\""), "range value");
+        assert!(!slider_with.contains("tooltip"));
         let slider_without = Slider {
             value: 40,
             variant: "default",
@@ -4528,9 +4199,8 @@ mod tests {
             show_value: true,
         }
         .render_html();
-        assert!(progress.contains("translateX(-70%)"), "100-30");
-        assert!(progress.contains(">30%</span>"));
-        assert!(progress.contains("animate-progress"));
+        assert!(progress.contains("30 of 100"), "{progress}");
+        assert!(!progress.contains("animate-"));
         // Full and empty extremes never underflow.
         for value in [0u8, 100u8] {
             let html = Progress {
@@ -4541,7 +4211,10 @@ mod tests {
                 show_value: false,
             }
             .render_html();
-            assert!(html.contains(&format!("translateX(-{}%)", 100 - value)));
+            assert!(
+                html.contains(&format!("{} of 100", value)),
+                "value {value}: {html}"
+            );
         }
     }
 
@@ -4565,8 +4238,21 @@ mod tests {
             hide_close_button: true,
         }
         .render_html();
-        assert!(first.contains("aria-labelledby=\"apex-dialog-delete-campaign\""));
-        assert!(second.contains("aria-labelledby=\"apex-dialog-delete-campaign\""));
+        assert!(first.contains("Delete campaign"), "{first}");
+        // Determinism is per-input: the same notice always renders the same
+        // bytes (the old dialog id derivation no longer exists).
+        assert_eq!(
+            first,
+            Dialog {
+                title: "Delete campaign?",
+                description: Some("Permanent"),
+                body: "<p>x</p>",
+                size: "default",
+                variant: "default",
+                hide_close_button: false,
+            }
+            .render_html()
+        );
         assert!(!second.contains("data-dialog-close"));
         // A title with no alphanumerics still yields the stable base id.
         let punctuation = Dialog {
@@ -4578,7 +4264,7 @@ mod tests {
             hide_close_button: false,
         }
         .render_html();
-        assert!(punctuation.contains("aria-labelledby=\"apex-dialog\""));
+        assert!(punctuation.contains("<b>???</b>"), "{punctuation}");
 
         // AlertDialog initial focus depends on the dialog type.
         let confirm = AlertDialog {
@@ -4590,7 +4276,10 @@ mod tests {
             dialog_type: "confirm",
         }
         .render_html();
-        assert!(confirm.contains("data-initial-focus=\"[data-alert-dialog-cancel]\""));
+        // ARK: no focus routing — there is no dialog. The notice carries the
+        // destructive verb and the message.
+        assert!(confirm.contains("apex-notice--fail"), "{confirm}");
+        assert!(confirm.contains("Remove"), "{confirm}");
     }
 
     #[test]
@@ -4610,7 +4299,9 @@ mod tests {
             delay_duration: 700,
         }
         .render_html();
-        assert!(html.contains("role=\"tooltip\" data-side=\"top\" data-delay=\"700\""));
+        // ARK: no tooltip element ships; the text is a visible help line.
+        assert!(html.contains("apex-help"), "{html}");
+        assert!(html.contains("Save"), "{html}");
     }
 }
 

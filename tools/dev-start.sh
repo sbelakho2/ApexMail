@@ -71,16 +71,13 @@ build_marketing_static_site() {
 
     if needs_rebuild "$css_output" \
         "apps/marketing-zola/static/css/ark.css" \
-        "apps/marketing-zola/static/css/input.css" \
         "apps/marketing-zola/templates" \
         "apps/marketing-zola/content"; then
         log "Building marketing stylesheet (cssgen)..."
         run_cssgen "$css_output" \
             --ark "../../apps/marketing-zola/static/css/ark.css" \
-            --include "../../apps/marketing-zola/static/css/input.css" \
-            --content "../../apps/marketing-zola/templates/**/*.html" \
-            --content "../../apps/marketing-zola/content/**/*.md" \
-            --content "../../apps/marketing-zola/static/css/input.css" \
+            --content "../../apps/marketing-zola/templates" \
+            --content "../../apps/marketing-zola/content" \
             --out "../../apps/marketing-zola/static/css/styles.css"
     fi
 

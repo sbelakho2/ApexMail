@@ -687,7 +687,7 @@ pub fn arc_mark_svg() -> &'static str {
 /// winds down the page (the pipeline as a spiral path).
 pub fn receipt_arc_svg(degrees: i32) -> String {
     format!(
-        r#"<svg class="apex-r-arc" viewBox="0 0 24 14" width="14" height="9" fill="none" aria-hidden="true" style="transform:rotate({degrees}deg)"><path d="M4 12 A 9 9 0 0 1 20 12" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/></svg>"#
+        r#"<svg class="" viewBox="0 0 24 14" width="14" height="9" fill="none" aria-hidden="true" style="transform:rotate({degrees}deg)"><path d="M4 12 A 9 9 0 0 1 20 12" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/></svg>"#
     )
 }
 
@@ -727,7 +727,7 @@ pub fn render_monoline_bar_chart(data: &[(String, f64)], width: u32, height: u32
         ));
         if is_peak {
             bars.push_str(&format!(
-                r#"<circle cx="{x:.1}" cy="{:.1}" r="3.5" class="apex-peak-point" stroke="none"/>"#,
+                r#"<circle cx="{x:.1}" cy="{:.1}" r="3.5" stroke="none"/>"#,
                 y - 7.0
             ));
         }

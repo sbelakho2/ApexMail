@@ -362,7 +362,7 @@ impl<'a> MarketingHeader<'a> {
         format!(
             "<header class=\"fixed top-0 left-0 right-0 z-50 {}\"><nav class=\"max-w-7xl mx-auto px-4 sm:px-6 lg:px-8\"><div class=\"flex items-center justify-between h-16 lg:h-20\"><a href=\"/\" class=\"flex items-center gap-2 apex-link\"><div class=\"w-8 h-8 flex items-center justify-center\">{}</div><span class=\"apex-em\">ApexMail</span></a><div class=\"hidden lg:flex items-center gap-2\"><div class=\"relative\"><button class=\"flex items-center gap-1.5 px-3 py-3 apex-btn\" aria-haspopup=\"menu\" aria-expanded=\"{}\">Product{}</button>{}</div><a href=\"/docs\" class=\"px-3 py-3 apex-em apex-btn\">Documentation</a><a href=\"/api-console\" class=\"px-3 py-3 apex-em apex-btn\">API Console</a><a href=\"/pricing\" class=\"px-3 py-3 apex-em apex-btn\">Pricing</a><a href=\"/compliance\" class=\"px-3 py-3 apex-em apex-btn\">Compliance</a><a href=\"/private-cloud\" class=\"px-3 py-3 apex-em apex-btn\">Enterprise</a></div><div class=\"hidden lg:flex items-center gap-3\"><a href=\"https://app.apexmail.ee/login\" class=\"px-3 py-3 apex-em apex-btn\">Sign In</a><a href=\"https://app.apexmail.ee/signup\" class=\"apex-btn apex-btn--primary\">Get Started Free</a></div><button class=\"lg:hidden p-2 min-h-[44px] min-w-[44px] flex items-center justify-center apex-btn\" aria-label=\"{} menu\" aria-expanded=\"{}\">{}</button></div></nav>{}</header>",
             if self.is_scrolled {
-                "bg-card/80 backdrop-blur-xl border-b border-surface-200/50 "
+                "bg-card/80 border-b border-surface-200/50 "
             } else {
                 "bg-transparent border-b border-transparent"
             },
@@ -407,7 +407,7 @@ impl CookieConsentBanner {
         // "recorded" when the consent cookie is present, and the
         // stylesheet collapses the banner. No script is involved.
         format!(
-            "<div class=\"fixed inset-x-0 bottom-0 z-50 border-t backdrop-blur px-4 py-3\" data-consent-key=\"{}\" data-consent-state=\"pending\"><div class=\"mx-auto flex max-w-6xl flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"\">We use essential cookies and privacy-friendly analytics to improve ApexMail. See our <a href=\"/cookies\" class=\"apex-em apex-link\">Cookie Policy</a>.</p><div class=\"flex items-center gap-2\"><a href=\"{CONSENT_ENDPOINT_PATH}?choice=necessary\" rel=\"nofollow\" class=\"inline-flex items-center justify-center border px-4 py-2 apex-em apex-btn\">Necessary only</a><a href=\"{CONSENT_ENDPOINT_PATH}?choice=all\" rel=\"nofollow\" class=\"apex-btn apex-btn--primary px-4 py-2\">Accept</a></div></div></div>",
+            "<div class=\"fixed inset-x-0 bottom-0 z-50 border-t px-4 py-3\" data-consent-key=\"{}\" data-consent-state=\"pending\"><div class=\"mx-auto flex max-w-6xl flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"\">We use essential cookies and privacy-friendly analytics to improve ApexMail. See our <a href=\"/cookies\" class=\"apex-em apex-link\">Cookie Policy</a>.</p><div class=\"flex items-center gap-2\"><a href=\"{CONSENT_ENDPOINT_PATH}?choice=necessary\" rel=\"nofollow\" class=\"inline-flex items-center justify-center border px-4 py-2 apex-em apex-btn\">Necessary only</a><a href=\"{CONSENT_ENDPOINT_PATH}?choice=all\" rel=\"nofollow\" class=\"apex-btn apex-btn--primary px-4 py-2\">Accept</a></div></div></div>",
             cookie_consent_storage_key(),
         )
     }
@@ -450,7 +450,7 @@ impl<'a> MarketingApiConsole<'a> {
             .join("");
         let request_editor = if endpoint.method == "POST" {
             format!(
-                "<div class=\"px-4 py-3 border-b\"><div class=\"mb-2 apex-em\">Request Body</div><textarea class=\"w-full p-3 border resize-none apex-input apex-textarea\" rows=\"4\" spellcheck=\"false\">{}</textarea></div>",
+                "<div class=\"px-4 py-3 border-b\"><div class=\"mb-2 apex-em\">Request Body</div><textarea class=\"w-full p-3 border apex-input apex-textarea\" rows=\"4\" spellcheck=\"false\">{}</textarea></div>",
                 html_escape(self.request_body),
             )
         } else {

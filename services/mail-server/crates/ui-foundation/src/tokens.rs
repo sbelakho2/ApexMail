@@ -266,7 +266,7 @@ mod tests {
         // Radius 0 everywhere — the arch tokens are gone.
         assert_eq!(tokens.get("--radius").map(String::as_str), Some("0px"));
         assert_eq!(tokens.get("--radius-lg").map(String::as_str), Some("0px"));
-        assert!(tokens.get("--radius-arch").is_none());
+        assert!(!tokens.contains_key("--radius-arch"));
         // Success is blue: no green exists.
         assert_eq!(
             tokens.get("--success").map(String::as_str),

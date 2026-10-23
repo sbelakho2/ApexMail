@@ -112,12 +112,6 @@ pub const ARK_CSS: &str = include_str!("../assets/ark.css");
 /// The marketing build's copy of the authority — must be byte-identical.
 pub const MARKETING_ARK_CSS: &str =
     include_str!("../../../../../apps/marketing-zola/static/css/ark.css");
-/// Source-of-truth marketing stylesheet (the Zola build compiles it into
-/// static/css/styles.css). Included so the brand palette is pinned at its
-/// source, not only in build output.
-pub const MARKETING_INPUT_CSS: &str =
-    include_str!("../../../../../apps/marketing-zola/static/css/input.css");
-
 /// Whether the embedded marketing pages are the REAL Zola build output
 /// (`apps/marketing-zola/public` present at compile time) rather than the
 /// build script's placeholders for a bare checkout (ci/README.md §9 F5).
@@ -126,7 +120,7 @@ pub const MARKETING_PUBLIC_BUILT: bool = cfg!(marketing_public_built);
 
 #[cfg(test)]
 mod tests {
-    use super::{GLOBALS_CSS, MARKETING_INPUT_CSS};
+    use super::GLOBALS_CSS;
 
     /// The compiled artifact inlines the authority: fonts, tokens and the
     /// apex-* vocabulary all resolve to ark.css content — and the artifact

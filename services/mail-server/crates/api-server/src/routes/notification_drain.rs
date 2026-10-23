@@ -303,7 +303,7 @@ fn render_notification(
     };
 
     let html = format!(
-        "<p>{}</p><hr><p style=\"color:#666;font-size:12px\">ApexMail · \
+        "<p>{}</p><hr><p style=\"color:#666;font-size:12px\">ApexMail, \
          automated notification for the account {}</p>",
         escape_html(&body_lines).replace('\n', "<br>"),
         escape_html(account),

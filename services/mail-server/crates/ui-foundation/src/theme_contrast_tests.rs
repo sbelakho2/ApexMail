@@ -129,8 +129,22 @@ fn css_themes_the_class(class_name: &str) -> bool {
         // Variant classes (hover:/focus:/…) ride a base class in practice.
         return true;
     }
-    let selector = format!(":root:not(.light) .{}", class_name.replace('/', "\\/"));
-    crate::GLOBALS_CSS.contains(&selector)
+    // ARK: pale tints are token-bound — the .dark block redefines every ramp
+    // step, so the same class flips to the dark wash automatically. The
+    // class is themed when its `bg-<hue>-<step>` token exists in BOTH blocks.
+    let Some(rest) = class_name.strip_prefix("bg-") else {
+        return true;
+    };
+    let (color, _alpha) = match rest.split_once('/') {
+        Some((c, a)) => (c, Some(a)),
+        None => (rest, None),
+    };
+    let Some((hue, step)) = color.rsplit_once('-') else {
+        return false;
+    };
+    let light = crate::tokens::block_tokens(crate::ARK_CSS, ":root");
+    let dark = crate::tokens::block_tokens(crate::ARK_CSS, ".dark");
+    light.contains_key(&format!("--{hue}-{step}")) && dark.contains_key(&format!("--{hue}-{step}"))
 }
 
 fn pale_tint_violations(surface: &str, document: &str, html: &str) -> Vec<String> {
@@ -204,7 +218,7 @@ mod pale_tint_detector_tests {
     fn flags_the_reported_mfa_notice_shape() {
         // The exact live regression, ARK edition: a bare tinted panel with no
         // text colour still trips the detector.
-        let html = r#"<div class="border px-4 py-4"><p class="apex-em">Two-factor verification required</p></div>"#;
+        let html = r#"<div class="border bg-amber-200 px-4 py-4"><p class="apex-em">Two-factor verification required</p></div>"#;
         let found = pale_tint_violations("control-plane", "/login?mfa=1", html);
         assert_eq!(found.len(), 1, "{found:?}");
 
@@ -216,7 +230,7 @@ mod pale_tint_detector_tests {
         assert!(pale_tint_violations("control-plane", "/dashboard", notice).is_empty());
 
         // …and an unthemed alpha variant with no text colour still fails.
-        let unthemed = r#"<div class="px-4 py-4">bad</div>"#;
+        let unthemed = r#"<div class="px-4 py-4 bg-amber-200">bad</div>"#;
         assert_eq!(
             pale_tint_violations("control-plane", "/dashboard", unthemed).len(),
             1

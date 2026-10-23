@@ -658,7 +658,7 @@ pub struct MarketingShell<'a> {
 }
 
 fn render_marketing_header() -> String {
-    "<header id=\"site-header\" data-marketing-shell=\"header\" class=\"fixed top-0 left-0 right-0 z-50 border-b border-transparent\">\
+    "<header id=\"site-header\" data-marketing-shell=\"header\" class=\"fixed top-0 left-0 right-0 z-50 border-b\">\
          <nav class=\"max-w-7xl mx-auto px-4 sm:px-6 lg:px-8\">\
          <div class=\"flex items-center justify-between h-16 lg:h-20\">\
          <a href=\"/\" class=\"flex items-center gap-2 apex-link\">\
@@ -694,7 +694,7 @@ fn render_marketing_footer() -> String {
 impl<'a> MarketingShell<'a> {
     pub fn render_html(&self) -> String {
         format!(
-            "<div class=\"min-h-screen safe-area-inset-bottom flex flex-col\">{}<main class=\"flex-1 pt-16 lg:pt-20\">{}</main>{}<div data-marketing-shell=\"cookie-consent\"></div><button data-marketing-shell=\"back-to-top\"></button></div>",
+            "<div class=\"min-h-screen apex-safe-bottom flex flex-col\">{}<main class=\"flex-1 pt-16 lg:pt-20\">{}</main>{}<div data-marketing-shell=\"cookie-consent\"></div><button data-marketing-shell=\"back-to-top\"></button></div>",
             render_marketing_header(),
             self.child_html,
             render_marketing_footer(),
@@ -1020,7 +1020,7 @@ fn render_cp_sidebar(current_path: &str, csrf_token: &str) -> String {
          <div class=\"p-6 mb-4\"><div class=\"flex flex-col gap-0.5\">\
          <span class=\"apex-sidebar-brand apex-wordmark\"><span class=\"apex-wordmark__apex\">Apex</span><span class=\"apex-wordmark__mail\">Mail</span></span>\
          <span class=\"apex-em apex-section-head\">Operations</span></div></div>\
-         <nav class=\"flex-1 overflow-y-auto cp-sidebar-nav\" data-sidebar=\"primary\" aria-label=\"Control Plane navigation\">{}</nav>\
+         <nav class=\"flex-1 overflow-y-auto apex-cp-sidebar-nav\" data-sidebar=\"primary\" aria-label=\"Control Plane navigation\">{}</nav>\
          <div class=\"p-4 border-t\"><form method=\"POST\" action=\"/web/auth/logout\"><input type=\"hidden\" name=\"_csrf\" value=\"{csrf_token}\" /><button type=\"submit\" class=\"flex w-full items-center gap-3 px-4 py-2 apex-btn\"><span>Sign Out</span></button></form></div></div>",
         content,
         csrf_token = html_escape(csrf_token),

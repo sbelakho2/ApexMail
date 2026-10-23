@@ -1839,7 +1839,7 @@ fn render_invoice_html(invoice: &LegacyInvoiceDto, style_nonce: &str) -> String 
             })
             .unwrap_or(false);
     let reverse_charge_note = if reverse_charge_applied {
-        "\n  <div class=\"vat-note\">\n      Reverse charge: VAT to be paid by the recipient per Article 196, EU VAT Directive 2006/112/EC\n    </div>\n".to_string()
+        "\n  <div class=\"apex-meta\">\n      Reverse charge: VAT to be paid by the recipient per Article 196, EU VAT Directive 2006/112/EC\n    </div>\n".to_string()
     } else {
         String::new()
     };
@@ -1847,7 +1847,7 @@ fn render_invoice_html(invoice: &LegacyInvoiceDto, style_nonce: &str) -> String 
     let mut line_items_html = String::new();
     for item in &invoice.line_items {
         line_items_html.push_str(&format!(
-            "\n        <tr>\n          <td>{}</td>\n          <td>{}</td>\n          <td class=\"amount\">{}</td>\n          <td class=\"amount\">{}%</td>\n          <td class=\"amount\">{}</td>\n        </tr>",
+            "\n        <tr>\n          <td>{}</td>\n          <td>{}</td>\n          <td class=\"apex-mono\">{}</td>\n          <td class=\"apex-mono\">{}%</td>\n          <td class=\"apex-mono\">{}</td>\n        </tr>",
             escape_html(&item.description),
             item.quantity,
             format_invoice_currency_with(item.unit_price, &invoice.currency),
@@ -1863,38 +1863,36 @@ fn render_invoice_html(invoice: &LegacyInvoiceDto, style_nonce: &str) -> String 
   <meta charset="utf-8">
   <title>Invoice {invoice_number}</title>
   <style nonce="{style_nonce}">
+    /* ARK invoice document: paper, ink, one 3px rule, tabular figures. The
+       class names are the shared vocabulary so the same document renders
+       identically here and anywhere else (rendered to PDF by pdf-renderer). */
     body {{ font-family:'Overpass',-apple-system,'Segoe UI',Arial,sans-serif; font-size: 13px; color: #0E141B; margin: 40px; }}
-    .header {{ display: flex; justify-content: space-between; margin-bottom: 40px; }}
-    .logo {{ font-family:Arial,Helvetica,sans-serif; font-size: 22px; font-weight: bold; letter-spacing: -0.04em; }}
-    .invoice-info {{ text-align: right; }}
-    .invoice-number {{ font-size: 18px; font-weight: bold; }}
-    .addresses {{ display: flex; justify-content: space-between; margin-bottom: 40px; }}
-    .address {{ width: 45%; }}
-    .address h3 {{ font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: #5B6B7A; margin-bottom: 10px; }}
+    .apex-invoice-header {{ display: flex; justify-content: space-between; margin-bottom: 40px; border-bottom: 3px solid #0E141B; padding-bottom: 14px; }}
+    .apex-invoice-addresses {{ display: flex; justify-content: space-between; margin-bottom: 40px; }}
+    .apex-invoice-addresses > div {{ width: 45%; }}
+    .apex-wordmark {{ font-family:Arial,Helvetica,sans-serif; font-size: 22px; font-weight: bold; letter-spacing: -0.04em; }}
+    .apex-meta {{ font-size: 11px; line-height: 1.6; color: #3D4B59; }}
+    .apex-em {{ font-weight: 600; color: #0E141B; }}
+    .apex-strong {{ font-weight: 600; font-size: 14px; color: #0E141B; }}
+    .apex-mono {{ font-family:'Overpass Mono',ui-monospace,monospace; font-variant-numeric: tabular-nums; text-align: right; }}
+    .apex-footnote {{ margin-top: 60px; padding-top: 20px; border-top: 2px solid #0E141B; font-size: 10px; color: #5B6B7A; }}
     table {{ width: 100%; border-collapse: collapse; margin-bottom: 30px; }}
     th {{ background: transparent; padding: 12px 12px 12px 0; text-align: left; font-weight: 600; text-transform: uppercase; font-size: 10px; letter-spacing: 0.08em; color: #5B6B7A; border-bottom: 2px solid #0E141B; }}
     td {{ padding: 12px 12px 12px 0; border-bottom: 1px solid #C4CDD5; }}
-    .amount {{ text-align: right; }}
-    .totals {{ margin-left: auto; width: 300px; }}
-    .totals table {{ margin-bottom: 0; }}
-    .totals td {{ border: none; padding: 8px 12px; }}
-    .total-row {{ font-weight: 600; font-size: 14px; }}
-    .footer {{ margin-top: 60px; padding-top: 20px; border-top: 2px solid #0E141B; font-size: 10px; color: #5B6B7A; }}
-    .vat-note {{ font-style: italic; margin-top: 20px; }}
   </style>
 </head>
 <body>
-  <div class="header">
-    <div class="logo">{trading_as}</div>
-    <div class="invoice-info">
-      <div class="invoice-number">Invoice {invoice_number}</div>
+  <div class="apex-invoice-header">
+    <div class="apex-wordmark">{trading_as}</div>
+    <div class="apex-meta">
+      <div class="apex-em">Invoice {invoice_number}</div>
       <div>Issued: {issued_at}</div>
       <div>Due: {due_at}</div>
 {purchase_order}    </div>
   </div>
 
-  <div class="addresses">
-    <div class="address">
+  <div class="apex-invoice-addresses">
+    <div class="apex-meta">
       <h3>From</h3>
       <strong>{company_name}</strong><br>
       (trading as {trading_as})<br>
@@ -1905,7 +1903,7 @@ fn render_invoice_html(invoice: &LegacyInvoiceDto, style_nonce: &str) -> String 
       VAT: {company_vat}<br>
       {billing_email}
     </div>
-    <div class="address">
+    <div class="apex-meta">
       <h3>Bill To</h3>
       <strong>{bill_to_company}</strong><br>
       {bill_to_line1}<br>
@@ -1920,32 +1918,32 @@ fn render_invoice_html(invoice: &LegacyInvoiceDto, style_nonce: &str) -> String 
       <tr>
         <th>Description</th>
         <th>Qty</th>
-        <th class="amount">Unit Price</th>
-        <th class="amount">VAT</th>
-        <th class="amount">Amount</th>
+        <th class="apex-mono">Unit Price</th>
+        <th class="apex-mono">VAT</th>
+        <th class="apex-mono">Amount</th>
       </tr>
     </thead>
     <tbody>{line_items_html}
     </tbody>
   </table>
 
-  <div class="totals">
+  <div class="apex-em">
     <table>
       <tr>
         <td>Subtotal</td>
-        <td class="amount">{subtotal}</td>
+        <td class="apex-mono">{subtotal}</td>
       </tr>
       <tr>
         <td>{vat_label}</td>
-        <td class="amount">{vat_total}</td>
+        <td class="apex-mono">{vat_total}</td>
       </tr>
-      <tr class="total-row">
+      <tr class="apex-strong">
         <td>Total</td>
-        <td class="amount">{total}</td>
+        <td class="apex-mono">{total}</td>
       </tr>
     </table>
   </div>{reverse_charge_note}{notes}
-  <div class="footer">
+  <div class="apex-footnote">
     <p>Payment terms: Net {payment_terms_days} days. Please include invoice number in payment reference.</p>
     <p>{company_name} (trading as {trading_as}) | Reg. {registry_code} | VAT: {company_vat}{bank_details}</p>
     <p>{company_street}, {company_postal_code} {company_city}, {company_country}</p>

@@ -1422,7 +1422,7 @@ pub fn render_route_with_form_fields_and_csrf(
                 // The typed /confirm page rides the same minimal auth chrome
                 // (and owns exactly one <main> landmark like the login page).
                 "/confirm" | "/confirm/" => format!(
-                    "<main id=\"app-main\" class=\"min-h-screen bg-surface-50 relative \
+                    "<main id=\"app-main\" class=\"min-h-screen relative \
                      flex items-center justify-center p-6\">{inner}</main>"
                 ),
                 _ => {
@@ -1544,15 +1544,15 @@ fn render_flash_banners(mut html: String, flash: &[crate::flash::FlashMessage]) 
         .map(|message| {
             let (border, icon, label) = match message.kind {
                 crate::flash::FlashKind::Success => {
-                    ("border-success-300 bg-success-50 text-success-900", "✓", "Success")
+                    ("apex-notice apex-notice--ok", "", "Done")
                 }
                 crate::flash::FlashKind::Error => (
-                    "border-destructive/40 bg-destructive/10 text-destructive",
-                    "!",
-                    "Error",
+                    "apex-notice apex-notice--fail",
+                    "",
+                    "Failure",
                 ),
                 crate::flash::FlashKind::Info => {
-                    ("border-primary/30 bg-primary/10 text-primary", "i", "Notice")
+                    ("apex-notice", "", "Notice")
                 }
             };
             format!(

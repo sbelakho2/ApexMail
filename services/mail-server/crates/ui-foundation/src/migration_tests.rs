@@ -536,12 +536,11 @@ fn migration_control_plane_pages_have_titles() {
 
 #[test]
 fn migration_marketing_pages_have_content() {
-    // 2026-10-16 (sovereignty round): the home hero's keyword follows the
-    // owner-directive positioning — "Email infrastructure built in Europe"
-    // replaces the retired "The email API" line — and the new EU-sovereign
-    // page is covered here so a build that drops it fails loudly.
+    // ARK copy round: the home hero states the product and where it runs
+    // (no slogan), and every marketing surface keeps a distinctive keyword so
+    // a build that drops a page fails loudly.
     let pages: Vec<(&str, &str)> = vec![
-        ("/", "Email infrastructure built in Europe"),
+        ("/", "Email infrastructure for developers"),
         ("/pricing", "pricing"),
         ("/features", "Features"),
         ("/compliance", "Compliance"),
@@ -721,7 +720,7 @@ fn migration_critical_css_classes_preserved() {
         "text-5xl",
         "font-bold",
         "bg-surface-50",
-        "rounded-[8px_8px_7px_7px]",
+        "rounded-[the-old-arch]",
     ] {
         assert!(
             !flat.iter().any(|c| c.as_str() == banned),

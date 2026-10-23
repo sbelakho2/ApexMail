@@ -3,7 +3,7 @@
 
    This file is the ONLY place a design decision lives. The console build
    (crates/ui-foundation/assets/globals.input.css) and the marketing build
-   (apps/marketing-zola/static/css/input.css) both `@import "./ark.css"`;
+   (the marketing build) both inline this file;
    tools/check_ark_mirror.py fails when the two copies diverge byte-for-byte.
 
    THE LAW (ARK v5):
@@ -1478,6 +1478,46 @@ a.apex-sidebar-brand:hover { color: inherit; }
 .apex-refresh-option {
   font-size: 0.75rem;
 }
+
+
+/* Evidence envelope row and machine word (shared by the standalone sandbox
+   documents, which inline their own copy of this subset). */
+.apex-evidence__bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.7rem;
+  align-items: baseline;
+  padding: 0.75rem 1.1rem;
+  border-bottom: 1px solid rgb(var(--surface-300));
+}
+.apex-method {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: rgb(var(--foreground));
+}
+.apex-strong { font-weight: 600; color: rgb(var(--foreground)); }
+
+
+/* Shell hooks: safe-area insets and the shrinking sidebar nav column. */
+.apex-safe-bottom { padding-bottom: env(safe-area-inset-bottom); }
+.apex-cp-sidebar-nav { min-height: 0; }
+/* Invoice document frame (the billing document uses these; the document
+   inlines its own copy of the rules for standalone rendering). */
+.apex-invoice-header {
+  display: flex;
+  justify-content: space-between;
+  border-bottom: var(--rule-3) solid rgb(var(--foreground));
+  padding-bottom: 0.875rem;
+  margin-bottom: 2.5rem;
+}
+.apex-invoice-addresses {
+  display: flex;
+  justify-content: space-between;
+  gap: 2rem;
+  margin-bottom: 2.5rem;
+}
+.apex-invoice-addresses > div { width: 45%; }
 
 /* ── Tabs ── */
 .apex-tabs {

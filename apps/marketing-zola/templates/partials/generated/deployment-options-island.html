@@ -15,38 +15,38 @@
     {# A real fieldset/legend groups the radio tab set for assistive tech; the
        visually-hidden radios stay keyboard focusable (see no-js.css) and the
        rings paint on the visible labels. #}
-    <fieldset class="border-0 p-0 m-0 min-w-0">
+    <fieldset class="p-0 m-0 min-w-0">
     <legend class="sr-only">{% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['deployment_models'] %}{{ i18n_data[l]['a11y']['deployment_models'] }}{% else %}Deployment models{% endif %}</legend>
     {# Radio inputs (visually hidden, control tabs via CSS) #}
-    <input type="radio" name="deploy" id="deploy-shared" class="deploy-radio apex-input" checked />
-    <input type="radio" name="deploy" id="deploy-dedicated" class="deploy-radio apex-input" />
-    <input type="radio" name="deploy" id="deploy-private" class="deploy-radio apex-input" />
-    <input type="radio" name="deploy" id="deploy-byoc" class="deploy-radio apex-input" />
+    <input type="radio" name="deploy" id="deploy-shared" class="apex-check apex-input" checked />
+    <input type="radio" name="deploy" id="deploy-dedicated" class="apex-check apex-input" />
+    <input type="radio" name="deploy" id="deploy-private" class="apex-check apex-input" />
+    <input type="radio" name="deploy" id="deploy-byoc" class="apex-check apex-input" />
 
     {# Tab buttons #}
-    <div class="deploy-tabs flex flex-wrap justify-center gap-2 mb-10">
-      <label for="deploy-shared" class="flex items-center gap-2 px-6 py-3 border border-transparent apex-em apex-label">
+    <div class="apex-tabs flex flex-wrap justify-center gap-2 mb-10">
+      <label for="deploy-shared" class="flex items-center gap-2 px-6 py-3 border apex-em apex-label">
         <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></svg>
         Shared Cloud
       </label>
-      <label for="deploy-dedicated" class="flex items-center gap-2 px-6 py-3 border border-transparent apex-em apex-label">
+      <label for="deploy-dedicated" class="flex items-center gap-2 px-6 py-3 border apex-em apex-label">
         <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 8V4a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v4M4 8v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8M4 8h16M9 12h6"/></svg>
         Dedicated
       </label>
-      <label for="deploy-private" class="flex items-center gap-2 px-6 py-3 border border-transparent apex-em apex-label">
+      <label for="deploy-private" class="flex items-center gap-2 px-6 py-3 border apex-em apex-label">
         <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="11" width="18" height="11" rx="0" ry="0"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
         Private Cloud
       </label>
-      <label for="deploy-byoc" class="flex items-center gap-2 px-6 py-3 border border-transparent apex-em apex-label">
+      <label for="deploy-byoc" class="flex items-center gap-2 px-6 py-3 border apex-em apex-label">
         <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
         BYOC
       </label>
     </div>
 
     {# Panels #}
-    <div class="deploy-panels">
+    <div class="apex-panel">
       {# Shared Cloud #}
-      <div id="panel-shared" class="deploy-panel border p-8">
+      <div id="panel-shared" class="apex-panel border p-8">
         <div class="grid lg:grid-cols-2 gap-12">
           <div>
             <h3 class="mb-2 apex-h3">Shared Cloud</h3>
@@ -82,7 +82,7 @@
       </div>
 
       {# Dedicated #}
-      <div id="panel-dedicated" class="deploy-panel border p-8">
+      <div id="panel-dedicated" class="apex-panel border p-8">
         <div class="grid lg:grid-cols-2 gap-12">
           <div>
             <h3 class="mb-2 apex-h3">Dedicated Infrastructure</h3>
@@ -118,7 +118,7 @@
       </div>
 
       {# Private Cloud #}
-      <div id="panel-private" class="deploy-panel border p-8">
+      <div id="panel-private" class="apex-panel border p-8">
         <div class="grid lg:grid-cols-2 gap-12">
           <div>
             <h3 class="mb-2 apex-h3">Private Cloud</h3>
@@ -154,7 +154,7 @@
       </div>
 
       {# BYOC #}
-      <div id="panel-byoc" class="deploy-panel border p-8">
+      <div id="panel-byoc" class="apex-panel border p-8">
         <div class="grid lg:grid-cols-2 gap-12">
           <div>
             <h3 class="mb-2 apex-h3">Bring Your Own Cloud</h3>

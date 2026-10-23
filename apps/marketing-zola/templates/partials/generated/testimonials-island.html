@@ -17,7 +17,7 @@
 <section class="py-20 lg:py-32 relative overflow-hidden" role="region" aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]["a11y"] and i18n_data[l]["a11y"]["platform_capabilities"] %}{{ i18n_data[l]["a11y"]["platform_capabilities"] }}{% else %}Platform capabilities{% endif %}">
   <div class="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
     <div class="mb-12">
-      <h2 class="section-title mb-4 apex-h2">
+      <h2 class="apex-h2 mb-4">
         <span class="">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_testimonials"] and i18n_data[l]["home_testimonials"]["heading_1"] %}{{ i18n_data[l]["home_testimonials"]["heading_1"] }}{% else %}Built for{% endif %}</span>
         <span class=""> {% if i18n_data and i18n_data[l] and i18n_data[l]["home_testimonials"] and i18n_data[l]["home_testimonials"]["heading_2"] %}{{ i18n_data[l]["home_testimonials"]["heading_2"] }}{% else %}Teams Who Ship{% endif %}</span>
       </h2>
@@ -26,10 +26,10 @@
       </p>
     </div>
 
-    <div class="testimonials-track pb-4">
+    <div class="apex-panel pb-4">
 
       {# ── Capability 1: Deliverability economics ────── #}
-      <div class="apex-card p-10 lg:p-14 mb-8">
+      <div class="apex-panel p-10 lg:p-14 mb-8">
         <div class="flex flex-col lg:flex-row gap-10 lg:gap-20">
           <div class="flex-1">
             <p class="mb-10 apex-em">
@@ -50,14 +50,14 @@
                   <div class="tabular-nums apex-em">{{ capabilities_enterprise.included_ips }} IPs</div>
                 </div>
               </div>
-              <div class="mt-8 pt-6 border-t apex-em">{{ capabilities_enterprise.included_volume_display }} emails/month</div>
+              <div class="mt-8 pt-6 apex-em">{{ capabilities_enterprise.included_volume_display }} emails/month</div>
             </div>
           </div>
         </div>
       </div>
 
       {# ── Capability 2: Compliance workflows ────────── #}
-      <div class="apex-card p-10 lg:p-14 mb-8">
+      <div class="apex-panel p-10 lg:p-14 mb-8">
         <div class="flex flex-col lg:flex-row gap-10 lg:gap-20">
           <div class="flex-1">
             <p class="mb-10 apex-em">
@@ -74,14 +74,14 @@
                   <div class="tabular-nums apex-em">On request</div>
                 </div>
               </div>
-              <div class="mt-8 pt-6 border-t apex-em">DPA AVAILABLE ON REQUEST</div>
+              <div class="mt-8 pt-6 apex-em">DPA AVAILABLE ON REQUEST</div>
             </div>
           </div>
         </div>
       </div>
 
       {# ── Capability 3: AI-assisted operations ───────── #}
-      <div class="apex-card p-10 lg:p-14 mb-8">
+      <div class="apex-panel p-10 lg:p-14 mb-8">
         <div class="flex flex-col lg:flex-row gap-10 lg:gap-20">
           <div class="flex-1">
             <p class="mb-10 apex-em">
@@ -102,7 +102,7 @@
                   <div class="tabular-nums apex-em">24h</div>
                 </div>
               </div>
-              <div class="mt-8 pt-6 border-t apex-em">Scoped access</div>
+              <div class="mt-8 pt-6 apex-em">Scoped access</div>
             </div>
           </div>
         </div>
@@ -114,7 +114,7 @@
       <p class="apex-em">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_testimonials"] and i18n_data[l]["home_testimonials"]["scroll_hint"] %}{{ i18n_data[l]["home_testimonials"]["scroll_hint"] }}{% else %}Scroll to see more capabilities →{% endif %}</p>
     </div>
 
-    <div class="mt-12 pt-12 border-t">
+    <div class="mt-12 pt-12">
       <p class="apex-em">
         {% if i18n_data and i18n_data[l] and i18n_data[l]["home_testimonials"] and i18n_data[l]["home_testimonials"]["footnote"] %}{{ i18n_data[l]["home_testimonials"]["footnote"] }}{% else %}Capabilities shown above map to implemented plan gates, compliance workflows, and API-backed operational surfaces.{% endif %}
       </p>
