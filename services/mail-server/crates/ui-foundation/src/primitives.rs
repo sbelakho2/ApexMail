@@ -361,7 +361,7 @@ fn render_chart_frame(
         format!(
             "<div class=\"flex flex-col space-y-1.5 p-6\">{}{}{}</div>",
             title
-                .map(|value| format!("<h3 class=\"break-words apex-h3\">{}</h3>", value))
+                .map(|value| format!("<h2 class=\"break-words apex-h3\">{}</h2>", value))
                 .unwrap_or_default(),
             description
                 .map(|value| format!("<p class=\"break-words\">{}</p>", value))
@@ -1178,7 +1178,7 @@ impl<'a> EmptyState<'a> {
             _ => String::new(),
         };
         format!(
-            "<div class=\"apex-empty-state flex flex-col items-center justify-center py-12 px-6\">{}<h3 class=\"mb-2 apex-h3\">{}</h3>{}{}</div>",
+            "<div class=\"apex-empty-state flex flex-col items-center justify-center py-12 px-6\">{}<h2 class=\"mb-2 apex-h3\">{}</h2>{}{}</div>",
             icon,
             self.title,
             description,
@@ -1796,7 +1796,7 @@ impl<'a> Table<'a> {
             format!(
                 "<tr class=\"border-b\"><td colspan=\"{colspan}\" class=\"p-10\">\
 <div class=\"apex-empty-state flex flex-col items-center justify-center px-6\">\
-<h3 class=\"mb-1 apex-h3\">Nothing here yet</h3>\
+<h2 class=\"mb-1 apex-h3\">Nothing here yet</h2>\
 <p class=\"mx-auto max-w-[320px]\">Entries appear here as soon as one is created. Use the page's create action to add the first one.</p>\
 </div></td></tr>"
             )
@@ -1995,7 +1995,7 @@ impl<'a> Card<'a> {
         // panels are not buttons and carry no hover lift.
         let _ = self.interactive;
         format!(
-            "<section class=\"apex-panel {}\"><div class=\"apex-panel__head\"><h3 class=\"apex-h3\">{}</h3></div><div class=\"apex-panel__body\">{}</div></section>",
+            "<section class=\"apex-panel {}\"><div class=\"apex-panel__head\"><h2 class=\"apex-h3\">{}</h2></div><div class=\"apex-panel__body\">{}</div></section>",
             card_padding_class(self.padding),
             self.title,
             self.body,

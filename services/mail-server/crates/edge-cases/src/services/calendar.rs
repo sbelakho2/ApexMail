@@ -774,11 +774,11 @@ fn generate_html_preview(event: &CalendarEvent) -> String {
     }
 
     format!(
-        r#"<div style="font-family:sans-serif;max-width:600px;margin:auto">
-<div style="background:#18181b;color:#fff;padding:16px;border-radius:0px">
-  <h2 style="margin:0">{summary_html}</h2>
+        r#"<div style="font-family:'Overpass',-apple-system,'Segoe UI',Arial,sans-serif;max-width:600px;margin:auto;color:#0E141B">
+<div style="border-top:3px solid #0E141B;padding-top:12px">
+  <h2 style="margin:0;font-family:'Spectral',Georgia,'Times New Roman',serif;font-weight:500;font-size:22px">{summary_html}</h2>
 </div>
-<div style="padding:16px;border:1px solid #e4e4e7;border-top:0;border-radius:0px">
+<div style="padding:16px 0;border-bottom:1px solid #C4CDD5">
   <p><strong>When:</strong> {when}</p>
   {loc}
   {desc}

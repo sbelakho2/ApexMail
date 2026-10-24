@@ -54,9 +54,7 @@ static ALLOWED_CSS_PROPERTIES: LazyLock<HashSet<String>> = LazyLock::new(|| {
         "border-width",
         "border-style",
         "border-color",
-        "border-radius",
         "box-sizing",
-        "box-shadow",
         // Typography
         "font",
         "font-family",
@@ -924,8 +922,8 @@ mod tests {
             "should preserve fontWeight"
         );
         assert!(
-            sanitized.contains("borderRadius"),
-            "should preserve borderRadius"
+            !sanitized.contains("borderRadius"),
+            "ARK is square: borderRadius is stripped from tenant CSS"
         );
         assert!(
             sanitized.contains("marginLeft"),
@@ -941,7 +939,10 @@ mod tests {
             "should preserve lineHeight"
         );
         assert!(sanitized.contains("color"), "should preserve color");
-        assert!(sanitized.contains("boxShadow"), "should preserve boxShadow");
+        assert!(
+            !sanitized.contains("boxShadow"),
+            "ARK carries no shadows: boxShadow is stripped from tenant CSS"
+        );
         assert!(
             sanitized.contains("textTransform"),
             "should preserve textTransform"
@@ -974,8 +975,12 @@ mod tests {
             "should preserve font-weight"
         );
         assert!(
-            sanitized.contains("border-radius"),
-            "should preserve border-radius"
+            !sanitized.contains("border-radius"),
+            "ARK is square: radius is stripped from tenant CSS"
+        );
+        assert!(
+            !sanitized.contains("box-shadow"),
+            "ARK carries no shadows: tenant CSS cannot add one"
         );
         assert!(sanitized.contains("color"), "should preserve color");
         assert!(

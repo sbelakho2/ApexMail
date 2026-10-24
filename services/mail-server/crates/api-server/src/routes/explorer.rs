@@ -2783,7 +2783,7 @@ mod adversarial_tests {
                 .await;
                 assert_eq!(resp.status(), StatusCode::OK);
                 let page = html(resp).await;
-                assert!(page.contains("DOMAIN CHECK"), "grade page: {page}");
+                assert!(page.contains("Domain check"), "grade page: {page}");
                 assert!(page.contains("example.com"), "cleaned domain: {page}");
             })
         });

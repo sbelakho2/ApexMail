@@ -269,6 +269,40 @@ mod tests {
         );
     }
 
+    /// ARK documents are set in Spectral (display) and Overpass / Overpass
+    /// Mono (text and machine data). The faces must travel INSIDE the PDF:
+    /// a document that names a typeface the reader does not own renders in
+    /// a system fallback, which is exactly the loss of authority the font
+    /// book exists to prevent. `pdffonts` (poppler) reads the same fact from
+    /// the outside; this test reads it from the bytes Typst writes.
+    #[tokio::test]
+    async fn ark_faces_are_embedded_in_the_rendered_pdf() {
+        let invoice = render_pdf("invoice", &invoice_payload("EUR", 12078))
+            .await
+            .expect("invoice renders");
+        assert_pdf(&invoice);
+        let text = String::from_utf8_lossy(&invoice);
+        // The invoice sets text in Overpass (headings in Spectral are part of
+        // the world's book; a face earns its bytes only where a glyph uses
+        // it, and this document has no heading). The world test asserts the
+        // full ARK book is loadable.
+        assert!(
+            text.contains("Overpass"),
+            "invoice: Overpass must be embedded"
+        );
+        assert!(
+            text.contains("/FontFile2") || text.contains("/FontFile3"),
+            "the embedded font program must be present"
+        );
+        // Deterministic artifact for the external check (`pdffonts` reads the
+        // same fact from outside; tools/ark_email_dogfood.py renders the
+        // sibling HTML documents).
+        let preview_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/ark-email-preview");
+        std::fs::create_dir_all(&preview_dir).expect("preview dir");
+        std::fs::write(preview_dir.join("invoice.pdf"), &invoice).expect("write invoice pdf");
+    }
+
     #[tokio::test]
     async fn invoice_renders_the_designed_layout_with_authoritative_currency() {
         let pdf = render_pdf("invoice", &invoice_payload("EUR", 12078))
@@ -493,9 +527,12 @@ mod tests {
             .await
             .expect("unicode invoice renders");
         let text = crate::test_extract::extract_text(&pdf);
-        assert!(text.contains("年度套餐"), "CJK must round-trip: {text}");
+        // Mixed ARK/fallback runs split at font boundaries, so the extractor
+        // can widen the gaps between clusters; compare on normalised spaces.
+        let normalised = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(normalised.contains("年度套餐"), "CJK must round-trip: {text}");
         assert!(
-            text.contains("Годовой план"),
+            normalised.contains("Годовой план"),
             "Cyrillic must round-trip: {text}"
         );
     }

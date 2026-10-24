@@ -59,17 +59,32 @@ pub static TEMPLATES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
 });
 
 // ---------------------------------------------------------------------------
-// Embedded Unicode fonts (OFL-licensed Noto Sans)
+// Embedded fonts (OFL-licensed)
 // ---------------------------------------------------------------------------
-// Latin/Greek/Cyrillic coverage comes from Noto Sans Regular; CJK from
-// Noto Sans SC Regular. Both are parsed once and offered to the Typst
-// compiler through the world's font book; `typst-pdf` subsets and embeds the
-// glyphs a document actually uses.
-// Licenses: assets/fonts/NotoSans-OFL.txt, assets/fonts/NotoSansSC-OFL.txt.
+// Documents render in the ARK faces — Spectral (display), Overpass (text) and
+// Overpass Mono (machine data) — with Noto Sans kept as the wide-coverage
+// fallback for scripts the ARK faces do not carry (CJK from Noto Sans SC).
+// All are parsed once and offered through the world's font book; `typst-pdf`
+// subsets and embeds the glyphs a document actually uses.
+// Licenses: assets/fonts/ARK-OFL.txt, assets/fonts/NotoSans-OFL.txt,
+// assets/fonts/NotoSansSC-OFL.txt.
 
 static FONTS: Lazy<Vec<Font>> = Lazy::new(|| {
     let mut fonts = Vec::new();
     for bytes in [
+        include_bytes!("../assets/fonts/Spectral-Regular.ttf").as_slice(),
+        include_bytes!("../assets/fonts/Spectral-Medium.ttf").as_slice(),
+        include_bytes!("../assets/fonts/Spectral-SemiBold.ttf").as_slice(),
+        include_bytes!("../assets/fonts/Overpass-Regular.ttf").as_slice(),
+        include_bytes!("../assets/fonts/Overpass-SemiBold.ttf").as_slice(),
+        include_bytes!("../assets/fonts/Overpass-Bold.ttf").as_slice(),
+        include_bytes!("../assets/fonts/Overpass-cyrillic-400.ttf").as_slice(),
+        include_bytes!("../assets/fonts/Overpass-cyrillic-600.ttf").as_slice(),
+        include_bytes!("../assets/fonts/Overpass-cyrillic-700.ttf").as_slice(),
+        include_bytes!("../assets/fonts/Overpass-cyrillic-ext-400.ttf").as_slice(),
+        include_bytes!("../assets/fonts/Overpass-cyrillic-ext-600.ttf").as_slice(),
+        include_bytes!("../assets/fonts/Overpass-cyrillic-ext-700.ttf").as_slice(),
+        include_bytes!("../assets/fonts/OverpassMono-Regular.ttf").as_slice(),
         include_bytes!("../assets/fonts/NotoSans-Regular.ttf").as_slice(),
         include_bytes!("../assets/fonts/NotoSansSC-Regular.ttf").as_slice(),
     ] {
@@ -359,6 +374,15 @@ mod tests {
             families.contains(&"Noto Sans"),
             "Noto Sans must be embedded: {families:?}"
         );
+        // ARK faces: display (Spectral), text (Overpass), machine data
+        // (Overpass Mono). A document that names one of these and does not
+        // carry it renders in a fallback.
+        for face in ["Spectral", "Overpass", "Overpass Mono"] {
+            assert!(
+                families.contains(&face),
+                "the ARK face {face} must be embedded: {families:?}"
+            );
+        }
         assert!(
             families.contains(&"Noto Sans SC"),
             "Noto Sans SC must be embedded: {families:?}"

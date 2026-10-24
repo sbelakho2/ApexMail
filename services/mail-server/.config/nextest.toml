@@ -23,6 +23,12 @@ all-tests = { max-threads = 8 }
 # Explorer sandbox-cache tests share one sandbox key row across processes;
 # serialize them so sibling re-mints can't flip the convergence assertions.
 explorer-sandbox = { max-threads = 1 }
+# The 100k-row import fixture streams a real 100,000-entry CSV through the
+# chunked importer under the request deadline. Alongside seven other
+# DB-heavy processes it can trip that deadline (408 REQUEST_TIMEOUT) and
+# fail without any code change — serialize the import family so the timing
+# assertion measures the importer, not the scheduler.
+bulk-import = { max-threads = 1 }
 
 
 
@@ -38,3 +44,7 @@ test-group = 'explorer-sandbox'
 [[profile.default.overrides]]
 filter = 'all()'
 test-group = 'all-tests'
+
+[[profile.default.overrides]]
+filter = 'test(provider_import)'
+test-group = 'bulk-import'

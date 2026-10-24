@@ -1821,16 +1821,42 @@ fn html_escape(value: &str) -> String {
 const BACK_LINK: &str = r#"<p class="back-link"><a href="/">Return to ApexMail</a></p>"#;
 
 /// Shared card shell for the public unsubscribe pages (confirmation,
-/// completion, error) — identical styling on every browser-facing surface.
+/// completion, error) — one ARK document on every browser-facing surface.
+/// Paper and ink, Spectral display, Overpass text, a 3px rule, square
+/// corners; the destructive action carries the red rule and word, never a
+/// red fill, and the dark block mirrors `ark.css`'s media tokens.
 fn unsubscribe_page_shell(title: &str, body: &str) -> String {
     format!(
         r#"<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"><title>{title} — ApexMail</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<style>body{{font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#f7f7f9;color:#222}}.card{{background:#fff;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,.08);padding:48px;text-align:center;max-width:420px}}h1{{font-size:20px;margin:0 0 12px}}p{{color:#666;font-size:14px;line-height:1.6;margin:0 0 16px}}.btn{{display:inline-block;background:#dc2626;color:#fff;border:none;border-radius:8px;padding:12px 24px;font-size:14px;font-weight:700;cursor:pointer}}.back-link{{margin-top:8px}}.back-link a{{color:#666}}</style>
+<meta name="color-scheme" content="light dark">
+<style>
+:root {{ color-scheme:light; --paper:#FFFFFF; --ink:#0E141B; --ink2:#3D4B59; --ink3:#5B6B7A; --hair:#C4CDD5; --destructive:#8E2A20; }}
+@media (prefers-color-scheme: dark) {{ :root {{ color-scheme:dark; --paper:#0E141B; --ink:#EDF1F4; --ink2:#C0CAD3; --ink3:#8B99A7; --hair:#33414E; --destructive:#E08A80; }} }}
+*, *::before, *::after {{ box-sizing:border-box; border-radius:0; }}
+body {{ font-family:'Overpass',-apple-system,'Segoe UI',Arial,sans-serif; display:flex; align-items:center; justify-content:center; min-height:100vh; margin:0; padding:24px; background:var(--paper); color:var(--ink); font-size:15px; line-height:1.55; }}
+.card {{ background:var(--paper); border-top:3px solid var(--ink); border-bottom:1px solid var(--hair); padding:28px 0 0; max-width:34rem; width:100%; }}
+.masthead {{ display:flex; align-items:baseline; justify-content:space-between; gap:16px; margin-bottom:22px; }}
+.wordmark {{ font-family:Arial,Helvetica,sans-serif; font-size:20px; font-weight:700; letter-spacing:-0.04em; }}
+.wordmark .apex {{ color:#B91C1C; }}
+.wordmark .mail {{ color:#09090B; }}
+@media (prefers-color-scheme: dark) {{ .wordmark .apex {{ color:#C45046; }} .wordmark .mail {{ color:#EDF1F4; }} }}
+.legend {{ font-family:'Overpass Mono',ui-monospace,monospace; font-size:11px; font-weight:600; letter-spacing:0.12em; text-transform:uppercase; color:var(--ink3); }}
+h1 {{ font-family:'Spectral',Georgia,'Times New Roman',serif; font-size:28px; line-height:1.18; font-weight:500; letter-spacing:-0.01em; margin:0 0 14px; }}
+p {{ color:var(--ink2); margin:0 0 16px; }}
+strong {{ color:var(--ink); font-family:'Overpass Mono',ui-monospace,monospace; font-weight:600; word-break:break-all; }}
+.btn {{ display:inline-flex; align-items:center; justify-content:center; min-height:44px; padding:0 22px; border:2px solid var(--destructive); background:var(--paper); color:var(--destructive); font-family:inherit; font-size:14px; font-weight:600; cursor:pointer; }}
+.btn:focus-visible {{ outline:3px double var(--ink); outline-offset:2px; }}
+.back-link {{ margin-top:18px; }}
+.back-link a {{ color:var(--ink); text-decoration:underline; text-underline-offset:3px; }}
+</style>
 </head>
-<body><div class="card">{body}</div></body></html>"#,
+<body><main class="card">
+<div class="masthead"><span class="wordmark"><span class="apex">Apex</span><span class="mail">Mail</span></span><span class="legend">{title}</span></div>
+{body}
+</main></body></html>"#,
     )
 }
 

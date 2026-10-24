@@ -2169,6 +2169,10 @@ mod tests {
         let logging = escalation_logging_pool(&pool).await;
         let service = SupportService::new(logging.clone());
         let capture = EscalationSqlCapture::default();
+        // sqlx logs statements through the `log` crate; without this bridge
+        // the layer sees nothing (the test used to depend on another test
+        // having installed it, so it failed whenever it ran first).
+        let _ = tracing_log::LogTracer::init();
         let capture_result = {
             use tracing_subscriber::layer::SubscriberExt;
             tracing::subscriber::set_default(

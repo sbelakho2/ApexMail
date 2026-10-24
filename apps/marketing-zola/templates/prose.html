@@ -32,7 +32,10 @@
     </ul>
   </nav>
   {% endif %}
-  <div class="apex-prose">
+  {# Markdown tables cannot carry a tabindex: the prose block is the
+     keyboard-reachable scroll region for wide registers (axe
+     scrollable-region-focusable). #}
+  <div class="apex-prose" tabindex="0" role="region" aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['page_content'] %}{{ i18n_data[l]['a11y']['page_content'] }}{% else %}Page content{% endif %}">
     {# Content is rendered from trusted Markdown source files only (legal/policy pages). #}
     {# |safe is acceptable because the content author is the site owner, not end users. #}
     {{ page.content | safe }}

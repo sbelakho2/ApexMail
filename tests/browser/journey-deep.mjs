@@ -415,6 +415,7 @@ const PROBE = () => {
         text: (el.innerText || "").trim().slice(0, 30),
         w: Math.round(r.width),
         h: Math.round(r.height),
+        html: (el.outerHTML || "").slice(0, 160),
       });
     }
   }
@@ -642,7 +643,7 @@ async function visit(page, state, role, name, url, opts = {}) {
     if (f.zeroSizeInteractive.length)
       record({ severity: "P1", kind: "zero-size-control", role, page: name, detail: f.zeroSizeInteractive.map((c) => c.selector).join(", ") });
     if (f.smallTargets.length)
-      record({ severity: "P2", kind: "small-tap-target", role, page: name, detail: f.smallTargets.map((c) => `${c.selector} ${c.w}×${c.h}`).join(", ") });
+      record({ severity: "P2", kind: "small-tap-target", role, page: name, detail: f.smallTargets.map((c) => `${c.selector} ${c.w}×${c.h} ${c.html}`).join(" | ") });
     if (f.brokenImages.length)
       record({ severity: "P1", kind: "broken-image", role, page: name, detail: f.brokenImages.map((c) => `${c.selector} ${c.src}`).join(", ") });
     if (f.duplicateIds.length)

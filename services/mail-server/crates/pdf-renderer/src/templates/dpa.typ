@@ -62,7 +62,7 @@
   ],
 )
 
-#set text(font: ("Noto Sans", "DejaVu Sans"), size: 10pt)
+#set text(font: ("Overpass", "Noto Sans", "DejaVu Sans"), size: 10pt)
 #set par(justify: true)
 #set heading(numbering: "1.1")
 

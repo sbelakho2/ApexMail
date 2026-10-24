@@ -22,37 +22,220 @@ pub fn escape_html(s: &str) -> String {
 /// "safe path back" every browser-facing terminal page must offer (batch 2).
 const BACK_LINK_HTML: &str = r#"<p class="back-link"><a href="/">Return to ApexMail</a></p>"#;
 
-pub fn render_error_page(message: &str) -> String {
-    let msg = escape_html(message);
+/// The ARK document these recipient pages live in.
+///
+/// The tracking host serves standalone documents (no `ark.css` request), so
+/// the authority's tokens and the few primitives these pages use are inlined:
+/// paper and ink, the 3px rule, Spectral display, Overpass text, Overpass
+/// Mono for machine data. Red marks destruction (an unsubscribe) and the
+/// wordmark — never a "save" or "resubscribe" action. The dark block mirrors
+/// `ark.css`'s `prefers-color-scheme` tokens so a dark reader never gets a
+/// white flash.
+const ARK_DOC_STYLE: &str = r#"
+    :root {
+      color-scheme: light;
+      --paper: #FFFFFF;
+      --ink: #0E141B;
+      --ink2: #3D4B59;
+      --ink3: #5B6B7A;
+      --hair: #C4CDD5;
+      --rule: #0E141B;
+      --destructive: #8E2A20;
+      --warning: #8A5A10;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        color-scheme: dark;
+        --paper: #0E141B;
+        --ink: #EDF1F4;
+        --ink2: #C0CAD3;
+        --ink3: #8B99A7;
+        --hair: #33414E;
+        --rule: #EDF1F4;
+        --destructive: #E08A80;
+        --warning: #D2A65E;
+      }
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; border-radius: 0; }
+    body {
+      font-family: 'Overpass', -apple-system, 'Segoe UI', Arial, sans-serif;
+      background: var(--paper);
+      color: var(--ink);
+      font-size: 15px;
+      line-height: 1.55;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+    .card {
+      background: var(--paper);
+      border-top: 3px solid var(--rule);
+      border-bottom: 1px solid var(--hair);
+      padding: 28px 0 0;
+      max-width: 34rem;
+      width: 100%;
+    }
+    .masthead {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 22px;
+    }
+    .wordmark {
+      font-family: Arial, Helvetica, sans-serif;
+      font-size: 20px;
+      font-weight: 700;
+      letter-spacing: -0.04em;
+    }
+    .wordmark .apex { color: #B91C1C; }
+    .wordmark .mail { color: #09090B; }
+    @media (prefers-color-scheme: dark) {
+      .wordmark .apex { color: #C45046; }
+      .wordmark .mail { color: #EDF1F4; }
+    }
+    .legend {
+      font-family: 'Overpass Mono', ui-monospace, monospace;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--ink3);
+    }
+    h1 {
+      font-family: 'Spectral', Georgia, 'Times New Roman', serif;
+      font-size: 28px;
+      line-height: 1.18;
+      font-weight: 500;
+      letter-spacing: -0.01em;
+      margin-bottom: 14px;
+    }
+    p { color: var(--ink2); margin-bottom: 14px; max-width: 32rem; }
+    .email, .mono {
+      font-family: 'Overpass Mono', ui-monospace, monospace;
+      color: var(--ink);
+      word-break: break-all;
+    }
+    .back-link { margin: 22px 0 18px; }
+    a { color: var(--ink); text-decoration: underline; text-underline-offset: 3px; }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 44px;
+      padding: 0 22px;
+      border: 2px solid var(--rule);
+      background: var(--paper);
+      color: var(--ink);
+      font-family: inherit;
+      font-size: 14px;
+      font-weight: 600;
+      text-decoration: none;
+      cursor: pointer;
+    }
+    .btn:focus-visible { outline: 3px double var(--ink); outline-offset: 2px; }
+    /* Save / Resubscribe: the ink fill (a primary action, never green). */
+    .btn-primary, .btn-success {
+      background: var(--ink);
+      color: var(--paper);
+      border-color: var(--ink);
+    }
+    /* An unsubscribe is destruction: the rule and the word carry the signal,
+       the ground stays paper. */
+    .btn-danger, .btn:not(.btn-primary):not(.btn-success) {
+      border-color: var(--destructive);
+      color: var(--destructive);
+      background: var(--paper);
+    }
+    .section { margin: 22px 0; }
+    .section-title {
+      font-family: 'Overpass', -apple-system, sans-serif;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--ink);
+      border-top: 2px solid var(--rule);
+      padding-top: 8px;
+      margin-bottom: 14px;
+    }
+    .pref-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+      padding: 12px 0;
+      border-bottom: 1px solid var(--hair);
+      cursor: pointer;
+    }
+    .pref-item input[type="checkbox"] {
+      margin-top: 4px;
+      accent-color: var(--ink);
+      width: 18px;
+      height: 18px;
+    }
+    .pref-info { flex: 1; }
+    .pref-name { display: block; font-weight: 600; color: var(--ink); margin-bottom: 2px; }
+    .pref-desc { display: block; font-size: 14px; color: var(--ink3); }
+    .actions { display: flex; gap: 12px; flex-wrap: wrap; margin: 18px 0; }
+    .divider { border-top: 1px solid var(--hair); margin: 24px 0; }
+    .alert {
+      border: 2px solid var(--ink);
+      padding: 10px 14px;
+      margin: 18px 0;
+      font-size: 14px;
+      color: var(--ink);
+    }
+    .alert-warning { border-color: var(--warning); }
+    .alert-success { border-color: var(--ink); }
+    @media (forced-colors: active) {
+      body { background: Canvas; color: CanvasText; }
+      .btn { border: 1px solid ButtonText; color: ButtonText; background: ButtonFace; }
+      .btn:focus-visible { outline: 2px solid Highlight; }
+    }
+"#;
+
+/// The document shell every recipient page renders inside.
+fn ark_document(title: &str, legend: &str, heading: &str, body: &str) -> String {
     format!(
         r#"<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Error - ApexMail</title>
-  <style>
-    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-    body {{ font-family: ui-monospace, "JetBrains Mono", monospace;
-      background-color: #ffffff; color: #000000;
-      min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }}
-    .card {{ background: #FFF; border: 1px solid #e4e4e7; border-radius: 0px; padding: 40px; max-width: 400px; text-align: center; }}
-    .icon {{ font-size: 48px; margin-bottom: 20px; }}
-    h1 {{ font-size: 24px; margin-bottom: 16px; font-weight: 700; color: #000000; letter-spacing: -0.01em; }}
-    p {{ color: #52525b; line-height: 1.6; font-weight: 400; }}
-    .back-link {{ margin-top: 24px; }}
-    .back-link a {{ color: #000000; }}
-  </style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{title} - ApexMail</title>
+  <style>{style}</style>
 </head>
 <body>
-  <div class="card">
-    <div class="icon">⚠️</div>
-    <h1>Something went wrong</h1>
-    <p>{msg}</p>
-    {BACK_LINK_HTML}
-  </div>
+  <main class="card">
+    <div class="masthead">
+      <span class="wordmark"><span class="apex">Apex</span><span class="mail">Mail</span></span>
+      <span class="legend">{legend}</span>
+    </div>
+    <h1>{heading}</h1>
+    {body}
+  </main>
 </body>
-</html>"#
+</html>"#,
+        title = escape_html(title),
+        style = ARK_DOC_STYLE,
+        legend = escape_html(legend),
+        heading = escape_html(heading),
+        body = body,
+    )
+}
+
+pub fn render_error_page(message: &str) -> String {
+    let msg = escape_html(message);
+    ark_document(
+        "Error",
+        "error",
+        "Something went wrong",
+        &format!(
+            r#"<p>{msg}</p>
+    {BACK_LINK_HTML}"#
+        ),
     )
 }
 
@@ -64,35 +247,14 @@ pub fn render_error_page(message: &str) -> String {
 /// event for the operator.
 pub fn render_click_refused_page(reason: &str) -> String {
     let msg = escape_html(reason);
-    format!(
-        r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Link not allowed - ApexMail</title>
-  <style>
-    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-    body {{ font-family: ui-monospace, "JetBrains Mono", monospace;
-      background-color: #ffffff; color: #000000;
-      min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }}
-    .card {{ background: #FFF; border: 1px solid #e4e4e7; border-radius: 0px; padding: 40px; max-width: 440px; text-align: center; }}
-    .icon {{ font-size: 48px; margin-bottom: 20px; }}
-    h1 {{ font-size: 24px; margin-bottom: 16px; font-weight: 700; color: #000000; letter-spacing: -0.01em; }}
-    p {{ color: #52525b; line-height: 1.6; font-weight: 400; }}
-    .back-link {{ margin-top: 24px; }}
-    .back-link a {{ color: #000000; }}
-  </style>
-</head>
-<body>
-  <div class="card">
-    <div class="icon">&#128683;</div>
-    <h1>This link is not allowed</h1>
-    <p>{msg}</p>
-    {BACK_LINK_HTML}
-  </div>
-</body>
-</html>"#
+    ark_document(
+        "Link not allowed",
+        "link refused",
+        "This link is not allowed",
+        &format!(
+            r#"<p>{msg}</p>
+    {BACK_LINK_HTML}"#
+        ),
     )
 }
 
@@ -104,71 +266,27 @@ pub fn render_click_refused_page(reason: &str) -> String {
 pub fn render_tracking_domain_refused_page(host: &str, reason: &str) -> String {
     let host_safe = escape_html(host);
     let msg = escape_html(reason);
-    format!(
-        r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Tracking domain not configured - ApexMail</title>
-  <style>
-    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-    body {{ font-family: ui-monospace, "JetBrains Mono", monospace;
-      background-color: #ffffff; color: #000000;
-      min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }}
-    .card {{ background: #FFF; border: 1px solid #e4e4e7; border-radius: 0px; padding: 40px; max-width: 480px; text-align: center; }}
-    .icon {{ font-size: 48px; margin-bottom: 20px; }}
-    h1 {{ font-size: 24px; margin-bottom: 16px; font-weight: 700; color: #000000; letter-spacing: -0.01em; }}
-    p {{ color: #52525b; line-height: 1.6; font-weight: 400; }}
-    .host {{ color: #000000; font-weight: 700; word-break: break-all; }}
-    .back-link {{ margin-top: 24px; }}
-    .back-link a {{ color: #000000; }}
-  </style>
-</head>
-<body>
-  <div class="card">
-    <div class="icon">&#128683;</div>
-    <h1>This tracking domain is not configured</h1>
-    <p>The request arrived on <span class="host">{host_safe}</span>. {msg}</p>
-    {BACK_LINK_HTML}
-  </div>
-</body>
-</html>"#
+    ark_document(
+        "Tracking domain not configured",
+        "domain refused",
+        "This tracking domain is not configured",
+        &format!(
+            r#"<p>Tracking links on <span class="mono">{host_safe}</span> cannot be resolved for this sender: {msg}</p>
+    {BACK_LINK_HTML}"#
+        ),
     )
 }
 
 pub fn render_success_page(email: &str) -> String {
     let email_safe = escape_html(email);
-    format!(
-        r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Unsubscribed - ApexMail</title>
-  <style>
-    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-    body {{ font-family: ui-monospace, "JetBrains Mono", monospace;
-      background-color: #ffffff; color: #000000;
-      min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }}
-    .card {{ background: #FFF; border: 1px solid #e4e4e7; border-radius: 0px; padding: 40px; max-width: 400px; text-align: center; }}
-    .icon {{ font-size: 48px; margin-bottom: 20px; }}
-    h1 {{ font-size: 24px; margin-bottom: 16px; font-weight: 700; color: #000000; letter-spacing: -0.01em; }}
-    p {{ color: #52525b; line-height: 1.6; font-weight: 400; }}
-    .email {{ color: #000000; font-weight: 700; }}
-    .back-link {{ margin-top: 24px; }}
-    .back-link a {{ color: #000000; }}
-  </style>
-</head>
-<body>
-  <div class="card">
-    <div class="icon">✅</div>
-    <h1>You've been unsubscribed</h1>
-    <p><span class="email">{email_safe}</span> has been removed from our mailing list.</p>
-    {BACK_LINK_HTML}
-  </div>
-</body>
-</html>"#
+    ark_document(
+        "Unsubscribed",
+        "unsubscribed",
+        "You've been unsubscribed",
+        &format!(
+            r#"<p><span class="email">{email_safe}</span> has been removed from our mailing list.</p>
+    {BACK_LINK_HTML}"#
+        ),
     )
 }
 
@@ -177,43 +295,20 @@ pub fn render_confirmation_page(token: &str, email: &str, unsub_path: &str) -> S
     let token_safe = escape_html(token);
     // #196:Escape unsub_path for safe use in HTML form action attributes
     let unsub_path = escape_html(unsub_path);
-    format!(
-        r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Confirm Unsubscribe - ApexMail</title>
-  <style>
-    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-    body {{ font-family: ui-monospace, "JetBrains Mono", monospace;
-      background-color: #ffffff; color: #000000;
-      min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }}
-    .card {{ background: #FFF; border: 1px solid #e4e4e7; border-radius: 0px; padding: 40px; max-width: 400px; text-align: center; }}
-    h1 {{ font-size: 24px; margin-bottom: 16px; font-weight: 700; color: #000000; letter-spacing: -0.01em; }}
-    p {{ color: #52525b; line-height: 1.6; margin-bottom: 24px; font-weight: 400; }}
-    .email {{ color: #000000; font-weight: 700; display: block; margin-top: 8px; }}
-    .btn {{ display: inline-block; background: #dc2626; color: #fff; padding: 12px 24px;
-      border-radius: 0px; text-decoration: none; font-weight: 700; transition: all 0.2s;
-      text-transform: uppercase; letter-spacing: 0.05em; font-size: 14px; border: none; cursor: pointer; }}
-  </style>
-</head>
-<body>
-  <div class="card">
-    <h1>Confirm Unsubscribe</h1>
-    <p>Are you sure you want to unsubscribe?
-      <span class="email">{email_safe}</span>
-    </p>
+    ark_document(
+        "Confirm Unsubscribe",
+        "confirm",
+        "Confirm Unsubscribe",
+        &format!(
+            r#"<p>Are you sure you want to unsubscribe? <span class="email">{email_safe}</span></p>
     <!-- F39:confirmation is a plain HTML form POST (accessible, no JS).
          The old GET ?confirm=1 link mutated consent on a plain fetch —
          prefetchers and link scanners could unsubscribe users. -->
     <form method="POST" action="{unsub_path}/{token_safe}/confirm">
       <input type="hidden" name="confirm" value="true">
       <button type="submit" class="btn">Yes, Unsubscribe Me</button>
-    </form>
-  </div>
-</body>
-</html>"#
+    </form>"#
+        ),
     )
 }
 
@@ -287,7 +382,7 @@ pub fn render_preferences_page_with_saved(
 
     let body = if globally_unsubscribed {
         format!(
-            r#"<div class="alert alert-warning">You are currently unsubscribed from all emails. Click "Resubscribe" to start receiving emails again.</div>
+            r#"<div class="alert alert-warning">You are currently unsubscribed from all emails. Resubscribe to start receiving emails again.</div>
       <form method="POST" action="{prefs_path}/{token_safe}">
         <input type="hidden" name="resubscribe_all" value="true">
         <button type="submit" class="btn btn-success">Resubscribe to All</button>
@@ -308,7 +403,7 @@ pub fn render_preferences_page_with_saved(
         <div class="divider"></div>
         <div class="section">
           <div class="section-title">Unsubscribe</div>
-          <p style="color:#71717a;font-size:14px;margin-bottom:12px;">Stop receiving all emails from this sender.</p>
+          <p>Stop receiving all emails from this sender.</p>
         </div>
       </form>
       <form method="POST" action="{prefs_path}/{token_safe}">
@@ -318,8 +413,8 @@ pub fn render_preferences_page_with_saved(
         )
     };
 
-    // Batch-2: the post-save confirmation banner (uses the previously
-    // dead .alert-success class) — shown on the ?saved=1 redirect target
+    // Batch-2: the post-save confirmation banner (the previously dead
+    // .alert-success class) — shown on the ?saved=1 redirect target
     // regardless of which consent branch the card renders below.
     let saved_banner = if just_saved {
         r#"<div class="alert alert-success">Your preferences have been saved.</div>"#
@@ -327,52 +422,15 @@ pub fn render_preferences_page_with_saved(
         ""
     };
 
-    format!(
-        r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Email Preferences - ApexMail</title>
-  <style>
-    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-    body {{ font-family: ui-monospace, "JetBrains Mono", monospace;
-      background-color: #ffffff; color: #000000;
-      min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }}
-    .card {{ background: #FFF; border: 1px solid #e4e4e7; border-radius: 0px; padding: 40px; max-width: 500px; width: 100%; }}
-    h1 {{ font-size: 24px; margin-bottom: 8px; font-weight: 700; color: #000000; letter-spacing: -0.01em; }}
-    .subtitle {{ color: #52525b; margin-bottom: 24px; font-weight: 400; }}
-    .email {{ color: #000000; font-weight: 700; }}
-    .section {{ margin-bottom: 24px; }}
-    .section-title {{ font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; letter-spacing: 0.1em; letter-spacing: 0.05em; color: #71717a; margin-bottom: 12px; }}
-    .pref-item {{ display: flex; align-items: flex-start; gap: 12px; padding: 12px;
-      background: #ffffff; border: 1px solid #e4e4e7; border-radius: 0px; margin-bottom: 8px; cursor: pointer; }}
-    .pref-item input[type="checkbox"] {{ margin-top: 4px; accent-color: #dc2626; }}
-    .pref-info {{ flex: 1; }}
-    .pref-name {{ display: block; font-weight: 700; margin-bottom: 2px; color: #000000; }}
-    .pref-desc {{ display: block; font-size: 14px; color: #71717a; font-weight: 400; }}
-    .btn {{ display: inline-block; padding: 12px 24px; border-radius: 0px; font-weight: 700;
-      text-decoration: none; border: none; cursor: pointer; font-size: 13px;
-      text-transform: uppercase; letter-spacing: 0.1em; letter-spacing: 0.1em; letter-spacing: 0.05em; }}
-    .btn-primary {{ background: #dc2626; color: #fff; }}
-    .btn-danger {{ background: #FFF; color: #dc2626; border: 1px solid #fee2e2; }}
-    .btn-success {{ background: #16a34a; color: #fff; }}
-    .actions {{ display: flex; gap: 12px; flex-wrap: wrap; }}
-    .divider {{ border-top: 1px solid #e4e4e7; margin: 24px 0; }}
-    .alert {{ padding: 12px 16px; border-radius: 0px; margin-bottom: 16px; font-size: 14px; font-weight: 400; }}
-    .alert-warning {{ background: #fffbeb; border: 1px solid #fef3c7; color: #92400e; }}
-    .alert-success {{ background: #F0FDF4; border: 1px solid #DCFCE7; color: #166534; }}
-  </style>
-</head>
-<body>
-  <div class="card">
-    <h1>Email Preferences</h1>
-    <p class="subtitle">Manage your subscriptions for <span class="email">{email_safe}</span></p>
+    ark_document(
+        "Email Preferences",
+        "preferences",
+        "Email Preferences",
+        &format!(
+            r#"<p class="subtitle">Manage your subscriptions for <span class="email">{email_safe}</span></p>
     {saved_banner}
-    {body}
-  </div>
-</body>
-</html>"#
+    {body}"#
+        ),
     )
 }
 
@@ -381,6 +439,66 @@ mod tests {
     use super::*;
 
     // ── F39:confirmation is a POST form, not a GET mutation link ──────
+
+
+    /// Every recipient page is an ARK document: Spectral display, Overpass
+    /// text, Mono machine data, paper/ink, no radius, no emoji decoration,
+    /// and red only on the destructive action (never as a fill).
+    #[test]
+    fn recipient_pages_are_ark_documents() {
+        let cats = [Category {
+            name: "Product news",
+            description: "Release notes and changes",
+            subscribed: true,
+        }];
+        let pages = [
+            render_error_page("Invalid or expired unsubscribe link"),
+            render_click_refused_page("destination not allowed"),
+            render_tracking_domain_refused_page("links.example.com", "domain not verified"),
+            render_success_page("user@example.com"),
+            render_confirmation_page("tok123", "user@example.com", "/u"),
+            render_preferences_page("tok123", "user@example.com", "/p", &cats, false),
+            render_preferences_page_with_saved(
+                "tok123",
+                "user@example.com",
+                "/p",
+                &cats,
+                true,
+                true,
+            ),
+        ];
+        for html in pages {
+            assert!(html.starts_with("<!DOCTYPE html>"), "{html}");
+            assert!(html.contains("<html lang=\"en\">"), "{html}");
+            assert!(html.contains("<title>") && html.contains("</title>"), "{html}");
+            assert!(!html.contains("<script"), "no scripts: {html}");
+            assert!(!html.contains("linear-gradient"), "{html}");
+            assert!(html.contains("'Spectral'"), "Spectral display face: {html}");
+            assert!(html.contains("'Overpass'"), "Overpass text face: {html}");
+            assert!(html.contains("#0E141B"), "ink token: {html}");
+            assert!(html.contains("color-scheme"), "declared scheme: {html}");
+            assert!(!html.contains("JetBrains Mono"), "{html}");
+            for emoji in ["\u{26a0}", "\u{2705}", "\u{1f6ab}"] {
+                assert!(!html.contains(emoji), "no emoji decoration in {html}");
+            }
+        }
+        let confirm = render_confirmation_page("tok123", "user@example.com", "/u");
+        assert!(
+            confirm.contains("class=\"btn\">Yes, Unsubscribe Me</button>"),
+            "the pinned confirm action survives: {confirm}"
+        );
+        let prefs = render_preferences_page("tok123", "user@example.com", "/p", &cats, false);
+        assert!(
+            prefs.contains("class=\"btn btn-primary\">Save Preferences</button>"),
+            "{prefs}"
+        );
+        assert!(
+            prefs.contains("class=\"btn btn-danger\">Unsubscribe from All</button>"),
+            "{prefs}"
+        );
+        assert!(!prefs.contains("#dc2626"), "the legacy red fill is gone: {prefs}");
+        assert!(!prefs.contains("#16a34a"), "the legacy green fill is gone: {prefs}");
+    }
 
     #[test]
     fn confirmation_page_renders_post_form_not_get_link() {

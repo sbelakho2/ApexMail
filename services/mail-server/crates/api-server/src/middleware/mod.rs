@@ -110,6 +110,14 @@ pub(crate) fn is_browser_request(path: &str, headers: &axum::http::HeaderMap) ->
 /// All arguments are static strings; `title` is the document title,
 /// `heading` the card heading, `message` the human explanation, and
 /// `link_href`/`link_label` the single onward link.
+///
+/// ARK document, attribute-styled: paper and ink, Spectral display,
+/// Overpass text, a 3px ink rule, square corners, the onward action as the
+/// ink fill. Red is reserved for the wordmark and destruction, so the error
+/// is stated in ink. A `<style>` block is deliberately absent — the page
+/// carries NO braces at all, which is the guarantee that it can never be
+/// mistaken for a JSON error body nor smuggle a template interpolation
+/// (scheme is pinned light-only in the `color-scheme` declaration).
 pub(crate) fn browser_error_html(
     title: &str,
     heading: &str,
@@ -119,18 +127,19 @@ pub(crate) fn browser_error_html(
 ) -> String {
     format!(
         "<!DOCTYPE html>\n\
-<html lang=\"en\">\n\
+<html lang=\"en\" style=\"color-scheme:light\">\n\
 <head>\n\
 <meta charset=\"utf-8\">\n\
 <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
 <title>{title} — ApexMail</title>\n\
 </head>\n\
-<body style=\"margin:0;padding:20px;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#ffffff;font-family:ui-monospace,'SF Mono',monospace;color:#000000\">\n\
-<div style=\"background:#ffffff;border:1px solid #e4e4e7;border-top:4px solid #dc2626;border-radius:0;padding:40px;max-width:420px;text-align:center\">\n\
-<h1 style=\"font-size:22px;margin:0 0 16px;font-weight:700;color:#dc2626;letter-spacing:-0.01em\">{heading}</h1>\n\
-<p style=\"color:#52525b;line-height:1.6;margin:0 0 24px\">{message}</p>\n\
-<a href=\"{link_href}\" style=\"display:inline-block;background:#dc2626;color:#ffffff;padding:12px 24px;border-radius:0;text-decoration:none;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;font-size:14px\">{link_label}</a>\n\
-</div>\n\
+<body style=\"margin:0;padding:24px;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#FFFFFF;color:#0E141B;font-family:'Overpass',-apple-system,'Segoe UI',Arial,sans-serif;font-size:15px;line-height:1.55\">\n\
+<main style=\"background:#FFFFFF;border-top:3px solid #0E141B;border-bottom:1px solid #C4CDD5;padding:28px 0 0;max-width:34rem;width:100%\">\n\
+<div style=\"display:flex;align-items:baseline;justify-content:space-between;gap:16px;margin-bottom:22px\"><span style=\"font-family:Arial,Helvetica,sans-serif;font-size:20px;font-weight:700;letter-spacing:-0.04em\"><span style=\"color:#B91C1C\">Apex</span><span style=\"color:#09090B\">Mail</span></span><span style=\"font-family:'Overpass Mono',ui-monospace,monospace;font-size:11px;font-weight:600;letter-spacing:0.12em;text-transform:uppercase;color:#5B6B7A\">{title}</span></div>\n\
+<h1 style=\"font-family:'Spectral',Georgia,'Times New Roman',serif;font-size:28px;line-height:1.18;font-weight:500;letter-spacing:-0.01em;margin:0 0 14px\">{heading}</h1>\n\
+<p style=\"color:#3D4B59;margin:0 0 20px;max-width:32rem\">{message}</p>\n\
+<a href=\"{link_href}\" style=\"display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:0 22px;border:2px solid #0E141B;background:#0E141B;color:#FFFFFF;font-weight:600;font-size:14px;text-decoration:none\">{link_label}</a>\n\
+</main>\n\
 </body>\n\
 </html>\n"
     )
@@ -212,8 +221,12 @@ mod tests {
         assert!(html.starts_with("<!DOCTYPE html>"));
         assert!(html.contains("lang=\"en\""));
         assert!(html.contains("<title>Too Many Requests — ApexMail</title>"));
-        assert!(html.contains("#dc2626"));
-        assert!(html.contains("border-radius:0"));
+        assert!(html.contains("'Spectral'"), "display face: {html}");
+        assert!(html.contains("'Overpass'"), "text face: {html}");
+        assert!(html.contains("#0E141B"), "ink token: {html}");
+        assert!(!html.contains("#dc2626"), "no legacy red heading/fill: {html}");
+        assert!(!html.contains("<style"), "brace-free by construction: {html}");
+        assert!(html.contains("background:#0E141B"), "ink action fill: {html}");
         assert!(html.contains("href=\"/login\""));
         // No braces at all: the page cannot be mistaken for a JSON error
         // body and no template interpolation can smuggle one in.

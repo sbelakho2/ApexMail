@@ -933,6 +933,52 @@ async fn collect_db_probe_results(state: &AppState) -> (Vec<serde_json::Value>, 
 
 // ─── Status page ───────────────────────────────────────────
 
+fn render_status_document(
+    cards: &str,
+    updated: &str,
+    pct: i64,
+    overall_msg: &str,
+    overall_cls: &str,
+) -> String {
+    format!(
+        r##"<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="{PROBE_INTERVAL_SECS}"><title>ApexMail Status</title>
+<style>
+:root{{color-scheme:light;--paper:#FFFFFF;--ink:#0E141B;--ink2:#3D4B59;--ink3:#5B6B7A;--hair:#C4CDD5;--warning:#8A5A10;--destructive:#8E2A20}}
+@media (prefers-color-scheme:dark){{:root{{color-scheme:dark;--paper:#0E141B;--ink:#EDF1F4;--ink2:#C0CAD3;--ink3:#8B99A7;--hair:#33414E;--warning:#D2A65E;--destructive:#E08A80}}}}
+*,*::before,*::after{{box-sizing:border-box;margin:0;padding:0;border-radius:0}}
+body{{font-family:'Overpass',-apple-system,'Segoe UI',Arial,sans-serif;background:var(--paper);color:var(--ink);max-width:60rem;margin:0 auto;padding:40px 24px;font-size:15px;line-height:1.55}}
+.masthead{{display:flex;align-items:baseline;justify-content:space-between;gap:16px;border-bottom:3px solid var(--ink);padding-bottom:14px;margin-bottom:22px}}
+.wordmark{{font-family:Arial,Helvetica,sans-serif;font-size:22px;font-weight:700;letter-spacing:-.04em}}.wordmark .apex{{color:#B91C1C}}.wordmark .mail{{color:#09090B}}
+@media (prefers-color-scheme:dark){{.wordmark .apex{{color:#C45046}}.wordmark .mail{{color:#EDF1F4}}}}
+.legend{{font-family:'Overpass Mono',ui-monospace,monospace;font-size:11px;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:var(--ink3)}}
+h1{{font-family:'Spectral',Georgia,'Times New Roman',serif;font-size:30px;font-weight:500;line-height:1.15;letter-spacing:-.01em;margin-bottom:8px}}
+.intro{{color:var(--ink2);margin-bottom:24px}}
+.overall{{border-bottom:2px solid var(--ink);padding-bottom:14px;margin-bottom:22px;display:flex;align-items:baseline;gap:16px;flex-wrap:wrap}}
+.overall .big{{font-family:'Overpass Mono',ui-monospace,monospace;font-size:40px;font-weight:600;color:var(--ink)}}
+.overall .msg{{color:var(--ink2)}}
+.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:0}}
+.card{{border-bottom:1px solid var(--hair);padding:14px 0}}
+.card h2{{font-family:'Overpass',-apple-system,sans-serif;font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--ink);margin-bottom:6px}}
+.card .status{{font-family:'Overpass Mono',ui-monospace,monospace;font-size:14px;font-weight:600}}
+.card .meta{{font-size:12px;color:var(--ink3)}}
+.ok{{color:var(--ink)}}.warn{{color:var(--warning)}}.err{{color:var(--destructive)}}
+footer{{margin-top:36px;padding-top:14px;border-top:1px solid var(--hair);font-size:12px;color:var(--ink3)}}
+</style></head><body>
+<div class="masthead"><span class="wordmark"><span class="apex">Apex</span><span class="mail">Mail</span></span><span class="legend">Status</span></div>
+<h1>Service status</h1>
+<p class="intro">Live service health — probes run every {PROBE_INTERVAL_SECS} seconds. Last checked {updated}.</p>
+<div class="overall"><div class="big {overall_cls}">{pct}%</div><div class="msg {overall_cls}">{overall_msg}</div></div>
+<div class="grid">{cards}</div>
+<footer>ApexMail — Bel Consulting OÜ, Registry 16588745</footer>
+</body></html>"##,
+        updated = updated,
+        overall_cls = overall_cls,
+        overall_msg = overall_msg,
+        pct = pct,
+        cards = cards,
+    )
+}
+
 async fn status_page(State(state): State<AppState>) -> impl IntoResponse {
     // Serve the SHARED SNAPSHOT (audit F8): the SSR output is the real
     // sampled health with the sample timestamp — never a per-request probe.
@@ -958,7 +1004,7 @@ async fn status_page(State(state): State<AppState>) -> impl IntoResponse {
             _ => "err",
         };
         cards.push_str(&format!(
-            "<div class=card><h3>{}</h3><div class=\"status {}\">{}</div><div class=meta>checked {}</div></div>",
+            "<div class=\"card\"><h2>{}</h2><div class=\"status {}\">{}</div><div class=\"meta\">checked {}</div></div>",
             esc(name), cls, esc(status), updated
         ));
     }
@@ -974,23 +1020,18 @@ async fn status_page(State(state): State<AppState>) -> impl IntoResponse {
         ("Service disruption", "err")
     };
 
-    let html = format!(
-        r##"<!DOCTYPE html><html lang=en><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>ApexMail Status</title>
-<style>:root{{--brand:#ef4444;--bg:#f8f9fa;--card:#fff;--border:#e9ecef;--text:#0f1117;--muted:#6b7280;--success:#059669;--warning:#d97706;--error:#dc2626}}*,*::before,*::after{{box-sizing:border-box;margin:0;padding:0}}body{{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--text);max-width:900px;margin:0 auto;padding:40px 20px}}h1{{font-size:22px;font-weight:700;margin-bottom:4px}}h1 span{{color:var(--brand)}}h1+p{{color:var(--muted);font-size:14px;margin-bottom:32px}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:16px}}.card{{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:20px}}.card h3{{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:8px}}.card .status{{font-size:14px;font-weight:600;margin-bottom:4px}}.card .meta{{font-size:12px;color:var(--muted)}}.ok{{color:var(--success)}}.warn{{color:var(--warning)}}.err{{color:var(--error)}}.overall{{text-align:center;margin-bottom:24px;padding:20px;background:var(--card);border:1px solid var(--border);border-radius:10px}}.overall .big{{font-size:36px;font-weight:700}}.bar{{height:4px;background:var(--border);border-radius:2px;margin-top:12px;overflow:hidden}}.bar-fill{{height:100%;border-radius:2px;transition:width .3s}}footer{{text-align:center;margin-top:40px;font-size:12px;color:var(--muted)}}</style></head><body>
-<h1><span>Apex</span>Mail Status</h1><p>Live service health — probes run every {PROBE_INTERVAL_SECS} seconds. <span id=updated style=color:var(--muted)>Last checked {updated}</span></p>
-<div class=overall id=overall><div class="big {overall_cls}" id=big>{pct}%</div><div id=msg style=font-size:14px;color:var(--muted)>{overall_msg}</div></div>
-<div class=grid id=grid>{cards}</div>
-<div class=bar><div class=bar-fill id=bar style=width:{pct}%></div></div>
-<footer>ApexMail — Bel Consulting OÜ, Registry 16588745</footer>
-<script>
-async function check(){{try{{var r=await fetch("/status/api"),d=await r.json();var ok=0,g=document.getElementById("grid"),h="";d.services.forEach(function(s){{var cls=s.status==="operational"||s.status==="connected"?"ok":s.status==="degraded"?"warn":"err";if(cls==="ok"||cls==="warn")ok++;h+="<div class=card><h3>"+s.name+"</h3><div class=\"status "+cls+"\">"+s.status+"</div><div class=meta>checked "+d.updated+"</div></div>"}});g.innerHTML=h;var pct=(ok/d.services.length*100).toFixed(0);document.getElementById("big").textContent=pct+"%";document.getElementById("bar").style.width=pct+"%";document.getElementById("big").className="big "+(pct==100?"ok":pct>=80?"warn":"err");document.getElementById("msg").textContent=pct==100?"All systems operational":pct>=80?"Minor degradation":"Service disruption";document.getElementById("updated").textContent="Last checked "+d.updated}}catch(ex){{/* keep the server-rendered state visible */}}}}
-check();setInterval(check,60000)
-</script></body></html>"##,
-        updated = updated,
-        overall_cls = overall_cls,
-        overall_msg = overall_msg,
-        pct = pct,
-        cards = cards,
+    // ARK status document: paper and ink, Spectral display, Overpass text,
+    // Overpass Mono for machine data, 3px rules, square corners, no green.
+    // The page polls with <meta http-equiv=refresh> — the platform ships no
+    // client script for presentation, and a refresh is the honest zero-JS
+    // equivalent of the deleted fetch loop (the JSON snapshot it used to read
+    // stays at /status/api for machines).
+    let html = render_status_document(
+        &cards,
+        &updated,
+        pct,
+        overall_msg,
+        overall_cls,
     );
     (
         StatusCode::OK,
@@ -1197,6 +1238,38 @@ fn resolve_session_secret() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The status page is an ARK document: paper and ink, Spectral display,
+    /// Overpass text, square corners, no green, and no client script — the
+    /// refresh is a `<meta http-equiv>`.
+    #[test]
+    fn status_page_is_an_ark_document() {
+        let html = render_status_document(
+            "<div class=\"card\"><h2>SMTP</h2><div class=\"status ok\">operational</div><div class=\"meta\">checked 2026-10-24 03:00 UTC</div></div>",
+            "2026-10-24 03:00 UTC",
+            100,
+            "All systems operational",
+            "ok",
+        );
+        assert!(html.starts_with("<!DOCTYPE html>"), "{html}");
+        assert!(html.contains("<html lang=\"en\">"), "{html}");
+        assert!(html.contains("<title>ApexMail Status</title>"), "{html}");
+        assert!(html.contains("'Spectral'"), "{html}");
+        assert!(html.contains("'Overpass'"), "{html}");
+        assert!(html.contains("#0E141B"), "{html}");
+        assert!(html.contains("border-radius:0"), "{html}");
+        assert!(!html.contains("<script"), "no client script: {html}");
+        assert!(
+            html.contains("<meta http-equiv=\"refresh\""),
+            "the refresh is declarative: {html}"
+        );
+        assert!(!html.contains("#059669"), "no green: {html}");
+        assert!(!html.contains("#ef4444"), "no legacy brand red: {html}");
+        // One h1, and the cards are h2 sections under it.
+        assert_eq!(html.matches("<h1>").count(), 1, "{html}");
+        assert!(html.contains("<h2>SMTP</h2>"), "{html}");
+    }
+
     // Trait method scope for the raw-argon2 seed/assert helpers below.
     use argon2::password_hash::PasswordHasher;
     use argon2::PasswordVerifier;
@@ -2225,7 +2298,12 @@ mod tests {
             .unwrap();
         let html = String::from_utf8(body.to_vec()).unwrap();
         assert!(html.contains("probes run every 60 seconds"), "{html}");
-        assert!(html.contains("Minor degradation"), "{html}");
+        // `fake_state` cannot reach its database, so every probe is degraded
+        // and the honest aggregate is the outage message. (This assertion
+        // previously matched the text inside the client script — a string
+        // that existed in the page source while the rendered aggregate said
+        // something else. The page serves no script now.)
+        assert!(html.contains("Service disruption"), "{html}");
     }
 
     #[tokio::test]
@@ -2513,7 +2591,7 @@ mod tests {
             .await
             .unwrap();
         let html = String::from_utf8(body.to_vec()).unwrap();
-        assert!(html.contains("id=big>0%<"), "overall percentage: {html}");
+        assert!(html.contains(">0%</div>"), "overall percentage: {html}");
         assert!(
             html.contains(">Service disruption</div>"),
             "overall message: {html}"

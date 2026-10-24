@@ -20,6 +20,19 @@
       --hair: #C4CDD5;
     }
     * { box-sizing: border-box; border-radius: 0; }
+    /* ARK's dark tokens, inline: this document must render when the authority
+       cannot load, and a dark-mode reader must not get a white flash on an
+       error page. Same values as ark.css's prefers-color-scheme block. */
+    @media (prefers-color-scheme: dark) {
+      :root {
+        color-scheme: dark;
+        --paper: #0E141B;
+        --ink: #EDF1F4;
+        --ink2: #C0CAD3;
+        --ink3: #8B99A7;
+        --hair: #33414E;
+      }
+    }
     body {
       margin: 0;
       min-height: 100vh;
@@ -74,6 +87,17 @@
     }
     .btn--primary { background: var(--ink); color: var(--paper); }
     .btn:focus-visible { outline: 3px double var(--ink); outline-offset: 2px; }
+    .skip {
+      position: absolute;
+      left: -9999px;
+      top: 0;
+      padding: 0.625rem 1rem;
+      background: var(--paper);
+      color: var(--ink);
+      border: 2px solid var(--ink);
+      text-decoration: none;
+    }
+    .skip:focus-visible { left: 0.75rem; top: 0.75rem; z-index: 100; outline: 3px double var(--ink); }
     .note {
       margin: 2rem 0 0;
       padding-top: 0.75rem;
@@ -89,7 +113,8 @@
   </style>
 </head>
 <body>
-  <main>
+  <a href=#main-content class=skip>Skip to content</a>
+  <main id=main-content>
     <p class="label">50x, service unavailable</p>
     <h1>The site is temporarily unavailable.</h1>
     <p class="body">

@@ -524,7 +524,7 @@ impl<'a> ControlPlaneShell<'a> {
             .iter()
             .map(|banner| {
                 format!(
-                    "<div class=\"px-6 py-2 border-b {} apex-em\">{}</div>",
+                    "<div class=\"{}\" role=\"status\">{}</div>",
                     control_plane_banner_class(banner.tone),
                     html_escape(banner.message)
                 )
@@ -700,10 +700,11 @@ impl<'a> MarketingShell<'a> {
 }
 
 fn control_plane_banner_class(tone: &str) -> &'static str {
+    // ARK: the strip's rule and text carry the tone; there is no tint slab.
     match tone {
-        "critical" => "bg-destructive/10 text-destructive border-destructive/20",
-        "warning" => "border-warning/20 bg-warning/10 text-warning",
-        _ => "bg-primary/10 text-primary border-primary/20",
+        "critical" => "apex-banner apex-banner--critical",
+        "warning" => "apex-banner apex-banner--warn",
+        _ => "apex-banner",
     }
 }
 
@@ -826,7 +827,7 @@ fn render_web_sidebar(
     let render_section = |title: &str, items: &[(&str, &str, &str)]| {
         format!(
             "<div class=\"space-y-1 mb-6\">\
-                <h3 class=\"px-6 mb-2 apex-h3\">{}</h3>\
+                <p class=\"px-6 mb-2 apex-h3\">{}</p>\
                 {}</div>",
             title,
             render_sidebar_content(items, "", current_path)
@@ -998,7 +999,7 @@ fn render_cp_sidebar(current_path: &str, csrf_token: &str) -> String {
     let render_section = |title: &str, items: &[(&str, &str, &str)]| {
         format!(
             "<div class=\"space-y-1 mb-6\">\
-                <h3 class=\"px-6 mb-2 apex-h3\">{}</h3>\
+                <p class=\"px-6 mb-2 apex-h3\">{}</p>\
                 {}</div>",
             title,
             render_sidebar_content(items, "", current_path)

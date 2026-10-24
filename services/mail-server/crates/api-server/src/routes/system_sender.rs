@@ -554,9 +554,26 @@ pub(crate) fn render_transactional_email_with_branding(
 ) -> String {
     use crate::routes::helpers::html_escape;
 
-    // White-label mail carries no ApexMail wordmark at all (the branded
-    // footer replaces it); stock mail renders the fixed lockup alone.
-    let brand_for = "";
+    // The lockup is the tenant's identity in white-label mail: their logo
+    // when one is configured (http/https only — a `javascript:` or `data:`
+    // src is never emitted into mail), otherwise their company name set in
+    // ink. The ApexMail wordmark appears only on stock mail; a branded
+    // message that still carried it would contradict the white-label
+    // contract the footer already keeps.
+    let lockup = match branding {
+        None => "<span style=\"color:#B91C1C\">Apex</span><span style=\"color:#09090B\">Mail</span>".to_string(),
+        Some(branding) => match branding.logo_url.as_deref().map(str::trim).filter(|url| is_safe_logo_url(url)) {
+            Some(url) => format!(
+                "<img src=\"{}\" alt=\"{}\" height=\"28\" style=\"display:block;height:28px;max-width:220px;border:0\"/>",
+                html_escape(url),
+                html_escape(branding.company_name())
+            ),
+            None => format!(
+                "<span style=\"color:#0E141B\">{}</span>",
+                html_escape(branding.company_name())
+            ),
+        },
+    };
     let mut actions_html = String::new();
     for action in email.actions {
         let label = html_escape(action.label);
@@ -589,7 +606,7 @@ pub(crate) fn render_transactional_email_with_branding(
     format!(
         r#"<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/><meta name="color-scheme" content="light only"/><title>{title}</title></head><body style="margin:0;padding:24px;background-color:#ffffff;color:#0E141B;font-family:'Overpass',-apple-system,'Segoe UI',Arial,sans-serif;font-size:15px;line-height:1.6"><div style="max-width:560px;margin:0 auto;background-color:#ffffff">
-<p style="margin:0 0 20px;font-family:Arial,Helvetica,sans-serif;font-size:22px;font-weight:700;letter-spacing:-0.04em"><span style="color:#B91C1C">Apex</span><span style="color:#09090B">Mail</span>{brand_for}</p>
+<p style="margin:0 0 20px;font-family:Arial,Helvetica,sans-serif;font-size:22px;font-weight:700;letter-spacing:-0.04em">{lockup}</p>
 <table role="presentation" style="width:100%;border-collapse:collapse"><tr><td style="border-top:3px solid #0E141B;padding-top:16px">
 <h2 style="margin:0 0 12px;color:#0E141B;font-family:'Spectral',Georgia,'Times New Roman',serif;font-size:20px;font-weight:500;letter-spacing:0;text-transform:none">{heading}</h2>
 {body}
@@ -601,6 +618,7 @@ pub(crate) fn render_transactional_email_with_branding(
         body = email.body_html,
         actions = actions_html,
         footer = footer,
+        lockup = lockup,
     )
 }
 
@@ -624,18 +642,25 @@ fn render_branded_email_footer(branding: &TenantBranding, footer_link: bool) -> 
         if !support_email.is_empty() {
             let escaped = html_escape(support_email);
             parts.push(format!(
-                "<a href=\"mailto:{escaped}\" style=\"color:#999;text-decoration:none\">{escaped}</a>"
+                "<a href=\"mailto:{escaped}\" style=\"color:#5B6B7A;text-decoration:underline\">{escaped}</a>"
             ));
         }
         let support_url = branding.support_url();
         if is_safe_support_url(support_url) {
             let escaped = html_escape(support_url);
             parts.push(format!(
-                "<a href=\"{escaped}\" style=\"color:#999;text-decoration:none\">{escaped}</a>"
+                "<a href=\"{escaped}\" style=\"color:#5B6B7A;text-decoration:underline\">{escaped}</a>"
             ));
         }
     }
     parts.join(", ")
+}
+
+/// http(s) only: a logo is fetched by the mail client, so no other scheme
+/// may appear in the `src`.
+fn is_safe_logo_url(url: &str) -> bool {
+    let lower = url.trim().to_ascii_lowercase();
+    lower.starts_with("https://") || lower.starts_with("http://")
 }
 
 /// http(s)/mailto only — mirrors the console footer rule so a hostile
@@ -854,6 +879,72 @@ mod tests {
         });
         assert!(!code_only.contains("<a href"), "{code_only}");
         assert!(code_only.contains("&copy; 2026 ApexMail"), "{code_only}");
+    }
+
+    /// White-label mail carries the tenant's identity in the lockup — their
+    /// logo when the URL is http(s), otherwise their company name — and
+    /// never the ApexMail wordmark. A hostile logo URL degrades to the name.
+    #[test]
+    fn white_label_lockup_replaces_the_apexmail_wordmark() {
+        let branding = TenantBranding {
+            company_name: Some("Northwind Logistics".into()),
+            logo_url: None,
+            favicon_url: None,
+            primary_color: None,
+            secondary_color: None,
+            custom_css: Some("body{display:none}".into()),
+            footer_text: None,
+            support_email: Some("support@northwind.example".into()),
+            support_url: None,
+            template: None,
+        };
+        let email = |branding: Option<&TenantBranding>| {
+            render_transactional_email_with_branding(
+                &TransactionalEmail {
+                    document_title: "Verify your email",
+                    heading: "Confirm Your Address",
+                    body_html: "<p>Body.</p>",
+                    actions: &[],
+                    footer_link: true,
+                },
+                branding,
+            )
+        };
+
+        // Stock mail keeps the fixed lockup.
+        let stock = email(None);
+        assert!(
+            stock.contains("<span style=\"color:#B91C1C\">Apex</span><span style=\"color:#09090B\">Mail</span>"),
+            "{stock}"
+        );
+
+        // No logo configured: the company name, in ink, is the lockup.
+        let named = email(Some(&branding));
+        assert!(named.contains(">Northwind Logistics</span>"), "{named}");
+        assert!(!named.contains("Apex</span>"), "{named}");
+        assert!(!named.contains("ApexMail"), "{named}");
+        assert!(!named.contains("<img"), "{named}");
+        // A tenant `custom_css` value is never injected into mail.
+        assert!(!named.contains("display:none"), "{named}");
+
+        // A configured https logo is the lockup, with the company as alt.
+        let mut with_logo = branding.clone();
+        with_logo.logo_url = Some("https://cdn.northwind.example/logo.png".into());
+        let logo = email(Some(&with_logo));
+        assert!(
+            logo.contains("<img src=\"https://cdn.northwind.example/logo.png\" alt=\"Northwind Logistics\""),
+            "{logo}"
+        );
+        assert!(!logo.contains("ApexMail"), "{logo}");
+
+        // Hostile schemes never reach the src; the name is the fallback.
+        for hostile in ["javascript:alert(1)", "data:image/svg+xml,<svg/>", "  ", "vbscript:x"] {
+            let mut bad = branding.clone();
+            bad.logo_url = Some(hostile.into());
+            let html = email(Some(&bad));
+            assert!(!html.contains("<img"), "{hostile}: {html}");
+            assert!(html.contains(">Northwind Logistics</span>"), "{hostile}: {html}");
+        }
     }
 
     /// The queue layer refuses an empty presentation: supplying the HTML and

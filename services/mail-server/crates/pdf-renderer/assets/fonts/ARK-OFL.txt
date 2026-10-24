@@ -1,0 +1,5 @@
+Spectral (Production Type), Overpass and Overpass Mono (Delve WithRical) are
+licensed under the SIL Open Font License 1.1. These TTF files are format
+conversions (woff2 -> ttf) of the web faces shipped in
+apps/marketing-zola/static/fonts; the fonts are unmodified otherwise.
+https://openfontlicense.org

@@ -9,7 +9,7 @@ last_updated = "2026-07-30"
 
 Diese Richtlinie zur akzeptablen Nutzung („AUP") definiert verbotene und akzeptable Nutzungen der ApexMail-E-Mail-Infrastruktur. Verstöße können zur Aussetzung oder Kündigung führen. Diese AUP unterscheidet zwischen Marketing- und Werbe-E-Mails und Transaktions- und Service-E-Mails — jede Kategorie unterliegt unterschiedlichen Einwilligungs-, Abmelde- und Versandpflichten wie unten beschrieben.
 
-### Welche Regeln für Ihre Nachricht gelten
+## Welche Regeln für Ihre Nachricht gelten
 
 | Wenn die Nachricht … | Kategorie | Es gilt |
 |---|---|---|

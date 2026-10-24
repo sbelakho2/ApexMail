@@ -85,7 +85,9 @@
   ],
 )
 
-#set text(font: ("Noto Sans", "DejaVu Sans"), size: 10pt)
+#set text(font: ("Overpass", "Noto Sans", "DejaVu Sans"), size: 10pt)
+// ARK document law: headings belong to Spectral; machine data to mono.
+#show heading: set text(font: ("Spectral", "Noto Serif", "DejaVu Serif"))
 
 // ---------------------------------------------------------------------------
 // Helpers: authoritative money and date handling

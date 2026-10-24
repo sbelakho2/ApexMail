@@ -9,7 +9,7 @@ last_updated = "2026-07-30"
 
 Esta Política de uso aceptable («PUA») define los usos prohibidos y aceptables de la infraestructura de correo electrónico de ApexMail. Su violación puede dar lugar a la suspensión o rescisión. Esta PUA distingue entre correos electrónicos de marketing y promocionales y correos electrónicos transaccionales y de servicio — cada categoría conlleva obligaciones diferentes de consentimiento, cancelación de suscripción y envío, como se describe a continuación.
 
-### Qué reglas se aplican a su mensaje
+## Qué reglas se aplican a su mensaje
 
 | Si el mensaje es… | Categoría | Qué se aplica |
 |---|---|---|

@@ -186,3 +186,6 @@ dump.rdb
 # Coverage artifacts — never track (accidentally committed 290 MiB once)
 *.profraw
 *.profdata
+
+# Local journey artifacts (screenshots, captured MFA secrets)
+.kiwi/

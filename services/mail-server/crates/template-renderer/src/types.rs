@@ -212,27 +212,20 @@ pub struct ValidationError {
 
 pub const STARTER_TEMPLATE: &str = r#"<html>
   <head>
-    <style>
-      body { font-family: ui-monospace, 'JetBrains Mono', monospace; margin: 0; padding: 0; }
-      .container { max-width: 600px; margin: 0 auto; padding: 20px; }
-      .header { background-color: #dc2626; color: white; padding: 24px; text-align: center; }
-      .content { padding: 24px; }
-      .footer { padding: 16px; text-align: center; color: #71717a; font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; }
-    </style>
+    <meta charset="utf-8">
+    <meta name="color-scheme" content="light only">
   </head>
-  <body>
-    <div class="container">
-      <div class="header">
-        <h1 style="margin:0;letter-spacing:0.05em">{{ title }}</h1>
+  <body style="margin:0;padding:24px;background-color:#FFFFFF;color:#0E141B;font-family:'Overpass',-apple-system,'Segoe UI',Arial,sans-serif;font-size:15px;line-height:1.6">
+    <div style="max-width:560px;margin:0 auto">
+      <p style="margin:0 0 20px;font-family:Arial,Helvetica,sans-serif;font-size:22px;font-weight:700;letter-spacing:-0.04em"><span style="color:#B91C1C">Apex</span><span style="color:#09090B">Mail</span></p>
+      <div style="border-top:3px solid #0E141B;padding-top:16px">
+        <h1 style="margin:0 0 12px;font-family:'Spectral',Georgia,'Times New Roman',serif;font-size:22px;font-weight:500;letter-spacing:0">{{ title }}</h1>
+        <p style="margin:0 0 12px">Hello {{ name }},</p>
+        <p style="margin:0 0 12px">{{ body }}</p>
       </div>
-      <div class="content">
-        <p>Hello {{ name }},</p>
-        <p>{{ body }}</p>
-      </div>
-      <div class="footer">
-        <p>{{ footer_text }}</p>
-        <p style="margin-top:8px"><a href="{{ base_url }}/unsubscribe?token={{ unsubscribe_token }}" style="color:#71717a">Unsubscribe</a></p>
-      </div>
+      <hr style="border:none;border-top:1px solid #C4CDD5;margin:24px 0 12px">
+      <p style="margin:0 0 6px;font-size:12px;color:#5B6B7A">{{ footer_text }}</p>
+      <p style="margin:0;font-size:12px"><a href="{{ base_url }}/unsubscribe?token={{ unsubscribe_token }}" style="color:#5B6B7A;text-decoration:underline">Unsubscribe</a></p>
     </div>
   </body>
 </html>"#;

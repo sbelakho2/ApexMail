@@ -9,7 +9,7 @@ last_updated = "2026-07-30"
 
 Cette Politique d'utilisation acceptable (« PUA ») définit les utilisations interdites et acceptables de l'infrastructure de messagerie ApexMail. Toute violation peut entraîner une suspension ou une résiliation. Cette PUA distingue les emails marketing et promotionnels des emails transactionnels et de service — chaque catégorie est soumise à des obligations de consentement, de désabonnement et d'envoi différentes, décrites ci-dessous.
 
-### Quelles règles s'appliquent à votre message
+## Quelles règles s'appliquent à votre message
 
 | Si le message est… | Catégorie | Ce qui s'applique |
 |---|---|---|

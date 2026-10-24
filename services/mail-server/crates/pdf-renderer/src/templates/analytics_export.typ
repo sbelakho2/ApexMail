@@ -48,7 +48,7 @@
   ],
 )
 
-#set text(font: ("Noto Sans", "DejaVu Sans"), size: 10pt, hyphenate: false)
+#set text(font: ("Overpass", "Noto Sans", "DejaVu Sans"), size: 10pt, hyphenate: false)
 #set par(justify: true)
 
 // ---------------------------------------------------------------------------

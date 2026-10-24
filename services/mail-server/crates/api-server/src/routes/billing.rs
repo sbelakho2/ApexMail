@@ -1858,15 +1858,16 @@ fn render_invoice_html(invoice: &LegacyInvoiceDto, style_nonce: &str) -> String 
 
     format!(
         r#"<!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8">
+  <meta name="color-scheme" content="light only">
   <title>Invoice {invoice_number}</title>
   <style nonce="{style_nonce}">
     /* ARK invoice document: paper, ink, one 3px rule, tabular figures. The
        class names are the shared vocabulary so the same document renders
        identically here and anywhere else (rendered to PDF by pdf-renderer). */
-    body {{ font-family:'Overpass',-apple-system,'Segoe UI',Arial,sans-serif; font-size: 13px; color: #0E141B; margin: 40px; }}
+    body {{ font-family:'Overpass',-apple-system,'Segoe UI',Arial,sans-serif; font-size: 13px; color: #0E141B; background: #ffffff; margin: 40px; }}
     .apex-invoice-header {{ display: flex; justify-content: space-between; margin-bottom: 40px; border-bottom: 3px solid #0E141B; padding-bottom: 14px; }}
     .apex-invoice-addresses {{ display: flex; justify-content: space-between; margin-bottom: 40px; }}
     .apex-invoice-addresses > div {{ width: 45%; }}
@@ -5755,6 +5756,155 @@ mod tests {
             html.contains("<style nonce=\"testnonce0123456789\">"),
             "the style nonce must be stamped on the single <style> element"
         );
+    }
+
+    // ── ARK document previews (browser-rendered by tools/ark_email_dogfood.py)
+
+    /// Write the ARK document previews to `target/ark-email-preview/` — the
+    /// exact bytes the API and mail queue emit — so the browser dogfood can
+    /// render them. The assertions below are the law for a document that
+    /// cannot load `ark.css` and must carry its own inline styles.
+    #[test]
+    fn ark_document_previews_are_written_and_carry_the_law() {
+        initialize_billing_test_env();
+        use crate::routes::system_sender::{
+            render_transactional_email, render_transactional_email_with_branding, EmailAction,
+            TenantBranding, TransactionalEmail,
+        };
+
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/ark-email-preview");
+        std::fs::create_dir_all(&dir).expect("preview dir");
+
+        let reset = render_transactional_email(&TransactionalEmail {
+            document_title: "Reset your password — ApexMail",
+            heading: "Reset Your Password",
+            body_html: "<p style=\"margin:0 0 12px\">Someone asked to reset the password for this ApexMail account. Choose a new password with the link below.</p><p style=\"margin:0 0 12px;font-size:12px;color:#5B6B7A\">The link expires in 30 minutes. If this was not you, no action is needed.</p>",
+            actions: &[EmailAction {
+                label: "Choose A New Password",
+                url: "https://app.apexmail.ee/reset-password/7c1f0f53d7a94f8e",
+                secondary: false,
+            }],
+            footer_link: true,
+        });
+        let verify = render_transactional_email(&TransactionalEmail {
+            document_title: "Verify your email — ApexMail",
+            heading: "Confirm Your Address",
+            body_html: "<p style=\"margin:0 0 12px\">Confirm this address to finish setting up the account. Mail stays paused until it is verified.</p>",
+            actions: &[EmailAction {
+                label: "Verify Email Address",
+                url: "https://app.apexmail.ee/verify-email/18be4c0c7d3e4a51",
+                secondary: false,
+            }],
+            footer_link: true,
+        });
+        let mfa = render_transactional_email(&TransactionalEmail {
+            document_title: "Your ApexMail verification code",
+            heading: "Your Verification Code",
+            body_html: "<p style=\"margin:0 0 12px\">Enter this code to finish signing in. It expires in 10 minutes.</p><p style=\"margin:0 0 12px;font-family:'Overpass Mono',ui-monospace,monospace;font-size:28px;letter-spacing:0.22em;color:#0E141B\">704213</p>",
+            actions: &[],
+            footer_link: false,
+        });
+        let branding = TenantBranding {
+            company_name: Some("Northwind Logistics".into()),
+            logo_url: None,
+            favicon_url: None,
+            primary_color: None,
+            secondary_color: None,
+            custom_css: None,
+            footer_text: Some("Northwind Logistics · Tallinn".into()),
+            support_email: Some("support@northwind.example".into()),
+            support_url: Some("https://northwind.example/help".into()),
+            template: None,
+        };
+        let invitation = render_transactional_email_with_branding(
+            &TransactionalEmail {
+                document_title: "You have been invited",
+                heading: "Join The Workspace",
+                body_html: "<p style=\"margin:0 0 12px\">An owner invited this address to the Northwind Logistics workspace. Accept the invitation, then set a password.</p>",
+                actions: &[
+                    EmailAction {
+                        label: "Accept Invitation",
+                        url: "https://app.northwind.example/invitations/5f2a",
+                        secondary: false,
+                    },
+                    EmailAction {
+                        label: "Read The Guide",
+                        url: "https://northwind.example/help/invitations",
+                        secondary: true,
+                    },
+                ],
+                footer_link: true,
+            },
+            Some(&branding),
+        );
+        let invoice = render_invoice_html(&sample_invoice(), "arkpreview0123456789abcdef01234");
+
+        let docs = [
+            ("email-password-reset.html", &reset),
+            ("email-verify-address.html", &verify),
+            ("email-mfa-code.html", &mfa),
+            ("email-invitation-branded.html", &invitation),
+            ("invoice.html", &invoice),
+        ];
+        for (name, html) in &docs {
+            std::fs::write(dir.join(name), html).expect("write preview");
+            assert!(
+                html.starts_with("<!DOCTYPE html>"),
+                "{name}: must carry a doctype"
+            );
+            assert!(
+                html.contains("<title>") && html.contains("</title>"),
+                "{name}: must carry a title"
+            );
+            assert!(!html.contains("<script"), "{name}: no scripts");
+            assert!(
+                html.contains("<html lang=\"en\""),
+                "{name}: must declare the document language"
+            );
+            assert!(
+                !html.to_ascii_lowercase().contains("border-radius"),
+                "{name}: ARK is square — no border-radius in the document"
+            );
+            assert!(
+                !html.contains("linear-gradient"),
+                "{name}: ARK carries no gradients"
+            );
+            assert!(
+                html.contains("'Overpass'"),
+                "{name}: the ARK body face must be declared"
+            );
+            assert!(
+                html.contains("#0E141B"),
+                "{name}: the ink token must ground the text"
+            );
+        }
+        // The email shell is light-only by declaration: no client may invert
+        // it into illegibility.
+        for (name, html) in &docs[..4] {
+            assert!(
+                html.contains("color-scheme\" content=\"light only\""),
+                "{name}: transactional mail must pin the light scheme"
+            );
+        }
+        // The branded document carries the tenant's identity, not ours.
+        assert!(
+            invitation.contains(">Northwind Logistics</span>"),
+            "white-label mail must carry the company name as its lockup"
+        );
+        assert!(
+            !invitation.contains("ApexMail"),
+            "white-label mail must not carry the ApexMail wordmark"
+        );
+        assert!(
+            reset.contains("<span style=\"color:#B91C1C\">Apex</span>"),
+            "stock mail keeps the fixed ApexMail lockup"
+        );
+        // Security mail is a document: the heading face is Spectral, and the
+        // invoice keeps tabular figures under Overpass Mono.
+        assert!(reset.contains("'Spectral'"));
+        assert!(invoice.contains("'Overpass Mono'"));
+        assert!(invoice.contains("border-bottom: 3px solid #0E141B"));
     }
 
     #[test]

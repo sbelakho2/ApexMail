@@ -163,6 +163,31 @@ PROBE_JS = r"""
       }
     }
   }
+  // ARK-13: a floating surface (fixed/sticky) that carries text must paint an
+  // opaque ground. A transparent fixed strip lets the page read through its
+  // own copy (the 390px cookie banner did exactly that).
+  for (const el of els) {
+    const cs = getComputedStyle(el);
+    if (cs.position !== 'fixed' && cs.position !== 'sticky') continue;
+    if (cs.display === 'none' || cs.visibility === 'hidden') continue;
+    if (isClipped(cs, el)) continue;
+    let hasText = false;
+    for (const node of el.childNodes) {
+      if (node.nodeType === 3 && node.textContent.trim().length > 1) { hasText = true; break; }
+    }
+    if (!hasText && !el.querySelector('a, button, input, select, textarea, p, h1, h2, h3')) continue;
+    const fill = (() => {
+      let e = el;
+      while (e) {
+        const c = getComputedStyle(e).backgroundColor;
+        const m = c.match(/rgba?\(([^)]+)\)/);
+        if (m) { const p = m[1].split(',').map(Number); if ((p.length > 3 ? p[3] : 1) > 0.5) return c; }
+        e = e.parentElement;
+      }
+      return null;
+    })();
+    if (!fill) addViolation(el, 'floating-transparent', cs.position);
+  }
   // contrast: nearest opaque background up the tree
   const parse = (c) => {
     const m = c.match(/rgba?\(([^)]+)\)/);
@@ -206,6 +231,34 @@ PROBE_JS = r"""
       addViolation(t.el, 'contrast', `${r.toFixed(2)} < ${need} on rgb(${bg.r},${bg.g},${bg.b}) ["${t.text}"]`);
     }
   }
+  // ARK-15: scrollable content must have a keyboard path (focusable itself
+  // or a focusable descendant) — otherwise the content is unreachable.
+  for (const el of els) {
+    const cs = getComputedStyle(el);
+    if (el === document.documentElement || el === document.body) continue;
+    if (cs.display === 'none' || cs.visibility === 'hidden') continue;
+    if (!/(auto|scroll)/.test(cs.overflowX) && !/(auto|scroll)/.test(cs.overflowY)) continue;
+    if (el.scrollWidth <= el.clientWidth + 1 && el.scrollHeight <= el.clientHeight + 1) continue;
+    const focusable = el.matches('a[href],button,input,select,textarea,[tabindex]')
+      || el.querySelector('a[href],button,input,select,textarea,[tabindex]');
+    if (!focusable) {
+      addViolation(el, 'scroll-trap', `${el.scrollWidth}x${el.scrollHeight} > ${el.clientWidth}x${el.clientHeight}`);
+    }
+  }
+  // ARK-14: placeholders are text and clear AA against the control's ground.
+  for (const el of document.querySelectorAll('input[placeholder], textarea[placeholder]')) {
+    const cs = getComputedStyle(el);
+    if (cs.display === 'none' || cs.visibility === 'hidden') continue;
+    const ph = getComputedStyle(el, '::placeholder');
+    const fg = parse(ph.color);
+    if (!fg) continue;
+    const own = parse(cs.backgroundColor);
+    const bg = own && own.a > 0.5 ? own : bgOf(el);
+    const r = ratio(fg, bg);
+    if (r < 4.5 - 0.01) {
+      addViolation(el, 'placeholder-contrast', `${r.toFixed(2)} < 4.5 ["${(el.getAttribute('placeholder')||'').slice(0,30)}"]`);
+    }
+  }
   // focus ring: the authority must ship the 3px double :focus-visible rule
   let hasDouble = false;
   for (const sheet of document.styleSheets) {
@@ -233,8 +286,8 @@ PROBE_JS = r"""
 """
 
 DARK_PROBE_JS = r"""
-() => {
-  document.documentElement.classList.add('dark');
+(addClass) => {
+  if (addClass) document.documentElement.classList.add('dark');
   const out = {violations: [], samples: {}};
   const body = getComputedStyle(document.body);
   out.samples.bodyBg = body.backgroundColor;
@@ -297,11 +350,74 @@ DARK_PROBE_JS = r"""
   const apex = document.querySelector('.apex-wordmark__apex');
   const mail = document.querySelector('.apex-wordmark__mail');
   if (apex && mail) out.samples.wordmark = {apex: getComputedStyle(apex).color, mail: getComputedStyle(mail).color};
-  document.documentElement.classList.remove('dark');
+  if (addClass) document.documentElement.classList.remove('dark');
   return out;
 }
 """
 
+
+
+A11Y_JS = r"""
+() => {
+  const out = [];
+  const add = (kind, detail) => { if (out.length < 20) out.push({kind, detail}); };
+  const lang = document.documentElement.getAttribute('lang');
+  if (!lang || !lang.trim()) add('a11y-lang', 'missing html[lang]');
+  const h1s = document.querySelectorAll('h1');
+  if (h1s.length === 0) add('a11y-h1', 'no h1');
+  if (h1s.length > 1) add('a11y-h1', h1s.length + ' h1 elements');
+  if (!document.querySelector('main, [role=main]')) add('a11y-landmark', 'no main landmark');
+  const levels = Array.from(document.querySelectorAll('h1,h2,h3,h4,h5,h6')).map(h => parseInt(h.tagName[1]));
+  for (let i = 1; i < levels.length; i++) {
+    if (levels[i] > levels[i-1] + 1) { add('a11y-heading-order', `h${levels[i-1]} -> h${levels[i]}`); break; }
+  }
+  for (const img of document.querySelectorAll('img')) {
+    if (!img.hasAttribute('alt')) { add('a11y-img-alt', (img.getAttribute('src')||'').slice(0, 60)); break; }
+  }
+  const ids = {};
+  for (const el of document.querySelectorAll('[id]')) ids[el.id] = (ids[el.id]||0)+1;
+  for (const [id, n] of Object.entries(ids)) if (n > 1) { add('a11y-dup-id', id + ' x' + n); break; }
+  for (const el of document.querySelectorAll('[tabindex]')) {
+    if (parseInt(el.getAttribute('tabindex')) > 0) { add('a11y-tabindex', el.tagName + ' ' + el.getAttribute('tabindex')); break; }
+  }
+  const named = (el) => {
+    if ((el.getAttribute('aria-label') || '').trim()) return true;
+    const lb = el.getAttribute('aria-labelledby');
+    if (lb && lb.split(/\s+/).some(id => { const t = document.getElementById(id); return t && t.textContent.trim(); })) return true;
+    if ((el.getAttribute('title') || '').trim()) return true;
+    if (el.id) { const l = document.querySelector('label[for="' + CSS.escape(el.id) + '"]'); if (l && l.textContent.trim()) return true; }
+    if (el.closest('label') && el.closest('label').textContent.trim()) return true;
+    if ((el.textContent || '').trim()) return true;
+    return false;
+  };
+  for (const el of document.querySelectorAll('input, select, textarea')) {
+    const t = (el.type || '').toLowerCase();
+    if (['hidden','submit','button','reset','image'].includes(t)) continue;
+    if (!named(el)) { add('a11y-control-name', el.tagName.toLowerCase() + '[' + t + '] name=' + (el.name||'')); break; }
+  }
+  for (const el of document.querySelectorAll('button')) { if (!named(el)) { add('a11y-button-name', el.outerHTML.slice(0, 80)); break; } }
+  for (const el of document.querySelectorAll('a[href]')) { if (!named(el)) { add('a11y-link-name', el.getAttribute('href') || ''); break; } }
+  return out;
+}
+"""
+
+MOTION_JS = r"""
+() => {
+  const bad = [];
+  for (const el of document.querySelectorAll('*')) {
+    const cs = getComputedStyle(el);
+    if (cs.display === 'none' || cs.visibility === 'hidden') continue;
+    for (const prop of ['transitionDuration', 'animationDuration']) {
+      const v = cs[prop];
+      if (!v || v === '0s') continue;
+      const worst = Math.max(...v.split(',').map(x => parseFloat(x) || 0));
+      if (worst > 0.002) { bad.push({kind: 'reduced-motion', detail: el.tagName + ' ' + prop + ' ' + v}); break; }
+    }
+    if (bad.length > 8) break;
+  }
+  return bad;
+}
+"""
 
 class QuietHandler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, *args, **kwargs):  # silence the walk
@@ -398,7 +514,8 @@ def main() -> int:
                 page.evaluate(FREEZE_JS)
                 page.wait_for_timeout(30)
                 res = page.evaluate(PROBE_JS)
-                dark = page.evaluate(DARK_PROBE_JS)
+                dark = page.evaluate(DARK_PROBE_JS, True)
+                a11y = page.evaluate(A11Y_JS)
                 # screenshots: light desktop, dark desktop, light mobile
                 page.screenshot(path=str(SHOTS / f"{slug}--light.png"), full_page=True)
                 shots += 1
@@ -407,6 +524,36 @@ def main() -> int:
                 page.screenshot(path=str(SHOTS / f"{slug}--dark.png"), full_page=True)
                 shots += 1
                 page.evaluate("document.documentElement.classList.remove('dark')")
+
+                # ARK-9b: the OS-level path. `prefers-color-scheme: dark` with
+                # no `.dark` class must flip the same tokens; a page that only
+                # answers the class leaves every dark-mode user on paper.
+                page.emulate_media(color_scheme="dark")
+                page.wait_for_timeout(40)
+                media_dark = page.evaluate(DARK_PROBE_JS, False)
+                media_bg = media_dark["samples"].get("bodyBg")
+                if media_bg == res["samples"].get("bodyBg"):
+                    failures.append({"page": str(rel), "kind": kind, "phase": "dark-media",
+                                     "violation": "dark-media",
+                                     "detail": f"body background did not flip under prefers-color-scheme: dark ({media_bg})"})
+                page.screenshot(path=str(SHOTS / f"{slug}--dark-media.png"), full_page=True)
+                shots += 1
+
+                # ARK-11: print is a document. Chrome must not paint shadows,
+                # rounded corners or gradients on paper, and text must keep AA.
+                page.emulate_media(color_scheme="light", media="print")
+                page.wait_for_timeout(40)
+                printed = page.evaluate(PROBE_JS)
+                page.emulate_media(media="screen")
+
+                # ARK-12: reduced motion removes every non-zero duration. The
+                # measurement freeze must go first: it forces transition:none.
+                page.evaluate("() => { const el = document.getElementById('ark-measure-freeze'); if (el) el.remove(); }")
+                page.emulate_media(reduced_motion="reduce")
+                page.wait_for_timeout(40)
+                motion = page.evaluate(MOTION_JS)
+                page.emulate_media(reduced_motion="no-preference", color_scheme="light")
+
                 page.set_viewport_size({"width": 390, "height": 844})
                 page.wait_for_timeout(40)
                 overflow = page.evaluate(
@@ -425,7 +572,12 @@ def main() -> int:
                 failures.append({"page": str(rel), "kind": kind, "error": str(exc)[:200]})
                 continue
             checked += 1
-            for phase, data in (("light", res), ("dark", dark)):
+            for v in a11y:
+                failures.append({"page": str(rel), "kind": kind, "phase": "a11y", **v})
+            for v in motion:
+                failures.append({"page": str(rel), "kind": kind, "phase": "reduced-motion", **v})
+            for phase, data in (("light", res), ("dark", dark), ("dark-media", media_dark),
+                                ("print", printed)):
                 for v in data["violations"]:
                     failures.append({"page": str(rel), "kind": kind, "phase": phase, **v})
                 s = data.get("samples", {})
@@ -450,7 +602,7 @@ def main() -> int:
                     if wm and not (wm["apex"] == "rgb(185, 28, 28)" and wm["mail"] == "rgb(9, 9, 11)"):
                         failures.append({"page": str(rel), "kind": kind, "phase": phase,
                                          "violation": "wordmark", "detail": json.dumps(wm)})
-                else:
+                elif phase in ("dark", "dark-media"):
                     wm = s.get("wordmark")
                     if wm and not (wm["apex"] == "rgb(196, 80, 70)" and wm["mail"] == "rgb(237, 241, 244)"):
                         failures.append({"page": str(rel), "kind": kind, "phase": phase,
