@@ -5515,6 +5515,22 @@ mod tests {
         .expect("seed SSO flow tenant");
     }
 
+    /// Remove any SSO configuration and domain bindings left by an earlier
+    /// run in the same canonical clone, so a configuration call is measured
+    /// against a clean tenant.
+    async fn clear_sso_flow_state(state: &AppState, tenant: &str) {
+        sqlx::query("DELETE FROM ent_sso_configurations WHERE tenant_id = $1")
+            .bind(tenant)
+            .execute(&state.db)
+            .await
+            .expect("clear SSO configurations");
+        sqlx::query("DELETE FROM ent_sso_identities WHERE tenant_id = $1")
+            .bind(tenant)
+            .execute(&state.db)
+            .await
+            .expect("clear SSO identities");
+    }
+
     /// Provision a canonical database and the real router for the SSO flow
     /// tests. The JWT gate is pointed at the repo's test keypair so admin
     /// tokens can be minted for the authenticated `/sso/configure` call.
@@ -6002,7 +6018,16 @@ mod tests {
             "session_duration_hours": 4,
         });
         let response = post_json(&app, "/sso/configure", &admin, &configure).await;
-        assert_eq!(response.status(), StatusCode::OK);
+        let configure_status = response.status();
+        let configure_body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap_or_default();
+        let configure_body = String::from_utf8_lossy(&configure_body);
+        assert_eq!(
+            configure_status,
+            StatusCode::OK,
+            "/sso/configure refused: {configure_body}"
+        );
 
         // 1. Login initiation → 302 to the IdP with AuthnRequest + RelayState.
         let response = get_request(&app, &format!("/sso/login/saml/{domain}")).await;
@@ -6391,6 +6416,11 @@ mod tests {
         let client_secret = "routes-oidc-secret";
         let admin = mint_sso_admin_token(&tenant, "routes-oidc-admin");
         seed_sso_flow_tenant(&state, &tenant).await;
+        // Idempotent against a reused canonical clone: a previous run of this
+        // test leaves its configuration and domain binding behind, and a
+        // second /sso/configure then answers 400 ("already configured") —
+        // the test measured the clone's history, not the router.
+        clear_sso_flow_state(&state, &tenant).await;
 
         let mock = MockOidcIdp::spawn(
             sso_flow_idp_key(),
