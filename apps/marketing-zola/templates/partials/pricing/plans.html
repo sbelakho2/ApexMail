@@ -121,6 +121,41 @@
         </tbody>
       </table>
     </div>
+    {# ── Contract lines and paid add-ons (the owner's catalogue) ── #}
+    <div class="apex-section-head mt-12">
+      <h2 class="apex-h2">Contract lines and add-ons</h2>
+      <span class="apex-section-aside">Quoted on contract, priced per workspace</span>
+    </div>
+    <div class="apex-table-wrap mt-6">
+      <table class="apex-table">
+        <caption class="sr-only">Contract lines and paid add-ons with their list prices.</caption>
+        <thead>
+          <tr>
+            <th scope="col">Line</th>
+            <th scope="col" class="apex-num">Price</th>
+            <th scope="col">Scope</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th scope="row" class="apex-key">Compliance</th>
+            <td class="apex-num">€990/mo</td>
+            <td class="break-words">Governed evidence, retention policy and review workflows for regulated senders.</td>
+          </tr>
+          <tr>
+            <th scope="row" class="apex-key">Platform</th>
+            <td class="apex-num">€990/mo base, plus usage</td>
+            <td class="break-words">Managed sending platform on contract: dedicated tenancy boundary with usage-priced volume.</td>
+          </tr>
+          <tr>
+            <th scope="row" class="apex-key">Mailboxes</th>
+            <td class="apex-num">€6 per seat/mo, 10-seat minimum</td>
+            <td class="break-words">Hosted mailboxes on your tenant's domains, with journaling and archive add-ons.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
     <p class="apex-footnote">Annual subscriptions are billed at {{ pricing_data.annual_billing_months }}&times; the monthly price (about {{ pricing_data.annual_savings_percent }}% less than twelve monthly payments); the Annual column shows that yearly total divided by twelve. Enterprise Cloud requires an annual contract; a second Business dedicated IP is assigned where traffic justifies it. All totals exclude VAT.</p>
 
     {# ── Enterprise infrastructure: the deployment ledger ── #}

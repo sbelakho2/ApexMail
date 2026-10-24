@@ -929,7 +929,8 @@ a.apex-sidebar-brand:hover { color: inherit; }
   font-size: 0.84375rem;
   font-weight: 600;
   line-height: 1.2;
-  white-space: nowrap;
+  text-align: center;
+  white-space: normal;
   text-decoration: none;
   cursor: pointer;
   transition: background-color var(--motion-duration) var(--motion-ease),
@@ -1296,6 +1297,11 @@ a.apex-sidebar-brand:hover { color: inherit; }
   border-collapse: collapse;
   text-align: left;
   font-size: 0.84375rem;
+  /* A ledger is a scroll region: wide rows scroll inside the table's own
+     rule instead of widening the page. */
+  display: block;
+  overflow-x: auto;
+  max-width: 100%;
 }
 .apex-table th {
   text-align: left;
@@ -1794,6 +1800,29 @@ a.apex-sidebar-brand:hover { color: inherit; }
   font-size: 0.8125rem;
   color: rgb(var(--muted-foreground));
 }
+
+/* Overflow containment: wide artifacts scroll inside their own rule, never
+   widening the page. Tables are ledgers and code blocks are documents; on a
+   narrow screen each gets its own horizontal scroll region. */
+table { max-width: 100%; }
+pre { max-width: 100%; overflow-x: auto; overflow-wrap: normal; }
+.apex-prose { overflow-wrap: break-word; }
+.apex-prose table {
+  display: block;
+  overflow-x: auto;
+  max-width: 100%;
+  border-collapse: collapse;
+}
+.apex-prose pre { display: block; overflow-x: auto; }
+.apex-table-wrap, .apex-table { min-width: 0; }
+h1, h2, h3, h4, h5, h6, p, li, td, th, dd, dt, blockquote {
+  overflow-wrap: break-word;
+}
+
+/* Grid and flex tracks may shrink: a wide artifact inside a track (a code
+   block, a long identifier) scrolls in its own rule instead of widening the
+   page. */
+.grid > *, .flex > * { min-width: 0; }
 
 /* ── Prose (docs, long-form) ── */
 .apex-prose {

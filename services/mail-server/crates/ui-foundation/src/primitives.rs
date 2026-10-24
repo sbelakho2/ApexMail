@@ -1173,8 +1173,8 @@ impl<'a> EmptyState<'a> {
             .map(|text| format!("<p class=\"mx-auto max-w-[320px]\">{}</p>", text))
             .unwrap_or_default();
         let action = match (self.action_label, self.action_href) {
-            (Some(label), Some(href)) => format!("<a href=\"{}\" class=\"inline-flex items-center justify-center whitespace-nowrap h-10 px-3 min-h-[44px] mt-6 apex-btn\">{}</a>", href, label),
-            (Some(label), None) => format!("<button type=\"button\" class=\"inline-flex items-center justify-center whitespace-nowrap h-10 px-3 min-h-[44px] mt-6 apex-btn\">{}</button>", label),
+            (Some(label), Some(href)) => format!("<a href=\"{}\" class=\"inline-flex items-center justify-center h-10 px-3 min-h-[44px] mt-6 apex-btn\">{}</a>", href, label),
+            (Some(label), None) => format!("<button type=\"button\" class=\"inline-flex items-center justify-center h-10 px-3 min-h-[44px] mt-6 apex-btn\">{}</button>", label),
             _ => String::new(),
         };
         format!(
@@ -1847,7 +1847,7 @@ impl<'a> Table<'a> {
             }
             _ => "Scrollable data table".to_string(),
         };
-        format!("<div class=\"apex-table-wrap relative w-full overflow-x-auto\" tabindex=\"0\" role=\"region\" aria-label=\"{region_label}\"><table class=\"apex-table w-full min-w-[640px]\"><thead class=\"sticky top-0 z-10\"><tr>{}</tr></thead><tbody>{}</tbody>{}</table></div>", headers, rows, caption)
+        format!("<div class=\"apex-table-wrap relative w-full overflow-x-auto\" tabindex=\"0\" role=\"region\" aria-label=\"{region_label}\"><table class=\"apex-table w-full\"><thead class=\"sticky top-0 z-10\"><tr>{}</tr></thead><tbody>{}</tbody>{}</table></div>", headers, rows, caption)
     }
 }
 
@@ -1896,7 +1896,7 @@ impl PaginationControls {
             } else {
                 ""
             };
-            format!("<button class=\"inline-flex items-center justify-center whitespace-nowrap h-10 px-3 min-h-[44px] apex-btn\"{}>{}</button>", disabled_attr, label)
+            format!("<button class=\"inline-flex items-center justify-center h-10 px-3 min-h-[44px] apex-btn\"{}>{}</button>", disabled_attr, label)
         };
         format!(
             "<div class=\"flex items-center gap-2\" role=\"navigation\" aria-label=\"Pagination controls\">{}{}<span class=\"px-2\">Page {} of {}</span>{}{}</div>",
@@ -3471,7 +3471,7 @@ mod tests {
         }
         .render_html();
 
-        assert!(html.contains("min-w-[640px]"));
+        assert!(html.contains("apex-table-wrap"));
         assert!(
             html.contains("apex-table-wrap") || html.contains("apex-loading"),
             "{html}"

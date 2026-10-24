@@ -409,6 +409,15 @@ def main() -> int:
                 page.evaluate("document.documentElement.classList.remove('dark')")
                 page.set_viewport_size({"width": 390, "height": 844})
                 page.wait_for_timeout(40)
+                overflow = page.evaluate(
+                    "() => ({scroll: document.documentElement.scrollWidth, view: window.innerWidth})"
+                )
+                if overflow["scroll"] > overflow["view"] + 1:
+                    failures.append({
+                        "page": str(rel), "kind": kind, "phase": "mobile",
+                        "violation": "overflow",
+                        "detail": f"scrollWidth {overflow['scroll']} > viewport {overflow['view']}",
+                    })
                 page.screenshot(path=str(SHOTS / f"{slug}--mobile.png"), full_page=True)
                 shots += 1
                 page.set_viewport_size({"width": 1440, "height": 900})

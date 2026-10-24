@@ -26,7 +26,7 @@
       tabindex="0"
       aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['comparison_scroll'] %}{{ i18n_data[l]['a11y']['comparison_scroll'] }}{% else %}Comparison table — scroll horizontally to see every column{% endif %}"
     >
-      <table class="w-full border-collapse min-w-[640px] apex-table">
+      <table class="apex-table">
         <caption class="sr-only">{% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['comparison_caption'] %}{{ i18n_data[l]['a11y']['comparison_caption'] }}{% else %}Feature comparison between ApexMail and {{ competitor_name }}.{% endif %}</caption>
         <thead>
           <tr class="border-b">

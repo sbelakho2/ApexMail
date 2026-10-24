@@ -118,8 +118,8 @@ pub fn tracking_domain_panel_html(panel: &TrackingDomainPanel, csrf_token: &str)
                  <div class=\"mt-2 flex flex-wrap items-center gap-3\"><span class=\"\">{domain}</span><span class=\"inline-flex items-center border px-2 py-0.5 apex-em apex-section-head\">{status}</span></div>\
                  {reason}{verified_note}{record}\
                  <div class=\"mt-4 flex flex-wrap gap-3\">\
-                   <form method=\"post\" action=\"/web/domains/{domain_id}/tracking-domain/verify\" class=\"inline\"><input type=\"hidden\" name=\"_csrf\" value=\"{csrf}\"><button type=\"submit\" class=\"{BTN}\">Verify DNS now</button></form>\
-                   <form method=\"post\" action=\"/web/domains/{domain_id}/tracking-domain/delete\" class=\"inline\"><input type=\"hidden\" name=\"_csrf\" value=\"{csrf}\"><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap px-4 py-2 apex-btn\">Remove</button></form>\
+                   <form method=\"post\" action=\"/web/domains/{domain_id}/tracking-domain/verify\"><input type=\"hidden\" name=\"_csrf\" value=\"{csrf}\"><button type=\"submit\" class=\"{BTN}\">Verify DNS now</button></form>\
+                   <form method=\"post\" action=\"/web/domains/{domain_id}/tracking-domain/delete\"><input type=\"hidden\" name=\"_csrf\" value=\"{csrf}\"><button type=\"submit\" class=\"inline-flex items-center justify-center px-4 py-2 apex-btn\">Remove</button></form>\
                  </div>",
                 domain = escape(&row.domain),
                 domain_id = escape(&panel.domain_id),
@@ -140,7 +140,7 @@ pub fn web_domain_tracking_page(panel: Option<&TrackingDomainPanel>, csrf_token:
         None => "<section data-page=\"tracking-domain\" class=\"space-y-4\"><div class=\"border p-6\">\
 <h2 class=\"apex-section-head\">Custom tracking domain</h2>\
 <p class=\"mt-2\">Open a domain from the Domains page to configure its tracking subdomain. This page is only reachable for a domain in your workspace.</p>\
-<a href=\"/domains\" class=\"mt-4 inline-flex items-center justify-center whitespace-nowrap h-12 px-6 py-3 apex-btn\">Back to domains</a></div></section>"
+<a href=\"/domains\" class=\"mt-4 inline-flex items-center justify-center h-12 px-6 py-3 apex-btn\">Back to domains</a></div></section>"
             .to_string(),
     };
     format!(

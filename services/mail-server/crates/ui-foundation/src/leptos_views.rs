@@ -630,7 +630,7 @@ fn domain_detail_section(data: &ListPageData) -> String {
         .map(|table| table.rows.as_slice())
         .unwrap_or(&[]);
     let verify_form = format!(
-        "<form method=\"post\" action=\"/web{base}/verify\" class=\"inline\"><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap px-4 py-2 apex-btn\">Verify DNS now</button><p class=\"mt-2 max-w-md\">Verification re-probes every record and (on the first run) provisions the DKIM keys that generate the full record set below.</p></form>",
+        "<form method=\"post\" action=\"/web{base}/verify\"><button type=\"submit\" class=\"inline-flex items-center justify-center px-4 py-2 apex-btn\">Verify DNS now</button><p class=\"mt-2 max-w-md\">Verification re-probes every record and (on the first run) provisions the DKIM keys that generate the full record set below.</p></form>",
         base = html_escape(&data.base_path),
     );
     if records.is_empty() {
@@ -702,7 +702,7 @@ fn campaign_detail_section(data: &ListPageData) -> String {
                 .collect::<Vec<_>>()
                 .join("");
             format!(
-                "<form method=\"post\" action=\"/web/campaigns/{id}/recipients\" class=\"space-y-3\" data-form-id=\"campaign-recipients\"><label class=\"apex-em apex-label\" for=\"campaign-recipients-list\">Recipients list</label><select id=\"campaign-recipients-list\" name=\"list_id\" class=\"flex h-12 w-full border px-3 apex-select\">{options}</select><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap px-4 py-2 apex-btn apex-btn--primary\">Wire recipients</button><p class=\"\">The checked list becomes this campaign's audience; counts refresh on the next page load.</p></form>",
+                "<form method=\"post\" action=\"/web/campaigns/{id}/recipients\" class=\"space-y-3\" data-form-id=\"campaign-recipients\"><label class=\"apex-em apex-label\" for=\"campaign-recipients-list\">Recipients list</label><select id=\"campaign-recipients-list\" name=\"list_id\" class=\"flex h-12 w-full border px-3 apex-select\">{options}</select><button type=\"submit\" class=\"inline-flex items-center justify-center px-4 py-2 apex-btn apex-btn--primary\">Wire recipients</button><p class=\"\">The checked list becomes this campaign's audience; counts refresh on the next page load.</p></form>",
                 id = urlencode_path(data.base_path.trim_start_matches("/campaigns/")),
                 options = options,
             )
@@ -731,13 +731,13 @@ fn campaign_detail_section(data: &ListPageData) -> String {
             }
             let button = if available {
                 format!(
-                    "<form method=\"post\" action=\"{target}\" class=\"inline\"><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap px-4 py-2 apex-btn apex-btn--primary\">{label}</button></form>",
+                    "<form method=\"post\" action=\"{target}\"><button type=\"submit\" class=\"inline-flex items-center justify-center px-4 py-2 apex-btn apex-btn--primary\">{label}</button></form>",
                     target = html_escape(&target),
                     label = html_escape(&label),
                 )
             } else {
                 format!(
-                    "<button type=\"button\" disabled aria-disabled=\"true\" class=\"inline-flex items-center justify-center whitespace-nowrap px-4 py-2 apex-btn\" title=\"Not available in this campaign's current status\">{label}</button>",
+                    "<button type=\"button\" disabled aria-disabled=\"true\" class=\"inline-flex items-center justify-center px-4 py-2 apex-btn\" title=\"Not available in this campaign's current status\">{label}</button>",
                     label = html_escape(&label),
                 )
             };
@@ -756,7 +756,7 @@ fn campaign_detail_section(data: &ListPageData) -> String {
         recipients = recipients_form.map(|form| format!(
             "<div class=\"border p-6\"><h2 class=\"mb-4 apex-section-head\">Audience</h2>{form}</div>",
             form = form
-        )).unwrap_or_else(|| "<div class=\"border p-6\"><h2 class=\"mb-2 apex-section-head\">Audience</h2><p class=\"\">No lists exist yet — create a list, then wire this campaign's recipients.</p><a href=\"/lists/new\" class=\"mt-3 inline-flex items-center justify-center whitespace-nowrap h-10 px-4 py-2 apex-btn\">Create list</a></div>".to_string()),
+        )).unwrap_or_else(|| "<div class=\"border p-6\"><h2 class=\"mb-2 apex-section-head\">Audience</h2><p class=\"\">No lists exist yet — create a list, then wire this campaign's recipients.</p><a href=\"/lists/new\" class=\"mt-3 inline-flex items-center justify-center h-10 px-4 py-2 apex-btn\">Create list</a></div>".to_string()),
     )
 }
 
@@ -851,7 +851,7 @@ fn cp_row_actions(
             return_to = html_escape(return_to),
         ));
         buttons.push(format!(
-            "<button type=\"submit\" form=\"{form_id}\" class=\"inline-flex items-center justify-center whitespace-nowrap px-2.5 py-1 apex-error apex-btn apex-btn--danger apex-btn--sm\">Delete</button>",
+            "<button type=\"submit\" form=\"{form_id}\" class=\"inline-flex items-center justify-center px-2.5 py-1 apex-error apex-btn apex-btn--danger apex-btn--sm\">Delete</button>",
             form_id = form_id,
         ));
     };
@@ -976,7 +976,7 @@ fn gdpr_transition_button(
         base = html_escape(base_path),
     ));
     format!(
-        "<button type=\"submit\" form=\"{form_id}\" class=\"inline-flex items-center justify-center whitespace-nowrap px-2.5 py-1 apex-btn apex-btn--sm\">{label}</button>",
+        "<button type=\"submit\" form=\"{form_id}\" class=\"inline-flex items-center justify-center px-2.5 py-1 apex-btn apex-btn--sm\">{label}</button>",
         form_id = form_id,
         label = html_escape(label),
     )
@@ -1013,7 +1013,7 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
     } else {
         match &data.primary_action {
             Some((label, href)) => format!(
-                "<a href=\"{}\" class=\"inline-flex w-full items-center justify-center whitespace-nowrap h-12 px-6 py-3 sm:w-auto apex-btn apex-btn--primary\">{}</a>",
+                "<a href=\"{}\" class=\"inline-flex w-full items-center justify-center h-12 px-6 py-3 sm:w-auto apex-btn apex-btn--primary\">{}</a>",
                 html_escape(href),
                 html_escape(label)
             ),
@@ -1033,7 +1033,7 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
                 let classes = "apex-btn min-h-[44px] w-full sm:w-auto";
                 if action.method.eq_ignore_ascii_case("post") {
                     format!(
-                        "<form method=\"post\" action=\"{action}\" class=\"inline\"><button type=\"submit\" class=\"{classes}\">{label}</button></form>",
+                        "<form method=\"post\" action=\"{action}\"><button type=\"submit\" class=\"{classes}\">{label}</button></form>",
                         action = html_escape(&action.action),
                         classes = classes,
                         label = html_escape(&action.label),
@@ -1328,7 +1328,7 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
                         .iter()
                         .map(|action| {
                             format!(
-                                "<button type=\"submit\" formaction=\"{action}\" formmethod=\"{method}\" class=\"inline-flex items-center justify-center whitespace-nowrap px-4 py-2 apex-btn\">{label}</button>",
+                                "<button type=\"submit\" formaction=\"{action}\" formmethod=\"{method}\" class=\"inline-flex items-center justify-center px-4 py-2 apex-btn\">{label}</button>",
                                 action = html_escape(&action.action),
                                 method = if action.method.eq_ignore_ascii_case("post") { "post" } else { "get" },
                                 label = html_escape(&action.label),
@@ -1541,12 +1541,12 @@ fn render_campaign_editor_page_with_data(
     }
     .render_html();
 
-    let save_button = format!("<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap px-4 py-2 apex-btn apex-btn--primary\">{}</button>", primary_action_label);
+    let save_button = format!("<button type=\"submit\" class=\"inline-flex items-center justify-center px-4 py-2 apex-btn apex-btn--primary\">{}</button>", primary_action_label);
     // Review §4.11: saving is save-as-configured, and "Save as draft" is a
     // distinct native submit that authorizes nothing — the named button
     // value reaches the handler, which clears any schedule instead of
     // arming an automatic send.
-    let save_draft_button = "<button type=\"submit\" name=\"as_draft\" value=\"1\" class=\"inline-flex items-center justify-center whitespace-nowrap px-4 py-2 apex-btn\">Save as draft</button>";
+    let save_draft_button = "<button type=\"submit\" name=\"as_draft\" value=\"1\" class=\"inline-flex items-center justify-center px-4 py-2 apex-btn\">Save as draft</button>";
 
     let hidden_id = campaign_id
         .map(|id| {
@@ -1625,7 +1625,7 @@ fn render_campaign_editor_page_with_data(
         timezone_label = Label { html_for: Some("campaign-timezone"), text: "Timezone", variant: "default", size: "default", required: false, optional: true }.render_html(),
         timezone_input = Input { id: Some("campaign-timezone"), input_type: "text", variant: "default", size: "default", placeholder: "Europe/Tallinn", value: &editor.timezone, left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: false, name: Some("timezone") }.render_html(),
         sto_box = NativeCheckbox { id: "campaign-sto", name: "send_time_optimization", checked: editor.send_time_optimization, label: "Optimize send time per recipient" }.render_html(),
-        preview_button = "<button type=\"submit\" formaction=\"/web/campaigns/preview\" formtarget=\"_blank\" class=\"inline-flex items-center justify-center whitespace-nowrap px-4 py-2 apex-btn\">Preview</button>",
+        preview_button = "<button type=\"submit\" formaction=\"/web/campaigns/preview\" formtarget=\"_blank\" class=\"inline-flex items-center justify-center px-4 py-2 apex-btn\">Preview</button>",
         save_draft_button = save_draft_button,
         save_button = save_button,
     )
@@ -2027,7 +2027,7 @@ pub fn web_dedicated_ips_page() -> String {
     let header_html = "<div class=\"flex items-center justify-between mb-6\">\
 <div><h1 class=\"apex-page-title\">Dedicated IPs</h1>\
 <p class=\"mt-1\">Manage your dedicated sending IP addresses</p></div>\
-<form method=\"post\" action=\"/web/dedicated-ips\" class=\"inline\"><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap h-12 px-6 py-3 apex-btn apex-btn--primary\">Provision New IP</button></form></div>";
+<form method=\"post\" action=\"/web/dedicated-ips\"><button type=\"submit\" class=\"inline-flex items-center justify-center h-12 px-6 py-3 apex-btn apex-btn--primary\">Provision New IP</button></form></div>";
 
     format!(
         "{header}\
@@ -2208,7 +2208,7 @@ pub fn control_plane_audit_page() -> String {
 <div class=\"apex-page-heading flex flex-col gap-2\"><p class=\"\"><span>Control Plane Audit</span></p>\
 <h1 class=\"apex-page-title\">Audit Logs</h1></div>\
 <div class=\"flex items-center gap-3\">\
-<a href=\"/web/admin/audit/export\" class=\"inline-flex items-center justify-center whitespace-nowrap px-4 py-2 apex-btn\">Export audit log (CSV)</a>\
+<a href=\"/web/admin/audit/export\" class=\"inline-flex items-center justify-center px-4 py-2 apex-btn\">Export audit log (CSV)</a>\
 </div>\
 <form method=\"get\" action=\"/audit\" role=\"search\" class=\"flex items-center gap-4\">\
 <div class=\"flex-1\"><label class=\"sr-only apex-label\" for=\"audit-search\">Search audit logs</label><input id=\"audit-search\" type=\"search\" name=\"query\" placeholder=\"Search audit logs...\" class=\"flex h-12 w-full border px-4 apex-input\" /></div><button type=\"submit\" class=\"px-4 py-2 apex-btn\">Search</button>\
@@ -2509,7 +2509,7 @@ fn sales_exception_item(decision: &SalesDecisionData) -> String {
     } else {
         let note_id = format!("decision-note-{}", decision.id);
         format!(
-            r#"<form method="post" action="/web/admin/autopilot/decisions/{id}/review" class="mt-3 flex flex-wrap items-end gap-3"><div class="min-w-[12rem] flex-1 space-y-1"><label class="apex-label" for="{note_id}">Review note (recorded)</label><input id="{note_id}" name="note" type="text" maxlength="500" placeholder="Why this decision is approved or rejected" class="w-full border px-3 py-2 apex-input" /></div><button type="submit" name="outcome" value="approved" class="apex-btn apex-btn--sm">Approve</button><button type="submit" name="outcome" value="rejected" class="inline-flex items-center justify-center whitespace-nowrap px-4 py-2 apex-btn apex-btn--danger">Reject</button><input type="hidden" name="return_to" value="/sales" /></form><p class="mt-2">Approval re-runs every gate before releasing the linked action; a gate refusal records the rejection with its reasons. The note is kept on the decision.</p>"#,
+            r#"<form method="post" action="/web/admin/autopilot/decisions/{id}/review" class="mt-3 flex flex-wrap items-end gap-3"><div class="min-w-[12rem] flex-1 space-y-1"><label class="apex-label" for="{note_id}">Review note (recorded)</label><input id="{note_id}" name="note" type="text" maxlength="500" placeholder="Why this decision is approved or rejected" class="w-full border px-3 py-2 apex-input" /></div><button type="submit" name="outcome" value="approved" class="apex-btn apex-btn--sm">Approve</button><button type="submit" name="outcome" value="rejected" class="inline-flex items-center justify-center px-4 py-2 apex-btn apex-btn--danger">Reject</button><input type="hidden" name="return_to" value="/sales" /></form><p class="mt-2">Approval re-runs every gate before releasing the linked action; a gate refusal records the rejection with its reasons. The note is kept on the decision.</p>"#,
             id = html_escape(&decision.id),
             note_id = html_escape(&note_id),
         )
@@ -3719,7 +3719,7 @@ pub fn web_campaigns_page() -> String {
     );
     let breadcrumbs = render_page_breadcrumbs("Campaigns");
     format!(
-        "<div class=\"space-y-6\">{breadcrumbs}<div class=\"flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"apex-page-title\">Campaigns</h1><p class=\"\">Search, filter, and batch-manage campaigns and their audiences in one place.</p></div><a href=\"/campaigns/new\" class=\"inline-flex w-full items-center justify-center whitespace-nowrap h-12 px-6 py-3 sm:w-auto apex-btn apex-btn--primary\">New Campaign</a></div>{filters}<form method=\"post\" action=\"/web/campaigns/delete-bulk\" data-bulk-form=\"campaigns\">{bulk_bar}<section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"\">Showing 11-20 of 42 campaigns. Returning from detail pages restores page 2 and the active filters.</p>{pagination}</div></section></form></div>",
+        "<div class=\"space-y-6\">{breadcrumbs}<div class=\"flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"apex-page-title\">Campaigns</h1><p class=\"\">Search, filter, and batch-manage campaigns and their audiences in one place.</p></div><a href=\"/campaigns/new\" class=\"inline-flex w-full items-center justify-center h-12 px-6 py-3 sm:w-auto apex-btn apex-btn--primary\">New Campaign</a></div>{filters}<form method=\"post\" action=\"/web/campaigns/delete-bulk\" data-bulk-form=\"campaigns\">{bulk_bar}<section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"\">Showing 11-20 of 42 campaigns. Returning from detail pages restores page 2 and the active filters.</p>{pagination}</div></section></form></div>",
         breadcrumbs = breadcrumbs,
         filters = render_debounced_filter_bar(
             "campaign-search",
@@ -3738,7 +3738,7 @@ pub fn web_campaigns_page() -> String {
 /// Campaign detail page.
 pub fn web_campaign_detail_page() -> String {
     format!(
-        "<div class=\"space-y-6\"><nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2\"><li><a href=\"{}\" class=\"apex-link\">Campaigns</a></li><li class=\"\">/</li><li class=\"apex-em\">Campaign Detail</li></ol></nav><div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"apex-page-title\">Campaign Detail</h1><p class=\"\">Breadcrumbs preserve the active list page and filter query when you navigate back.</p></div><div class=\"flex flex-col gap-3 sm:flex-row\"><a href=\"/campaigns/c_spring/edit?returnTo=%2Fcampaigns%3Fpage%3D2%26status%3Ddraft%26query%3Dspring\" class=\"inline-flex items-center justify-center whitespace-nowrap h-12 px-6 py-3 apex-btn\">Edit</a><a href=\"/confirm?intent=delete-campaign&amp;id=c_spring&amp;return_to=%2Fcampaigns\" class=\"inline-flex items-center justify-center whitespace-nowrap h-12 px-6 py-3 apex-btn apex-btn--danger\">Delete Campaign</a></div></div><div class=\"grid gap-6 md:grid-cols-3\"><div class=\"border p-6 md:p-8\"><h3 class=\"apex-h3\">Recipients</h3><p class=\"apex-em\">4,280</p></div><div class=\"border p-6 md:p-8\"><h3 class=\"apex-h3\">Open Rate</h3><p class=\"apex-em\">41.2%</p></div><div class=\"border p-6 md:p-8\"><h3 class=\"apex-h3\">Click Rate</h3><p class=\"apex-em\">8.6%</p></div></div></div>",
+        "<div class=\"space-y-6\"><nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2\"><li><a href=\"{}\" class=\"apex-link\">Campaigns</a></li><li class=\"\">/</li><li class=\"apex-em\">Campaign Detail</li></ol></nav><div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"apex-page-title\">Campaign Detail</h1><p class=\"\">Breadcrumbs preserve the active list page and filter query when you navigate back.</p></div><div class=\"flex flex-col gap-3 sm:flex-row\"><a href=\"/campaigns/c_spring/edit?returnTo=%2Fcampaigns%3Fpage%3D2%26status%3Ddraft%26query%3Dspring\" class=\"inline-flex items-center justify-center h-12 px-6 py-3 apex-btn\">Edit</a><a href=\"/confirm?intent=delete-campaign&amp;id=c_spring&amp;return_to=%2Fcampaigns\" class=\"inline-flex items-center justify-center h-12 px-6 py-3 apex-btn apex-btn--danger\">Delete Campaign</a></div></div><div class=\"grid gap-6 md:grid-cols-3\"><div class=\"border p-6 md:p-8\"><h3 class=\"apex-h3\">Recipients</h3><p class=\"apex-em\">4,280</p></div><div class=\"border p-6 md:p-8\"><h3 class=\"apex-h3\">Open Rate</h3><p class=\"apex-em\">41.2%</p></div><div class=\"border p-6 md:p-8\"><h3 class=\"apex-h3\">Click Rate</h3><p class=\"apex-em\">8.6%</p></div></div></div>",
         CAMPAIGNS_RETURN_HREF,
     )
 }
@@ -3754,7 +3754,7 @@ pub fn web_message_timeline_page() -> String {
      <p class=\"\">Replay a message's state as of a timestamp from the append-only delivery sources.</p></div>\
      <div class=\"border p-6 md:p-8\"><h3 class=\"apex-h3\">No message selected</h3>\
      <p class=\"\">Open a message from the events table to reconstruct its state at a specific time.</p>\
-     <a href=\"/events\" class=\"mt-4 inline-flex items-center justify-center whitespace-nowrap h-12 px-6 py-3 apex-btn\">Back to events</a></div></div>"
+     <a href=\"/events\" class=\"mt-4 inline-flex items-center justify-center h-12 px-6 py-3 apex-btn\">Back to events</a></div></div>"
         .to_string()
 }
 
@@ -3809,14 +3809,14 @@ pub fn web_campaign_edit_page_with_values(edit: &crate::view_data::CampaignEditD
     let breadcrumbs = render_page_breadcrumbs("Campaigns");
     format!(
         "<div class=\"w-full max-w-3xl space-y-6\">{breadcrumbs}\
-<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"apex-page-title\">Edit Campaign</h1><p class=\"\">Saving updates this campaign in place.</p></div><a href=\"/campaigns\" class=\"inline-flex items-center justify-center whitespace-nowrap px-4 py-2 apex-btn\">Back to campaigns</a></div>\
+<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"apex-page-title\">Edit Campaign</h1><p class=\"\">Saving updates this campaign in place.</p></div><a href=\"/campaigns\" class=\"inline-flex items-center justify-center px-4 py-2 apex-btn\">Back to campaigns</a></div>\
 <form class=\"space-y-6\" method=\"post\" action=\"/web/campaigns/update\">\
 <input type=\"hidden\" name=\"id\" value=\"{id}\" />\
 <div class=\"space-y-2\"><label class=\"apex-em apex-label\" for=\"campaign-name\">Campaign Name</label><input id=\"campaign-name\" name=\"name\" type=\"text\" required value=\"{name}\" class=\"flex h-12 w-full border px-3 apex-input\" /></div>\
 <div class=\"space-y-2\"><label class=\"apex-em apex-label\" for=\"campaign-subject\">Subject Line</label><input id=\"campaign-subject\" name=\"subject\" type=\"text\" required value=\"{subject}\" class=\"flex h-12 w-full border px-3 apex-input\" /></div>\
 <div class=\"space-y-2\"><label class=\"apex-em apex-label\" for=\"campaign-content\">HTML Content</label><textarea id=\"campaign-content\" name=\"html_body\" rows=\"10\" maxlength=\"25000\" class=\"flex min-h-[160px] w-full border px-3 py-2 apex-input apex-textarea\">{html_body}</textarea></div>\
 <div class=\"space-y-2\"><label class=\"apex-em apex-label\" for=\"campaign-scheduled-at\">Schedule (optional, UTC)</label><input id=\"campaign-scheduled-at\" name=\"scheduled_at\" type=\"datetime-local\" value=\"{scheduled_at}\" class=\"flex h-12 w-full border px-3 apex-input\" /><p class=\"\">Enter the send time in UTC. A scheduled time starts the send automatically when it arrives — saving a schedule authorizes that automatic send. Keep the field empty to store the campaign as a draft.</p></div>\
-<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"\">Your changes take effect when you submit this form.</p><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap px-4 py-2 apex-btn apex-btn--primary\">Save Changes</button></div>\
+<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"\">Your changes take effect when you submit this form.</p><button type=\"submit\" class=\"inline-flex items-center justify-center px-4 py-2 apex-btn apex-btn--primary\">Save Changes</button></div>\
 </form></div>",
         breadcrumbs = breadcrumbs,
         id = html_escape(&edit.id),
@@ -3915,7 +3915,7 @@ pub fn web_contacts_page() -> String {
             ],
         ],
     };
-    let bulk_bar = "<section class=\"border p-6\" data-bulk-scope=\"contacts\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div aria-live=\"polite\"><p class=\"apex-em\">Select rows to act on them in bulk</p><p class=\"\">Select the contacts you want to act on, then choose an action.</p></div><div class=\"flex flex-col gap-2 sm:flex-row\"><button type=\"submit\" formaction=\"/web/contacts/export.csv\" formmethod=\"get\" class=\"inline-flex items-center justify-center whitespace-nowrap px-4 py-2 apex-btn\">Export selected</button><button type=\"submit\" formaction=\"/web/contacts/delete-bulk\" class=\"apex-btn--link apex-error\">Delete selected</button></div></div></section>";
+    let bulk_bar = "<section class=\"border p-6\" data-bulk-scope=\"contacts\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div aria-live=\"polite\"><p class=\"apex-em\">Select rows to act on them in bulk</p><p class=\"\">Select the contacts you want to act on, then choose an action.</p></div><div class=\"flex flex-col gap-2 sm:flex-row\"><button type=\"submit\" formaction=\"/web/contacts/export.csv\" formmethod=\"get\" class=\"inline-flex items-center justify-center px-4 py-2 apex-btn\">Export selected</button><button type=\"submit\" formaction=\"/web/contacts/delete-bulk\" class=\"apex-btn--link apex-error\">Delete selected</button></div></div></section>";
     let pagination_key = pagination_storage_key("contacts");
     let pagination = PaginationControls {
         page: 3,
@@ -3928,7 +3928,7 @@ pub fn web_contacts_page() -> String {
     );
     let breadcrumbs = render_page_breadcrumbs("Contacts");
     format!(
-        "<div class=\"space-y-6\">{breadcrumbs}<div class=\"flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"apex-page-title\">Contacts</h1><p class=\"\">Server-rendered filters, deterministic states, and batch actions keep list management fast at scale.</p></div><a href=\"/contacts/new\" class=\"inline-flex w-full items-center justify-center whitespace-nowrap h-12 px-6 py-3 sm:w-auto apex-btn apex-btn--primary\">Add Contact</a></div>{filters}<form method=\"post\" action=\"/web/contacts/delete-bulk\" data-bulk-form=\"contacts\">{bulk_bar}<section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"\">Showing 41-60 of 148 contacts. Page state persists while you review individual records and come back.</p>{pagination}</div></section></form></div>",
+        "<div class=\"space-y-6\">{breadcrumbs}<div class=\"flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"apex-page-title\">Contacts</h1><p class=\"\">Server-rendered filters, deterministic states, and batch actions keep list management fast at scale.</p></div><a href=\"/contacts/new\" class=\"inline-flex w-full items-center justify-center h-12 px-6 py-3 sm:w-auto apex-btn apex-btn--primary\">Add Contact</a></div>{filters}<form method=\"post\" action=\"/web/contacts/delete-bulk\" data-bulk-form=\"contacts\">{bulk_bar}<section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"\">Showing 41-60 of 148 contacts. Page state persists while you review individual records and come back.</p>{pagination}</div></section></form></div>",
         breadcrumbs = breadcrumbs,
         filters = render_debounced_filter_bar(
             "contact-search",
@@ -3992,14 +3992,14 @@ pub fn web_contact_edit_page_with_values(contact: &crate::view_data::ContactEdit
     };
     format!(
         "<div class=\"w-full max-w-3xl space-y-6\">{breadcrumbs}\
-<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"apex-page-title\">Edit Contact</h1><p class=\"\">Saving updates this contact in place.</p></div><a href=\"/contacts\" class=\"inline-flex items-center justify-center whitespace-nowrap px-4 py-2 apex-btn\">Back to contacts</a></div>\
+<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"apex-page-title\">Edit Contact</h1><p class=\"\">Saving updates this contact in place.</p></div><a href=\"/contacts\" class=\"inline-flex items-center justify-center px-4 py-2 apex-btn\">Back to contacts</a></div>\
 <section class=\"border p-4\"><p class=\"apex-em\">Audience membership</p>{membership}<p class=\"mt-1\">Membership is managed from each list's page — this editor changes identity and subscription status only.</p></section>\
 <form class=\"space-y-6\" method=\"post\" action=\"/web/contacts/update\">\
 <input type=\"hidden\" name=\"id\" value=\"{id}\" />\
 <div class=\"space-y-2\"><label class=\"apex-em apex-label\" for=\"contact-email\">Email address</label><input id=\"contact-email\" type=\"text\" value=\"{email}\" readonly disabled class=\"flex h-12 w-full border px-3 apex-input\" /><p class=\"\">The address is the contact's identity and cannot be changed — delete the contact and add the new address instead.</p></div>\
 <div class=\"space-y-2\"><label class=\"apex-em apex-label\" for=\"contact-name\">Name</label><input id=\"contact-name\" name=\"name\" type=\"text\" value=\"{name}\" maxlength=\"120\" class=\"flex h-12 w-full border px-3 apex-input\" /></div>\
 <div class=\"space-y-2\"><label class=\"apex-em apex-label\" for=\"contact-status\">Subscription status</label><select id=\"contact-status\" name=\"status\" class=\"flex h-12 w-full border px-3 apex-select\">{options}</select></div>\
-<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"\">Your changes take effect when you submit this form.</p><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap px-4 py-2 apex-btn apex-btn--primary\">Save Contact</button></div>\
+<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"\">Your changes take effect when you submit this form.</p><button type=\"submit\" class=\"inline-flex items-center justify-center px-4 py-2 apex-btn apex-btn--primary\">Save Contact</button></div>\
 </form></div>",
         breadcrumbs = breadcrumbs,
         membership = membership,
@@ -4041,7 +4041,7 @@ pub fn web_contacts_new_page() -> String {
 <input id=\"contacts-import-file\" name=\"file\" type=\"file\" accept=\".csv,text/csv\" class=\"flex w-full border px-3 py-2 apex-input\" />\
 <p class=\"\">When both are provided the file wins. The import result arrives as a summary after you submit.</p>\
 </div>\
-<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap px-4 py-2 apex-btn\">Import contacts</button>\
+<button type=\"submit\" class=\"inline-flex items-center justify-center px-4 py-2 apex-btn\">Import contacts</button>\
 </form>\
 </section>\
 </div>",
@@ -4115,7 +4115,7 @@ pub fn web_lists_page() -> String {
     );
     let breadcrumbs = render_page_breadcrumbs("Lists");
     format!(
-        "<div class=\"space-y-6\">{breadcrumbs}<div class=\"flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"apex-page-title\">Lists</h1><p class=\"\">List actions run through a signed confirmation page and preserve the active list page when you navigate away and back.</p></div><a href=\"/lists/new\" class=\"inline-flex w-full items-center justify-center whitespace-nowrap h-12 px-6 py-3 sm:w-auto apex-btn apex-btn--primary\">New List</a></div>{filters}<section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"\">Showing 1-20 of 44 lists. Query parameters stay attached to pagination links for back/forward restoration.</p>{pagination}</div></section></div>",
+        "<div class=\"space-y-6\">{breadcrumbs}<div class=\"flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"apex-page-title\">Lists</h1><p class=\"\">List actions run through a signed confirmation page and preserve the active list page when you navigate away and back.</p></div><a href=\"/lists/new\" class=\"inline-flex w-full items-center justify-center h-12 px-6 py-3 sm:w-auto apex-btn apex-btn--primary\">New List</a></div>{filters}<section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"\">Showing 1-20 of 44 lists. Query parameters stay attached to pagination links for back/forward restoration.</p>{pagination}</div></section></div>",
         breadcrumbs = breadcrumbs,
         filters = render_debounced_filter_bar(
             "list-search",
@@ -4145,8 +4145,8 @@ pub fn web_list_detail_page() -> String {
 <div><h1 class=\"apex-page-title\" data-list-name>List</h1>\
 <p class=\"\">Subscribers and settings for this list. Reload the page to see fresh counts.</p></div>\
 <div class=\"flex flex-col gap-3 sm:flex-row\">\
-<a href=\"/lists/l_launch/edit\" class=\"inline-flex items-center justify-center whitespace-nowrap h-12 px-6 py-3 apex-btn\">Edit</a>\
-<a href=\"/confirm?intent=delete-list&amp;id=l_launch&amp;return_to=%2Flists\" class=\"inline-flex items-center justify-center whitespace-nowrap h-12 px-6 py-3 apex-btn apex-btn--danger\">Delete List</a>\
+<a href=\"/lists/l_launch/edit\" class=\"inline-flex items-center justify-center h-12 px-6 py-3 apex-btn\">Edit</a>\
+<a href=\"/confirm?intent=delete-list&amp;id=l_launch&amp;return_to=%2Flists\" class=\"inline-flex items-center justify-center h-12 px-6 py-3 apex-btn apex-btn--danger\">Delete List</a>\
 </div></div>\
 <div class=\"grid gap-6 md:grid-cols-3\">\
 <div class=\"border p-6 md:p-8\"><h3 class=\"apex-h3\">Subscribers</h3><p class=\"apex-em\">—</p><a href=\"/lists/l_launch/members\" class=\"mt-2 inline-flex items-center apex-link\">Inspect members &rarr;</a></div>\
@@ -4279,8 +4279,8 @@ pub fn web_list_detail_page_with_values(detail: &crate::view_data::ListDetailDat
 <div><h1 class=\"apex-page-title\" data-list-name>{name}</h1>\
 <p class=\"\">Subscribers and settings for this list. Reload the page to see fresh counts.</p></div>\
 <div class=\"flex flex-col gap-3 sm:flex-row\">\
-<a href=\"/lists/{id}/edit\" class=\"inline-flex items-center justify-center whitespace-nowrap h-12 px-6 py-3 apex-btn\">Edit</a>\
-<a href=\"/confirm?intent=delete-list&amp;id={id}&amp;return_to=%2Flists\" class=\"inline-flex items-center justify-center whitespace-nowrap h-12 px-6 py-3 apex-btn apex-btn--danger\">Delete List</a>\
+<a href=\"/lists/{id}/edit\" class=\"inline-flex items-center justify-center h-12 px-6 py-3 apex-btn\">Edit</a>\
+<a href=\"/confirm?intent=delete-list&amp;id={id}&amp;return_to=%2Flists\" class=\"inline-flex items-center justify-center h-12 px-6 py-3 apex-btn apex-btn--danger\">Delete List</a>\
 </div></div>\
 <div class=\"grid gap-6 md:grid-cols-3\">\
 <div class=\"border p-6 md:p-8\"><h3 class=\"apex-h3\">Subscribers</h3><p class=\"apex-em\">{subscribers}</p><a href=\"/lists/{id}/members\" class=\"mt-2 inline-flex items-center apex-link\">Inspect members &rarr;</a></div>\
@@ -4324,7 +4324,7 @@ pub fn web_list_members_page_with_values(members: &crate::view_data::ListMembers
         "<div data-view-state=\"empty\" class=\"border p-8\">\
 <h3 class=\"apex-h3\">No subscribers on this list yet</h3>\
 <p class=\"mx-auto mt-2 max-w-md\">Members are contacts you add to this list. Add the contacts you want to reach, then choose this list as a campaign audience.</p>\
-<div class=\"mt-5 flex flex-wrap items-center justify-center gap-3\"><a href=\"/contacts/new\" class=\"inline-flex items-center justify-center whitespace-nowrap px-6 py-3 apex-btn apex-btn--primary\">Add a contact</a><a href=\"/contacts\" class=\"inline-flex items-center justify-center whitespace-nowrap px-6 py-3 apex-btn\">View contacts</a></div>\
+<div class=\"mt-5 flex flex-wrap items-center justify-center gap-3\"><a href=\"/contacts/new\" class=\"inline-flex items-center justify-center px-6 py-3 apex-btn apex-btn--primary\">Add a contact</a><a href=\"/contacts\" class=\"inline-flex items-center justify-center px-6 py-3 apex-btn\">View contacts</a></div>\
 </div>".to_string()
     } else {
         format!(
@@ -4344,7 +4344,7 @@ pub fn web_list_members_page_with_values(members: &crate::view_data::ListMembers
 <div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\">\
 <div><h1 class=\"apex-page-title\">Members — {name}</h1>\
 <p class=\"\">{total} subscriber(s) on this list, newest first.</p></div>\
-<a href=\"/lists/{id}\" class=\"inline-flex items-center justify-center whitespace-nowrap px-6 py-3 apex-btn\">Back to list</a>\
+<a href=\"/lists/{id}\" class=\"inline-flex items-center justify-center px-6 py-3 apex-btn\">Back to list</a>\
 </div>\
 {body}\
 </div>",
@@ -4369,7 +4369,7 @@ pub fn web_list_members_page() -> String {
 <div data-view-state=\"empty\" class=\"border p-8\">\
 <h3 class=\"apex-h3\">Open a list to see its members</h3>\
 <p class=\"mx-auto mt-2 max-w-md\">This route shows one list's subscribers. Pick a list first.</p>\
-<div class=\"mt-5 flex flex-wrap items-center justify-center gap-3\"><a href=\"/lists\" class=\"inline-flex items-center justify-center whitespace-nowrap px-6 py-3 apex-btn apex-btn--primary\">View lists</a></div>\
+<div class=\"mt-5 flex flex-wrap items-center justify-center gap-3\"><a href=\"/lists\" class=\"inline-flex items-center justify-center px-6 py-3 apex-btn apex-btn--primary\">View lists</a></div>\
 </div></div>".to_string()
 }
 
@@ -4379,7 +4379,7 @@ pub fn web_lists_new_page() -> String {
 <h1 class=\"mb-6 apex-page-title\">Create List</h1>\
 <form class=\"space-y-6\" method=\"post\" action=\"/web/lists\">\
 <div class=\"space-y-2\">{name_label}{name_input}</div>\
-<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center\">{save_button}<a href=\"/lists\" class=\"inline-flex items-center justify-center whitespace-nowrap px-4 py-2 apex-btn\">Cancel</a></div>\
+<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center\">{save_button}<a href=\"/lists\" class=\"inline-flex items-center justify-center px-4 py-2 apex-btn\">Cancel</a></div>\
 </form></div>",
         name_label = Label {
             html_for: Some("list-new-name"),
@@ -4443,7 +4443,7 @@ pub fn web_templates_page() -> String {
     format!(
         "<div class=\"space-y-6\">\
 <div class=\"apex-page-heading\"><h1 class=\"apex-page-title\">Templates</h1>\
-<a href=\"/templates/new\" class=\"inline-flex items-center justify-center whitespace-nowrap h-12 px-6 py-3 apex-btn apex-btn--primary\">New Template</a></div>\
+<a href=\"/templates/new\" class=\"inline-flex items-center justify-center h-12 px-6 py-3 apex-btn apex-btn--primary\">New Template</a></div>\
 <section data-view-state=\"ready\">{table}</section></div>",
         table = table.render_html(),
     )
@@ -4494,15 +4494,15 @@ pub fn web_template_edit_page_with_values(edit: &crate::view_data::TemplateEditD
     let breadcrumbs = "<nav aria-label=\"Breadcrumb\" class=\"mb-6\"><ol class=\"flex items-center gap-2\"><li><a href=\"/templates\" class=\"apex-link\">Templates</a></li><li class=\"\">/</li><li class=\"apex-em\" aria-current=\"page\">Edit Template</li></ol></nav>".to_string();
     format!(
         "{breadcrumbs}<div class=\"w-full max-w-3xl space-y-6\">\
-<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"apex-page-title\">Edit Template</h1><p class=\"\">Saving creates a new version snapshot — the previous one can be restored.</p></div><a href=\"/templates\" class=\"inline-flex items-center justify-center whitespace-nowrap px-4 py-2 apex-btn\">Back to templates</a></div>\
+<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"apex-page-title\">Edit Template</h1><p class=\"\">Saving creates a new version snapshot — the previous one can be restored.</p></div><a href=\"/templates\" class=\"inline-flex items-center justify-center px-4 py-2 apex-btn\">Back to templates</a></div>\
 <form class=\"space-y-6\" method=\"post\" action=\"/web/templates/update\" data-form-id=\"template-update\">\
 <input type=\"hidden\" name=\"id\" value=\"{id}\" />\
 <div class=\"space-y-2\"><label class=\"apex-em apex-label\" for=\"template-name\">Template Name</label><input id=\"template-name\" name=\"name\" type=\"text\" required value=\"{name}\" class=\"flex h-12 w-full border px-3 apex-input\" /></div>\
 <div class=\"space-y-2\"><label class=\"apex-em apex-label\" for=\"template-subject\">Default Subject</label><input id=\"template-subject\" name=\"subject\" type=\"text\" value=\"{subject}\" class=\"flex h-12 w-full border px-3 apex-input\" /></div>\
 <div class=\"space-y-2\"><label class=\"apex-em apex-label\" for=\"template-content\">HTML Content</label><textarea id=\"template-content\" name=\"html_body\" rows=\"14\" class=\"flex min-h-[240px] w-full border px-3 py-2 apex-input apex-textarea\">{html_body}</textarea><p class=\"\">Leave the content empty to keep the stored body. Preview with an empty field renders the stored version.</p></div>\
 <div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"\">Your changes take effect when you submit this form.</p><div class=\"flex flex-col gap-3 sm:flex-row\">\
-<button type=\"submit\" formaction=\"/web/templates/preview\" formtarget=\"_blank\" class=\"inline-flex items-center justify-center whitespace-nowrap px-4 py-2 apex-btn\">Preview</button>\
-<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap px-4 py-2 apex-btn apex-btn--primary\">Save Changes</button>\
+<button type=\"submit\" formaction=\"/web/templates/preview\" formtarget=\"_blank\" class=\"inline-flex items-center justify-center px-4 py-2 apex-btn\">Preview</button>\
+<button type=\"submit\" class=\"inline-flex items-center justify-center px-4 py-2 apex-btn apex-btn--primary\">Save Changes</button>\
 </div></div>\
 </form></div>",
         id = html_escape(&edit.id),
@@ -4907,7 +4907,7 @@ pub fn web_domains_page() -> String {
     format!(
         "<div class=\"space-y-6\">\
 <div class=\"apex-page-heading\"><h1 class=\"apex-page-title\">Domains</h1>\
-<a href=\"/domains/new\" class=\"inline-flex items-center justify-center whitespace-nowrap h-12 px-6 py-3 apex-btn apex-btn--primary\">Add Domain</a></div>\
+<a href=\"/domains/new\" class=\"inline-flex items-center justify-center h-12 px-6 py-3 apex-btn apex-btn--primary\">Add Domain</a></div>\
 {empty}</div>",
         empty = EmptyState {
             title: "No domains configured",
@@ -5046,7 +5046,7 @@ pub fn web_demos_page(data: Option<&DemosPageData>) -> String {
                  <strong>Viewer link — shown once</strong>\
                  <span>Share this with the prospect. It is not stored in plaintext, so copy it now.</span>\
                  <code class=\"apex-mono mt-2 block break-all\">{url}</code>\
-                 <a href=\"{url}\" class=\"mt-3 inline-flex items-center justify-center whitespace-nowrap px-4 py-2 apex-btn\">Open viewer</a>\
+                 <a href=\"{url}\" class=\"mt-3 inline-flex items-center justify-center px-4 py-2 apex-btn\">Open viewer</a>\
                  </div>",
                 url = html_escape(url)
             )
@@ -5647,7 +5647,7 @@ pub fn api_key_create_form_html() -> String {
 <p class=\"mt-0.5\">Only scopes your account already holds can be issued. Prefer read-only keys when write access is not required.</p></div>\
 {scope_groups}</div>\
 <div class=\"flex items-center gap-3 pt-2 border-t\">\
-<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap px-5 py-2.5 apex-btn apex-btn--primary\">Create API Key</button>\
+<button type=\"submit\" class=\"inline-flex items-center justify-center px-5 py-2.5 apex-btn apex-btn--primary\">Create API Key</button>\
 <p class=\"\">No scopes selected still creates a key with no API access.</p></div>\
 </form>",
         scope_groups = scope_groups,
@@ -5670,7 +5670,7 @@ pub fn team_invite_form_html() -> String {
 <input id=\"team-invite-email\" name=\"userName\" type=\"email\" required autocomplete=\"email\" class=\"flex h-12 w-full border px-3 apex-input\" placeholder=\"colleague@company.com\" /></div>\
 <div class=\"space-y-2\"><label class=\"apex-em apex-label\" for=\"team-invite-role\">Role</label>\
 <select id=\"team-invite-role\" name=\"role\" class=\"flex h-12 w-full border px-3 apex-select\"><option value=\"member\">Member</option><option value=\"admin\">Admin</option></select></div>\
-<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap px-4 py-2 apex-btn apex-btn--primary\">Send invitation</button>\
+<button type=\"submit\" class=\"inline-flex items-center justify-center px-4 py-2 apex-btn apex-btn--primary\">Send invitation</button>\
 <p class=\"\">Submitting creates an invitation record and adds the address as <strong>invited</strong>. No invitation email is sent from this page yet — the record alone does not sign anyone in.</p>\
 </form>"
         .to_string()
@@ -5712,7 +5712,7 @@ pub fn webhook_register_form_html() -> String {
 <fieldset class=\"space-y-2\"><legend class=\"\">Events</legend>\
 <p class=\"\">At least one. Each event is delivered to the endpoint as a signed JSON POST.</p>\
 <div class=\"grid grid-cols-1 gap-1.5 sm:grid-cols-2\">{events}</div></fieldset>\
-<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap px-4 py-2 apex-btn apex-btn--primary\">Register endpoint</button>\
+<button type=\"submit\" class=\"inline-flex items-center justify-center px-4 py-2 apex-btn apex-btn--primary\">Register endpoint</button>\
 </form>"
     )
 }
@@ -5721,7 +5721,7 @@ pub fn webhook_register_form_html() -> String {
 pub fn dedicated_ip_request_form_html() -> String {
     "<form class=\"space-y-4 border p-6\" method=\"post\" action=\"/web/dedicated-ips/request\">\
 <p class=\"\">Request a dedicated IP. Eligibility depends on plan and sending volume; provisioning is confirmed by support.</p>\
-<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap px-4 py-2 apex-btn apex-btn--primary\">Request dedicated IP</button>\
+<button type=\"submit\" class=\"inline-flex items-center justify-center px-4 py-2 apex-btn apex-btn--primary\">Request dedicated IP</button>\
 </form>"
         .to_string()
 }
@@ -5731,7 +5731,7 @@ pub fn dedicated_ip_request_form_html() -> String {
 pub fn billing_action_form_html() -> String {
     "<div class=\"border p-6 space-y-3\">\
 <p class=\"\">Plan changes and invoice downloads are completed through the billing team. Submitting logs a request — it does not charge the account.</p>\
-<a href=\"/settings/billing\" class=\"inline-flex items-center justify-center whitespace-nowrap px-4 py-2 apex-btn apex-btn--primary\">Manage billing</a>\
+<a href=\"/settings/billing\" class=\"inline-flex items-center justify-center px-4 py-2 apex-btn apex-btn--primary\">Manage billing</a>\
 </div>"
         .to_string()
 }
@@ -5789,7 +5789,7 @@ pub fn web_settings_billing_page() -> String {
 <form class=\"mt-4\" method=\"post\" action=\"/web/billing/checkout\">\
 <label class=\"mb-2 apex-label\" for=\"upgrade-plan\"><svg class=\"\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Plan</label>\
 <select id=\"upgrade-plan\" name=\"plan\" class=\"w-full max-w-xs px-4 py-3 border apex-select\"><option value=\"starter\">Developer — €20/mo</option><option value=\"pro\">Pro — €89/mo</option><option value=\"growth\">Growth — €229/mo</option><option value=\"scale\">Business — €699/mo</option></select>\
-<button type=\"submit\" class=\"mt-3 inline-flex items-center justify-center whitespace-nowrap h-12 px-6 py-3 apex-btn apex-btn--primary\">Request plan change</button>\
+<button type=\"submit\" class=\"mt-3 inline-flex items-center justify-center h-12 px-6 py-3 apex-btn apex-btn--primary\">Request plan change</button>\
 </form>\
 </div>\
 <div class=\"border p-6 md:p-8\">\
@@ -5802,8 +5802,8 @@ pub fn web_settings_billing_page() -> String {
 <p class=\"apex-em\">Payment methods are managed with the billing team</p>\
 <p class=\"\">The request below asks the billing team to open the secure portal for you — card details are never entered on this page</p>\
 </div>\
-<div class=\"flex flex-col gap-2 w-full sm:w-auto shrink-0\">\
-<form class=\"inline\" method=\"post\" action=\"/web/billing/portal\"><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap h-10 px-4 py-2 apex-btn\">Request portal access</button></form>\
+<div class=\"flex flex-col gap-2 w-full sm:w-auto min-w-0\">\
+<form method=\"post\" action=\"/web/billing/portal\"><button type=\"submit\" class=\"inline-flex items-center justify-center h-10 px-4 py-2 apex-btn\">Request portal access</button></form>\
 </div>\
 </div>\
 </div>\
@@ -5812,7 +5812,7 @@ pub fn web_settings_billing_page() -> String {
 <p class=\"\">Cancelling stops the next renewal charge. Access continues until the end of the current billing period; choose the immediate option to end access now. No refunds are issued for partial periods.</p>\
 <form class=\"mt-4 space-y-3\" method=\"post\" action=\"/web/billing/cancel\">\
 <label class=\"flex items-center gap-2 apex-label\"><input type=\"checkbox\" name=\"immediately\" value=\"true\" class=\"h-4 w-4 apex-input\" />End access immediately instead of at period end</label>\
-<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap h-10 px-4 py-2 apex-btn\">Cancel subscription</button>\
+<button type=\"submit\" class=\"inline-flex items-center justify-center h-10 px-4 py-2 apex-btn\">Cancel subscription</button>\
 </form>\
 </div>\
 <div class=\"border p-6 md:p-8\"><h3 class=\"mb-6 apex-h3\">Usage This Month</h3>\
@@ -5861,7 +5861,7 @@ pub fn web_settings_webhooks_page() -> String {
 <label class=\"inline-flex items-center gap-2 apex-label\"><input type=\"checkbox\" name=\"events\" value=\"message.sent\" checked class=\"apex-input\" /> Sent</label>\
 <label class=\"inline-flex items-center gap-2 apex-label\"><input type=\"checkbox\" name=\"events\" value=\"message.bounced\" checked class=\"apex-input\" /> Bounced</label>\
 <label class=\"inline-flex items-center gap-2 apex-label\"><input type=\"checkbox\" name=\"events\" value=\"message.complained\" class=\"apex-input\" /> Complained</label>\
-<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap h-12 px-6 py-3 apex-btn apex-btn--primary\">Add Webhook</button>\
+<button type=\"submit\" class=\"inline-flex items-center justify-center h-12 px-6 py-3 apex-btn apex-btn--primary\">Add Webhook</button>\
 </form>\
 {table}</div>",
         table = table.render_html(),
@@ -6649,10 +6649,10 @@ pub fn control_plane_jobs_page_with_data(data: Option<&crate::view_data::JobsPag
         let escaped_id = html_escape(&job.id);
         let actions = match job.status.as_str() {
             "dead_letter" | "failed" => format!(
-                "<form method=\"post\" action=\"/web/admin/jobs/{escaped_id}/retry\" class=\"inline\"><button type=\"submit\" class=\"apex-btn apex-btn--sm\" title=\"Re-queue this terminal job (attempts reset, schedule now)\">Retry</button></form>"
+                "<form method=\"post\" action=\"/web/admin/jobs/{escaped_id}/retry\"><button type=\"submit\" class=\"apex-btn apex-btn--sm\" title=\"Re-queue this terminal job (attempts reset, schedule now)\">Retry</button></form>"
             ),
             "pending" => format!(
-                "<form method=\"post\" action=\"/web/admin/jobs/{escaped_id}/cancel\" class=\"inline\"><button type=\"submit\" class=\"apex-btn apex-btn--sm\" title=\"Delete this unclaimed job from the queue\">Cancel</button></form>"
+                "<form method=\"post\" action=\"/web/admin/jobs/{escaped_id}/cancel\"><button type=\"submit\" class=\"apex-btn apex-btn--sm\" title=\"Delete this unclaimed job from the queue\">Cancel</button></form>"
             ),
             "processing" => "<span class=\"\" title=\"A worker holds the lease; the job returns to the queue after its visibility timeout\">In flight</span>".to_string(),
             _ => "<span class=\"\" title=\"Completed history is immutable\">History</span>".to_string(),
@@ -7536,7 +7536,7 @@ pub fn web_confirm_page(
 <p class=\"mt-2\">{description} <span class=\"\">{resource}</span></p>\
 <p class=\"mt-4\">This confirmation link is signed and expires 15 minutes after it was rendered.</p>\
 <div class=\"mt-6 flex flex-col gap-3 sm:flex-row\">\
-<form method=\"post\" action=\"/web/confirm\" class=\"inline\">\
+<form method=\"post\" action=\"/web/confirm\">\
 <input type=\"hidden\" name=\"intent\" value=\"{intent}\" />\
 <input type=\"hidden\" name=\"id\" value=\"{resource}\" />\
 <input type=\"hidden\" name=\"return_to\" value=\"{return}\" />\
