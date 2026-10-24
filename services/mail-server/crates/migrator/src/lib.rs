@@ -722,7 +722,7 @@ pub mod test_support {
         // A test may only ever drop a PROVISIONED clone. Refuse the base
         // database named by TEST_DATABASE_URL: a naming bug must fail loudly
         // instead of deleting the developer's canonical database.
-        if let Some(base) = std::env::var("TEST_DATABASE_URL").ok() {
+        if let Ok(base) = std::env::var("TEST_DATABASE_URL") {
             let base_name = base
                 .rsplit_once('/')
                 .map(|(_, tail)| tail.split('?').next().unwrap_or(tail))

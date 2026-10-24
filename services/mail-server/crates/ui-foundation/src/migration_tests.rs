@@ -254,7 +254,8 @@ fn migration_docs_define_rust_ui_and_current_mollie_boundary() {
         "Mollie tool contract no longer documents the webhook endpoint"
     );
     assert!(
-        MOLLIE_TOOL_CONTRACT_MD.contains("Bearer") && MOLLIE_TOOL_CONTRACT_MD.contains("v2/payments"),
+        MOLLIE_TOOL_CONTRACT_MD.contains("Bearer")
+            && MOLLIE_TOOL_CONTRACT_MD.contains("v2/payments"),
         "Mollie tool contract no longer documents fetch-verify with the Bearer key"
     );
     // The pre-cutover wire vocabulary has no Mollie analog: a contract that
@@ -360,8 +361,7 @@ fn migration_269_renames_the_billing_schema_to_mollie() {
         ),
     ] {
         assert!(
-            MOLLIE_BILLING_RENAMES_SQL.contains(old)
-                && MOLLIE_BILLING_RENAMES_SQL.contains(new),
+            MOLLIE_BILLING_RENAMES_SQL.contains(old) && MOLLIE_BILLING_RENAMES_SQL.contains(new),
             "migration 269 does not rename {old} -> {new}"
         );
     }

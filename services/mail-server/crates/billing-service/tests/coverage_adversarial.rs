@@ -3565,8 +3565,7 @@ db_test!(overage_sweep_applies_wallet_before_dunning, |h| {
 // Mollie API and post the same form bodies Mollie would.
 
 /// The bare acknowledgement the handler returns for an accepted delivery.
-const MOLLIE_ACCEPTED: &str = "[accepted]";
-
+const MOLLIE_ACCEPTED: &str = "OK";
 
 type MockResponses = Arc<std::sync::Mutex<std::collections::HashMap<String, (u16, String)>>>;
 
@@ -3584,19 +3583,7 @@ impl MockMollie {
 
     fn publish_payment(&self, document: &serde_json::Value) {
         let id = document["id"].as_str().expect("payment document id");
-        self.route(
-            &format!("/v2/payments/{id}"),
-            200,
-            document.to_string(),
-        );
-    }
-
-    fn publish_refunds(&self, payment_id: &str, refunds: &[serde_json::Value]) {
-        self.route(
-            &format!("/v2/payments/{payment_id}/refunds"),
-            200,
-            serde_json::json!({ "_embedded": { "refunds": refunds } }).to_string(),
-        );
+        self.route(&format!("/v2/payments/{id}"), 200, document.to_string());
     }
 }
 
@@ -3631,9 +3618,8 @@ async fn mock_handler(
 fn mock_mollie_api() -> &'static MockMollie {
     static MOCK: std::sync::OnceLock<MockMollie> = std::sync::OnceLock::new();
     MOCK.get_or_init(|| {
-        let responses: MockResponses = Arc::new(std::sync::Mutex::new(
-            std::collections::HashMap::new(),
-        ));
+        let responses: MockResponses =
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock");
         listener
             .set_nonblocking(true)
@@ -3791,7 +3777,7 @@ async fn expect_mollie_ok(app: &axum::Router, payment_id: &str) {
     );
     assert_eq!(
         text, MOLLIE_ACCEPTED,
-        "the acknowledgement is the bare [accepted] body"
+        "the acknowledgement is the bare OK body Mollie treats as success"
     );
 }
 
@@ -3804,8 +3790,7 @@ fn json_error(text: &str) -> String {
 }
 
 /// Serializes the tests that inspect the process-shared deadletter indexes.
-static WEBHOOK_DEADLETTER_LOCK: tokio::sync::Mutex<()> =
-    tokio::sync::Mutex::const_new(());
+static WEBHOOK_DEADLETTER_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// The `(status, error)` rows recorded for a payment id.
 async fn webhook_rows(h: &Harness, payment_id: &str) -> Vec<(String, Option<String>)> {
@@ -3928,7 +3913,12 @@ db_test!(mollie_webhook_form_body_is_verified_by_fetch, |h| {
     seed_tenant(&h, tenant, "free").await;
     let invoice_id = Uuid::new_v4();
     seed_cov_local_invoice(&h, tenant, invoice_id, 1_000, 0, 1_000, "eur").await;
-    mock.publish_payment(&recurring_payment("tr_cov_form", invoice_id, 1_000, Some(tenant)));
+    mock.publish_payment(&recurring_payment(
+        "tr_cov_form",
+        invoice_id,
+        1_000,
+        Some(tenant),
+    ));
 
     expect_mollie_ok(&app, "tr_cov_form").await;
 
@@ -3972,17 +3962,16 @@ db_test!(mollie_webhook_refusals_write_nothing_and_deadletter, |h| {
     mock.route("/v2/payments/tr_cov_provider_down", 503, "upstream down");
     let (status, _) = deliver_payment(&app, "tr_cov_provider_down").await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    assert!(deadletters_naming(&h, &["tr_cov_provider_down"]).await.is_empty());
+    assert!(deadletters_naming(&h, &["tr_cov_provider_down"])
+        .await
+        .is_empty());
     assert!(webhook_rows(&h, "tr_cov_provider_down").await.is_empty());
 
     // A provider document we cannot read is a refused, deadlettered 400.
     mock.route("/v2/payments/tr_cov_unreadable", 200, "not json");
     let (status, text) = deliver_payment(&app, "tr_cov_unreadable").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(
-        json_error(&text),
-        "Mollie returned an unreadable object"
-    );
+    assert_eq!(json_error(&text), "Mollie returned an unreadable object");
     let entries = deadletters_naming(&h, &["tr_cov_unreadable"]).await;
     assert_eq!(entries.len(), 1, "the unreadable object is deadlettered");
     assert_eq!(entries[0]["reason"], "malformed_provider_object");
@@ -4009,7 +3998,9 @@ db_test!(mollie_webhook_refusals_write_nothing_and_deadletter, |h| {
         assert_eq!(json_error(&text), "Invalid webhook body");
     }
     assert!(
-        !deadletters_naming(&h, &["tr_cov_bad_id_0"]).await.is_empty(),
+        !deadletters_naming(&h, &["tr_cov_bad_id_0"])
+            .await
+            .is_empty(),
         "a refused id is deadlettered for triage"
     );
 
@@ -4066,50 +4057,55 @@ db_test!(mollie_webhook_refusals_write_nothing_and_deadletter, |h| {
     assert_eq!(snapshots, 0);
 });
 
-db_test!(mollie_webhook_unsettled_status_is_acknowledged_without_effects, |h| {
-    let mock = mock_mollie_api();
-    let app = billing_service::routes::router(h.state.clone());
-    mock.publish_payment(&payment_document(
-        "tr_cov_open",
-        "open",
-        2_900,
-        Some("recurring"),
-        "cst_cov",
-        Some("mdt_cov"),
-        serde_json::json!({ "tenant_id": "cov_wh_open" }),
-    ));
-    expect_mollie_ok(&app, "tr_cov_open").await;
+db_test!(
+    mollie_webhook_unsettled_status_is_acknowledged_without_effects,
+    |h| {
+        let mock = mock_mollie_api();
+        let app = billing_service::routes::router(h.state.clone());
+        mock.publish_payment(&payment_document(
+            "tr_cov_open",
+            "open",
+            2_900,
+            Some("recurring"),
+            "cst_cov",
+            Some("mdt_cov"),
+            serde_json::json!({ "tenant_id": "cov_wh_open" }),
+        ));
+        expect_mollie_ok(&app, "tr_cov_open").await;
 
-    let events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mollie_webhook_events")
-        .fetch_one(&h.pool)
-        .await
-        .expect("count events");
-    assert_eq!(events, 0, "open has not settled: no fact to record");
-    let invoices: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM invoices")
-        .fetch_one(&h.pool)
-        .await
-        .expect("count invoices");
-    assert_eq!(invoices, 0);
-});
+        let events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mollie_webhook_events")
+            .fetch_one(&h.pool)
+            .await
+            .expect("count events");
+        assert_eq!(events, 0, "open has not settled: no fact to record");
+        let invoices: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM invoices")
+            .fetch_one(&h.pool)
+            .await
+            .expect("count invoices");
+        assert_eq!(invoices, 0);
+    }
+);
 
-db_test!(mollie_webhook_replay_is_idempotent_and_reclaims_stale, |h| {
-    let mock = mock_mollie_api();
-    let app = billing_service::routes::router(h.state.clone());
-    let tenant = "cov_wh_replay";
-    seed_tenant(&h, tenant, "free").await;
+db_test!(
+    mollie_webhook_replay_is_idempotent_and_reclaims_stale,
+    |h| {
+        let mock = mock_mollie_api();
+        let app = billing_service::routes::router(h.state.clone());
+        let tenant = "cov_wh_replay";
+        seed_tenant(&h, tenant, "free").await;
 
-    let replay_invoice = Uuid::new_v4();
-    seed_cov_local_invoice(&h, tenant, replay_invoice, 1_000, 0, 1_000, "eur").await;
-    mock.publish_payment(&recurring_payment(
-        "tr_cov_replay",
-        replay_invoice,
-        1_000,
-        Some(tenant),
-    ));
-    expect_mollie_ok(&app, "tr_cov_replay").await;
-    expect_mollie_ok(&app, "tr_cov_replay").await;
+        let replay_invoice = Uuid::new_v4();
+        seed_cov_local_invoice(&h, tenant, replay_invoice, 1_000, 0, 1_000, "eur").await;
+        mock.publish_payment(&recurring_payment(
+            "tr_cov_replay",
+            replay_invoice,
+            1_000,
+            Some(tenant),
+        ));
+        expect_mollie_ok(&app, "tr_cov_replay").await;
+        expect_mollie_ok(&app, "tr_cov_replay").await;
 
-    let (status_text, allocations, claims): (String, i64, i64) = sqlx::query_as(
+        let (status_text, allocations, claims): (String, i64, i64) = sqlx::query_as(
         "SELECT (SELECT status FROM invoices WHERE id = $1),
                 (SELECT COUNT(*) FROM invoice_payment_allocations WHERE invoice_id = $1),
                 (SELECT COUNT(*) FROM mollie_webhook_events WHERE mollie_payment_id = 'tr_cov_replay')",
@@ -4118,51 +4114,54 @@ db_test!(mollie_webhook_replay_is_idempotent_and_reclaims_stale, |h| {
     .fetch_one(&h.pool)
     .await
     .expect("replay state");
-    assert_eq!(status_text, "paid");
-    assert_eq!(allocations, 1, "replay never double-allocates");
-    assert_eq!(claims, 1, "one claim row per payment fact");
+        assert_eq!(status_text, "paid");
+        assert_eq!(allocations, 1, "replay never double-allocates");
+        assert_eq!(claims, 1, "one claim row per payment fact");
 
-    // Stale-pending reclaim: an 11-minute-old pending row is reclaimed, a
-    // fresh one is left alone; the redelivered payment then settles once.
-    let stale_invoice = Uuid::new_v4();
-    seed_cov_local_invoice(&h, tenant, stale_invoice, 2_500, 0, 2_500, "eur").await;
-    mock.publish_payment(&recurring_payment(
-        "tr_cov_replay_stale",
-        stale_invoice,
-        2_500,
-        Some(tenant),
-    ));
-    let fresh_id = "mollie:cov_replay_fresh_not_stolen";
-    sqlx::query(
-        "INSERT INTO mollie_webhook_events
+        // Stale-pending reclaim: an 11-minute-old pending row is reclaimed, a
+        // fresh one is left alone; the redelivered payment then settles once.
+        let stale_invoice = Uuid::new_v4();
+        seed_cov_local_invoice(&h, tenant, stale_invoice, 2_500, 0, 2_500, "eur").await;
+        mock.publish_payment(&recurring_payment(
+            "tr_cov_replay_stale",
+            stale_invoice,
+            2_500,
+            Some(tenant),
+        ));
+        let fresh_id = "mollie:cov_replay_fresh_not_stolen";
+        sqlx::query(
+            "INSERT INTO mollie_webhook_events
              (id, mollie_event_id, event_type, status, created_at, updated_at)
          VALUES (gen_random_uuid(), 'mollie:cov_replay_stale_pending', 'AUTHORISATION', 'pending',
                  NOW() - INTERVAL '20 minutes', NOW() - INTERVAL '11 minutes'),
                 (gen_random_uuid(), $1, 'AUTHORISATION', 'pending', NOW(), NOW())",
-    )
-    .bind(fresh_id)
-    .execute(&h.pool)
-    .await
-    .expect("seed pending rows");
-
-    let reclaimed = billing_service::mollie_webhooks::reclaim_stale_pending_webhooks(&h.state)
+        )
+        .bind(fresh_id)
+        .execute(&h.pool)
         .await
-        .expect("reclaim stale pending webhooks");
-    assert_eq!(reclaimed, vec!["mollie:cov_replay_stale_pending".to_string()]);
-    let (stale_status, fresh_status): (String, String) = sqlx::query_as(
-        "SELECT (SELECT status FROM mollie_webhook_events WHERE mollie_event_id = $1),
-                (SELECT status FROM mollie_webhook_events WHERE mollie_event_id = $2)",
-    )
-    .bind("mollie:cov_replay_stale_pending")
-    .bind(fresh_id)
-    .fetch_one(&h.pool)
-    .await
-    .expect("pending rows");
-    assert_eq!(stale_status, "received", "the abandoned claim is reclaimed");
-    assert_eq!(fresh_status, "pending", "fresh pending work is not stolen");
+        .expect("seed pending rows");
 
-    expect_mollie_ok(&app, "tr_cov_replay_stale").await;
-    let (status_text, allocations, claims): (String, i64, i64) = sqlx::query_as(
+        let reclaimed = billing_service::mollie_webhooks::reclaim_stale_pending_webhooks(&h.state)
+            .await
+            .expect("reclaim stale pending webhooks");
+        assert_eq!(
+            reclaimed,
+            vec!["mollie:cov_replay_stale_pending".to_string()]
+        );
+        let (stale_status, fresh_status): (String, String) = sqlx::query_as(
+            "SELECT (SELECT status FROM mollie_webhook_events WHERE mollie_event_id = $1),
+                (SELECT status FROM mollie_webhook_events WHERE mollie_event_id = $2)",
+        )
+        .bind("mollie:cov_replay_stale_pending")
+        .bind(fresh_id)
+        .fetch_one(&h.pool)
+        .await
+        .expect("pending rows");
+        assert_eq!(stale_status, "received", "the abandoned claim is reclaimed");
+        assert_eq!(fresh_status, "pending", "fresh pending work is not stolen");
+
+        expect_mollie_ok(&app, "tr_cov_replay_stale").await;
+        let (status_text, allocations, claims): (String, i64, i64) = sqlx::query_as(
         "SELECT (SELECT status FROM invoices WHERE id = $1),
                 (SELECT COUNT(*) FROM invoice_payment_allocations WHERE invoice_id = $1),
                 (SELECT COUNT(*) FROM mollie_webhook_events WHERE mollie_payment_id = 'tr_cov_replay_stale')",
@@ -4171,10 +4170,11 @@ db_test!(mollie_webhook_replay_is_idempotent_and_reclaims_stale, |h| {
     .fetch_one(&h.pool)
     .await
     .expect("stale state");
-    assert_eq!(status_text, "paid");
-    assert_eq!(allocations, 1);
-    assert_eq!(claims, 1);
-});
+        assert_eq!(status_text, "paid");
+        assert_eq!(allocations, 1);
+        assert_eq!(claims, 1);
+    }
+);
 
 db_test!(mollie_webhook_out_of_order_events_never_rewind_state, |h| {
     let mock = mock_mollie_api();
@@ -4199,10 +4199,7 @@ db_test!(mollie_webhook_out_of_order_events_never_rewind_state, |h| {
             .fetch_one(&h.pool)
             .await
             .expect("invoice after settlement");
-    assert_eq!(
-        payment_after_first.as_deref(),
-        Some("tr_cov_order_first")
-    );
+    assert_eq!(payment_after_first.as_deref(), Some("tr_cov_order_first"));
 
     // A LATER, DIFFERENT payment fact for the already-paid invoice is a NEW
     // notification: acknowledged idempotently, never re-settled or rewound.
@@ -4232,7 +4229,10 @@ db_test!(mollie_webhook_out_of_order_events_never_rewind_state, |h| {
     .expect("invoice after the later delivery");
     assert_eq!(status_text, "paid", "the settled invoice is never rewound");
     assert_eq!(allocations, 1, "a second charge never double-settles");
-    assert_eq!(payment_id, payment_after_first, "the binding is never overwritten");
+    assert_eq!(
+        payment_id, payment_after_first,
+        "the binding is never overwritten"
+    );
     assert_eq!(
         paid_at_after_second, paid_at_after_first,
         "paid_at is never re-stamped"
@@ -4364,101 +4364,109 @@ db_test!(
     }
 );
 
-db_test!(mollie_webhook_cross_tenant_binding_and_bad_states_refuse, |h| {
-    let _guard = WEBHOOK_DEADLETTER_LOCK.lock().await;
-    let mock = mock_mollie_api();
-    let app = billing_service::routes::router(h.state.clone());
-    let owner = "cov_wh_bind_a";
-    let other = "cov_wh_bind_b";
-    seed_tenant(&h, owner, "free").await;
-    seed_tenant(&h, other, "free").await;
-    seed_cov_subscription(&h, owner, "sub_cov_bound", None).await;
-    let invoice_id = Uuid::new_v4();
-    seed_cov_local_invoice(&h, owner, invoice_id, 4_900, 0, 4_900, "eur").await;
+db_test!(
+    mollie_webhook_cross_tenant_binding_and_bad_states_refuse,
+    |h| {
+        let _guard = WEBHOOK_DEADLETTER_LOCK.lock().await;
+        let mock = mock_mollie_api();
+        let app = billing_service::routes::router(h.state.clone());
+        let owner = "cov_wh_bind_a";
+        let other = "cov_wh_bind_b";
+        seed_tenant(&h, owner, "free").await;
+        seed_tenant(&h, other, "free").await;
+        seed_cov_subscription(&h, owner, "sub_cov_bound", None).await;
+        let invoice_id = Uuid::new_v4();
+        seed_cov_local_invoice(&h, owner, invoice_id, 4_900, 0, 4_900, "eur").await;
 
-    // The FIRST payment binds the OWNER's subscription: the fetch produces
-    // both an informational authorisation and the RECURRING_CONTRACT fact.
-    mock.publish_payment(&first_payment(
-        "tr_cov_bind_owner",
-        owner,
-        "mdt_cov_owner",
-        Some(invoice_id),
-    ));
-    expect_mollie_ok(&app, "tr_cov_bind_owner").await;
-    let bound: Option<String> = sqlx::query_scalar(
-        "SELECT mollie_mandate_id FROM mollie_subscriptions
+        // The FIRST payment binds the OWNER's subscription: the fetch produces
+        // both an informational authorisation and the RECURRING_CONTRACT fact.
+        mock.publish_payment(&first_payment(
+            "tr_cov_bind_owner",
+            owner,
+            "mdt_cov_owner",
+            Some(invoice_id),
+        ));
+        expect_mollie_ok(&app, "tr_cov_bind_owner").await;
+        let bound: Option<String> = sqlx::query_scalar(
+            "SELECT mollie_mandate_id FROM mollie_subscriptions
          WHERE mollie_subscription_id = 'sub_cov_bound'",
-    )
-    .fetch_one(&h.pool)
-    .await
-    .expect("owner subscription");
-    assert_eq!(bound.as_deref(), Some("mdt_cov_owner"));
+        )
+        .fetch_one(&h.pool)
+        .await
+        .expect("owner subscription");
+        assert_eq!(bound.as_deref(), Some("mdt_cov_owner"));
 
-    // The invoice belongs to `owner` but the payment is attributed to
-    // `other`: cross-tenant settlement is refused and nothing moves.
-    clear_deadletters_naming(&h, &["tr_cov_cross"]).await;
-    mock.publish_payment(&recurring_payment(
-        "tr_cov_cross",
-        invoice_id,
-        4_900,
-        Some(other),
-    ));
-    let (status, _) = deliver_payment(&app, "tr_cov_cross").await;
-    assert_eq!(
-        status,
-        StatusCode::BAD_REQUEST,
-        "a cross-tenant settlement is refused"
-    );
-    let rows = webhook_rows(&h, "tr_cov_cross").await;
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].0, "failed");
-    assert!(
-        rows[0].1.clone().unwrap_or_default().contains("cross-tenant"),
-        "the refusal names the condition"
-    );
-    let (invoice_status, payment_id, allocations): (String, Option<String>, i64) = sqlx::query_as(
-        "SELECT status, mollie_payment_id,
+        // The invoice belongs to `owner` but the payment is attributed to
+        // `other`: cross-tenant settlement is refused and nothing moves.
+        clear_deadletters_naming(&h, &["tr_cov_cross"]).await;
+        mock.publish_payment(&recurring_payment(
+            "tr_cov_cross",
+            invoice_id,
+            4_900,
+            Some(other),
+        ));
+        let (status, _) = deliver_payment(&app, "tr_cov_cross").await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "a cross-tenant settlement is refused"
+        );
+        let rows = webhook_rows(&h, "tr_cov_cross").await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, "failed");
+        assert!(
+            rows[0]
+                .1
+                .clone()
+                .unwrap_or_default()
+                .contains("cross-tenant"),
+            "the refusal names the condition"
+        );
+        let (invoice_status, payment_id, allocations): (String, Option<String>, i64) =
+            sqlx::query_as(
+                "SELECT status, mollie_payment_id,
                 (SELECT COUNT(*) FROM invoice_payment_allocations WHERE invoice_id = $1)
          FROM invoices WHERE id = $1",
-    )
-    .bind(invoice_id)
-    .fetch_one(&h.pool)
-    .await
-    .expect("invoice");
-    assert_eq!(invoice_status, "pending");
-    assert_eq!(payment_id, None);
-    assert_eq!(allocations, 0);
-
-    // A token delivery for a tenant with no subscription row is
-    // acknowledged (the mandate is recoverable from the provider) and no
-    // row is invented.
-    mock.publish_payment(&first_payment(
-        "tr_cov_bind_orphan",
-        other,
-        "mdt_cov_orphan",
-        None,
-    ));
-    expect_mollie_ok(&app, "tr_cov_bind_orphan").await;
-    let other_rows: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM mollie_subscriptions WHERE tenant_id = $1")
-            .bind(other)
+            )
+            .bind(invoice_id)
             .fetch_one(&h.pool)
             .await
-            .expect("other subscriptions");
-    assert_eq!(other_rows, 0, "the acknowledgement invents no row");
-    let owner_token_after: Option<String> = sqlx::query_scalar(
-        "SELECT mollie_mandate_id FROM mollie_subscriptions
+            .expect("invoice");
+        assert_eq!(invoice_status, "pending");
+        assert_eq!(payment_id, None);
+        assert_eq!(allocations, 0);
+
+        // A token delivery for a tenant with no subscription row is
+        // acknowledged (the mandate is recoverable from the provider) and no
+        // row is invented.
+        mock.publish_payment(&first_payment(
+            "tr_cov_bind_orphan",
+            other,
+            "mdt_cov_orphan",
+            None,
+        ));
+        expect_mollie_ok(&app, "tr_cov_bind_orphan").await;
+        let other_rows: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM mollie_subscriptions WHERE tenant_id = $1")
+                .bind(other)
+                .fetch_one(&h.pool)
+                .await
+                .expect("other subscriptions");
+        assert_eq!(other_rows, 0, "the acknowledgement invents no row");
+        let owner_token_after: Option<String> = sqlx::query_scalar(
+            "SELECT mollie_mandate_id FROM mollie_subscriptions
          WHERE mollie_subscription_id = 'sub_cov_bound'",
-    )
-    .fetch_one(&h.pool)
-    .await
-    .expect("owner subscription");
-    assert_eq!(
-        owner_token_after.as_deref(),
-        Some("mdt_cov_owner"),
-        "another tenant's delivery never rewrites the owner's binding"
-    );
-});
+        )
+        .fetch_one(&h.pool)
+        .await
+        .expect("owner subscription");
+        assert_eq!(
+            owner_token_after.as_deref(),
+            Some("mdt_cov_owner"),
+            "another tenant's delivery never rewrites the owner's binding"
+        );
+    }
+);
 
 db_test!(
     unverified_mollie_contract_binding_never_grants_a_paid_plan,
@@ -6220,7 +6228,6 @@ db_test!(overage_sweep_backfills_legacy_pricing_snapshot_once, |h| {
     invalidate_subscription_cache("tenant-that-does-not-exist");
 });
 
-
 // ---------------------------------------------------------------------------
 // E-SWEEP-TRIGGER — on-demand overage sweep entrypoint
 // ---------------------------------------------------------------------------
@@ -6600,3 +6607,295 @@ fn overage_math_is_exact_and_quotes_only_catalog_rates() {
     assert_eq!(calculate_overage_cost_with_rate(101, 100, 80), 1);
 }
 
+// ---------------------------------------------------------------------------
+// Plan activation — the money path: a verified paid checkout grants the plan,
+// issues a paid invoice that reconciles to the collected gross, and is
+// idempotent on the payment id.
+// ---------------------------------------------------------------------------
+
+fn subscription_document(id: &str, customer: &str, cents: i64) -> serde_json::Value {
+    serde_json::json!({
+        "id": id,
+        "customerId": customer,
+        "status": "active",
+        "amount": { "currency": "EUR", "value": money_value(cents) },
+        "interval": "1 month",
+        "description": "ApexMail Starter"
+    })
+}
+
+db_test!(
+    paid_checkout_activation_grants_exactly_the_charged_gross,
+    |h| {
+        let mock = mock_mollie_api();
+        seed_tenant(&h, "cov_activate", "free").await;
+        seed_billing_address(&h, "cov_activate", "EE").await;
+        mock.route(
+            "/v2/customers/cst_cov_activate/subscriptions",
+            201,
+            subscription_document("sub_cov_activate", "cst_cov_activate", 2_000).to_string(),
+        );
+
+        let outcome = billing_service::plan_billing::activate_from_paid_checkout(
+            &h.pool,
+            "tr_cov_activate",
+            "cov_activate",
+            "starter",
+            "monthly",
+            "EUR",
+            2_000,
+            Some("cst_cov_activate"),
+            Some("mdt_cov_activate"),
+        )
+        .await
+        .expect("activation");
+        assert_eq!(
+            outcome.mollie_subscription_id.as_deref(),
+            Some("sub_cov_activate")
+        );
+        assert!(!outcome.already_active);
+
+        let plan: String = sqlx::query_scalar("SELECT plan FROM tenants WHERE id = $1")
+            .bind("cov_activate")
+            .fetch_one(&h.pool)
+            .await
+            .expect("tenant plan");
+        assert_eq!(plan, "starter");
+
+        let (status, subscription_id): (String, String) = sqlx::query_as(
+            "SELECT status, mollie_subscription_id FROM mollie_subscriptions WHERE tenant_id = $1",
+        )
+        .bind("cov_activate")
+        .fetch_one(&h.pool)
+        .await
+        .expect("subscription row");
+        assert_eq!(status, "active");
+        assert_eq!(subscription_id, "sub_cov_activate");
+
+        let (invoice_status, net, vat, total): (String, i64, i64, i64) = sqlx::query_as(
+            "SELECT status, subtotal, vat_total, total FROM invoices \
+         WHERE mollie_payment_id = 'tr_cov_activate'",
+        )
+        .fetch_one(&h.pool)
+        .await
+        .expect("plan invoice");
+        assert_eq!(invoice_status, "paid");
+        assert_eq!(total, 2_000, "the invoice totals the collected gross");
+        assert_eq!(net + vat, total, "net + VAT is exactly the charge");
+        assert!(vat > 0, "an Estonian charge carries VAT");
+
+        let (allocations, allocated): (i64, i64) = sqlx::query_as(
+        "SELECT count(*), COALESCE(sum(amount_cents), 0)::bigint FROM invoice_payment_allocations \
+         WHERE operation_id = 'mollie:tr_cov_activate'",
+    )
+    .fetch_one(&h.pool)
+    .await
+    .expect("allocation");
+        assert_eq!((allocations, allocated), (1, 2_000));
+
+        // Webhook redelivery / operator replay: the payment id is the key.
+        let replay = billing_service::plan_billing::activate_from_paid_checkout(
+            &h.pool,
+            "tr_cov_activate",
+            "cov_activate",
+            "starter",
+            "monthly",
+            "EUR",
+            2_000,
+            Some("cst_cov_activate"),
+            Some("mdt_cov_activate"),
+        )
+        .await
+        .expect("replay");
+        assert!(replay.already_active);
+        let invoices: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM invoices WHERE mollie_payment_id = 'tr_cov_activate'",
+        )
+        .fetch_one(&h.pool)
+        .await
+        .expect("invoice count");
+        assert_eq!(invoices, 1, "a replay never issues a second invoice");
+
+        // A charge that does not match the catalog grants nothing at all.
+        let error = billing_service::plan_billing::activate_from_paid_checkout(
+            &h.pool,
+            "tr_cov_underpaid",
+            "cov_activate",
+            "starter",
+            "monthly",
+            "EUR",
+            1_900,
+            Some("cst_cov_activate"),
+            Some("mdt_cov_activate"),
+        )
+        .await
+        .expect_err("a mismatched charge must be refused");
+        assert!(error.contains("refusing to grant"), "{error}");
+        let underpaid_invoices: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM invoices WHERE mollie_payment_id = 'tr_cov_underpaid'",
+        )
+        .fetch_one(&h.pool)
+        .await
+        .expect("underpaid invoice count");
+        assert_eq!(underpaid_invoices, 0);
+    }
+);
+
+db_test!(
+    recurring_payment_issues_the_next_period_and_failure_marks_past_due,
+    |h| {
+        let mock = mock_mollie_api();
+        seed_tenant(&h, "cov_renew", "free").await;
+        seed_billing_address(&h, "cov_renew", "EE").await;
+        mock.route(
+            "/v2/customers/cst_cov_renew/subscriptions",
+            201,
+            subscription_document("sub_cov_renew", "cst_cov_renew", 2_000).to_string(),
+        );
+        billing_service::plan_billing::activate_from_paid_checkout(
+            &h.pool,
+            "tr_cov_renew_first",
+            "cov_renew",
+            "starter",
+            "monthly",
+            "EUR",
+            2_000,
+            Some("cst_cov_renew"),
+            Some("mdt_cov_renew"),
+        )
+        .await
+        .expect("activation");
+
+        let cycle_before: DateTime<Utc> = sqlx::query_scalar(
+            "SELECT billing_cycle_end FROM mollie_subscriptions WHERE tenant_id = $1",
+        )
+        .bind("cov_renew")
+        .fetch_one(&h.pool)
+        .await
+        .expect("cycle before");
+
+        billing_service::plan_billing::renew_from_paid_subscription(
+            &h.pool,
+            "tr_cov_renew_second",
+            "sub_cov_renew",
+            2_000,
+            "EUR",
+        )
+        .await
+        .expect("renewal");
+        // A redelivered renewal is a no-op on the same payment id.
+        billing_service::plan_billing::renew_from_paid_subscription(
+            &h.pool,
+            "tr_cov_renew_second",
+            "sub_cov_renew",
+            2_000,
+            "EUR",
+        )
+        .await
+        .expect("renewal replay");
+
+        let (status, net, vat, total): (String, i64, i64, i64) = sqlx::query_as(
+            "SELECT status, subtotal, vat_total, total FROM invoices \
+         WHERE mollie_payment_id = 'tr_cov_renew_second'",
+        )
+        .fetch_one(&h.pool)
+        .await
+        .expect("renewal invoice");
+        assert_eq!(status, "paid");
+        assert_eq!(total, 2_000);
+        assert_eq!(net + vat, total);
+        let renewal_invoices: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM invoices WHERE mollie_payment_id = 'tr_cov_renew_second'",
+        )
+        .fetch_one(&h.pool)
+        .await
+        .expect("renewal count");
+        assert_eq!(renewal_invoices, 1);
+
+        let (cycle_after, subscription_status): (DateTime<Utc>, String) = sqlx::query_as(
+            "SELECT billing_cycle_end, status FROM mollie_subscriptions WHERE tenant_id = $1",
+        )
+        .bind("cov_renew")
+        .fetch_one(&h.pool)
+        .await
+        .expect("cycle after");
+        assert!(cycle_after > cycle_before, "the cycle advances");
+        assert_eq!(subscription_status, "active");
+
+        // A failed recurring charge marks the row past_due and notifies the
+        // tenant; the plan stays until cancellation/reconciliation decides.
+        billing_service::plan_billing::mark_subscription_payment_failed(
+            &h.pool,
+            "sub_cov_renew",
+            Some("insufficient funds"),
+            Some(2_000),
+        )
+        .await
+        .expect("failure");
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM mollie_subscriptions WHERE tenant_id = $1")
+                .bind("cov_renew")
+                .fetch_one(&h.pool)
+                .await
+                .expect("status");
+        assert_eq!(status, "past_due");
+        let notifications: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM notification_queue WHERE tenant_id = $1 AND type = 'payment_failed'",
+    )
+    .bind("cov_renew")
+    .fetch_one(&h.pool)
+    .await
+    .expect("notification count");
+        assert_eq!(notifications, 1);
+    }
+);
+
+db_test!(
+    provider_reconciliation_downgrades_a_non_active_subscription,
+    |h| {
+        let mock = mock_mollie_api();
+        seed_tenant(&h, "cov_reconcile", "starter").await;
+        sqlx::query(
+        "INSERT INTO mollie_subscriptions (tenant_id, mollie_subscription_id, plan, status, \
+            billing_interval, billing_cycle_start, billing_cycle_end, mollie_customer_id, \
+            mollie_mandate_id, mollie_sequence_type) \
+         VALUES ($1, 'sub_cov_reconcile', 'starter', 'active', 'monthly', NOW(), \
+                 NOW() + INTERVAL '30 days', 'cst_cov_reconcile', 'mdt_cov_reconcile', 'recurring')",
+    )
+    .bind("cov_reconcile")
+    .execute(&h.pool)
+    .await
+    .expect("seed subscription");
+        mock.route(
+            "/v2/customers/cst_cov_reconcile/subscriptions/sub_cov_reconcile",
+            200,
+            serde_json::json!({
+                "id": "sub_cov_reconcile",
+                "customerId": "cst_cov_reconcile",
+                "status": "canceled",
+                "amount": { "currency": "EUR", "value": "20.00" },
+                "interval": "1 month"
+            })
+            .to_string(),
+        );
+
+        let reconciled = billing_service::plan_billing::sweep_provider_subscription_state(&h.pool)
+            .await
+            .expect("reconcile sweep");
+        assert!(reconciled >= 1, "the dead subscription is reconciled");
+
+        let plan: String = sqlx::query_scalar("SELECT plan FROM tenants WHERE id = $1")
+            .bind("cov_reconcile")
+            .fetch_one(&h.pool)
+            .await
+            .expect("tenant plan");
+        assert_eq!(plan, "free", "only an active subscription grants the plan");
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM mollie_subscriptions WHERE tenant_id = $1")
+                .bind("cov_reconcile")
+                .fetch_one(&h.pool)
+                .await
+                .expect("subscription status");
+        assert_eq!(status, "canceled");
+    }
+);

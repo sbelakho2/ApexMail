@@ -206,7 +206,7 @@ pub async fn generate_invoice_number(pool: &PgPool) -> Result<String, InvoiceErr
 
 /// Same as [`generate_invoice_number`], on a caller-owned transaction so
 /// the sequence bump participates in the caller's atomicity unit.
-async fn generate_invoice_number_tx(
+pub(crate) async fn generate_invoice_number_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
 ) -> Result<String, InvoiceError> {
     let year = Utc::now().year();
@@ -635,6 +635,265 @@ pub async fn create_invoice_in_tx(
         paid_at: None,
         period_start: input.period_start,
         period_end: input.period_end,
+        created_at: now,
+        updated_at: now,
+    })
+}
+
+/// Create a PAID invoice for a plan charge whose Mollie payment was the
+/// GROSS amount actually collected.
+///
+/// Catalog prices are the customer-facing charge, so VAT (and, for a US
+/// registered state, sales tax) is EXTRACTED from the gross rather than added
+/// on top: the invoice total must equal the money Mollie took, or the tax
+/// gate (which compares the charge to the invoice total) would refuse the
+/// very payment that funded it. The rate comes from the same
+/// `calculate_vat_with_evidence` the invoice writer uses; reverse charge
+/// requires VIES evidence exactly as there. The address is snapshotted
+/// immutably and the recognition ledger is materialised with the paid date.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_paid_plan_invoice_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: &str,
+    plan_display_name: &str,
+    interval: &str,
+    gross_cents: i64,
+    currency: &str,
+    mollie_payment_id: &str,
+    period_start: DateTime<Utc>,
+    period_end: DateTime<Utc>,
+) -> Result<Invoice, InvoiceError> {
+    if gross_cents <= 0 {
+        return Err(InvoiceError::PdfGeneration(
+            "a plan charge must be positive".into(),
+        ));
+    }
+    let addr: BillingAddrSnapshotRow = sqlx::query_as(
+        r#"
+        SELECT ba.company_name, ba.vat_number, ba.address_line1, ba.address_line2,
+               ba.city, ba.state, ba.postal_code, ba.country, ba.email,
+               t.settings->>'registryCode' AS registry_code
+        FROM billing_addresses ba
+        JOIN tenants t ON t.id = ba.tenant_id
+        WHERE ba.tenant_id = $1
+        "#,
+    )
+    .bind(tenant_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(InvoiceError::Db)?
+    .ok_or(InvoiceError::NoBillingAddress)?;
+    let country = addr
+        .country
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or(InvoiceError::NoBillingAddress)?;
+    let now = Utc::now();
+    let today = now.date_naive();
+    let vat_evidence = match addr
+        .vat_number
+        .as_deref()
+        .map(str::trim)
+        .filter(|vat| !vat.is_empty())
+    {
+        Some(vat) => load_vat_evidence_in(&mut **tx, tenant_id, vat).await,
+        None => None,
+    };
+    let (vat_rate, _, vat_evidence_id) = calculate_vat_for_invoice(
+        gross_cents,
+        &country,
+        addr.vat_number.as_deref(),
+        vat_evidence.as_ref(),
+        today,
+    );
+
+    // The provider charges a GROSS, tax-inclusive amount. Extract the net so
+    // that net + VAT + US sales tax is EXACTLY the collected sum: solve
+    // net·(1 + rate) = gross in integer half-up arithmetic, then let VAT be the
+    // remainder of the charge. A fixed-point iteration of the rounded VAT does
+    // not converge for every cent (24 % of 1613 and 1614 round to 387 and 388,
+    // oscillating around a non-existent fixed point).
+    let rate_tenths = (vat_rate * 10.0).round() as i64;
+    if rate_tenths <= -1000 {
+        return Err(InvoiceError::PdfGeneration(format!(
+            "plan invoice cannot extract a net from a {vat_rate}% rate"
+        )));
+    }
+    let net_for = |tax_cents: i64| -> i64 {
+        let taxable = (gross_cents - tax_cents).max(0);
+        let denominator = i128::from(1000 + rate_tenths);
+        let numerator = i128::from(taxable) * 1000;
+        // Round half-up on magnitude (the amount is non-negative here).
+        ((numerator + denominator / 2) / denominator) as i64
+    };
+    let mut net = net_for(0);
+    let mut us_tax_cents = 0i64;
+    let mut us_tax_snapshot: Option<String> = None;
+    for _ in 0..2 {
+        let decision = crate::us_tax::tax_decision_for_invoice(
+            &mut **tx,
+            None,
+            tenant_id,
+            &country,
+            addr.state.as_deref(),
+            net,
+            today,
+        )
+        .await
+        .map_err(|error| InvoiceError::UsSalesTax(error.to_string()))?;
+        us_tax_cents = match &decision {
+            crate::us_tax::UsTaxDecision::Taxed(tax) => tax.amount_cents,
+            _ => 0,
+        };
+        us_tax_snapshot = match &decision {
+            crate::us_tax::UsTaxDecision::Taxed(tax) => Some(tax.snapshot_json().to_string()),
+            crate::us_tax::UsTaxDecision::Exempt(exemption) => {
+                Some(exemption.snapshot_json().to_string())
+            }
+            crate::us_tax::UsTaxDecision::None => None,
+        };
+        net = net_for(us_tax_cents);
+    }
+    let vat = gross_cents - net - us_tax_cents;
+    if net < 0 || vat < 0 || net + vat + us_tax_cents != gross_cents {
+        return Err(InvoiceError::PdfGeneration(format!(
+            "plan invoice cannot reconcile a gross charge of {gross_cents} cents              (net {net} + VAT {vat} + sales tax {us_tax_cents})"
+        )));
+    }
+    // The extracted VAT must still be the statutory rate applied to the net,
+    // within the single cent the gross rounding can absorb.
+    let statutory_vat = billing_common::vat_rates::vat_amount_half_up(net, vat_rate);
+    if (statutory_vat - vat).abs() > 1 {
+        return Err(InvoiceError::PdfGeneration(format!(
+            "plan invoice VAT {vat} deviates from {statutory_vat} at rate {vat_rate}% on net {net}"
+        )));
+    }
+
+    let line_items = vec![InvoiceLineItem {
+        description: format!("{plan_display_name} — {interval}"),
+        quantity: 1,
+        unit_price: net,
+        amount: net,
+        vat_rate,
+        vat_amount: vat,
+    }];
+    // US sales tax is its own non-VAT line (mirrors the invoice writer).
+    let mut all_lines = line_items;
+    if us_tax_cents > 0 {
+        if let Some(snapshot) = us_tax_snapshot
+            .as_deref()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+        {
+            all_lines.push(InvoiceLineItem {
+                description: snapshot
+                    .get("description")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("US sales tax")
+                    .to_string(),
+                quantity: 1,
+                unit_price: us_tax_cents,
+                amount: us_tax_cents,
+                vat_rate: 0.0,
+                vat_amount: 0,
+            });
+        }
+    }
+    let items_json = encode_invoice_line_items(&all_lines)?;
+    let invoice_number = generate_invoice_number_tx(tx).await?;
+    let id = Uuid::new_v4();
+    let address_snapshot = serde_json::json!({
+        "snapshotVersion": BILLING_ADDRESS_SNAPSHOT_VERSION,
+        "company_name": addr.company_name,
+        "vat_number": addr.vat_number,
+        "address_line1": addr.address_line1,
+        "address_line2": addr.address_line2,
+        "city": addr.city,
+        "state": addr.state,
+        "postal_code": addr.postal_code,
+        "country": addr.country,
+        "email": addr.email,
+        "registry_code": addr.registry_code,
+    })
+    .to_string();
+
+    sqlx::query(
+        r#"
+        INSERT INTO invoices (
+            id, tenant_id, mollie_payment_id, invoice_number, status,
+            currency, amount, subtotal, vat_total, total, line_items,
+            issued_at, due_at, paid_at, period_start, period_end,
+            billing_country, vat_rate, billing_address, billing_registry_code,
+            vat_evidence_id, us_sales_tax_cents, us_sales_tax_snapshot,
+            created_at, updated_at
+        ) VALUES (
+            $1, $2, $3, $4, 'paid',
+            $5, $6, $7, $8, $6, $9,
+            $10, $10, $10, $11, $12,
+            $13, $14, $15, $16,
+            $17, $18, $19::jsonb,
+            $10, $10
+        )
+        "#,
+    )
+    .bind(id)
+    .bind(tenant_id)
+    .bind(mollie_payment_id)
+    .bind(&invoice_number)
+    .bind(currency.trim().to_ascii_uppercase())
+    .bind(gross_cents)
+    .bind(net)
+    .bind(vat)
+    .bind(&items_json)
+    .bind(now)
+    .bind(period_start)
+    .bind(period_end)
+    .bind(country.to_uppercase())
+    .bind(vat_rate)
+    .bind(address_snapshot)
+    .bind(addr.registry_code)
+    .bind(vat_evidence_id)
+    .bind(us_tax_cents)
+    .bind(us_tax_snapshot.as_deref())
+    .execute(&mut **tx)
+    .await
+    .map_err(InvoiceError::Db)?;
+
+    crate::vat_recognition::materialize_invoice_recognition(
+        tx,
+        &crate::vat_recognition::InvoiceRecognitionInput {
+            invoice_id: id,
+            tenant_id: tenant_id.to_string(),
+            currency: currency.trim().to_ascii_uppercase(),
+            subtotal_cents: net,
+            vat_rate,
+            vat_cents: vat,
+            issued_at: now,
+            paid_at: Some(now),
+            billing_country: Some(country.to_uppercase()),
+        },
+        now,
+    )
+    .await
+    .map_err(InvoiceError::Recognition)?;
+
+    Ok(Invoice {
+        id,
+        tenant_id: tenant_id.to_string(),
+        mollie_payment_id: Some(mollie_payment_id.to_string()),
+        invoice_number,
+        status: InvoiceStatus::Paid,
+        currency: currency.trim().to_ascii_uppercase(),
+        subtotal: net,
+        vat_total: vat,
+        us_sales_tax_cents: us_tax_cents,
+        us_sales_tax_snapshot: us_tax_snapshot.and_then(|text| serde_json::from_str(&text).ok()),
+        total: gross_cents,
+        line_items: all_lines,
+        issued_at: now,
+        due_at: now,
+        paid_at: Some(now),
+        period_start,
+        period_end,
         created_at: now,
         updated_at: now,
     })
@@ -1129,12 +1388,11 @@ async fn mollie_refund_payment(
 ) -> Result<Option<String>, InvoiceVoidError> {
     use crate::mollie_client::{MollieClient, Money};
 
-    let client =
-        MollieClient::from_env().map_err(|_| InvoiceVoidError::MollieUnavailable {
-            invoice_id,
-            mollie_payment_id: payment_id.to_string(),
-            status: invoice_status.to_string(),
-        })?;
+    let client = MollieClient::from_env().map_err(|_| InvoiceVoidError::MollieUnavailable {
+        invoice_id,
+        mollie_payment_id: payment_id.to_string(),
+        status: invoice_status.to_string(),
+    })?;
     let refund = client
         .create_refund(
             payment_id,
@@ -1186,12 +1444,7 @@ pub async fn void_invoice(
     input: VoidInvoiceInput,
 ) -> Result<Invoice, InvoiceVoidError> {
     // ── 1. Lock + validate the current state ────────────────────────────
-    let (status, mollie_payment_id, total_cents, currency): (
-        String,
-        Option<String>,
-        i64,
-        String,
-    ) = {
+    let (status, mollie_payment_id, total_cents, currency): (String, Option<String>, i64, String) = {
         let mut tx = pool.begin().await.map_err(InvoiceVoidError::Db)?;
         let row: Option<(String, Option<String>, i64, String)> = sqlx::query_as(
             "SELECT status::text, mollie_payment_id,

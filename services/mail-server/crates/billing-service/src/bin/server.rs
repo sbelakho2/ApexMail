@@ -72,6 +72,31 @@ struct Cli {
     #[arg(long, env = "BILLING_SWEEP_US_TAX_NEXUS_ONLY", default_value_t = false)]
     sweep_us_tax_nexus_only: bool,
 
+    /// Apply every period-end cancellation whose period has ended ONCE,
+    /// print the count and exit — the SAME function the daily loop calls.
+    /// The loop's first tick is 90 minutes after boot, so without this an
+    /// operator cannot make a cancellation effective on demand.
+    #[arg(
+        long,
+        env = "BILLING_END_CANCELED_SUBSCRIPTIONS_ONLY",
+        default_value_t = false
+    )]
+    end_canceled_subscriptions_only: bool,
+
+    /// Fetch every provider subscription this deployment holds and reconcile
+    /// the local entitlement state ONCE, then exit — the SAME function the
+    /// hourly loop calls. A subscription that is no longer `active` at Mollie
+    /// (canceled, completed, suspended, pending) stops granting the plan; a
+    /// subscription whose provider amount drifted from the catalog raises a
+    /// finance incident. Operators use it after a provider-side change instead
+    /// of waiting for the next hourly tick.
+    #[arg(
+        long,
+        env = "BILLING_RECONCILE_SUBSCRIPTIONS_ONLY",
+        default_value_t = false
+    )]
+    reconcile_subscriptions_only: bool,
+
     /// Validate the committed US sales-tax rate/threshold data file
     /// (`data/us_sales_tax.json`, or the `US_TAX_DATA_FILE` override),
     /// print the per-state freshness report and exit. Validation errors (and
@@ -331,6 +356,39 @@ async fn main() -> anyhow::Result<()> {
                 serde_json::to_string_pretty(&report.to_json()).map_err(anyhow::Error::msg)?
             );
         }
+        return Ok(());
+    }
+
+    // The same one-shot ops pattern for provider subscription state: fetch
+    // every `sub_…` row at Mollie and converge the local entitlement state.
+    // Deliberately BEFORE the webhook fail-fast — reconciliation only needs
+    // the API key the client reads from the environment, and an unconfigured
+    // client reconciles nothing (0) instead of blocking ops.
+    if cli.reconcile_subscriptions_only {
+        let reconciled = billing_service::plan_billing::sweep_provider_subscription_state(&db)
+            .await
+            .map_err(anyhow::Error::msg)?;
+        println!("subscription reconcile: reconciled={reconciled}");
+        return Ok(());
+    }
+
+    if cli.end_canceled_subscriptions_only {
+        let redis =
+            deadpool_redis::Config::from_url(&cli.redis_url).create_pool(Some(Runtime::Tokio1))?;
+        let config = BillingConfig {
+            database_url: cli.database_url,
+            redis_url: cli.redis_url,
+            listen_addr: cli.listen.clone(),
+            service_auth_token: cli.service_auth_token,
+            mollie_api_key: cli.mollie_api_key,
+            api_base_url: cli.api_base_url,
+            ..BillingConfig::default()
+        };
+        let state = AppState::new(db, redis, config);
+        let ended = maintenance::sweep_canceled_at_period_end(state.as_ref())
+            .await
+            .map_err(anyhow::Error::msg)?;
+        println!("canceled-at-period-end sweep: ended={ended}");
         return Ok(());
     }
 

@@ -329,7 +329,6 @@ pub fn authenticated_router(state: AppState) -> Router<AppState> {
         .route("/web/webhooks", post(form_webhook_create))
         .route("/web/team/invite", post(form_team_invite))
         .route("/web/billing/checkout", post(form_billing_checkout))
-        .route("/web/billing/portal", post(form_billing_portal))
         // External audit 15 Oct, H1: the console's own cancellation action.
         // The old portal form only noted a request while renewals continued.
         .route("/web/billing/cancel", post(form_billing_cancel))
@@ -5269,42 +5268,6 @@ async fn form_team_invite(
 
 async fn form_billing_checkout(
     State(state): State<AppState>,
-    axum::Extension(_user): axum::Extension<AuthUser>,
-    headers: HeaderMap,
-    Form(form): Form<HashMap<String, String>>,
-) -> Response {
-    if let Err(message) = check_csrf(&form, &headers, &state.config) {
-        return redirect_error(message, "/settings/billing", &state.config);
-    }
-    let plan = field(&form, "plan");
-    if !["starter", "pro", "growth", "scale"].contains(&plan.as_str()) {
-        return redirect_error(
-            "Choose a plan to upgrade to.",
-            "/settings/billing",
-            &state.config,
-        );
-    }
-    // Batch-2 honesty fix (P0-C): this form previously flashed "Plan
-    // upgrade request recorded." while recording nothing. The request the
-    // form CAN make is now exactly what happens: it is noted (with tenant,
-    // plan and kind) for the billing team in the operational log, no
-    // checkout session opens and nothing is charged — the page copy states
-    // this up front too.
-    tracing::info!(
-        tenant_id = %_user.tenant_id,
-        plan = %plan,
-        request = "plan-change",
-        "billing page: plan change request noted for the billing team"
-    );
-    redirect_success(
-        "Your plan change request was noted for the billing team. Nothing has been charged.",
-        "/settings/billing",
-        &state.config,
-    )
-}
-
-async fn form_billing_portal(
-    State(state): State<AppState>,
     axum::Extension(user): axum::Extension<AuthUser>,
     headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
@@ -5312,19 +5275,117 @@ async fn form_billing_portal(
     if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, "/settings/billing", &state.config);
     }
-    // Batch-2 honesty fix (P0-C): the portal twin claimed a portal session
-    // opens from the API console — nothing opens here. The form notes the
-    // portal-access request for the billing team and says exactly that.
-    tracing::info!(
-        tenant_id = %user.tenant_id,
-        request = "billing-portal-access",
-        "billing page: portal access request noted for the billing team"
-    );
-    redirect_success(
-        "Your request for billing portal access was noted for the billing team. Nothing was changed.",
-        "/settings/billing",
-        &state.config,
+    let plan = field(&form, "plan");
+    if !crate::routes::billing::SELF_SERVE_CHECKOUT_PLAN_IDS.contains(&plan.as_str()) {
+        return redirect_error(
+            "Choose a plan to upgrade to.",
+            "/settings/billing",
+            &state.config,
+        );
+    }
+    let interval = form
+        .get("interval")
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| value == "monthly" || value == "yearly")
+        .unwrap_or_else(|| "monthly".to_string());
+    let yearly = interval == "yearly";
+    let Some(plan_row) = platform_catalog::plan_by_name(&plan) else {
+        return redirect_error(
+            "That plan cannot be purchased here.",
+            "/settings/billing",
+            &state.config,
+        );
+    };
+    let currency =
+        crate::routes::billing::resolve_tenant_billing_currency(&state, &user.tenant_id).await;
+    let in_usd = currency.eq_ignore_ascii_case("USD");
+    let amount_cents = match (in_usd, yearly) {
+        (true, true) => plan_row.price_yearly_usd_cents,
+        (true, false) => plan_row.price_monthly_usd_cents,
+        (false, true) => plan_row.price_yearly_cents,
+        (false, false) => plan_row.price_monthly_cents,
+    };
+    if amount_cents <= 0 {
+        return redirect_error(
+            "That plan is not self-serve billable.",
+            "/settings/billing",
+            &state.config,
+        );
+    }
+    let currency_code = if in_usd { "USD" } else { "EUR" };
+
+    // The console form is the documented self-service entry point: it opens a
+    // REAL Mollie checkout and redirects the customer there. The plan changes
+    // only when the webhook verifies the settled payment.
+    let mollie = match billing_service::mollie_client::MollieClient::from_env() {
+        Ok(mollie) => mollie,
+        Err(error) => {
+            tracing::error!(tenant_id = %user.tenant_id, error = %error, "console checkout: Mollie is not configured");
+            return redirect_error(
+                "Payments are temporarily unavailable. Nothing has been charged.",
+                "/settings/billing",
+                &state.config,
+            );
+        }
+    };
+    let customer_id = match crate::routes::billing::get_or_create_mollie_customer_id(
+        &state,
+        &user.tenant_id,
     )
+    .await
+    {
+        Ok(customer_id) => customer_id,
+        Err(error) => {
+            tracing::error!(tenant_id = %user.tenant_id, error = %error, "console checkout: customer onboarding failed");
+            return redirect_error(
+                "We could not start the checkout. Nothing has been charged.",
+                "/settings/billing",
+                &state.config,
+            );
+        }
+    };
+    let base = state.config.base_url.trim_end_matches('/');
+    let success_url = format!("{base}/settings/billing?checkout=success");
+    let link = mollie
+        .create_payment(billing_service::mollie_client::CreatePayment {
+            amount: billing_service::mollie_client::Money::new(currency_code, amount_cents),
+            description: format!("ApexMail {}", plan_row.display_name),
+            redirect_url: success_url,
+            webhook_url: None,
+            metadata: serde_json::json!({
+                "tenant_id": user.tenant_id.clone(),
+                "plan_name": plan.clone(),
+                "interval": interval,
+                "source": "console_checkout",
+            }),
+            method: None,
+            customer_id: Some(customer_id),
+            mandate_id: None,
+            sequence_type: Some("first".into()),
+            idempotency_key: format!("console_checkout_{}_{}_{}", user.tenant_id, plan, interval),
+        })
+        .await;
+    match link {
+        Ok(link) => match link.checkout_url {
+            Some(url) => axum::response::Redirect::to(&url).into_response(),
+            None => {
+                tracing::error!(tenant_id = %user.tenant_id, payment_id = %link.id, "console checkout returned no URL");
+                redirect_error(
+                    "The payment provider returned no checkout page. Nothing has been charged.",
+                    "/settings/billing",
+                    &state.config,
+                )
+            }
+        },
+        Err(error) => {
+            tracing::error!(tenant_id = %user.tenant_id, error = %error, "console checkout: payment creation failed");
+            redirect_error(
+                "We could not start the checkout. Nothing has been charged.",
+                "/settings/billing",
+                &state.config,
+            )
+        }
+    }
 }
 
 /// POST /web/billing/cancel — the console's self-service cancellation
@@ -17666,10 +17727,6 @@ mod coverage_handler_tests {
             "/settings/billing"
         );
         bounced!(
-            form_billing_portal(state(), extension(), headers.clone(), Form(form.clone())),
-            "/settings/billing"
-        );
-        bounced!(
             form_profile_update(state(), extension(), headers.clone(), Form(form.clone())),
             "/settings/profile"
         );
@@ -18267,23 +18324,10 @@ mod coverage_handler_tests {
             Form(form),
         )
         .await;
-        // Batch-2 P0-C fix: the fabricated "request recorded" flash became
-        // the honest noted-for-the-billing-team copy.
-        assert!(flash_text(&response, &app.config)
-            .contains("Your plan change request was noted for the billing team"));
+        // The console form opens a REAL Molllie checkout. Without provider
+        // credentials it refuses honestly and charges nothing.
+        assert!(flash_text(&response, &app.config).contains("Payments are temporarily unavailable"));
         assert!(flash_text(&response, &app.config).contains("Nothing has been charged."));
-        let (headers, form) = signed_form(&app.config, &[]);
-        let response = form_billing_portal(
-            State(app.clone()),
-            axum::Extension(user.clone()),
-            headers,
-            Form(form),
-        )
-        .await;
-        // Batch-2 P0-C fix: no portal session "opens" here — the flash
-        // states the noted request instead.
-        assert!(flash_text(&response, &app.config)
-            .contains("Your request for billing portal access was noted"));
 
         // External audit 15 Oct, H1: the console cancel form is the REAL
         // state change (period end by default, immediate when chosen) — it
@@ -22834,16 +22878,6 @@ mod adversarial_outage_tests {
         let state = dead_state().await;
         let (headers, form) = signed_form(&state, &[("plan", "pro")]);
         let response = form_billing_checkout(
-            State(state.clone()),
-            Extension(caller()),
-            headers,
-            Form(form),
-        )
-        .await;
-        assert_eq!(response.status(), StatusCode::SEE_OTHER);
-
-        let (headers, form) = signed_form(&state, &[]);
-        let response = form_billing_portal(
             State(state.clone()),
             Extension(caller()),
             headers,

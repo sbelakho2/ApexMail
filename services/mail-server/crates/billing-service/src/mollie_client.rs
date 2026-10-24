@@ -125,6 +125,8 @@ pub struct Payment {
     pub sequence_type: Option<String>,
     pub customer_id: Option<String>,
     pub mandate_id: Option<String>,
+    /// Present when the payment was created by a Mollie subscription.
+    pub subscription_id: Option<String>,
     pub paid_at: Option<String>,
     pub method: Option<String>,
     pub metadata: serde_json::Map<String, serde_json::Value>,
@@ -330,10 +332,17 @@ impl MollieClient {
     }
 
     fn url(&self, path: &str) -> String {
-        format!("{}/{}", self.base_url.trim_end_matches('/'), path.trim_start_matches('/'))
+        format!(
+            "{}/{}",
+            self.base_url.trim_end_matches('/'),
+            path.trim_start_matches('/')
+        )
     }
 
-    async fn send(&self, request: reqwest::RequestBuilder) -> Result<serde_json::Value, MollieError> {
+    async fn send(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<serde_json::Value, MollieError> {
         let response = request
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Accept", "application/json")
@@ -409,7 +418,10 @@ impl MollieClient {
     /// Every refund of one payment (Mollie has no top-level refund fetch).
     pub async fn payment_refunds(&self, payment_id: &str) -> Result<Vec<Refund>, MollieError> {
         let document = self
-            .send(self.http.get(self.url(&format!("payments/{payment_id}/refunds"))))
+            .send(
+                self.http
+                    .get(self.url(&format!("payments/{payment_id}/refunds"))),
+            )
             .await?;
         let embedded = document
             .get("_embedded")
@@ -460,8 +472,14 @@ impl MollieClient {
                 .and_then(|value| value.as_str())
                 .unwrap_or(id)
                 .to_string(),
-            name: document.get("name").and_then(|value| value.as_str()).map(str::to_string),
-            email: document.get("email").and_then(|value| value.as_str()).map(str::to_string),
+            name: document
+                .get("name")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            email: document
+                .get("email")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
             raw: document,
         })
     }
@@ -487,13 +505,23 @@ impl MollieClient {
                 .and_then(|value| value.as_str())
                 .unwrap_or_default()
                 .to_string(),
-            name: document.get("name").and_then(|value| value.as_str()).map(str::to_string),
-            email: document.get("email").and_then(|value| value.as_str()).map(str::to_string),
+            name: document
+                .get("name")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            email: document
+                .get("email")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
             raw: document,
         })
     }
 
-    pub async fn get_mandate(&self, customer_id: &str, mandate_id: &str) -> Result<Mandate, MollieError> {
+    pub async fn get_mandate(
+        &self,
+        customer_id: &str,
+        mandate_id: &str,
+    ) -> Result<Mandate, MollieError> {
         let document = self
             .send(
                 self.http
@@ -512,7 +540,10 @@ impl MollieClient {
                 .and_then(|value| value.as_str())
                 .unwrap_or_default()
                 .to_string(),
-            method: document.get("method").and_then(|value| value.as_str()).map(str::to_string),
+            method: document
+                .get("method")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
             raw: document,
         })
     }
@@ -520,7 +551,11 @@ impl MollieClient {
     /// Revoke a mandate at Mollie. After this call the mandate can never be
     /// charged again — the only provider-side guarantee that a canceled
     /// account stops generating recurring charges.
-    pub async fn revoke_mandate(&self, customer_id: &str, mandate_id: &str) -> Result<(), MollieError> {
+    pub async fn revoke_mandate(
+        &self,
+        customer_id: &str,
+        mandate_id: &str,
+    ) -> Result<(), MollieError> {
         self.send(
             self.http
                 .delete(self.url(&format!("customers/{customer_id}/mandates/{mandate_id}"))),
@@ -579,7 +614,11 @@ impl MollieClient {
         Ok(subscription_from_json(customer_id, &document))
     }
 
-    pub async fn cancel_subscription(&self, customer_id: &str, id: &str) -> Result<(), MollieError> {
+    pub async fn cancel_subscription(
+        &self,
+        customer_id: &str,
+        id: &str,
+    ) -> Result<(), MollieError> {
         self.send(
             self.http
                 .delete(self.url(&format!("customers/{customer_id}/subscriptions/{id}"))),
@@ -598,7 +637,10 @@ impl MollieClient {
 
     // ---- settlements (payout reconciliation) ----------------------------
 
-    pub async fn list_settlements(&self, from: Option<&str>) -> Result<Vec<Settlement>, MollieError> {
+    pub async fn list_settlements(
+        &self,
+        from: Option<&str>,
+    ) -> Result<Vec<Settlement>, MollieError> {
         let mut url = self.url("settlements");
         if let Some(from) = from {
             url.push_str(&format!("?from={from}"));
@@ -656,6 +698,7 @@ pub fn payment_from_json(document: &serde_json::Value) -> Payment {
         sequence_type: string_at(document, "/sequenceType"),
         customer_id: string_at(document, "/customerId"),
         mandate_id: string_at(document, "/mandateId"),
+        subscription_id: string_at(document, "/subscriptionId"),
         paid_at: string_at(document, "/paidAt"),
         method: string_at(document, "/method"),
         metadata,

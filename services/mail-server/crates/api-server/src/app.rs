@@ -727,6 +727,12 @@ pub fn build_app(state: AppState) -> Router {
         // thing that makes sales tax compute on new invoices — the sweep
         // tracks thresholds and alerts, and never charges.
         .nest("/v1/admin/billing/us-tax", routes::admin::us_tax::router())
+        // Payout reconciliation: the provider's own settlement objects, the
+        // surface the billing lifecycle documents (operator-only).
+        .nest(
+            "/v1/admin/billing/settlements",
+            routes::admin::mollie_settlements::router(),
+        )
         // Billing abuse review (wave G): the operator surface for the
         // billing-service abuse-report/restriction machinery (audit F09),
         // which previously had no production caller or route.
@@ -2611,8 +2617,7 @@ pub(crate) mod test_support {
     /// runs the lib suite in one process, so the webhook tests in `app` and
     /// the checkout tests in `routes::billing` share this lock; without it a
     /// fake provider endpoint could leak between them.
-    pub(crate) static MOLLIE_ENV_MUTEX: tokio::sync::Mutex<()> =
-        tokio::sync::Mutex::const_new(());
+    pub(crate) static MOLLIE_ENV_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     pub(crate) async fn lock_mollie_env() -> tokio::sync::MutexGuard<'static, ()> {
         MOLLIE_ENV_MUTEX.lock().await
@@ -7634,10 +7639,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/webhooks/mollie")
-                    .header(
-                        "content-type",
-                        "application/x-www-form-urlencoded",
-                    )
+                    .header("content-type", "application/x-www-form-urlencoded")
                     .body(Body::from(mollie_webhook_form("tr_unknownDelivery01")))
                     .unwrap(),
             )
@@ -7662,10 +7664,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/webhooks/mollie")
-                    .header(
-                        "content-type",
-                        "application/x-www-form-urlencoded",
-                    )
+                    .header("content-type", "application/x-www-form-urlencoded")
                     .body(Body::from(mollie_webhook_form("not-a-mollie-id")))
                     .unwrap(),
             )
@@ -7686,10 +7685,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/webhooks/mollie")
-                    .header(
-                        "content-type",
-                        "application/x-www-form-urlencoded",
-                    )
+                    .header("content-type", "application/x-www-form-urlencoded")
                     .body(Body::from(mollie_webhook_form("tr_unknownDelivery01")))
                     .unwrap(),
             )

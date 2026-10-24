@@ -5785,11 +5785,13 @@ pub fn web_settings_billing_page() -> String {
 <div class=\"border p-6 md:p-8\">\
 <h2 class=\"mb-2 apex-h3\">Current Plan</h2>\
 <p class=\"mt-4 apex-em\">unavailable<span class=\"\"> — live figures load with your account data</span></p>\
-<p class=\"mt-3\">Plan changes are arranged with the billing team. Submitting the request below records a change request for them — nothing is charged from this page and no checkout session opens here.</p>\
-<form class=\"mt-4\" method=\"post\" action=\"/web/billing/checkout\">\
+<p class=\"mt-3\">Choosing a plan opens Mollie&rsquo;s secure checkout in this browser. The plan changes only once Mollie confirms the payment; nothing is charged on this page.</p>\
+<form class=\"mt-4 space-y-3\" method=\"post\" action=\"/web/billing/checkout\">\
 <label class=\"mb-2 apex-label\" for=\"upgrade-plan\"><svg class=\"\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Plan</label>\
 <select id=\"upgrade-plan\" name=\"plan\" class=\"w-full max-w-xs px-4 py-3 border apex-select\"><option value=\"starter\">Developer — €20/mo</option><option value=\"pro\">Pro — €89/mo</option><option value=\"growth\">Growth — €229/mo</option><option value=\"scale\">Business — €699/mo</option></select>\
-<button type=\"submit\" class=\"mt-3 inline-flex items-center justify-center h-12 px-6 py-3 apex-btn apex-btn--primary\">Request plan change</button>\
+<label class=\"mb-2 apex-label\" for=\"upgrade-interval\">Billing interval</label>\
+<select id=\"upgrade-interval\" name=\"interval\" class=\"w-full max-w-xs px-4 py-3 border apex-select\"><option value=\"monthly\">Monthly</option><option value=\"yearly\">Yearly, ten monthly payments</option></select>\
+<button type=\"submit\" class=\"mt-3 inline-flex items-center justify-center h-12 px-6 py-3 apex-btn apex-btn--primary\">Continue to checkout</button>\
 </form>\
 </div>\
 <div class=\"border p-6 md:p-8\">\
@@ -5799,11 +5801,8 @@ pub fn web_settings_billing_page() -> String {
 <svg class=\"h-5 w-5\" xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect width=\"20\" height=\"14\" x=\"2\" y=\"5\" rx=\"2\"/><line x1=\"2\" x2=\"22\" y1=\"10\" y2=\"10\"/></svg>\
 </div>\
 <div class=\"flex-1 min-w-[9rem]\">\
-<p class=\"apex-em\">Payment methods are managed with the billing team</p>\
-<p class=\"\">The request below asks the billing team to open the secure portal for you — card details are never entered on this page</p>\
-</div>\
-<div class=\"flex flex-col gap-2 w-full sm:w-auto min-w-0\">\
-<form method=\"post\" action=\"/web/billing/portal\"><button type=\"submit\" class=\"inline-flex items-center justify-center h-10 px-4 py-2 apex-btn\">Request portal access</button></form>\
+<p class=\"apex-em\">Payment methods are collected at Mollie checkout</p>\
+<p class=\"\">The plan checkout opens Mollie's secure payment page in this browser. Card details are never entered on this page, and the plan changes only once Mollie confirms the payment.</p>\
 </div>\
 </div>\
 </div>\
@@ -7845,8 +7844,15 @@ mod tests {
         assert!(webhooks.contains("name=\"events\""));
 
         let billing = web_settings_billing_page();
+        // The plan-change form opens a REAL checkout (plan + interval) and
+        // the dead portal request form is gone for good.
         assert!(billing.contains("action=\"/web/billing/checkout\""));
-        assert!(billing.contains("action=\"/web/billing/portal\""));
+        assert!(billing.contains("name=\"interval\""));
+        assert!(billing.contains("Continue to checkout"));
+        assert!(
+            !billing.contains("/web/billing/portal"),
+            "the dead billing-portal form must never return"
+        );
         // External audit 15 Oct, H1: cancellation is a real form, not a
         // request to a non-existent billing portal.
         assert!(billing.contains("action=\"/web/billing/cancel\""));
@@ -9449,7 +9455,8 @@ mod tests {
         assert!(!html.contains("$0"));
         assert!(!html.contains("0 of 1,000 emails"));
         assert!(html.contains("unavailable"));
-        assert!(html.contains("Request plan change"));
+        assert!(html.contains("Continue to checkout"));
+        assert!(html.contains("name=\"interval\""));
         assert!(html.contains("Usage This Month"));
     }
 

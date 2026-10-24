@@ -128,7 +128,8 @@ async fn fetch_dashboard_mrr(db: &sqlx::PgPool) -> Result<f64, sqlx::Error> {
         return Ok(0.0);
     }
 
-    let has_billing_interval = column_exists(db, "mollie_subscriptions", "billing_interval").await?;
+    let has_billing_interval =
+        column_exists(db, "mollie_subscriptions", "billing_interval").await?;
     let sql = build_subscription_mrr_sql(has_billing_interval);
 
     let cents = sqlx::query_scalar::<_, i64>(&sql).fetch_one(db).await?;

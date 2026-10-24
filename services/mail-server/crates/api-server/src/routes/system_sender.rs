@@ -932,18 +932,28 @@ mod tests {
         with_logo.logo_url = Some("https://cdn.northwind.example/logo.png".into());
         let logo = email(Some(&with_logo));
         assert!(
-            logo.contains("<img src=\"https://cdn.northwind.example/logo.png\" alt=\"Northwind Logistics\""),
+            logo.contains(
+                "<img src=\"https://cdn.northwind.example/logo.png\" alt=\"Northwind Logistics\""
+            ),
             "{logo}"
         );
         assert!(!logo.contains("ApexMail"), "{logo}");
 
         // Hostile schemes never reach the src; the name is the fallback.
-        for hostile in ["javascript:alert(1)", "data:image/svg+xml,<svg/>", "  ", "vbscript:x"] {
+        for hostile in [
+            "javascript:alert(1)",
+            "data:image/svg+xml,<svg/>",
+            "  ",
+            "vbscript:x",
+        ] {
             let mut bad = branding.clone();
             bad.logo_url = Some(hostile.into());
             let html = email(Some(&bad));
             assert!(!html.contains("<img"), "{hostile}: {html}");
-            assert!(html.contains(">Northwind Logistics</span>"), "{hostile}: {html}");
+            assert!(
+                html.contains(">Northwind Logistics</span>"),
+                "{hostile}: {html}"
+            );
         }
     }
 

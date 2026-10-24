@@ -109,50 +109,64 @@ pub async fn revoke_tenant_mandate_at_provider(
     pool: &PgPool,
     tenant_id: &str,
 ) -> Result<bool, String> {
+    let revoked =
+        revoke_tenant_mandates_at_provider(pool, std::slice::from_ref(&tenant_id.to_string()))
+            .await?;
+    Ok(revoked > 0)
+}
+
+/// Batch form: ONE lookup for every tenant, then one provider DELETE each.
+/// The period-end sweep must not add a per-row SELECT to its set-based path.
+pub async fn revoke_tenant_mandates_at_provider(
+    pool: &PgPool,
+    tenant_ids: &[String],
+) -> Result<u64, String> {
     use crate::mollie_client::MollieClient;
 
-    let stored: Option<(Option<String>, Option<String>)> = sqlx::query_as(
+    if tenant_ids.is_empty() {
+        return Ok(0);
+    }
+    let stored: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
         r#"
-        SELECT s.mollie_customer_id, s.mollie_mandate_id
+        SELECT DISTINCT ON (s.tenant_id) s.tenant_id, s.mollie_customer_id, s.mollie_mandate_id
         FROM mollie_subscriptions s
-        WHERE s.tenant_id = $1
+        WHERE s.tenant_id = ANY($1)
           AND s.mollie_mandate_id IS NOT NULL
           AND s.mollie_mandate_id <> ''
-        ORDER BY s.created_at DESC
-        LIMIT 1
+        ORDER BY s.tenant_id, s.created_at DESC
         "#,
     )
-    .bind(tenant_id)
-    .fetch_optional(pool)
+    .bind(tenant_ids)
+    .fetch_all(pool)
     .await
-    .map_err(|error| format!("Failed to load the tenant mandate: {error}"))?;
-
-    let Some((customer_id, mandate_id)) = stored else {
-        return Ok(false);
-    };
-    let (Some(customer_id), Some(mandate_id)) = (customer_id, mandate_id) else {
-        return Ok(false);
-    };
+    .map_err(|error| format!("Failed to load the tenant mandates: {error}"))?;
 
     let Ok(mollie) = MollieClient::from_env() else {
-        return Ok(false);
+        return Ok(0);
     };
-    mollie
-        .revoke_mandate(&customer_id, &mandate_id)
+    let mut revoked = 0u64;
+    for (tenant_id, customer_id, mandate_id) in stored {
+        let (Some(customer_id), Some(mandate_id)) = (customer_id, mandate_id) else {
+            continue;
+        };
+        mollie
+            .revoke_mandate(&customer_id, &mandate_id)
+            .await
+            .map_err(|error| {
+                format!("Mollie mandate revocation for tenant {tenant_id} failed: {error}")
+            })?;
+        sqlx::query(
+            "UPDATE mollie_customers
+                SET mandate_revoked_at = NOW(), updated_at = NOW()
+              WHERE tenant_id = $1",
+        )
+        .bind(&tenant_id)
+        .execute(pool)
         .await
-        .map_err(|error| format!("Mollie mandate revocation failed: {error}"))?;
-
-    sqlx::query(
-        "UPDATE mollie_customers
-            SET mandate_revoked_at = NOW(), updated_at = NOW()
-          WHERE tenant_id = $1",
-    )
-    .bind(tenant_id)
-    .execute(pool)
-    .await
-    .map_err(|error| format!("Failed to record the mandate revocation: {error}"))?;
-
-    Ok(true)
+        .map_err(|error| format!("Failed to record the mandate revocation: {error}"))?;
+        revoked += 1;
+    }
+    Ok(revoked)
 }
 
 pub async fn cancel_subscription(
@@ -163,10 +177,12 @@ pub async fn cancel_subscription(
     let mut tx = pool.begin().await.map_err(SubscriptionError::Db)?;
 
     // Serialize concurrent cancels for this tenant; only a live subscription
-    // can be canceled.
-    let subscription_id: Option<Uuid> = sqlx::query_scalar(
+    // can be canceled. The provider ids are CAPTURED here, before the local
+    // transition: flipping the row to `canceled` first would make a
+    // status-filtered lookup miss it and Mollie would keep charging.
+    let row: Option<(Uuid, Option<String>, Option<String>)> = sqlx::query_as(
         r#"
-        SELECT id
+        SELECT id, mollie_subscription_id, mollie_customer_id
         FROM mollie_subscriptions
         WHERE tenant_id = $1
           AND status IN ('active', 'trialing', 'past_due', 'unpaid')
@@ -179,7 +195,7 @@ pub async fn cancel_subscription(
     .fetch_optional(&mut *tx)
     .await
     .map_err(SubscriptionError::Db)?;
-    let Some(subscription_id) = subscription_id else {
+    let Some((subscription_id, provider_subscription_id, provider_customer_id)) = row else {
         tx.rollback().await.ok();
         return Err(SubscriptionError::NotFound);
     };
@@ -242,12 +258,28 @@ pub async fn cancel_subscription(
 
     tx.commit().await.map_err(SubscriptionError::Db)?;
 
-    // Immediate cancellation also revokes the mandate at Mollie: the local
-    // state already refuses every future charge, but a live mandate is a
-    // standing permission at the provider. Best-effort by design (the cancel
-    // is committed); a failure leaves `mandate_revoked_at` NULL, which the
-    // maintenance sweep retries.
+    // Immediate cancellation stops the provider: Mollie's own subscription
+    // is canceled (no further charge generation) and the mandate is revoked.
+    // Best-effort by design (the local cancel is committed); failures are
+    // retried by the maintenance sweep.
     if immediately {
+        if let (Some(subscription_id), Some(customer_id)) = (
+            provider_subscription_id.as_deref(),
+            provider_customer_id.as_deref(),
+        ) {
+            if let Err(error) = crate::plan_billing::cancel_provider_subscription_object(
+                customer_id,
+                subscription_id,
+            )
+            .await
+            {
+                tracing::warn!(
+                    tenant_id = %tenant_id,
+                    error = %error,
+                    "subscription canceled locally but the Mollie subscription cancellation failed; the reconciliation sweep retries it"
+                );
+            }
+        }
         if let Err(error) = revoke_tenant_mandate_at_provider(pool, tenant_id).await {
             tracing::warn!(
                 tenant_id = %tenant_id,

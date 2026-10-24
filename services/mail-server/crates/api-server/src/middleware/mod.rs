@@ -224,9 +224,18 @@ mod tests {
         assert!(html.contains("'Spectral'"), "display face: {html}");
         assert!(html.contains("'Overpass'"), "text face: {html}");
         assert!(html.contains("#0E141B"), "ink token: {html}");
-        assert!(!html.contains("#dc2626"), "no legacy red heading/fill: {html}");
-        assert!(!html.contains("<style"), "brace-free by construction: {html}");
-        assert!(html.contains("background:#0E141B"), "ink action fill: {html}");
+        assert!(
+            !html.contains("#dc2626"),
+            "no legacy red heading/fill: {html}"
+        );
+        assert!(
+            !html.contains("<style"),
+            "brace-free by construction: {html}"
+        );
+        assert!(
+            html.contains("background:#0E141B"),
+            "ink action fill: {html}"
+        );
         assert!(html.contains("href=\"/login\""));
         // No braces at all: the page cannot be mistaken for a JSON error
         // body and no template interpolation can smuggle one in.

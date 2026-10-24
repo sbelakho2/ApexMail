@@ -85,15 +85,13 @@ not facts and never grant access.
 ## Plan changes and cancellation
 
 Existing subscription changes are checkout-gated. `/switch-plan` returns
-`409 CHECKOUT_REQUIRED` and never mutates local rows. Cancellation changes the
-local row (`POST /cancel` sets `cancel_at_period_end` or cancels immediately)
-and, for an immediate cancel, REVOKES the mandate at the provider
-(`DELETE /v2/customers/{cst}/mandates/{mdt}`) — the only provider-side
-guarantee that the account can never be charged again. The revocation is
-recorded on `mollie_customers.mandate_revoked_at`; a failure there is retried
-by the maintenance sweep (15-minute interval) until Mollie confirms. Renewal
-paths honour the local flag, and the provider state is always re-read with an
-authenticated fetch rather than trusted from a webhook body.
+`409 CHECKOUT_REQUIRED` and never mutates local rows. Cancellation is local:
+`POST /cancel` sets `cancel_at_period_end` or cancels immediately. Mollie has
+no hosted billing portal, and its subscription charges are merchant-initiated;
+renewal paths honour the flag and the provider subscription state is reconciled
+from authenticated fetches. Canceling the Mollie-side subscription
+(`DELETE /v2/customers/{cst}/subscriptions/{sub}`) is the provider operation
+that stops Mollie's own charge generation.
 
 ## Refunds
 
@@ -117,11 +115,9 @@ tenant:
 - the id has the documented shape (`tr_…` or `re_…`, charset
   `[A-Za-z0-9_]`) and the object fetches with the configured Bearer key;
 - the fetched object is bound to the metadata tenant, not another tenant;
-- a recurring charge names a local invoice, and its amount and currency must
-  match that invoice exactly (the tax-truth gate persists an immutable
-  snapshot before anything is marked paid);
-- a checkout payment is informational: it never grants entitlement on its
-  own.
+- the notified amount maps to an **active** ApexMail plan and matches its
+  monthly or annual interval;
+- the transition is valid and the amount matches the expected catalog amount.
 
 Mollie payment statuses are `open | pending | authorized | paid | failed |
 canceled | expired | refunded | charged_back`. Only `paid`, `refunded`,
@@ -129,13 +125,11 @@ canceled | expired | refunded | charged_back`. Only `paid`, `refunded`,
 `pending` and `authorized` are not settled and are ignored until the status
 changes.
 
-ApexMail does not create Mollie subscription objects: recurring collection is
-an explicit `sequenceType: recurring` payment against the customer's mandate,
-so the LOCAL subscription row is authoritative for access and renewals, and
-the mandate plus `mollie_customers.mandate_revoked_at` is the provider-side
-truth for what may still be charged. There is therefore no provider
-subscription state to reconcile, and no claim in this document depends on
-one.
+Only an `active` Mollie subscription grants the mapped paid plan. `canceled`,
+`completed`, `suspended` and `pending` subscriptions remain stored for
+reconciliation but resolve the tenant to Free access. A reconciled
+cancellation downgrades only if the canceled subscription is already
+associated with that tenant.
 
 Enterprise contract signature handling is the separate audited entitlement
 path. It is not a generic Checkout purchase path.
@@ -181,11 +175,10 @@ ApexMail normalizes the fetched state into these internal event codes:
 
 ## Settlements
 
-Mollie pays out through settlements. The API client exposes
-`GET /v2/settlements` and `GET /v2/settlements/{id}` (the objects carry their
-invoice and payment references) for OPERATOR payout reconciliation. No
-automated settlement posting runs today, and customer entitlement never
-depends on a settlement.
+Mollie pays out through settlements. `GET /v2/settlements` lists them and
+`GET /v2/settlements/{id}` returns one, including its invoice and payment
+references. Payout reconciliation uses these objects; they are not customer
+entitlement events.
 
 ## Operational rules
 
@@ -196,9 +189,7 @@ depends on a settlement.
 - Do not expose Enterprise or PAYG through generic public Checkout.
 - Never trust a webhook body's status: the webhook carries only an id.
 - If local billing state diverges from Mollie, reconcile from an authenticated
-  fetch or an audited operational process. Mollie wins for the payments and
-  refunds that back an invoice; the LOCAL subscription row is authoritative
-  for entitlement and renewals.
+  fetch or an audited operational process; Mollie wins for subscription state.
 
 See [the pricing reference](../pricing.md) and
 [the billing lifecycle](../architecture/billing-lifecycle.md) for related

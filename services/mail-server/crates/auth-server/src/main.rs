@@ -1026,13 +1026,7 @@ async fn status_page(State(state): State<AppState>) -> impl IntoResponse {
     // client script for presentation, and a refresh is the honest zero-JS
     // equivalent of the deleted fetch loop (the JSON snapshot it used to read
     // stays at /status/api for machines).
-    let html = render_status_document(
-        &cards,
-        &updated,
-        pct,
-        overall_msg,
-        overall_cls,
-    );
+    let html = render_status_document(&cards, &updated, pct, overall_msg, overall_cls);
     (
         StatusCode::OK,
         [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],

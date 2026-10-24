@@ -10,8 +10,6 @@
 pub mod accounting_export;
 /// Posting hooks into the statutory accounting ledger (migration 220).
 pub mod accounting_postings;
-pub mod mollie_client;
-pub mod mollie_webhooks;
 pub mod config;
 pub mod credit_notes;
 pub mod invoices;
@@ -22,12 +20,15 @@ pub mod maintenance;
 /// metrics (counters, gauges, histograms), consecutive-error alert thresholds,
 /// and stale-event detection.
 pub mod metering_monitor;
+pub mod mollie_client;
+pub mod mollie_webhooks;
 /// Money-invariant test gate (audit item 4): integer-cents round-trips,
 /// half-up rounding everywhere, VAT line reconciliation, wallet
 /// conservation, and a source-scan ban on f32/f64 in money paths.
 #[cfg(test)]
 mod money_invariants;
 pub mod overage;
+pub mod plan_billing;
 pub mod plans;
 /// Contract product-line billing: the Platform line (base + per-1K usage
 /// tier + active subaccounts above 100) and the Mailboxes seat line

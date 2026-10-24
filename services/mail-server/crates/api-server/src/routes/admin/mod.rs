@@ -43,6 +43,7 @@ pub mod insights;
 pub mod jobs;
 pub mod leads_discovery;
 pub mod mailboxes;
+pub mod mollie_settlements;
 pub mod operators;
 pub mod predictive_analytics;
 pub mod proxy;

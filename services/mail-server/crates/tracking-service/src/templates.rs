@@ -440,7 +440,6 @@ mod tests {
 
     // ── F39:confirmation is a POST form, not a GET mutation link ──────
 
-
     /// Every recipient page is an ARK document: Spectral display, Overpass
     /// text, Mono machine data, paper/ink, no radius, no emoji decoration,
     /// and red only on the destructive action (never as a fill).
@@ -470,7 +469,10 @@ mod tests {
         for html in pages {
             assert!(html.starts_with("<!DOCTYPE html>"), "{html}");
             assert!(html.contains("<html lang=\"en\">"), "{html}");
-            assert!(html.contains("<title>") && html.contains("</title>"), "{html}");
+            assert!(
+                html.contains("<title>") && html.contains("</title>"),
+                "{html}"
+            );
             assert!(!html.contains("<script"), "no scripts: {html}");
             assert!(!html.contains("linear-gradient"), "{html}");
             assert!(html.contains("'Spectral'"), "Spectral display face: {html}");
@@ -496,8 +498,14 @@ mod tests {
             prefs.contains("class=\"btn btn-danger\">Unsubscribe from All</button>"),
             "{prefs}"
         );
-        assert!(!prefs.contains("#dc2626"), "the legacy red fill is gone: {prefs}");
-        assert!(!prefs.contains("#16a34a"), "the legacy green fill is gone: {prefs}");
+        assert!(
+            !prefs.contains("#dc2626"),
+            "the legacy red fill is gone: {prefs}"
+        );
+        assert!(
+            !prefs.contains("#16a34a"),
+            "the legacy green fill is gone: {prefs}"
+        );
     }
 
     #[test]

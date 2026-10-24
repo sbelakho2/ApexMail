@@ -27,7 +27,7 @@ use crate::routes::helpers::hash_token;
 use crate::state::AppState;
 
 const MINIMUM_MONTHLY_CHARGE_CENTS: i64 = 0;
-const SELF_SERVE_CHECKOUT_PLAN_IDS: [&str; 4] = ["starter", "pro", "growth", "scale"];
+pub(crate) const SELF_SERVE_CHECKOUT_PLAN_IDS: [&str; 4] = ["starter", "pro", "growth", "scale"];
 const DEFAULT_BILLING_CURRENCY: &str = "EUR";
 const DEFAULT_NET_DAYS: i64 = 30;
 const USAGE_QUERY_CACHE_TTL_SECONDS: u64 = 30;
@@ -1029,7 +1029,18 @@ fn tenant_billing_email(settings_raw: &str) -> Option<String> {
     settings.billing_email.or(settings.default_from_email)
 }
 
-async fn get_or_create_mollie_customer_id(
+/// The email a Mollie customer is created with: the explicit billing contact,
+/// the sending-address fallback, then the billing address's email (the invoice
+/// identity). A blank or non-address value never wins over a real one.
+fn resolve_billing_email(settings_raw: &str, address_email: Option<String>) -> Option<String> {
+    tenant_billing_email(settings_raw).or_else(|| {
+        address_email
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty() && value.contains('@'))
+    })
+}
+
+pub(crate) async fn get_or_create_mollie_customer_id(
     state: &AppState,
     tenant_id: &str,
 ) -> Result<String, String> {
@@ -1059,18 +1070,25 @@ async fn get_or_create_mollie_customer_id(
         return Ok(mollie_customer_id);
     }
 
-    let Some((tenant_name, settings_raw)) = sqlx::query_as::<_, (String, String)>(
-        "SELECT name, settings::text AS settings FROM tenants WHERE id = $1",
-    )
-    .bind(tenant_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(|error| format!("Failed to query tenant for Mollie checkout: {error}"))?
+    let Some((tenant_name, settings_raw, address_email)) =
+        sqlx::query_as::<_, (String, String, Option<String>)>(
+            "SELECT t.name, t.settings::text AS settings, ba.email \
+           FROM tenants t \
+           LEFT JOIN billing_addresses ba ON ba.tenant_id = t.id \
+          WHERE t.id = $1",
+        )
+        .bind(tenant_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|error| format!("Failed to query tenant for Mollie checkout: {error}"))?
     else {
         return Err("Tenant not found".into());
     };
 
-    let Some(email) = tenant_billing_email(&settings_raw) else {
+    // The Mollie customer's email IS the invoice identity: prefer the explicit
+    // billing contact, then the sending-address fallback, then the billing
+    // address's email (the one an invoice would carry).
+    let Some(email) = resolve_billing_email(&settings_raw, address_email) else {
         return Err("No billing email configured".into());
     };
 
@@ -1081,11 +1099,7 @@ async fn get_or_create_mollie_customer_id(
     let mollie = billing_service::mollie_client::MollieClient::from_env()
         .map_err(|error| format!("Mollie is not configured: {error}"))?;
     let customer = mollie
-        .create_customer(
-            &tenant_name,
-            &email,
-            &format!("customer_{tenant_id}"),
-        )
+        .create_customer(&tenant_name, &email, &format!("customer_{tenant_id}"))
         .await
         .map_err(|error| format!("Failed to create the Mollie customer: {error}"))?;
     if customer.id.is_empty() {
@@ -1352,7 +1366,7 @@ async fn invalidate_cache_key(state: &AppState, key: &str) {
     }
 }
 
-async fn resolve_tenant_billing_currency(state: &AppState, tenant_id: &str) -> String {
+pub(crate) async fn resolve_tenant_billing_currency(state: &AppState, tenant_id: &str) -> String {
     let currency: Option<String> = sqlx::query_scalar(
         "SELECT settings->>'billingCurrency' AS billing_currency FROM tenants WHERE id = $1",
     )
@@ -5214,6 +5228,36 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    #[test]
+    fn billing_email_falls_back_from_settings_to_the_invoice_address() {
+        // Explicit billing contact wins.
+        assert_eq!(
+            resolve_billing_email(
+                r#"{"billingEmail":"billing@acme.test"}"#,
+                Some("addr@acme.test".into())
+            ),
+            Some("billing@acme.test".into())
+        );
+        // Sending-address fallback.
+        assert_eq!(
+            resolve_billing_email(r#"{"defaultFromEmail":"hello@acme.test"}"#, None),
+            Some("hello@acme.test".into())
+        );
+        // The billing address's email (the invoice identity) is the last
+        // resort — a tenant with only an address can still check out.
+        assert_eq!(
+            resolve_billing_email("{}", Some("  addr@acme.test ".into())),
+            Some("addr@acme.test".into())
+        );
+        // A blank or non-address value never wins.
+        assert_eq!(resolve_billing_email("{}", Some("   ".into())), None);
+        assert_eq!(
+            resolve_billing_email("{}", Some("not-an-email".into())),
+            None
+        );
+        assert_eq!(resolve_billing_email("{not json", None), None);
+    }
+
     use axum::body::Body;
     use axum::http::{Method, Request};
     use deadpool_redis::Config as RedisConfig;
@@ -5669,8 +5713,8 @@ mod tests {
             TenantBranding, TransactionalEmail,
         };
 
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/ark-email-preview");
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/ark-email-preview");
         std::fs::create_dir_all(&dir).expect("preview dir");
 
         let reset = render_transactional_email(&TransactionalEmail {
@@ -8292,10 +8336,7 @@ mod adversarial_tests {
         let mock = Router::new()
             .route("/customers", post(mock_create_customer))
             .route("/payments", post(mock_create_payment))
-            .route(
-                "/payments/:payment_id/refunds",
-                post(mock_create_refund),
-            )
+            .route("/payments/:payment_id/refunds", post(mock_create_refund))
             .with_state(state.clone());
         tokio::spawn(async move {
             let _ = axum::serve(listener, mock).await;
@@ -8527,8 +8568,7 @@ mod adversarial_tests {
         );
         assert_eq!(body_resp["data"]["sessionId"], "tr_mock_1");
         assert_eq!(
-            body_resp["data"]["url"],
-            "https://www.mollie.com/checkout/tr_mock_1",
+            body_resp["data"]["url"], "https://www.mollie.com/checkout/tr_mock_1",
             "the checkout URL comes from _links.checkout.href"
         );
         let (customer_id, name, email): (String, String, String) = sqlx::query_as(
@@ -8622,7 +8662,10 @@ mod adversarial_tests {
                 "storePaymentMethod",
                 "lineItems",
             ] {
-                assert!(sent.get(absent).is_none(), "unexpected field {absent}: {sent}");
+                assert!(
+                    sent.get(absent).is_none(),
+                    "unexpected field {absent}: {sent}"
+                );
             }
         }
 
@@ -8788,7 +8831,9 @@ mod adversarial_tests {
             .header("x-api-key", &env.key)
             .header("idempotency-key", "void-refund-1")
             .header("content-type", "application/json")
-            .body(Body::from(json!({"reason": "customer cancelled"}).to_string()))
+            .body(Body::from(
+                json!({"reason": "customer cancelled"}).to_string(),
+            ))
             .unwrap(),
         )
         .await;

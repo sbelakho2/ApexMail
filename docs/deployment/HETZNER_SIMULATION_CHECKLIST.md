@@ -599,8 +599,8 @@ The Mollie Dashboard's test mode can also post to a configured webhook.
 # Upgrade/downgrade scenarios are driven through a Mollie payment (direct
 # local plan mutation is refused with 409 CHECKOUT_REQUIRED). Cancellation is
 # a local state change: POST /cancel sets cancel_at_period_end (or cancels
-# immediately, which also revokes the mandate at Mollie) and no further
-# renewals are charged.
+# immediately and cancels the Mollie subscription) and no further renewals
+# are charged.
 
 # Past due + recovery
 #   payment failed, then a later paid payment

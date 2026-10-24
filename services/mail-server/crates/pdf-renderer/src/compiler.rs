@@ -297,8 +297,8 @@ mod tests {
         // Deterministic artifact for the external check (`pdffonts` reads the
         // same fact from outside; tools/ark_email_dogfood.py renders the
         // sibling HTML documents).
-        let preview_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/ark-email-preview");
+        let preview_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/ark-email-preview");
         std::fs::create_dir_all(&preview_dir).expect("preview dir");
         std::fs::write(preview_dir.join("invoice.pdf"), &invoice).expect("write invoice pdf");
     }
@@ -530,7 +530,10 @@ mod tests {
         // Mixed ARK/fallback runs split at font boundaries, so the extractor
         // can widen the gaps between clusters; compare on normalised spaces.
         let normalised = text.split_whitespace().collect::<Vec<_>>().join(" ");
-        assert!(normalised.contains("年度套餐"), "CJK must round-trip: {text}");
+        assert!(
+            normalised.contains("年度套餐"),
+            "CJK must round-trip: {text}"
+        );
         assert!(
             normalised.contains("Годовой план"),
             "Cyrillic must round-trip: {text}"

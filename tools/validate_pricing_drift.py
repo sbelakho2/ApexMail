@@ -555,7 +555,7 @@ def validate_pricing_reference(catalog: dict[str, ParsedPlan], errors: list[str]
     text = read(DOCS_PRICING)
     check_contains(DOCS_PRICING, "the active `plans` records, and verified Mollie webhooks", errors)
     check_contains(DOCS_PRICING, "HIPAA availability is **not currently offered**", errors)
-    check_contains(DOCS_PRICING, "The local `mollie_subscriptions` row is the entitlement authority", errors)
+    check_contains(DOCS_PRICING, "Only an `active` Mollie subscription grants", errors)
     for plan_id in MARKETING_PLAN_IDS:
         plan = catalog.get(plan_id)
         if plan is None:
@@ -878,7 +878,7 @@ def validate_marketing_source(catalog: dict[str, ParsedPlan], errors: list[str])
         "€0.80, Pro €0.60, Growth/Business €0.35",
         "HIPAA availability is not currently offered",
         "billing settings in the console",
-        "webhook carries only the payment id",
+        "the webhook carries only the payment id",
     ):
         check(needle in faq, f"pricing FAQ is missing {needle!r}", errors)
     for stale in ("Mollie billing portal", "portail de facturation Mollie", "portal de facturación de Mollie", "Mollie-Abrechnungsportal"):
@@ -1081,10 +1081,10 @@ def validate_lifecycle_docs(errors: list[str]) -> None:
     authority = read(PRICING_AUTHORITY)
     for needle in (
         "Payment creation does not change the tenant plan",
-        "Entitlement follows the LOCAL `mollie_subscriptions` row",
+        "Only an `active` Mollie subscription grants",
         "sets `cancel_at_period_end`",
         "period-end sweep",
-        "persists the monthly and yearly plan codes",
+        "persists the monthly and yearly provider-facing plan",
     ):
         check(needle in lifecycle, f"billing lifecycle doc is missing {needle!r}", errors)
     check("does not persist Mollie price columns" not in lifecycle, "billing lifecycle retains false plans-table claim", errors)
@@ -1096,7 +1096,7 @@ def validate_lifecycle_docs(errors: list[str]) -> None:
     for needle in (
         "The public Checkout endpoint accepts",
         "An authorization is not a settlement",
-        "ApexMail does not create Mollie subscription objects",
+        "Only an `active` Mollie subscription grants",
     ):
         check(needle in mollie, f"Mollie contract is missing {needle!r}", errors)
     check(

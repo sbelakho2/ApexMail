@@ -215,7 +215,8 @@ async fn query_dashboard_snapshot(db: &sqlx::PgPool) -> Result<DashboardSsePaylo
     // populate — mirroring billing-service's get_mrr_report pattern (tenants.plan
     // → plans pricing, ROUND(price_yearly / 12.0) yearly normalization).
     // The legacy `subscriptions` table has no writer and always read as zero.
-    let mrr = if table_exists(db, "mollie_subscriptions").await? && table_exists(db, "plans").await?
+    let mrr = if table_exists(db, "mollie_subscriptions").await?
+        && table_exists(db, "plans").await?
     {
         let has_billing_interval =
             crate::routes::helpers::column_exists(db, "mollie_subscriptions", "billing_interval")

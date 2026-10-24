@@ -8,7 +8,6 @@ use billing_common::cost_throttle::{
 use chrono::{DateTime, Datelike, Timelike, Utc};
 use redis::AsyncCommands;
 use reqwest::Client;
-use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -231,6 +230,28 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
                 Err(error_message) => {
                     error!(error = %error_message, "failed to process dedicated IP billing sync");
                 }
+            }
+        }
+    });
+
+    // Provider subscription state is reconciled from authenticated fetches:
+    // only an ACTIVE Mollie subscription grants the plan, and an amount that
+    // drifted from the catalog is a finance incident.
+    let subscription_state = state.clone();
+    tokio::spawn(async move {
+        let mut interval = interval_at(
+            Instant::now() + task_interval(HOURLY_TASK_INTERVAL),
+            task_interval(HOURLY_TASK_INTERVAL),
+        );
+        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            match crate::plan_billing::sweep_provider_subscription_state(&subscription_state.db)
+                .await
+            {
+                Ok(0) => {}
+                Ok(reconciled) => info!(reconciled, "reconciled Mollie subscription state"),
+                Err(error) => error!(error = %error, "Mollie subscription reconciliation failed"),
             }
         }
     });
@@ -1345,7 +1366,7 @@ fn audit_signing_key() -> String {
 /// `tenants`/`mollie_subscriptions`. Status values, timestamp columns, the
 /// `plan <> 'free'` guard and the audit payload are byte-identical to the
 /// per-row loop this replaced.
-async fn sweep_canceled_at_period_end(state: &AppState) -> Result<u64, String> {
+pub async fn sweep_canceled_at_period_end(state: &AppState) -> Result<u64, String> {
     let mut tx = state
         .db
         .begin()
@@ -1355,10 +1376,13 @@ async fn sweep_canceled_at_period_end(state: &AppState) -> Result<u64, String> {
     // Lock the due set, transition the subscriptions and downgrade their
     // tenants in ONE statement; the RETURNING chain yields exactly the rows
     // that were ended (same predicate, same writes as the old per-row loop).
-    let due: Vec<(uuid::Uuid, String)> = sqlx::query_as(
+    // The provider ids ride along: they must be captured BEFORE the local
+    // status becomes `canceled`, otherwise the provider-side DELETE has no
+    // row left to find and Mollie would keep charging a canceled customer.
+    let due: Vec<(uuid::Uuid, String, String, Option<String>)> = sqlx::query_as(
         r#"
         WITH due AS (
-            SELECT s.id, s.tenant_id
+            SELECT s.id, s.tenant_id, s.mollie_subscription_id, s.mollie_customer_id
             FROM mollie_subscriptions s
             WHERE s.cancel_at_period_end = true
               AND s.status IN ('active', 'trialing', 'past_due', 'unpaid')
@@ -1382,7 +1406,7 @@ async fn sweep_canceled_at_period_end(state: &AppState) -> Result<u64, String> {
              WHERE t.id = due.tenant_id
                AND t.plan <> 'free'
         )
-        SELECT due.id, due.tenant_id
+        SELECT due.id, due.tenant_id, due.mollie_subscription_id, due.mollie_customer_id
         FROM due
         JOIN ended ON ended.id = due.id
         ORDER BY due.id
@@ -1395,7 +1419,7 @@ async fn sweep_canceled_at_period_end(state: &AppState) -> Result<u64, String> {
     append_audit_log_batch(
         &mut tx,
         due.iter()
-            .map(|(subscription_id, tenant_id)| BatchedAuditEntry {
+            .map(|(subscription_id, tenant_id, _, _)| BatchedAuditEntry {
                 tenant_id: tenant_id.clone(),
                 action: "billing.subscription_ended_at_period_end",
                 resource_type: "subscription",
@@ -1410,6 +1434,31 @@ async fn sweep_canceled_at_period_end(state: &AppState) -> Result<u64, String> {
     tx.commit()
         .await
         .map_err(|e| format!("Failed to commit canceled-subscription sweep: {e}"))?;
+
+    // The provider-side half of the period-end cancellation: stop Mollie's
+    // own charge generation and revoke the mandate, using the ids captured
+    // before the local transition. A provider failure here is logged; the
+    // reconciliation sweep retries any provider object still active for a
+    // locally canceled row, and the revocation sweep retries mandates.
+    let tenants: Vec<String> = due.iter().map(|(_, tenant, _, _)| tenant.clone()).collect();
+    for (_, tenant_id, subscription_id, customer_id) in &due {
+        let Some(customer_id) = customer_id.as_deref() else {
+            continue;
+        };
+        if let Err(error) =
+            crate::plan_billing::cancel_provider_subscription_object(customer_id, subscription_id)
+                .await
+        {
+            tracing::warn!(tenant_id = %tenant_id, error = %error,
+                "period-end cancellation: provider subscription cancellation failed (reconciliation retries it)");
+        }
+    }
+    if let Err(error) =
+        crate::subscriptions::revoke_tenant_mandates_at_provider(&state.db, &tenants).await
+    {
+        tracing::warn!(error = %error,
+            "period-end cancellation: mandate revocation failed (sweep will retry)");
+    }
     Ok(due.len() as u64)
 }
 
@@ -2519,6 +2568,10 @@ async fn process_scheduled_retries(
           -- External audit 15 Oct, H1: a subscription canceled for period end
           -- must never be charged again, even if a dunning retry is queued.
           AND s.cancel_at_period_end = false
+          -- Mollie retries its OWN subscription charges; a local mandate
+          -- charge here would collect the same period twice. Provider rows
+          -- always carry a `sub_...` id; local-only rows do not.
+          AND (s.mollie_subscription_id IS NULL OR left(s.mollie_subscription_id, 4) <> 'sub_')
         ORDER BY d.next_retry_at ASC
         LIMIT 50
         "#,
@@ -5016,10 +5069,11 @@ pub async fn resolve_abuse_report(
 /// deterministic `Idempotency-Key` makes a retried call replay instead of
 /// double-charging.
 ///
-/// The returned [`MollieCharge`] carries the payment id and the status. A
+/// The returned [`MollieCharge`] carries the payment id. A
 /// `failed`/`canceled`/`expired` status is an `Err`; `paid` and the async
 /// states (`open`, `pending`, `authorized`) are accepted — the webhook
 /// settles the final outcome.
+#[allow(clippy::too_many_arguments)]
 async fn mollie_charge_stored_payment_method(
     _client: &Client,
     reference: &str,
@@ -5066,7 +5120,6 @@ async fn mollie_charge_stored_payment_method(
     match link.status.as_str() {
         "paid" | "open" | "pending" | "authorized" => Ok(MollieCharge {
             payment_id: link.id,
-            status: link.status,
         }),
         other => Err(format!(
             "Mollie declined the charge ({reference}): status {other}"
@@ -5078,22 +5131,6 @@ async fn mollie_charge_stored_payment_method(
 #[derive(Debug, Clone)]
 struct MollieCharge {
     payment_id: String,
-    status: String,
-}
-
-async fn decode_mollie_response<T: DeserializeOwned>(
-    response: reqwest::Response,
-) -> Result<T, String> {
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(format!("Mollie returned {status}: {body}"));
-    }
-
-    response
-        .json::<T>()
-        .await
-        .map_err(|error| format!("Mollie response decode failed: {error}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -7180,7 +7217,7 @@ mod coverage_adversarial {
                  (tenant_id, mollie_subscription_id, plan, status, billing_cycle_start,
                   billing_cycle_end, mollie_customer_id,
                   mollie_mandate_id)
-             VALUES ($1, 'psp_retry_sub', 'growth', 'past_due', NOW(),
+             VALUES ($1, '', 'growth', 'past_due', NOW(),
                      NOW() + INTERVAL '30 days', $1, 'tok_retry')",
         )
         .bind(tenant)
@@ -8028,10 +8065,13 @@ mod coverage_adversarial {
             "INSERT INTO mollie_subscriptions
                  (tenant_id, mollie_subscription_id, plan, status, billing_cycle_start,
                   billing_cycle_end, mollie_customer_id)
+             -- local_<tenant> = a LOCAL-only subscription row (no Mollie
+             -- subscription): the legacy/operator shape the mandate retry
+             -- charges. Provider rows always carry a `sub_...` id.
              VALUES ($1, $2, 'growth', $3, NOW(), NOW() + INTERVAL '30 days', $1)",
         )
         .bind(tenant)
-        .bind(format!("sub_{}", &tenant[..tenant.len().min(20)]))
+        .bind(format!("local_{}", &tenant[..tenant.len().min(20)]))
         .bind(sub_status)
         .execute(&env.pool)
         .await
@@ -8560,9 +8600,11 @@ mod coverage_adversarial {
             ],
             "cancel is timestamped and never wedges on a stale provider reference"
         );
-        for path in ["/v2/payments"] {
-            assert_eq!(mock.call_count(path), 0, "no HTTP for {path}");
-        }
+        assert_eq!(
+            mock.call_count("/v2/payments"),
+            0,
+            "no HTTP to the payments endpoint"
+        );
 
         match previous {
             (Some(key), Some(url), Some(price)) => {
@@ -9850,8 +9892,51 @@ mod coverage_adversarial {
                 "no per-row tenant downgrades: {:?}",
                 capture.statements()
             );
+            // The provider-side cancellation must use handles captured by the
+            // SAME statement that flips the status: a post-commit lookup keyed
+            // on the live status would find nothing (the row is already
+            // `canceled`) and Mollie would keep charging. So the CTE carries
+            // the provider ids and NO subscription lookup may run at all.
+            let cte = capture
+                .statements()
+                .into_iter()
+                .find(|statement| statement.starts_with("WITH due AS"))
+                .unwrap_or_default();
+            assert!(!cte.is_empty(), "the due statement must run");
+            // The capture truncates SQL text, so the handle contract is pinned
+            // on the source of the ONE sweep function.
+            let source =
+                std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/maintenance.rs"))
+                    .expect("maintenance source");
+            let start = source
+                .find("pub async fn sweep_canceled_at_period_end")
+                .expect("sweep function");
+            let body = &source[start..(start + 4_000).min(source.len())];
+            assert!(
+                body.contains("due.mollie_subscription_id")
+                    && body.contains("due.mollie_customer_id"),
+                "the due statement must capture the provider handles"
+            );
+            assert_eq!(
+                capture.count_starting_with("SELECT tenant_id, mollie_subscription_id"),
+                0,
+                "no post-commit provider-subscription lookup: {:?}",
+                capture.statements()
+            );
+            assert_eq!(
+                capture.count_starting_with("SELECT DISTINCT ON (s.tenant_id)"),
+                1,
+                "ONE batch mandate lookup: {:?}",
+                capture.statements()
+            );
             assert_eq!(
                 capture.count_starting_with("SELECT"),
+                1,
+                "only the batch mandate lookup may SELECT: {:?}",
+                capture.statements()
+            );
+            assert_eq!(
+                capture.count_starting_with("SELECT * FROM mollie_subscriptions"),
                 0,
                 "no separate due-list SELECT: {:?}",
                 capture.statements()
