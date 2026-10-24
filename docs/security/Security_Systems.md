@@ -48,7 +48,7 @@ ApexMail implements eight dedicated Rust security crates providing defense-in-de
 - ✅ WAF: Added DB-specific SQL keywords (`PG_SLEEP`, `DBMS_LOCK`, `UTL_HTTP`, `XOR`, `REGEXP`, `RLIKE`)
 - ✅ DLP: Fixed ReDoS vulnerability in credit card regex — switched to bounded pattern
 - ✅ DLP: Fixed entropy scanner offset tracking for UTF-8 correctness
-- ✅ DLP: Added comprehensive secret prefixes (Adyen, GitLab, npm, Twilio, Sendgrid, JWT)
+- ✅ DLP: Added comprehensive secret prefixes (Mollie, GitLab, npm, Twilio, Sendgrid, JWT)
 - ✅ ATO: Enhanced device fingerprinting — includes TLS fingerprint hash, uses /16 IP prefix
 - ✅ ATO: Added lockout escalation — `RequireCaptcha` action after repeated lockouts
 - ✅ Threat-intel: Added full IPv6 blocklist support (`Ipv6Blocklist`, `UnifiedIpBlocklist`)

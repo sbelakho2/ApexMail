@@ -4003,7 +4003,7 @@ async fn register(
 
     // A plan submitted at sign-up is only an onboarding preference. Never
     // grant a paid entitlement until the authenticated billing flow creates a
-    // Adyen subscription and its verified webhook updates the tenant.
+    // Mollie subscription and its verified webhook updates the tenant.
     let signup_plan_intent = signup_plan_intent(&body.plan)?;
 
     // Rate-limit only after cheap validation so ordinary form mistakes do not

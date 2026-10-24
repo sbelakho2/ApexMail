@@ -15,7 +15,7 @@
 //! # Period records (audits F30/F31)
 //!
 //! Billable periods live in the immutable `billing_periods` table
-//! (migration 137), written by the Adyen subscription webhook at every
+//! (migration 137), written by the Mollie subscription webhook at every
 //! period transition and by a catch-up insert at the top of the sweep. A
 //! renewal can no longer overwrite the period bounds before the sweep
 //! reads them. The sweep selects only `invoice_state = 'unbilled'` rows —
@@ -67,16 +67,16 @@
 //!    credits; audit F60) — wallet application never invents its own
 //!    total-minus-this-debit fallback, and an unavailable balance is a
 //!    retryable failure, never the basis of an external amount (F33).
-//! 2. **Adyen charge (recurring).** For tenants with a stored Adyen
-//!    recurring token on file and a configured `ADYEN_API_KEY`/
-//!    `ADYEN_MERCHANT_ACCOUNT`, the REMAINING amount is charged
+//! 2. **Mollie charge (recurring).** For tenants with a stored Mollie
+//!    recurring token on file and a configured `MOLLIE_API_KEY`/
+//!    `MOLLIE_PROFILE_ID`, the REMAINING amount is charged
 //!    immediately as a recurring `POST /payments` against the stored
 //!    token (audit F34: the old pending-invoice-item path never charged,
 //!    so final usage went uncollected). The idempotency key carries the
 //!    immutable local operation identity (invoice id) AND the frozen
 //!    amount, so a retry with a changed wallet balance can never reuse
-//!    one Adyen key with different parameters. The local ↔ provider
-//!    mapping (charge pspReference, merchant reference
+//!    one Mollie key with different parameters. The local ↔ provider
+//!    mapping (charge payment id, invoice reference
 //!    `invoice:{local_invoice_id}`) is persisted, and the settlement
 //!    webhook reconciles through that reference. The HTTP call runs
 //!    OUTSIDE any wallet-lock transaction (audit F33).
@@ -150,7 +150,7 @@ const SWEEP_PAGE: i64 = 500;
 /// reconciled, never aged out with the raw metering events. Pinned by
 /// unit tests.
 const SWEEP_UNBILLED_PERIODS_SQL: &str = r#"
-    SELECT id, tenant_id, adyen_subscription_id, period_start, period_end,
+    SELECT id, tenant_id, mollie_subscription_id, period_start, period_end,
            plan_name, email_allowance,
            -- billing_periods.overage_rate_millicents is INT4; the Rust row
            -- decodes i64, so project an explicit bigint cast.
@@ -183,7 +183,7 @@ pub struct OverageSweepResult {
     pub payg_invoices_created: u64,
     /// Invoices fully covered by the wallet and marked paid.
     pub wallet_paid: u64,
-    /// Invoices left `pending` for the dunning flow / Adyen next cycle.
+    /// Invoices left `pending` for the dunning flow / Mollie next cycle.
     pub pending_dunning: u64,
     /// Periods whose invoice already existed when claimed (unique index
     /// backstop) — the existing invoice was reused, never double-collected
@@ -218,7 +218,7 @@ pub struct OverageSweepResult {
 struct BillingPeriodRow {
     id: Uuid,
     tenant_id: String,
-    adyen_subscription_id: Option<String>,
+    mollie_subscription_id: Option<String>,
     period_start: DateTime<Utc>,
     period_end: DateTime<Utc>,
     plan_name: Option<String>,
@@ -261,7 +261,7 @@ const EFFECTIVE_PERIOD_PLAN_SQL: &str = r#"
              ELSE ss.plan
         END AS plan_name,
         p.email_limit
-    FROM adyen_subscriptions ss
+    FROM mollie_subscriptions ss
     JOIN tenants t ON t.id = ss.tenant_id
     LEFT JOIN plan_overrides po
       ON po.tenant_id = t.id
@@ -273,7 +273,7 @@ const EFFECTIVE_PERIOD_PLAN_SQL: &str = r#"
                        ELSE ss.plan
                   END
     WHERE ss.tenant_id = $1
-      AND ss.adyen_subscription_id = $2
+      AND ss.mollie_subscription_id = $2
     LIMIT 1
 "#;
 
@@ -287,12 +287,12 @@ async fn ensure_subscription_period_records(db: &PgPool) -> Result<(), String> {
     sqlx::query(
         r#"
         INSERT INTO billing_periods (
-            tenant_id, adyen_subscription_id, usage_kind,
+            tenant_id, mollie_subscription_id, usage_kind,
             period_start, period_end, currency, plan_name, email_allowance,
             overage_rate_millicents, pricing_snapshot, pricing_resolved_at
         )
         SELECT
-            ss.tenant_id, ss.adyen_subscription_id, 'subscription',
+            ss.tenant_id, ss.mollie_subscription_id, 'subscription',
             ss.billing_cycle_start, ss.billing_cycle_end,
             eff.currency, eff.plan_name, p.email_limit,
             rate.rate_millicents,
@@ -305,7 +305,7 @@ async fn ensure_subscription_period_records(db: &PgPool) -> Result<(), String> {
                 'source', 'catchup'
             ),
             NOW()
-        FROM adyen_subscriptions ss
+        FROM mollie_subscriptions ss
         JOIN tenants t ON t.id = ss.tenant_id
         LEFT JOIN LATERAL (
             SELECT po.plan AS override_plan
@@ -618,7 +618,7 @@ async fn process_subscription_period(
     if plan_name.as_deref().map(str::trim).unwrap_or("").is_empty() {
         let live: Option<(String, Option<i64>)> = sqlx::query_as(EFFECTIVE_PERIOD_PLAN_SQL)
             .bind(&period.tenant_id)
-            .bind(&period.adyen_subscription_id)
+            .bind(&period.mollie_subscription_id)
             .fetch_optional(&mut *tx)
             .await
             .map_err(|e| format!("overage sweep: plan limit query failed: {e}"))?;
@@ -804,7 +804,7 @@ async fn process_subscription_period(
 
     let input = CreateInvoiceInput {
         tenant_id: period.tenant_id.clone(),
-        adyen_psp_reference: None,
+        mollie_payment_id: None,
         line_items: vec![NewLineItem {
             description: description.clone(),
             quantity: 1,
@@ -970,10 +970,10 @@ async fn process_subscription_period(
 
 /// PAYG half of the sweep (audit 1.3 — PAYG was priced and displayed but
 /// never billed). PAYG tenants (unlimited email limit, zero base price,
-/// typically no Adyen subscription) are invoiced per COMPLETED calendar
+/// typically no Mollie subscription) are invoiced per COMPLETED calendar
 /// month — the same period the quota/reporting paths use for tenants
 /// without a subscription cycle — from the existing metering events.
-/// Usage-record pushing to Adyen Meter is deliberately NOT used; the
+/// Usage-record pushing to Mollie Meter is deliberately NOT used; the
 /// invoice-item mechanism in [`collect_usage_invoice`] collects the cost.
 /// A month that computes to zero is skipped silently.
 async fn sweep_payg_calendar_months(
@@ -1185,7 +1185,7 @@ async fn process_payg_month(
 
     let input = CreateInvoiceInput {
         tenant_id: tenant_id.to_string(),
-        adyen_psp_reference: None,
+        mollie_payment_id: None,
         line_items,
         period_start: month_start,
         period_end: month_end,
@@ -1661,7 +1661,7 @@ pub(crate) async fn collect_usage_invoice(
 
     // Outstanding AFTER the wallet application — the single derivation.
     // An UNAVAILABLE balance is a retryable failure (audit F33): never
-    // initiate an external Adyen amount from a fallback total.
+    // initiate an external Mollie amount from a fallback total.
     let remaining_cents = match invoice_outstanding_cents(&state.db, invoice.id).await {
         Ok(outstanding) => outstanding,
         Err(error) => {
@@ -1688,7 +1688,7 @@ pub(crate) async fn collect_usage_invoice(
         return Ok(());
     }
 
-    // (c) Adyen-managed tenants: charge the REMAINING amount NOW as a
+    // (c) Mollie-managed tenants: charge the REMAINING amount NOW as a
     // recurring `POST /payments` against the tenant's stored token (audit
     // F34 — the old pending-item-only path never charged, so settlement
     // never matched and final usage could wait forever for a renewal that
@@ -1696,14 +1696,14 @@ pub(crate) async fn collect_usage_invoice(
     // the frozen amount; the local ↔ provider mapping is persisted and the
     // settlement webhook reconciles through `reference =
     // invoice:{local_invoice_id}`. The HTTP call runs OUTSIDE every
-    // wallet-lock transaction (audit F33). A Adyen failure is a retryable
+    // wallet-lock transaction (audit F33). A Mollie failure is a retryable
     // error: the outbox keeps the work and backs off — the invoice is NOT
     // pushed to done on the back of a failure.
     //
     // Audit SM7 F3: the collection amount is FROZEN on the outbox payload at
-    // the first Adyen attempt and every retry reuses the frozen figure —
+    // the first Mollie attempt and every retry reuses the frozen figure —
     // hence the EXACT same idempotency key. Recomputing the live remainder
-    // per attempt used to mint a NEW key (and a SECOND Adyen charge for
+    // per attempt used to mint a NEW key (and a SECOND Mollie charge for
     // the delta) whenever an allocation landed between attempts.
     let outbox_payload = collection_outbox_payload(&state.db, invoice.id).await?;
     let collection_cents = match frozen_collection_amount(outbox_payload.as_ref()) {
@@ -1713,7 +1713,7 @@ pub(crate) async fn collect_usage_invoice(
                     invoice_id = %invoice.id,
                     frozen,
                     live_outstanding = remaining_cents,
-                    "usage invoice collection: reusing the frozen Adyen collection amount — \
+                    "usage invoice collection: reusing the frozen Mollie collection amount — \
                      the live outstanding moved after the first attempt"
                 );
             }
@@ -1721,7 +1721,7 @@ pub(crate) async fn collect_usage_invoice(
         }
         None => freeze_collection_amount(&state.db, invoice.id, remaining_cents).await?,
     };
-    let adyen = match create_and_finalize_adyen_usage_invoice(
+    let mollie = match create_and_finalize_mollie_usage_invoice(
         state,
         invoice,
         collection_cents,
@@ -1732,26 +1732,26 @@ pub(crate) async fn collect_usage_invoice(
     )
     .await
     {
-        Ok(adyen) => adyen,
+        Ok(mollie) => mollie,
         Err(error) => {
             record_collection_failure(state, invoice.id, &owner_token, &error).await;
-            return Err(format!("Adyen collection failed: {error}"));
+            return Err(format!("Mollie collection failed: {error}"));
         }
     };
 
-    if let Some(mapping) = adyen.as_ref() {
+    if let Some(mapping) = mollie.as_ref() {
         let persisted = sqlx::query(
             r#"
             UPDATE invoices
-            SET adyen_psp_reference = $2,
-                adyen_payment_reference = $3,
+            SET mollie_payment_id = $2,
+                mollie_payment_reference = $3,
                 updated_at = NOW()
             WHERE id = $1
-              AND (adyen_psp_reference IS NULL OR adyen_psp_reference = $2)
+              AND (mollie_payment_id IS NULL OR mollie_payment_id = $2)
             "#,
         )
         .bind(invoice.id)
-        .bind(&mapping.psp_reference)
+        .bind(&mapping.payment_id)
         .bind(&mapping.reference)
         .execute(&state.db)
         .await;
@@ -1759,13 +1759,13 @@ pub(crate) async fn collect_usage_invoice(
             Ok(execution) if execution.rows_affected() > 0 => {}
             Ok(_) => warn!(
                 invoice_id = %invoice.id,
-                existing = ?invoice.adyen_psp_reference,
-                "usage invoice collection: Adyen mapping not stored — invoice already bound to a different Adyen payment"
+                existing = ?invoice.mollie_payment_id,
+                "usage invoice collection: Mollie mapping not stored — invoice already bound to a different Mollie payment"
             ),
             Err(error) => {
                 // The external operation exists; the mapping must not be
                 // lost — keep the outbox retryable (audit F34).
-                let error = format!("storing Adyen mapping failed: {error}");
+                let error = format!("storing Mollie mapping failed: {error}");
                 record_collection_failure(state, invoice.id, &owner_token, &error).await;
                 return Err(error);
             }
@@ -1788,8 +1788,8 @@ pub(crate) async fn collect_usage_invoice(
         invoice_number = %invoice.invoice_number,
         applied_cents,
         remaining_cents,
-        adyen_payment = adyen.as_ref().map(|m| m.psp_reference.clone()),
-        "usage invoice moved to pending — wallet applied, remainder handed to dunning/Adyen"
+        mollie_payment = mollie.as_ref().map(|m| m.payment_id.clone()),
+        "usage invoice moved to pending — wallet applied, remainder handed to dunning/Mollie"
     );
 
     invalidate_wallet_balance_cache(state, &invoice.tenant_id).await;
@@ -1801,8 +1801,8 @@ pub(crate) async fn collect_usage_invoice(
 const COLLECTION_LEASE_SECS: i64 = 600;
 
 /// The outbox-payload key that freezes the external collection amount at the
-/// first Adyen attempt (audit SM7 F3).
-const FROZEN_COLLECTION_AMOUNT_KEY: &str = "adyenCollectionCents";
+/// first Mollie attempt (audit SM7 F3).
+const FROZEN_COLLECTION_AMOUNT_KEY: &str = "mollieCollectionCents";
 
 /// The frozen collection amount carried by an outbox payload (pure — audit
 /// SM7 F3, pinned by unit tests). `Some(cents)` ONLY for a positive integer
@@ -1833,7 +1833,7 @@ async fn collection_outbox_payload(
 
 /// Freeze the external collection amount on the outbox payload (audit
 /// SM7 F3). The FIRST freeze wins: a concurrent collector that took over an
-/// expired lease mid-attempt cannot move the figure — and with it the Adyen
+/// expired lease mid-attempt cannot move the figure — and with it the Mollie
 /// idempotency keys — once another attempt has frozen it. Returns the
 /// EFFECTIVE frozen amount: the caller's proposal only when this call
 /// performed the freeze, the pre-existing frozen figure otherwise (the
@@ -2247,46 +2247,33 @@ async fn finalize_collection(
 }
 
 /// The persisted local ↔ provider mapping for a collected usage invoice
-/// (audit F34): the charge's pspReference (bound to the local invoice) plus
-/// the merchant reference the settlement webhook matches
+/// (audit F34): the charge's payment id (bound to the local invoice) plus
+/// the reference the settlement webhook matches
 /// (`invoice:{local_invoice_id}`).
 #[derive(Debug, Clone)]
-struct AdyenUsageInvoice {
-    psp_reference: String,
+struct MollieUsageInvoice {
+    payment_id: String,
     reference: String,
 }
 
-/// A Adyen Checkout `POST /payments` response (the fields this path reads).
-#[derive(Debug, serde::Deserialize)]
-struct AdyenUsageChargeResponse {
-    #[serde(rename = "pspReference")]
-    psp_reference: String,
-    #[serde(rename = "resultCode")]
-    result_code: String,
-}
-
-/// Immediate Adyen collection of a usage invoice's remaining amount
-/// (audit F34): charge the remainder NOW as a recurring `POST /payments`
-/// against the tenant's stored token — not "on some future renewal" (which
-/// never comes for cancelled/PAYG tenants).
+/// Immediate Mollie collection of a usage invoice's remaining amount
+/// (audit F34): charge the remainder NOW as a recurring payment against the
+/// tenant's stored mandate — not "on some future renewal" (which never comes
+/// for cancelled/PAYG tenants).
 ///
-/// * The amount travels as integer MINOR UNITS (`{currency, value}`) — the
-///   frozen cents amount, exactly; Adyen cannot express millicents.
-/// * `reference = invoice:{local_invoice_id}` is the settlement contract:
-///   the webhook reconciles the payment to OUR invoice row by it.
-/// * `shopperReference` is the tenant id (Adyen has no customer object),
-///   and the payment method is the stored token from
-///   `adyen_subscriptions.adyen_recurring_detail_reference`.
+/// * The amount travels as a decimal string (Mollie's wire format), built
+///   from the frozen cents amount by [`Money`] — exact, never rounded.
+/// * The metadata carries `invoice_id` (and `reference`) so the webhook
+///   reconciles the payment to OUR invoice row.
+/// * `sequenceType: recurring` with the Mollie customer + mandate is the
+///   stored-mandate charge; the mandate lives on the Mollie customer, never in the body.
 /// * The idempotency key embeds the immutable local operation identity
 ///   (invoice id) AND the FROZEN amount, so a retry after a wallet-balance
 ///   change replays the SAME key — and a changed remainder can never mint
 ///   a second charge under a new key (F34).
-/// * Adyen metadata carries the local invoice id, usage kind and period,
-///   so callbacks reconcile through the persisted mapping.
-/// * Returns `Ok(None)` when the tenant has no stored Adyen token or no
-///   `ADYEN_API_KEY` is configured (the wallet + dunning path covers
-///   them).
-async fn create_and_finalize_adyen_usage_invoice(
+/// * Returns `Ok(None)` when the tenant has no stored Mollie mandate or no
+///   `MOLLIE_API_KEY` is configured (the wallet + dunning path covers them).
+async fn create_and_finalize_mollie_usage_invoice(
     state: &AppState,
     invoice: &Invoice,
     amount_cents: i64,
@@ -2294,107 +2281,85 @@ async fn create_and_finalize_adyen_usage_invoice(
     description: &str,
     period_start: DateTime<Utc>,
     usage_kind: &str,
-) -> Result<Option<AdyenUsageInvoice>, String> {
+) -> Result<Option<MollieUsageInvoice>, String> {
+    use crate::mollie_client::{CreatePayment, MollieClient, Money};
+
     if amount_cents <= 0 {
         return Ok(None);
     }
-    let Ok(api_key) = std::env::var("ADYEN_API_KEY") else {
-        return Ok(None); // not Adyen-configured — wallet + dunning path
+    let Ok(mollie) = MollieClient::from_env() else {
+        return Ok(None); // not Mollie-configured — wallet + dunning path
     };
-    if api_key.trim().is_empty() {
-        return Ok(None);
-    }
-    // A half-configured deployment is a real misconfiguration, not an
-    // unconfigured one: fail loudly so the outbox retries and exposes it.
-    let merchant_account = std::env::var("ADYEN_MERCHANT_ACCOUNT")
-        .ok()
-        .map(|account| account.trim().to_string())
-        .filter(|account| !account.is_empty())
-        .ok_or_else(|| "ADYEN_MERCHANT_ACCOUNT is not configured".to_string())?;
 
-    let stored_payment_method_id: Option<String> = sqlx::query_scalar(
+    let stored: Option<(String, String)> = sqlx::query_as(
         r#"
-        SELECT adyen_recurring_detail_reference
-        FROM adyen_subscriptions
-        WHERE tenant_id = $1
-          AND adyen_recurring_detail_reference IS NOT NULL
-          AND adyen_recurring_detail_reference <> ''
-        ORDER BY CASE WHEN status = 'active' THEN 0 ELSE 1 END, created_at DESC
+        SELECT s.mollie_customer_id, s.mollie_mandate_id
+        FROM mollie_subscriptions s
+        WHERE s.tenant_id = $1
+          AND s.mollie_mandate_id IS NOT NULL
+          AND s.mollie_mandate_id <> ''
+        ORDER BY CASE WHEN s.status = 'active' THEN 0 ELSE 1 END, s.created_at DESC
         LIMIT 1
         "#,
     )
     .bind(&invoice.tenant_id)
     .fetch_optional(&state.db)
     .await
-    .map_err(|e| format!("Adyen stored-token lookup failed: {e}"))?;
-    let Some(stored_payment_method_id) = stored_payment_method_id else {
+    .map_err(|e| format!("Mollie stored-mandate lookup failed: {e}"))?;
+    let Some((customer_id, mandate_id)) = stored else {
         return Ok(None); // no stored payment method — wallet + dunning path
     };
 
-    let base_url = std::env::var("ADYEN_API_BASE_URL")
-        .unwrap_or_else(|_| "https://checkout-test.adyen.com/v71".into());
-    let client = reqwest::Client::new();
-    // The merchant reference IS the settlement contract: the webhook
-    // reconciles this charge to OUR invoice row by `invoice:{uuid}`.
+    // The metadata IS the settlement contract: the webhook reconciles this
+    // charge to OUR invoice row.
     let reference = format!("invoice:{}", invoice.id);
     // Frozen external operation identity: local invoice + FROZEN amount
     // (audit F34/SM7 F3 — a changed remainder can never reuse a previously
-    // issued key; currency is the invoice's immutable currency). Bounded to
-    // Adyen's 64-char Idempotency-Key limit by construction (9 + 32 + 1 +
-    // ≤19 digits + 1).
+    // issued key; currency is the invoice's immutable currency).
     let idempotency_key = format!("usageinv_{}_{}c", invoice.id.simple(), amount_cents);
 
-    let body = serde_json::json!({
-        "amount": { "currency": currency.trim().to_uppercase(), "value": amount_cents },
-        "merchantAccount": merchant_account,
-        "reference": reference,
-        "paymentMethod": {
-            "type": "scheme",
-            "storedPaymentMethodId": stored_payment_method_id,
-        },
-        "shopperReference": invoice.tenant_id,
-        "recurringProcessingModel": "Subscription",
-        "metadata": {
-            "apexmailInvoiceId": invoice.id.to_string(),
-            "apexmailTenantId": invoice.tenant_id,
-            "periodStart": period_start.to_rfc3339(),
-            "usageKind": usage_kind,
-            "description": description,
-        },
-    });
-
-    let response = client
-        .post(format!("{base_url}/payments"))
-        // The version lives in the base URL path — Adyen has no version
-        // header, and auth is the API key, never a bearer token.
-        .header("X-API-Key", api_key.trim())
-        .header("Idempotency-Key", &idempotency_key)
-        .json(&body)
-        .timeout(std::time::Duration::from_secs(30))
-        .send()
+    let payment = mollie
+        .create_payment(CreatePayment {
+            amount: Money::new(currency, amount_cents),
+            description: description.to_string(),
+            // API-initiated: no browser return.
+            redirect_url: String::new(),
+            webhook_url: None,
+            metadata: serde_json::json!({
+                "invoice_id": invoice.id.to_string(),
+                "reference": reference,
+                "tenant_id": invoice.tenant_id,
+                "period_start": period_start.to_rfc3339(),
+                "usage_kind": usage_kind,
+            }),
+            method: None,
+            customer_id: Some(customer_id),
+            mandate_id: Some(mandate_id),
+            sequence_type: Some("recurring".into()),
+            idempotency_key,
+        })
         .await
-        .map_err(|e| format!("Adyen payment request failed: {e}"))?;
-    let status = response.status();
-    let body = response.text().await.unwrap_or_default();
-    if !status.is_success() {
-        return Err(format!("Adyen payment returned {status}: {body}"));
+        .map_err(|e| format!("Mollie declined the usage collection: {e}"))?;
+
+    if payment.id.trim().is_empty() {
+        return Err(
+            "Mollie payment response carries no id — refusing to bind an unidentifiable charge"
+                .to_string(),
+        );
     }
-    let charge: AdyenUsageChargeResponse =
-        serde_json::from_str(&body).map_err(|e| format!("Adyen payment decode failed: {e}"))?;
-    match charge.result_code.as_str() {
-        // Settlement is confirmed by the webhook reconciling
-        // adyen_psp_reference / the merchant reference; this call only
-        // opens the (async) attempt.
-        "Authorised" | "Pending" | "Received" => {}
+    match payment.status.as_str() {
+        // Settlement is confirmed by the webhook reconciling the payment id /
+        // the invoice reference; this call only opens the (async) attempt.
+        "paid" | "open" | "pending" | "authorized" => {}
         other => {
             return Err(format!(
-                "Adyen declined the usage collection: resultCode {other}"
+                "Mollie declined the usage collection: status {other}"
             ))
         }
     }
 
-    Ok(Some(AdyenUsageInvoice {
-        psp_reference: charge.psp_reference,
+    Ok(Some(MollieUsageInvoice {
+        payment_id: payment.id,
         reference,
     }))
 }
@@ -2603,7 +2568,7 @@ pub async fn tenant_has_active_paid_subscription(
 const PAID_SUBSCRIPTION_EXISTS_SQL: &str = r#"
     SELECT EXISTS(
         SELECT 1
-        FROM adyen_subscriptions ss
+        FROM mollie_subscriptions ss
         JOIN plans p ON p.name = ss.plan
         WHERE ss.tenant_id = $1
           AND ss.status = 'active'
@@ -2676,7 +2641,7 @@ mod tests {
 
     // ------------------------------------------------------------------
     // Audit SM7 F3 — the collection amount is frozen on the outbox payload
-    // at the first Adyen attempt; retries reuse it (hence the EXACT
+    // at the first Mollie attempt; retries reuse it (hence the EXACT
     // idempotency keys) instead of re-deriving a moved remainder.
     // ------------------------------------------------------------------
 
@@ -2685,7 +2650,7 @@ mod tests {
         let payload = serde_json::json!({
             "periodStart": "2026-08-01T00:00:00+00:00",
             "usageKind": "payg",
-            "adyenCollectionCents": 4_321,
+            "mollieCollectionCents": 4_321,
         });
         assert_eq!(frozen_collection_amount(Some(&payload)), Some(4_321));
 
@@ -2699,25 +2664,25 @@ mod tests {
 
         // A non-integer or non-positive "frozen" figure is corruption, not a
         // freeze — the caller re-freezes the live remainder.
-        let float_payload = serde_json::json!({ "adyenCollectionCents": 4_321.5 });
+        let float_payload = serde_json::json!({ "mollieCollectionCents": 4_321.5 });
         assert_eq!(frozen_collection_amount(Some(&float_payload)), None);
-        let zero_payload = serde_json::json!({ "adyenCollectionCents": 0 });
+        let zero_payload = serde_json::json!({ "mollieCollectionCents": 0 });
         assert_eq!(frozen_collection_amount(Some(&zero_payload)), None);
-        let negative_payload = serde_json::json!({ "adyenCollectionCents": -7 });
+        let negative_payload = serde_json::json!({ "mollieCollectionCents": -7 });
         assert_eq!(frozen_collection_amount(Some(&negative_payload)), None);
-        let string_payload = serde_json::json!({ "adyenCollectionCents": "4321" });
+        let string_payload = serde_json::json!({ "mollieCollectionCents": "4321" });
         assert_eq!(frozen_collection_amount(Some(&string_payload)), None);
     }
 
     /// The frozen amount is the idempotency-key seed: the SAME (local
     /// invoice id, frozen amount) pair must derive the SAME key, which is
-    /// what makes a changed remainder unable to mint a second Adyen charge.
+    /// what makes a changed remainder unable to mint a second Mollie charge.
     /// The seed format itself is pinned here (it is load-bearing across
     /// attempts; the conversion froze it to `usageinv_{invoice}_{amount}c`
-    /// — usage kind and currency moved out of the key because Adyen binds
+    /// — usage kind and currency moved out of the key because Mollie binds
     /// the currency through the body's `amount.currency` instead).
     #[test]
-    fn adyen_collection_key_seed_is_stable_per_frozen_amount() {
+    fn mollie_collection_key_seed_is_stable_per_frozen_amount() {
         let invoice_id = Uuid::parse_str("0123456789abcdef0123456789abcdef").expect("uuid");
         let seed =
             |amount_cents: i64| format!("usageinv_{}_{}c", invoice_id.simple(), amount_cents);
@@ -2775,9 +2740,9 @@ mod tests {
     }
 
     #[test]
-    fn adyen_idempotency_key_is_stable_per_invoice_and_frozen_amount() {
+    fn mollie_idempotency_key_is_stable_per_invoice_and_frozen_amount() {
         // (Documented contract; the key is built inline in
-        // create_and_finalize_adyen_usage_invoice — pin the shape.) Adyen
+        // create_and_finalize_mollie_usage_invoice — pin the shape.) Mollie
         // has no provider-side invoice objects and the collection is ONE
         // `POST /payments`, so the key embeds exactly the local invoice id
         // and the frozen amount (audit F34): a retry with a changed
@@ -3139,7 +3104,7 @@ mod coverage_adversarial {
             database_url,
             redis_url: "redis://127.0.0.1:6379".to_string(),
             service_auth_token: "coverage".to_string(),
-            adyen_hmac_key: "whsec_coverage".to_string(),
+            mollie_api_key: "whsec_coverage".to_string(),
             api_base_url: "http://127.0.0.1:9".to_string(),
             ..BillingConfig::default()
         };
@@ -3422,7 +3387,7 @@ mod coverage_adversarial {
 
         // …a concurrent collector re-deriving a moved remainder (an
         // allocation landed: 4_000) must NOT move the freeze — it collects
-        // under the first attempt's figure so both share ONE Adyen key.
+        // under the first attempt's figure so both share ONE Mollie key.
         let effective = freeze_collection_amount(&env.pool, invoice_id, 4_000)
             .await
             .expect("second freeze");
@@ -3450,7 +3415,7 @@ mod coverage_adversarial {
         let invoice = seed_invoice(env, tenant, 2500, "EUR").await;
         seed_outbox(env, invoice, tenant, "in_progress", 1, None).await;
 
-        record_collection_failure(&env.state, invoice, "col-owner-1", "adyen down").await;
+        record_collection_failure(&env.state, invoice, "col-owner-1", "mollie down").await;
         let (status, error, next, owner): (
             String,
             Option<String>,
@@ -3465,7 +3430,7 @@ mod coverage_adversarial {
         .await
         .expect("outbox");
         assert_eq!(status, "pending", "retryable failure returns to pending");
-        assert_eq!(error.as_deref(), Some("adyen down"));
+        assert_eq!(error.as_deref(), Some("mollie down"));
         assert!(owner.is_none(), "the lease is released");
         let delay = (next.expect("backoff") - Utc::now()).num_seconds();
         assert!((295..=300).contains(&delay), "~5min backoff, got {delay}");
@@ -3488,7 +3453,7 @@ mod coverage_adversarial {
         .expect("outbox");
         assert_eq!(
             error.as_deref(),
-            Some("adyen down"),
+            Some("mollie down"),
             "a non-owner cannot record state"
         );
 
@@ -3645,43 +3610,43 @@ mod coverage_adversarial {
         assert_eq!(deferred_status, "pending", "the backoff is honored");
     });
 
-    // ---------------- Adyen usage collection ----------------
+    // ---------------- Mollie usage collection ----------------
 
     env_test!(
-        adyen_usage_collection_finalizes_and_keeps_retryable_state,
+        mollie_usage_collection_finalizes_and_keeps_retryable_state,
         |env| {
             let mock = Mock::default();
             // The frozen contract: ONE recurring `POST /payments` against
-            // the tenant's stored token; 2xx + a success resultCode is the
-            // accepted shape (settlement arrives via the webhook).
+            // the tenant's stored mandate; a 2xx with a settled status is the
+            // accepted shape (settlement itself arrives via the webhook).
             mock.route(
                 "/payments",
                 200,
-                r#"{"pspReference":"psp_ov_1","resultCode":"Authorised"}"#,
+                r#"{"id":"tr_ov_1","status":"paid","amount":{"currency":"EUR","value":"10.00"}}"#,
             );
             let base = spawn_mock(mock.clone()).await;
 
             let guard = ENV_LOCK.lock().await;
             let previous = (
-                std::env::var("ADYEN_API_KEY").ok(),
-                std::env::var("ADYEN_API_BASE_URL").ok(),
-                std::env::var("ADYEN_MERCHANT_ACCOUNT").ok(),
+                std::env::var("MOLLIE_API_KEY").ok(),
+                std::env::var("MOLLIE_API_BASE_URL").ok(),
+                std::env::var("MOLLIE_PROFILE_ID").ok(),
             );
-            std::env::set_var("ADYEN_API_KEY", "adyen-test-key-fixture");
-            std::env::set_var("ADYEN_API_BASE_URL", &base);
-            std::env::set_var("ADYEN_MERCHANT_ACCOUNT", "ApexMailTestECOM");
+            std::env::set_var("MOLLIE_API_KEY", "mollie-test-key-fixture");
+            std::env::set_var("MOLLIE_API_BASE_URL", &base);
+            std::env::set_var("MOLLIE_PROFILE_ID", "ApexMailTestECOM");
 
-            let tenant = "ovcov_adyen";
+            let tenant = "ovcov_mollie";
             seed_tenant(env, tenant, "growth").await;
             // The recurring charge replays the token minted at signup —
-            // `adyen_subscriptions.adyen_recurring_detail_reference`.
+            // `mollie_subscriptions.mollie_mandate_id`.
             sqlx::query(
-                "INSERT INTO adyen_subscriptions
-                     (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
-                      billing_cycle_end, adyen_shopper_reference,
-                      adyen_recurring_detail_reference)
-                 VALUES ($1, 'psp_ov_sub', 'growth', 'active', NOW(),
-                         NOW() + INTERVAL '30 days', $1, 'tok_ov_1')",
+                "INSERT INTO mollie_subscriptions
+                     (tenant_id, mollie_subscription_id, plan, status, billing_cycle_start,
+                      billing_cycle_end, mollie_customer_id,
+                      mollie_mandate_id)
+                 VALUES ($1, 'sub_ov_1', 'growth', 'active', NOW(),
+                         NOW() + INTERVAL '30 days', 'cst_ov_1', 'mdt_ov_1')",
             )
             .bind(tenant)
             .execute(&env.pool)
@@ -3698,9 +3663,9 @@ mod coverage_adversarial {
             let call = mock.last_call("/payments").expect("payment call");
             assert_eq!(call.method, "POST");
             assert_eq!(
-                call.headers.get("x-api-key").map(String::as_str),
-                Some("adyen-test-key-fixture"),
-                "auth is the API key header, never a bearer token"
+                call.headers.get("authorization").map(String::as_str),
+                Some("Bearer mollie-test-key-fixture"),
+                "auth is the secret key as a Bearer token"
             );
             assert_eq!(
                 call.headers.get("idempotency-key").map(String::as_str),
@@ -3711,33 +3676,29 @@ mod coverage_adversarial {
                 serde_json::from_str(&call.body).expect("payment body JSON");
             assert_eq!(
                 body["amount"],
-                serde_json::json!({"currency": "EUR", "value": 1000}),
-                "the amount travels as inline minor units"
+                serde_json::json!({"currency": "EUR", "value": "10.00"}),
+                "the amount travels as Mollie's decimal string"
+            );
+            assert!(
+                body.get("merchantAccount").is_none(),
+                "Mollie takes no merchant account: the key identifies it"
             );
             assert_eq!(
-                body["merchantAccount"],
-                serde_json::json!("ApexMailTestECOM")
-            );
-            assert_eq!(
-                body["reference"],
+                body["metadata"]["reference"],
                 serde_json::json!(format!("invoice:{invoice}")),
                 "the settlement contract binds the charge to OUR invoice row"
             );
-            assert_eq!(body["paymentMethod"]["type"], serde_json::json!("scheme"));
             assert_eq!(
-                body["paymentMethod"]["storedPaymentMethodId"],
-                serde_json::json!("tok_ov_1"),
-                "the stored token is the payment method"
+                body["metadata"]["invoice_id"],
+                serde_json::json!(invoice.to_string())
             );
-            assert_eq!(body["shopperReference"], serde_json::json!(tenant));
-            assert_eq!(
-                body["recurringProcessingModel"],
-                serde_json::json!("Subscription")
-            );
+            assert_eq!(body["customerId"], serde_json::json!("cst_ov_1"));
+            assert_eq!(body["mandateId"], serde_json::json!("mdt_ov_1"));
+            assert_eq!(body["sequenceType"], serde_json::json!("recurring"));
 
-            let (status, adyen_payment, adyen_item): (String, Option<String>, Option<String>) =
+            let (status, mollie_payment, mollie_item): (String, Option<String>, Option<String>) =
                 sqlx::query_as(
-                    "SELECT status, adyen_psp_reference, adyen_payment_reference
+                    "SELECT status, mollie_payment_id, mollie_payment_reference
                  FROM invoices WHERE id = $1",
                 )
                 .bind(invoice)
@@ -3746,12 +3707,12 @@ mod coverage_adversarial {
                 .expect("invoice");
             assert_eq!(status, "pending");
             assert_eq!(
-                adyen_payment.as_deref(),
-                Some("psp_ov_1"),
-                "the charge's pspReference is persisted on the local invoice"
+                mollie_payment.as_deref(),
+                Some("tr_ov_1"),
+                "the charge's Mollie payment id is persisted on the local invoice"
             );
             assert_eq!(
-                adyen_item.as_deref(),
+                mollie_item.as_deref(),
                 Some(format!("invoice:{invoice}").as_str()),
                 "the merchant reference is persisted as the settlement binding"
             );
@@ -3765,9 +3726,9 @@ mod coverage_adversarial {
             assert_eq!(dunning, "warning");
             assert!(retry.is_some(), "dunning retry is scheduled");
 
-            // A Adyen outage on the NEXT invoice keeps the outbox retryable:
+            // A Mollie outage on the NEXT invoice keeps the outbox retryable:
             // the invoice is not pushed to done on the back of a failure.
-            mock.route("/payments", 500, "adyen exploded");
+            mock.route("/payments", 500, "mollie exploded");
             let failing = seed_invoice(env, tenant, 700, "EUR").await;
             seed_outbox(env, failing, tenant, "pending", 0, None).await;
             let stats = resume_pending_collections(&env.state)
@@ -3798,14 +3759,14 @@ mod coverage_adversarial {
 
             match previous {
                 (Some(key), Some(url), Some(merchant)) => {
-                    std::env::set_var("ADYEN_API_KEY", key);
-                    std::env::set_var("ADYEN_API_BASE_URL", url);
-                    std::env::set_var("ADYEN_MERCHANT_ACCOUNT", merchant);
+                    std::env::set_var("MOLLIE_API_KEY", key);
+                    std::env::set_var("MOLLIE_API_BASE_URL", url);
+                    std::env::set_var("MOLLIE_PROFILE_ID", merchant);
                 }
                 _ => {
-                    std::env::remove_var("ADYEN_API_KEY");
-                    std::env::remove_var("ADYEN_API_BASE_URL");
-                    std::env::remove_var("ADYEN_MERCHANT_ACCOUNT");
+                    std::env::remove_var("MOLLIE_API_KEY");
+                    std::env::remove_var("MOLLIE_API_BASE_URL");
+                    std::env::remove_var("MOLLIE_PROFILE_ID");
                 }
             }
             drop(guard);
@@ -3813,15 +3774,15 @@ mod coverage_adversarial {
     );
 
     env_test!(
-        adyen_usage_invoice_guards_amount_and_missing_config,
+        mollie_usage_invoice_guards_amount_and_missing_config,
         |env| {
             let guard = ENV_LOCK.lock().await;
             let previous = (
-                std::env::var("ADYEN_API_KEY").ok(),
-                std::env::var("ADYEN_MERCHANT_ACCOUNT").ok(),
+                std::env::var("MOLLIE_API_KEY").ok(),
+                std::env::var("MOLLIE_PROFILE_ID").ok(),
             );
-            std::env::remove_var("ADYEN_API_KEY");
-            std::env::remove_var("ADYEN_MERCHANT_ACCOUNT");
+            std::env::remove_var("MOLLIE_API_KEY");
+            std::env::remove_var("MOLLIE_PROFILE_ID");
 
             let tenant = "ovcov_zero";
             seed_tenant(env, tenant, "growth").await;
@@ -3831,8 +3792,8 @@ mod coverage_adversarial {
                 .expect("load invoice")
                 .expect("invoice exists");
 
-            // Zero remaining: nothing to collect, no Adyen configuration needed.
-            let none = create_and_finalize_adyen_usage_invoice(
+            // Zero remaining: nothing to collect, no Mollie configuration needed.
+            let none = create_and_finalize_mollie_usage_invoice(
                 &env.state,
                 &invoice,
                 0,
@@ -3845,7 +3806,7 @@ mod coverage_adversarial {
             .expect("zero amount");
             assert!(none.is_none());
             // Negative remaining is equally refused.
-            let none = create_and_finalize_adyen_usage_invoice(
+            let none = create_and_finalize_mollie_usage_invoice(
                 &env.state,
                 &invoice,
                 -5,
@@ -3858,11 +3819,11 @@ mod coverage_adversarial {
             .expect("negative amount");
             assert!(none.is_none());
 
-            // Positive amount but Adyen not configured: the wallet+dunning
-            // path is chosen, never a half-configured HTTP call. (Adyen has
-            // no customer object; the fallback is chosen by config and the
-            // absence of a stored recurring token.)
-            let none = create_and_finalize_adyen_usage_invoice(
+            // Positive amount but Mollie not configured: the wallet+dunning
+            // path is chosen, never a half-configured HTTP call. (Mollie has
+            // customers are real objects; the fallback is chosen by config
+            // and the absence of a stored mandate.)
+            let none = create_and_finalize_mollie_usage_invoice(
                 &env.state,
                 &invoice,
                 100,
@@ -3876,9 +3837,9 @@ mod coverage_adversarial {
             assert!(none.is_none());
 
             // A BLANK API key is the unconfigured deployment: still a clean
-            // `None` (no attempt to reach Adyen).
-            std::env::set_var("ADYEN_API_KEY", "   ");
-            let none = create_and_finalize_adyen_usage_invoice(
+            // `None` (no attempt to reach Mollie).
+            std::env::set_var("MOLLIE_API_KEY", "   ");
+            let none = create_and_finalize_mollie_usage_invoice(
                 &env.state,
                 &invoice,
                 100,
@@ -3891,12 +3852,12 @@ mod coverage_adversarial {
             .expect("blank secret");
             assert!(none.is_none());
 
-            // A key WITHOUT a merchant account is a real misconfiguration —
-            // Adyen's `/payments` body requires `merchantAccount`, so the
-            // call must fail loudly (the outbox retries and exposes it)
-            // rather than silently falling back to the wallet path.
-            std::env::set_var("ADYEN_API_KEY", "adyen-test-key-fixture");
-            let error = create_and_finalize_adyen_usage_invoice(
+            // A configured key with NO stored mandate is not an error: the
+            // tenant simply collects through the wallet + dunning path, and
+            // no provider call is attempted (Mollie needs no profile id — the
+            // secret key identifies the account).
+            std::env::set_var("MOLLIE_API_KEY", "mollie-test-key-fixture");
+            let none = create_and_finalize_mollie_usage_invoice(
                 &env.state,
                 &invoice,
                 100,
@@ -3906,20 +3867,17 @@ mod coverage_adversarial {
                 "overage",
             )
             .await
-            .expect_err("half-configured Adyen must fail loudly");
-            assert!(
-                error.contains("ADYEN_MERCHANT_ACCOUNT"),
-                "the error names the missing variable: {error}"
-            );
+            .expect("no stored mandate is a clean fallback");
+            assert!(none.is_none());
 
             match previous {
                 (Some(key), Some(merchant)) => {
-                    std::env::set_var("ADYEN_API_KEY", key);
-                    std::env::set_var("ADYEN_MERCHANT_ACCOUNT", merchant);
+                    std::env::set_var("MOLLIE_API_KEY", key);
+                    std::env::set_var("MOLLIE_PROFILE_ID", merchant);
                 }
                 _ => {
-                    std::env::remove_var("ADYEN_API_KEY");
-                    std::env::remove_var("ADYEN_MERCHANT_ACCOUNT");
+                    std::env::remove_var("MOLLIE_API_KEY");
+                    std::env::remove_var("MOLLIE_PROFILE_ID");
                 }
             }
             drop(guard);
@@ -3958,7 +3916,7 @@ mod coverage_adversarial {
         BillingPeriodRow {
             id,
             tenant_id: tenant.to_string(),
-            adyen_subscription_id: None,
+            mollie_subscription_id: None,
             period_start: period_end - chrono::Duration::days(30),
             period_end,
             plan_name: plan_name.map(str::to_string),
@@ -4285,7 +4243,7 @@ mod coverage_adversarial {
     // -------------------------------------------------------------------
     // W6C adversarial coverage: sweep pagination/failure isolation, the
     // snapshot backfill and mismatch arms, PAYG adoption, and the wallet /
-    // lease / Adyen fault arms of the collection ladder.
+    // lease / Mollie fault arms of the collection ladder.
     // -------------------------------------------------------------------
 
     async fn break_table(env: &Env, table: &str) {
@@ -4484,10 +4442,11 @@ mod coverage_adversarial {
         seed_plan(env, "growth", 1000, serde_json::json!({})).await;
         seed_tenant(env, tenant, "growth").await;
         sqlx::query(
-            // Adyen has no customer object: shopperReference IS the tenant id.
-            "INSERT INTO adyen_subscriptions
-                 (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
-                  billing_cycle_end, adyen_shopper_reference)
+            // The Mollie customer is bound to the tenant through
+            // `mollie_customers.mollie_customer_id`.
+            "INSERT INTO mollie_subscriptions
+                 (tenant_id, mollie_subscription_id, plan, status, billing_cycle_start,
+                  billing_cycle_end, mollie_customer_id)
              VALUES ($1, 'sub_backfill', 'growth', 'active', NOW() - INTERVAL '30 days',
                      NOW(), $1)",
         )
@@ -4507,7 +4466,7 @@ mod coverage_adversarial {
         let period = BillingPeriodRow {
             id: Uuid::new_v4(),
             tenant_id: tenant.to_string(),
-            adyen_subscription_id: Some("sub_backfill".to_string()),
+            mollie_subscription_id: Some("sub_backfill".to_string()),
             period_start: now - chrono::Duration::days(32),
             period_end: now - chrono::Duration::days(2),
             plan_name: None,
@@ -4517,7 +4476,7 @@ mod coverage_adversarial {
         };
         sqlx::query(
             "INSERT INTO billing_periods
-                 (id, tenant_id, adyen_subscription_id, usage_kind, period_start, period_end,
+                 (id, tenant_id, mollie_subscription_id, usage_kind, period_start, period_end,
                   currency)
              VALUES ($1, $2, $3, 'subscription', $4, $5, 'EUR')",
         )
@@ -5223,35 +5182,35 @@ mod coverage_adversarial {
         assert_eq!(dunning, 0, "no dunning entry from a failed finalization");
     });
 
-    // The persisted local ↔ external Adyen mapping can never rebind an
-    // invoice that is ALREADY bound to a different Adyen pspReference — the
+    // The persisted local <-> external Mollie mapping can never rebind an
+    // invoice that is ALREADY bound to a different provider payment id; the
     // prior binding wins and the collection still completes.
-    env_test!(adyen_mapping_never_rebinds_a_bound_invoice, |env| {
+    env_test!(mollie_mapping_never_rebinds_a_bound_invoice, |env| {
         let mock = Mock::default();
         mock.route(
             "/payments",
             200,
-            r#"{"pspReference":"psp_rebind_new","resultCode":"Authorised"}"#,
+            r#"{"id":"tr_rebind_new","status":"paid","amount":{"currency":"EUR","value":"10.00"}}"#,
         );
         let base = spawn_mock(mock.clone()).await;
 
         let guard = ENV_LOCK.lock().await;
         let previous = (
-            std::env::var("ADYEN_API_KEY").ok(),
-            std::env::var("ADYEN_API_BASE_URL").ok(),
-            std::env::var("ADYEN_MERCHANT_ACCOUNT").ok(),
+            std::env::var("MOLLIE_API_KEY").ok(),
+            std::env::var("MOLLIE_API_BASE_URL").ok(),
+            std::env::var("MOLLIE_PROFILE_ID").ok(),
         );
-        std::env::set_var("ADYEN_API_KEY", "adyen-test-key-fixture");
-        std::env::set_var("ADYEN_API_BASE_URL", &base);
-        std::env::set_var("ADYEN_MERCHANT_ACCOUNT", "ApexMailTestECOM");
+        std::env::set_var("MOLLIE_API_KEY", "mollie-test-key-fixture");
+        std::env::set_var("MOLLIE_API_BASE_URL", &base);
+        std::env::set_var("MOLLIE_PROFILE_ID", "ApexMailTestECOM");
 
         let tenant = "ovcov_rebind";
         seed_tenant(env, tenant, "growth").await;
         sqlx::query(
-            "INSERT INTO adyen_subscriptions
-                 (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
-                  billing_cycle_end, adyen_shopper_reference,
-                  adyen_recurring_detail_reference)
+            "INSERT INTO mollie_subscriptions
+                 (tenant_id, mollie_subscription_id, plan, status, billing_cycle_start,
+                  billing_cycle_end, mollie_customer_id,
+                  mollie_mandate_id)
              VALUES ($1, 'psp_rebind_sub', 'growth', 'active', NOW(),
                      NOW() + INTERVAL '30 days', $1, 'tok_rebind')",
         )
@@ -5260,7 +5219,7 @@ mod coverage_adversarial {
         .await
         .expect("subscription");
         let invoice_id = seed_invoice(env, tenant, 1000, "EUR").await;
-        sqlx::query("UPDATE invoices SET adyen_psp_reference = 'psp_prior' WHERE id = $1")
+        sqlx::query("UPDATE invoices SET mollie_payment_id = 'tr_prior' WHERE id = $1")
             .bind(invoice_id)
             .execute(&env.pool)
             .await
@@ -5271,8 +5230,8 @@ mod coverage_adversarial {
             .await
             .expect("resume");
         assert_eq!(stats.resumed, 1, "{stats:?}");
-        let (adyen_payment, outbox): (Option<String>, String) = sqlx::query_as(
-            "SELECT i.adyen_psp_reference, o.status FROM invoices i
+        let (mollie_payment, outbox): (Option<String>, String) = sqlx::query_as(
+            "SELECT i.mollie_payment_id, o.status FROM invoices i
              JOIN invoice_collection_outbox o ON o.invoice_id = i.id WHERE i.id = $1",
         )
         .bind(invoice_id)
@@ -5280,55 +5239,55 @@ mod coverage_adversarial {
         .await
         .expect("invoice");
         assert_eq!(
-            adyen_payment.as_deref(),
-            Some("psp_prior"),
+            mollie_payment.as_deref(),
+            Some("tr_prior"),
             "the prior external binding is never overwritten"
         );
         assert_eq!(outbox, "done");
 
         match previous {
             (Some(key), Some(url), Some(merchant)) => {
-                std::env::set_var("ADYEN_API_KEY", key);
-                std::env::set_var("ADYEN_API_BASE_URL", url);
-                std::env::set_var("ADYEN_MERCHANT_ACCOUNT", merchant);
+                std::env::set_var("MOLLIE_API_KEY", key);
+                std::env::set_var("MOLLIE_API_BASE_URL", url);
+                std::env::set_var("MOLLIE_PROFILE_ID", merchant);
             }
             _ => {
-                std::env::remove_var("ADYEN_API_KEY");
-                std::env::remove_var("ADYEN_API_BASE_URL");
-                std::env::remove_var("ADYEN_MERCHANT_ACCOUNT");
+                std::env::remove_var("MOLLIE_API_KEY");
+                std::env::remove_var("MOLLIE_API_BASE_URL");
+                std::env::remove_var("MOLLIE_PROFILE_ID");
             }
         }
         drop(guard);
     });
 
-    // Adyen responses without the identity field (`pspReference`) are HARD
-    // errors — never half-recorded mappings — and a non-success resultCode
-    // or a non-2xx status is a failure, not a silent collection.
+    // Mollie responses without an id are HARD errors — never half-recorded
+    // mappings — and a non-settled status or a non-2xx response is a
+    // failure, not a silent collection.
     env_test!(
-        adyen_responses_without_psp_reference_or_declined_are_errors,
+        mollie_responses_without_payment_id_or_failed_status_are_errors,
         |env| {
             let mock = Mock::default();
             let base = spawn_mock(mock.clone()).await;
 
             let guard = ENV_LOCK.lock().await;
             let previous = (
-                std::env::var("ADYEN_API_KEY").ok(),
-                std::env::var("ADYEN_API_BASE_URL").ok(),
-                std::env::var("ADYEN_MERCHANT_ACCOUNT").ok(),
+                std::env::var("MOLLIE_API_KEY").ok(),
+                std::env::var("MOLLIE_API_BASE_URL").ok(),
+                std::env::var("MOLLIE_PROFILE_ID").ok(),
             );
-            std::env::set_var("ADYEN_API_KEY", "adyen-test-key-fixture");
-            std::env::set_var("ADYEN_API_BASE_URL", &base);
-            std::env::set_var("ADYEN_MERCHANT_ACCOUNT", "ApexMailTestECOM");
+            std::env::set_var("MOLLIE_API_KEY", "mollie-test-key-fixture");
+            std::env::set_var("MOLLIE_API_BASE_URL", &base);
+            std::env::set_var("MOLLIE_PROFILE_ID", "ApexMailTestECOM");
 
-            let tenant = "ovcov_adyen_bad";
+            let tenant = "ovcov_mollie_bad";
             seed_tenant(env, tenant, "growth").await;
             sqlx::query(
-                "INSERT INTO adyen_subscriptions
-                     (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
-                      billing_cycle_end, adyen_shopper_reference,
-                      adyen_recurring_detail_reference)
-                 VALUES ($1, 'psp_bad_sub', 'growth', 'active', NOW(),
-                         NOW() + INTERVAL '30 days', $1, 'tok_bad')",
+                "INSERT INTO mollie_subscriptions
+                     (tenant_id, mollie_subscription_id, plan, status, billing_cycle_start,
+                      billing_cycle_end, mollie_customer_id,
+                      mollie_mandate_id)
+                 VALUES ($1, 'sub_bad_1', 'growth', 'active', NOW(),
+                         NOW() + INTERVAL '30 days', 'cst_bad_1', 'mdt_bad_1')",
             )
             .bind(tenant)
             .execute(&env.pool)
@@ -5340,10 +5299,10 @@ mod coverage_adversarial {
                 .expect("load")
                 .expect("exists");
 
-            // 1. 2xx response WITHOUT a pspReference: the decode is a hard
-            // error, so no half-recorded mapping can be persisted.
-            mock.route("/payments", 200, r#"{"resultCode":"Authorised"}"#);
-            let error = create_and_finalize_adyen_usage_invoice(
+            // 1. 2xx response WITHOUT an id: a hard error, so no
+            // half-recorded mapping can be persisted.
+            mock.route("/payments", 200, r#"{"status":"paid"}"#);
+            let error = create_and_finalize_mollie_usage_invoice(
                 &env.state,
                 &invoice,
                 100,
@@ -5353,17 +5312,17 @@ mod coverage_adversarial {
                 "overage",
             )
             .await
-            .expect_err("response without pspReference");
-            assert!(error.contains("pspReference"), "{error}");
+            .expect_err("response without an id");
+            assert!(error.contains("no id"), "{error}");
 
-            // 2. 2xx with a pspReference but a DECLINED resultCode: HTTP 200
-            // does not mean the money moved.
+            // 2. 2xx with an id but a FAILED status: HTTP 200 does not mean
+            // the money moved.
             mock.route(
                 "/payments",
                 200,
-                r#"{"pspReference":"psp_declined","resultCode":"Refused"}"#,
+                r#"{"id":"tr_declined","status":"failed","amount":{"currency":"EUR","value":"1.00"}}"#,
             );
-            let error = create_and_finalize_adyen_usage_invoice(
+            let error = create_and_finalize_mollie_usage_invoice(
                 &env.state,
                 &invoice,
                 100,
@@ -5373,15 +5332,15 @@ mod coverage_adversarial {
                 "overage",
             )
             .await
-            .expect_err("declined resultCode");
+            .expect_err("failed status");
             assert!(
-                error.contains("resultCode Refused"),
-                "the refusal names the resultCode: {error}"
+                error.contains("status failed"),
+                "the refusal names the provider status: {error}"
             );
 
             // 3. Non-2xx: the provider error propagates.
             mock.route("/payments", 500, "card declined");
-            let error = create_and_finalize_adyen_usage_invoice(
+            let error = create_and_finalize_mollie_usage_invoice(
                 &env.state,
                 &invoice,
                 100,
@@ -5401,14 +5360,14 @@ mod coverage_adversarial {
 
             match previous {
                 (Some(key), Some(url), Some(merchant)) => {
-                    std::env::set_var("ADYEN_API_KEY", key);
-                    std::env::set_var("ADYEN_API_BASE_URL", url);
-                    std::env::set_var("ADYEN_MERCHANT_ACCOUNT", merchant);
+                    std::env::set_var("MOLLIE_API_KEY", key);
+                    std::env::set_var("MOLLIE_API_BASE_URL", url);
+                    std::env::set_var("MOLLIE_PROFILE_ID", merchant);
                 }
                 _ => {
-                    std::env::remove_var("ADYEN_API_KEY");
-                    std::env::remove_var("ADYEN_API_BASE_URL");
-                    std::env::remove_var("ADYEN_MERCHANT_ACCOUNT");
+                    std::env::remove_var("MOLLIE_API_KEY");
+                    std::env::remove_var("MOLLIE_API_BASE_URL");
+                    std::env::remove_var("MOLLIE_PROFILE_ID");
                 }
             }
             drop(guard);
@@ -5416,31 +5375,31 @@ mod coverage_adversarial {
     );
 
     // A tenant with NO stored recurring token on file takes the wallet +
-    // dunning path cleanly, even with Adyen fully configured (Adyen has no
+    // dunning path cleanly, even with Mollie fully configured (Mollie has no
     // customer object — the stored token is what a charge would need).
     env_test!(
-        adyen_collection_skips_tenants_without_a_stored_token,
+        mollie_collection_skips_tenants_without_a_stored_token,
         |env| {
             let mock = Mock::default();
             let base = spawn_mock(mock.clone()).await;
 
             let guard = ENV_LOCK.lock().await;
             let previous = (
-                std::env::var("ADYEN_API_KEY").ok(),
-                std::env::var("ADYEN_API_BASE_URL").ok(),
-                std::env::var("ADYEN_MERCHANT_ACCOUNT").ok(),
+                std::env::var("MOLLIE_API_KEY").ok(),
+                std::env::var("MOLLIE_API_BASE_URL").ok(),
+                std::env::var("MOLLIE_PROFILE_ID").ok(),
             );
-            std::env::set_var("ADYEN_API_KEY", "adyen-test-key-fixture");
-            std::env::set_var("ADYEN_API_BASE_URL", &base);
-            std::env::set_var("ADYEN_MERCHANT_ACCOUNT", "ApexMailTestECOM");
+            std::env::set_var("MOLLIE_API_KEY", "mollie-test-key-fixture");
+            std::env::set_var("MOLLIE_API_BASE_URL", &base);
+            std::env::set_var("MOLLIE_PROFILE_ID", "ApexMailTestECOM");
 
             let tenant = "ovcov_no_customer";
             seed_tenant(env, tenant, "growth").await;
             // An active subscription WITHOUT a stored token is not chargeable.
             sqlx::query(
-                "INSERT INTO adyen_subscriptions
-                 (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
-                  billing_cycle_end, adyen_shopper_reference)
+                "INSERT INTO mollie_subscriptions
+                 (tenant_id, mollie_subscription_id, plan, status, billing_cycle_start,
+                  billing_cycle_end, mollie_customer_id)
              VALUES ($1, 'psp_notoken_sub', 'growth', 'active', NOW(),
                      NOW() + INTERVAL '30 days', $1)",
             )
@@ -5453,7 +5412,7 @@ mod coverage_adversarial {
                 .await
                 .expect("load")
                 .expect("exists");
-            let none = create_and_finalize_adyen_usage_invoice(
+            let none = create_and_finalize_mollie_usage_invoice(
                 &env.state,
                 &invoice,
                 400,
@@ -5469,14 +5428,14 @@ mod coverage_adversarial {
 
             match previous {
                 (Some(key), Some(url), Some(merchant)) => {
-                    std::env::set_var("ADYEN_API_KEY", key);
-                    std::env::set_var("ADYEN_API_BASE_URL", url);
-                    std::env::set_var("ADYEN_MERCHANT_ACCOUNT", merchant);
+                    std::env::set_var("MOLLIE_API_KEY", key);
+                    std::env::set_var("MOLLIE_API_BASE_URL", url);
+                    std::env::set_var("MOLLIE_PROFILE_ID", merchant);
                 }
                 _ => {
-                    std::env::remove_var("ADYEN_API_KEY");
-                    std::env::remove_var("ADYEN_API_BASE_URL");
-                    std::env::remove_var("ADYEN_MERCHANT_ACCOUNT");
+                    std::env::remove_var("MOLLIE_API_KEY");
+                    std::env::remove_var("MOLLIE_API_BASE_URL");
+                    std::env::remove_var("MOLLIE_PROFILE_ID");
                 }
             }
             drop(guard);
@@ -5491,8 +5450,8 @@ mod coverage_adversarial {
         seed_plan(env, "growth", 1000, serde_json::json!({})).await;
         seed_tenant(env, tenant, "growth").await;
         sqlx::query(
-            "INSERT INTO adyen_subscriptions
-                 (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
+            "INSERT INTO mollie_subscriptions
+                 (tenant_id, mollie_subscription_id, plan, status, billing_cycle_start,
                   billing_cycle_end)
              VALUES ($1, 'sub_gate', 'growth', 'active', NOW(), NOW() + INTERVAL '30 days')",
         )
@@ -5510,7 +5469,7 @@ mod coverage_adversarial {
         );
 
         // Downgrade: the cache still answers true until invalidated.
-        sqlx::query("UPDATE adyen_subscriptions SET status = 'canceled' WHERE tenant_id = $1")
+        sqlx::query("UPDATE mollie_subscriptions SET status = 'canceled' WHERE tenant_id = $1")
             .bind(tenant)
             .execute(&env.pool)
             .await
@@ -5533,8 +5492,8 @@ mod coverage_adversarial {
         let ghost = "ovcov_gate_ghost";
         seed_tenant(env, ghost, "ghost_plan").await;
         sqlx::query(
-            "INSERT INTO adyen_subscriptions
-                 (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
+            "INSERT INTO mollie_subscriptions
+                 (tenant_id, mollie_subscription_id, plan, status, billing_cycle_start,
                   billing_cycle_end)
              VALUES ($1, 'sub_gate_ghost', 'ghost_plan', 'active', NOW(), NOW())",
         )

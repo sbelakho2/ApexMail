@@ -76,7 +76,7 @@ def ensure_scratch_tree(cfg: Config, log=None) -> Path:
     """A marker-tagged rsync copy of the working tree; created on first use."""
     scratch = cfg.mutation_worktree
     # Always refresh: a marker-tagged copy from an earlier campaign silently
-    # compiles an OLD tree (the stale scratch was pre-Adyen and failed the
+    # compiles an OLD tree (the stale scratch was pre-Mollie and failed the
     # mutant build). One rsync per run is cheap against the build that follows.
     if scratch.exists():
         shutil.rmtree(scratch)

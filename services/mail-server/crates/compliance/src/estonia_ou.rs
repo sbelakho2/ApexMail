@@ -943,7 +943,7 @@ impl EstoniaOuCompliance {
                 category: format!("Billing revenue ({})", r.currency),
                 amount_cents: r.total_cents.unwrap_or(0),
                 invoice_count: r.invoice_count.unwrap_or(0),
-                description: "Revenue from customer invoices (Adyen)".into(),
+                description: "Revenue from customer invoices (Mollie)".into(),
             })
             .collect();
 
@@ -974,11 +974,15 @@ impl EstoniaOuCompliance {
             .await
             {
                 if let Some(total_revenue) = row.total_cents {
-                    let adyen_fee_est = ((total_revenue as f64) * 0.029 + 30.0) as i64;
+                    // Mollie's EU card rate (1.8% + EUR 0.25) is the dominant
+                    // method for this customer base; the estimate stays
+                    // deliberately conservative by applying it to all
+                    // revenue (iDEAL is cheaper, non-EEA cards dearer).
+                    let mollie_fee_est = ((total_revenue as f64) * 0.018 + 25.0) as i64;
                     expenses.push(ExpenseCategory {
-                        category: "Payment processing (Adyen fees)".into(),
-                        amount_cents: adyen_fee_est,
-                        description: "Estimated 2.9% + 0,30 € Adyen processing fees".into(),
+                        category: "Payment processing (Mollie fees)".into(),
+                        amount_cents: mollie_fee_est,
+                        description: "Estimated 1.8% + EUR 0.25 Mollie processing fees (EU card rate)".into(),
                     });
                 }
             }
@@ -3564,13 +3568,14 @@ mod adversarial_tests {
         let fees: i64 = report
             .expense_breakdown
             .iter()
-            .filter(|e| e.category.contains("Adyen"))
+            .filter(|e| e.category.contains("Mollie"))
             .map(|e| e.amount_cents)
             .sum();
         // The fee estimate applies to the gross charged amount
         // (subtotal + VAT) of the same paid invoices.
         let gross_charged = (100000 + 24000 + 50000 + 12000) as f64;
-        assert_eq!(fees, (gross_charged * 0.029 + 30.0) as i64);
+        // Mollie's published EU card rate: 1.8% + EUR 0.25.
+        assert_eq!(fees, (gross_charged * 0.018 + 25.0) as i64);
         assert_eq!(
             report.income_statement.net_profit_cents,
             report.income_statement.revenue_cents

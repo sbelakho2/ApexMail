@@ -7,15 +7,15 @@
 //!
 //! | Adapter | Event source (file:line at time of writing) |
 //! |---|---|
-//! | [`post_invoice_issued`] | invoice finalization — `billing-service/src/overage.rs:1966` (`finalize_collection`, draft→paid/pending) and `billing-service/src/adyen_webhooks.rs:1608` (`handle_invoice_paid`) |
-//! | [`post_payment_allocation`] | Adyen settlement / wallet settlement — allocation rows written at `billing-service/src/adyen_webhooks.rs:1741` and `billing-service/src/overage.rs:1918` (`invoice_payment_allocations`) |
+//! | [`post_invoice_issued`] | invoice finalization — `billing-service/src/overage.rs:1966` (`finalize_collection`, draft→paid/pending) and `billing-service/src/mollie_webhooks.rs:1608` (`handle_invoice_paid`) |
+//! | [`post_payment_allocation`] | Mollie settlement / wallet settlement — allocation rows written at `billing-service/src/mollie_webhooks.rs:1741` and `billing-service/src/overage.rs:1918` (`invoice_payment_allocations`) |
 //! | [`post_credit_note`] | credit notes / refunds — `billing-service/src/credit_notes.rs:172` (`create_credit_note`, `credit_notes` rows) |
 //! | [`post_operating_cost`] | expenses — deployment-optional `operating_costs`, read by `compliance/src/estonia_ou.rs:973` (there is no canonical expense table; the adapter reports `SourceTableMissing` when absent). NO production writer exists: [`crate::sweeps::sweep_unposted_expenses`] posts any row a future expense feature (or psql) creates. |
 //! | [`post_payroll_record`] | payroll — `payroll_records` (migration `199_payroll_tax_inputs.sql:26`, read by `compliance/src/estonia_ou.rs:1026`). NO production writer exists: no payroll-run/admin path inserts rows; [`crate::sweeps::sweep_unposted_payroll`] posts every unposted record once the payroll-run feature (or psql) creates one. |
 //! | [`post_bank_statement_line`] | bank receipts/payments — `bank_statement_lines` (created by migration 220; no bank feed/import writer exists in the repo). [`crate::sweeps::sweep_unposted_bank_statement_lines`] posts any line a future feed creates. |
 //!
 //! `invoices` also carries rows inserted directly as paid by
-//! `adyen_webhooks.rs:1875` (`insert_paid_invoice_from_adyen`); that path
+//! `mollie_webhooks.rs:1875` (`insert_paid_invoice_from_mollie`); that path
 //! calls [`post_invoice_issued`] via the billing-service hook too.
 
 use chrono::NaiveDate;
@@ -314,7 +314,7 @@ async fn ensure_customer(
 }
 
 // ===========================================================================
-// Adyen settlement / wallet settlement (invoice_payment_allocations)
+// Mollie settlement / wallet settlement (invoice_payment_allocations)
 // ===========================================================================
 
 #[derive(Debug, sqlx::FromRow)]
@@ -330,7 +330,7 @@ struct PaymentAllocationRow {
 
 /// Post a settlement: Dr processor clearing / wallet liability / bank,
 /// Cr AR. Idempotency key `settlement:<operation_id>` — the allocation's own
-/// unique operation id, so a replayed Adyen webhook posts once.
+/// unique operation id, so a replayed Mollie webhook posts once.
 pub async fn post_payment_allocation(pool: &PgPool, operation_id: &str) -> Result<PostOutcome> {
     let mut tx = pool.begin().await?;
     let outcome = post_payment_allocation_in(&mut tx, operation_id).await?;
@@ -379,10 +379,10 @@ pub async fn post_payment_allocation_in(
         crate::provisioning::ensure_open_period_in(conn, legal_entity_id, document_date).await?;
 
     let clearing = match allocation.source.as_str() {
-        "adyen" => {
+        "mollie" => {
             let processor_account: Option<Uuid> = sqlx::query_scalar(
                 "SELECT clearing_account_id FROM processor_clearing_accounts \
-                 WHERE legal_entity_id = $1 AND processor = 'adyen' AND currency = $2 \
+                 WHERE legal_entity_id = $1 AND processor = 'mollie' AND currency = $2 \
                    AND is_active LIMIT 1",
             )
             .bind(legal_entity_id)
@@ -392,7 +392,7 @@ pub async fn post_payment_allocation_in(
             match processor_account {
                 Some(account) => account,
                 None => {
-                    crate::chart::resolve_account_role(conn, legal_entity_id, ROLE_ADYEN_CLEARING)
+                    crate::chart::resolve_account_role(conn, legal_entity_id, ROLE_PAYMENT_CLEARING)
                         .await?
                 }
             }
@@ -405,7 +405,7 @@ pub async fn post_payment_allocation_in(
     let ar = crate::chart::resolve_account_role(conn, legal_entity_id, ROLE_AR).await?;
 
     let source_type = match allocation.source.as_str() {
-        "adyen" => "adyen_settlement",
+        "mollie" => "mollie_settlement",
         "wallet" => "wallet_settlement",
         _ => "manual_settlement",
     };

@@ -18,10 +18,10 @@
     <fieldset class="p-0 m-0 min-w-0">
     <legend class="sr-only">{% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['deployment_models'] %}{{ i18n_data[l]['a11y']['deployment_models'] }}{% else %}Deployment models{% endif %}</legend>
     {# Radio inputs (visually hidden, control tabs via CSS) #}
-    <input type="radio" name="deploy" id="deploy-shared" class="apex-check apex-input" checked />
-    <input type="radio" name="deploy" id="deploy-dedicated" class="apex-check apex-input" />
-    <input type="radio" name="deploy" id="deploy-private" class="apex-check apex-input" />
-    <input type="radio" name="deploy" id="deploy-byoc" class="apex-check apex-input" />
+    <input type="radio" name="deploy" id="deploy-shared" class="apex-checkbox apex-input" checked />
+    <input type="radio" name="deploy" id="deploy-dedicated" class="apex-checkbox apex-input" />
+    <input type="radio" name="deploy" id="deploy-private" class="apex-checkbox apex-input" />
+    <input type="radio" name="deploy" id="deploy-byoc" class="apex-checkbox apex-input" />
 
     {# Tab buttons #}
     <div class="apex-tabs flex flex-wrap justify-center gap-2 mb-10">

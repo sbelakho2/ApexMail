@@ -737,7 +737,7 @@
       "q5": "Ist HIPAA-Compliance enthalten?",
       "a5": "HIPAA-Verfügbarkeit wird derzeit nicht angeboten. Enterprise kann Compliance-Workflow-Gespräche unterstützen, aber ein regulierter Anwendungsfall darf erst nach schriftlicher Bestätigung und gegebenenfalls erforderlicher Vereinbarung mit unseren Security- und Legal-Teams fortgesetzt werden.",
       "q6": "Kann ich den Tarif jederzeit wechseln?",
-      "a6": "Wechsel bezahlter Tarife erfolgen über sicheres Adyen Checkout oder das Adyen-Abrechnungsportal. Ein Tarif ändert sich erst, wenn Adyen das Abrechnungsereignis bestätigt und ApexMail den verifizierten Adyen-Webhook verarbeitet hat. Jährliche Enterprise-Verträge folgen dem unterzeichneten Bestellformular und den Servicebedingungen."
+      "a6": "Wechsel bezahlter Tarife werden über die Abrechnungseinstellungen im Konsolenbereich angefragt und von unserem Abrechnungsteam abgeschlossen, nachdem die Zahlung über die Mollie-API verifiziert wurde; der Webhook des Anbieters enthält nur die Zahlungs-Id. Jährliche Enterprise-Verträge folgen dem unterzeichneten Bestellformular und den Servicebedingungen."
     },
     "home_sovereignty": {
       "eyebrow": "Standort und Nachweise",
@@ -1498,7 +1498,7 @@
       "q5": "La conformité HIPAA est-elle incluse ?",
       "a5": "La disponibilité HIPAA n'est pas proposée actuellement. Enterprise peut accompagner les discussions sur les flux de conformité, mais un cas d'usage réglementé ne peut avancer qu'après confirmation écrite et tout accord requis avec nos équipes sécurité et juridique.",
       "q6": "Puis-je changer de forfait à tout moment ?",
-      "a6": "Les changements de forfait payant passent par Adyen Checkout sécurisé ou le portail de facturation Adyen. Un forfait ne change qu'une fois que Adyen a confirmé l'événement de facturation et qu'ApexMail a réconcilié le webhook Adyen vérifié. Les contrats annuels Enterprise suivent le bon de commande signé et les conditions de service."
+      "a6": "Les changements de forfait payant sont demandés depuis la page de facturation de la console et finalisés par notre équipe de facturation après vérification du paiement via l'API Mollie ; le webhook du prestataire ne contient que l'id du paiement. Les contrats annuels Enterprise suivent le bon de commande signé et les conditions de service."
     },
     "home_sovereignty": {
       "eyebrow": "Localisation et preuves",
@@ -2259,7 +2259,7 @@
       "q5": "¿Está incluido el cumplimiento HIPAA?",
       "a5": "La disponibilidad HIPAA no se ofrece actualmente. Enterprise puede apoyar conversaciones sobre flujos de cumplimiento, pero un caso de uso regulado solo puede avanzar tras confirmación por escrito y cualquier acuerdo requerido con nuestros equipos de seguridad y legal.",
       "q6": "¿Puedo cambiar de plan en cualquier momento?",
-      "a6": "Los cambios de plan de pago utilizan Adyen Checkout seguro o el portal de facturación de Adyen. Un plan no cambia hasta que Adyen confirma el evento de facturación y ApexMail concilia el webhook verificado de Adyen. Los contratos anuales Enterprise siguen el formulario de pedido firmado y los términos del servicio."
+      "a6": "Los cambios de plan de pago se solicitan desde la página de facturación de la consola y los completa nuestro equipo de facturación tras verificar el pago mediante la API de Mollie; el webhook del proveedor solo contiene el id del pago. Los contratos anuales Enterprise siguen el formulario de pedido firmado y los términos del servicio."
     },
     "home_sovereignty": {
       "eyebrow": "Ubicación y evidencia",

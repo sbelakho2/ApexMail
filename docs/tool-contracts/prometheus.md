@@ -35,7 +35,7 @@ apexmail_api_requests_total{method="POST", route="/v1/messages", status="200"}
 apexmail_api_request_duration_seconds{method="GET", route="/v1/campaigns"}
 apexmail_worker_emails_sent_total{tenant_id="t_abc", status="delivered"}
 apexmail_mta_queue_depth{priority="high"}
-apexmail_billing_adyen_webhook_duration_seconds{event="AUTHORISATION"}
+apexmail_billing_mollie_webhook_duration_seconds{event="AUTHORISATION"}
 ```
 
 ---
@@ -52,7 +52,7 @@ Monotonically increasing values. Reset only on process restart.
 | `apexmail_worker_emails_sent_total` | `tenant_id`, `status` | Emails processed |
 | `apexmail_worker_emails_bounced_total` | `tenant_id`, `bounce_type` | Bounce events |
 | `apexmail_mta_connections_total` | `direction` (inbound/outbound) | SMTP connections |
-| `apexmail_billing_webhook_events_total` | `event`, `status` | Adyen webhook events |
+| `apexmail_billing_webhook_events_total` | `event`, `status` | Mollie webhook events |
 | `apexmail_tracking_opens_total` | `tenant_id` | Email opens tracked |
 | `apexmail_tracking_clicks_total` | `tenant_id` | Link clicks tracked |
 

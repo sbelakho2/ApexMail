@@ -31,7 +31,7 @@ private-key 7, linkedin-client-id 1.
   key material found.
 - **stripe-access-token (8)** — all benign. The gitleaks rule id is the
   built-in Stripe-token rule (it matches `sk_live_`-shaped values; the
-  provider material in this repository has since been converted to Adyen).
+  provider material in this repository has since been converted to Mollie).
   `dlp-engine` hits are the detector's own pattern strings and test vectors
   (a scanner that detects `sk_live_` necessarily contains it); the
   `apps/billing` hits are test fixtures with synthetic keys.

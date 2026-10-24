@@ -251,7 +251,7 @@ Sub-processor details are available on request and in our Data Processing Agreem
 
 - Each sub-processor has a Data Processing Agreement (DPA) in place.
 - Sub-processor changes are communicated to customers with 30-day advance notice.
-- Adyen processes payment data under PCI DSS compliance; ApexMail does not store raw credit card numbers.
+- Mollie B.V. processes payment data under PCI DSS compliance; ApexMail does not store raw credit card numbers. Mollie B.V. is a payment institution supervised by De Nederlandsche Bank (DNB), with its registered office at Keizersgracht 126, 1015 CW Amsterdam, The Netherlands. Payment data is processed in the Netherlands (EU); card-scheme networks may process it globally under Mollie's Data Processing Agreement.
 
 ---
 

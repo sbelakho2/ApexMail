@@ -89,8 +89,8 @@ pub struct PlanUpsertInput {
     pub api_call_limit: i64,
     pub sort_order: i32,
     pub features: PlanFeatures,
-    pub adyen_plan_code_monthly: Option<String>,
-    pub adyen_plan_code_yearly: Option<String>,
+    pub mollie_plan_code_monthly: Option<String>,
+    pub mollie_plan_code_yearly: Option<String>,
 }
 
 /// All default plans shipped with ApexMail.
@@ -482,7 +482,7 @@ const SEED_PLAN_UPSERT_SQL: &str = r#"
             id, name, display_name, description,
             price_monthly, price_yearly, price_monthly_usd, price_yearly_usd,
             email_limit, api_call_limit,
-            features, adyen_plan_code_monthly, adyen_plan_code_yearly,
+            features, mollie_plan_code_monthly, mollie_plan_code_yearly,
             is_active, sort_order, created_at, updated_at
         ) VALUES (
             'pln_' || substr(replace(gen_random_uuid()::text, '-', ''), 1, 22), $1, $2, $3,
@@ -515,7 +515,7 @@ const SEED_PLAN_UPSERT_SQL: &str = r#"
         RETURNING
             id, name, display_name, description,
             price_monthly, price_yearly, email_limit, api_call_limit,
-            features, adyen_plan_code_monthly, adyen_plan_code_yearly,
+            features, mollie_plan_code_monthly, mollie_plan_code_yearly,
             is_active, sort_order, created_at, updated_at
         "#;
 
@@ -588,7 +588,7 @@ pub async fn upsert_plan(pool: &PgPool, seed: &PlanSeed) -> Result<Plan, sqlx::E
 /// value, because the live drift it repairs (Free 30k instead of 3k, Pro
 /// €10 instead of €89, Business €50 instead of €699) IS the seed history.
 ///
-/// Adyen price ids are deliberately NOT in the SET list: they are
+/// Mollie price ids are deliberately NOT in the SET list: they are
 /// integration identifiers, not catalog facts, and must survive a
 /// reconcile. `price_cents` (the legacy CP listing column) is kept equal to
 /// `price_monthly`.
@@ -597,7 +597,7 @@ const RECONCILE_PLAN_UPSERT_SQL: &str = r#"
             id, name, display_name, description,
             price_monthly, price_yearly, price_monthly_usd, price_yearly_usd,
             email_limit, api_call_limit,
-            features, adyen_plan_code_monthly, adyen_plan_code_yearly,
+            features, mollie_plan_code_monthly, mollie_plan_code_yearly,
             is_active, sort_order, created_at, updated_at, price_cents
         ) VALUES (
             'pln_' || substr(replace(gen_random_uuid()::text, '-', ''), 1, 22), $1, $2, $3,
@@ -654,7 +654,7 @@ pub struct PlanReconcileReport {
 ///    `reconcile_repairs_drifted_capability_flags`);
 /// 2. deactivates every active row whose name is not a catalog plan.
 ///
-/// Adyen price-id columns are preserved. All SQL runs in ONE transaction,
+/// Mollie price-id columns are preserved. All SQL runs in ONE transaction,
 /// and the pass is idempotent: a second run reports zero changes.
 pub async fn reconcile_plans_with_catalog(
     pool: &PgPool,
@@ -761,7 +761,7 @@ pub async fn upsert_plan_input(
         INSERT INTO plans (
             id, name, display_name, description,
             price_monthly, price_yearly, email_limit, api_call_limit,
-            features, adyen_plan_code_monthly, adyen_plan_code_yearly,
+            features, mollie_plan_code_monthly, mollie_plan_code_yearly,
             is_active, sort_order, created_at, updated_at
         ) VALUES (
             'pln_' || substr(replace(gen_random_uuid()::text, '-', ''), 1, 22), $1, $2, $3,
@@ -776,14 +776,14 @@ pub async fn upsert_plan_input(
             email_limit   = EXCLUDED.email_limit,
             api_call_limit= EXCLUDED.api_call_limit,
             features      = EXCLUDED.features,
-            adyen_plan_code_monthly = COALESCE(EXCLUDED.adyen_plan_code_monthly, plans.adyen_plan_code_monthly),
-            adyen_plan_code_yearly  = COALESCE(EXCLUDED.adyen_plan_code_yearly, plans.adyen_plan_code_yearly),
+            mollie_plan_code_monthly = COALESCE(EXCLUDED.mollie_plan_code_monthly, plans.mollie_plan_code_monthly),
+            mollie_plan_code_yearly  = COALESCE(EXCLUDED.mollie_plan_code_yearly, plans.mollie_plan_code_yearly),
             sort_order    = EXCLUDED.sort_order,
             updated_at    = $10
         RETURNING
             id, name, display_name, description,
             price_monthly, price_yearly, email_limit, api_call_limit,
-            features, adyen_plan_code_monthly, adyen_plan_code_yearly,
+            features, mollie_plan_code_monthly, mollie_plan_code_yearly,
             is_active, sort_order, created_at, updated_at
         "#,
     )
@@ -797,8 +797,8 @@ pub async fn upsert_plan_input(
     .bind(&features_json)
     .bind(input.sort_order)
     .bind(now)
-    .bind(&input.adyen_plan_code_monthly)
-    .bind(&input.adyen_plan_code_yearly)
+    .bind(&input.mollie_plan_code_monthly)
+    .bind(&input.mollie_plan_code_yearly)
     .fetch_one(pool)
     .await?;
 
@@ -812,7 +812,7 @@ pub async fn get_active_plans(pool: &PgPool) -> Result<Vec<Plan>, sqlx::Error> {
         SELECT
             id, name, display_name, description,
             price_monthly, price_yearly, email_limit, api_call_limit,
-            features, adyen_plan_code_monthly, adyen_plan_code_yearly,
+            features, mollie_plan_code_monthly, mollie_plan_code_yearly,
             is_active, sort_order, created_at, updated_at
         FROM plans
         WHERE is_active = true
@@ -841,7 +841,7 @@ pub async fn get_plan_by_name(pool: &PgPool, name: &str) -> Result<Option<Plan>,
         SELECT
             id, name, display_name, description,
             price_monthly, price_yearly, email_limit, api_call_limit,
-            features, adyen_plan_code_monthly, adyen_plan_code_yearly,
+            features, mollie_plan_code_monthly, mollie_plan_code_yearly,
             is_active, sort_order, created_at, updated_at
         FROM plans
         WHERE name = $1
@@ -1167,8 +1167,8 @@ struct PlanRow {
     email_limit: i64,
     api_call_limit: i64,
     features: Option<serde_json::Value>,
-    adyen_plan_code_monthly: Option<String>,
-    adyen_plan_code_yearly: Option<String>,
+    mollie_plan_code_monthly: Option<String>,
+    mollie_plan_code_yearly: Option<String>,
     is_active: bool,
     sort_order: i32,
     created_at: DateTime<Utc>,
@@ -1222,8 +1222,8 @@ impl PlanRow {
             email_limit: self.email_limit,
             api_call_limit: self.api_call_limit,
             features,
-            adyen_plan_code_monthly: self.adyen_plan_code_monthly,
-            adyen_plan_code_yearly: self.adyen_plan_code_yearly,
+            mollie_plan_code_monthly: self.mollie_plan_code_monthly,
+            mollie_plan_code_yearly: self.mollie_plan_code_yearly,
             is_active: self.is_active,
             sort_order: self.sort_order,
             created_at: self.created_at,
@@ -1798,8 +1798,8 @@ mod tests {
             email_limit: 1_000,
             api_call_limit: 1_000,
             features,
-            adyen_plan_code_monthly: None,
-            adyen_plan_code_yearly: None,
+            mollie_plan_code_monthly: None,
+            mollie_plan_code_yearly: None,
             is_active: true,
             sort_order: 0,
             created_at: now,
@@ -2037,15 +2037,15 @@ mod coverage_adversarial {
             api_call_limit: api_limit,
             sort_order: 7,
             features: PlanFeatures::default(),
-            // A merchant-defined plan code (Adyen has no provider price
+            // A merchant-defined plan code (Mollie has no provider price
             // objects; the code is OUR catalog key).
-            adyen_plan_code_monthly: Some("apexmail_plcov_monthly".to_string()),
-            adyen_plan_code_yearly: None,
+            mollie_plan_code_monthly: Some("apexmail_plcov_monthly".to_string()),
+            mollie_plan_code_yearly: None,
         }
     }
 
     env_test!(
-        upsert_plan_input_updates_in_place_and_keeps_adyen_ids,
+        upsert_plan_input_updates_in_place_and_keeps_mollie_ids,
         |env| {
             let created = upsert_plan_input(&env.pool, &upsert("plcov_plan", 100, 200))
                 .await
@@ -2055,20 +2055,20 @@ mod coverage_adversarial {
             assert!(created.is_active);
 
             // A second upsert with the same name updates rather than duplicates,
-            // and a NULL adyen id preserves the stored one.
+            // and a NULL mollie id preserves the stored one.
             let mut update = upsert("plcov_plan", 300, 400);
-            update.adyen_plan_code_monthly = None;
-            update.adyen_plan_code_yearly = Some("apexmail_plcov_yearly".to_string());
+            update.mollie_plan_code_monthly = None;
+            update.mollie_plan_code_yearly = Some("apexmail_plcov_yearly".to_string());
             let updated = upsert_plan_input(&env.pool, &update).await.expect("update");
             assert_eq!(updated.id, created.id, "same row, updated in place");
             assert_eq!(updated.email_limit, 300);
             assert_eq!(
-                updated.adyen_plan_code_monthly.as_deref(),
+                updated.mollie_plan_code_monthly.as_deref(),
                 Some("apexmail_plcov_monthly"),
-                "an omitted Adyen plan code never erases the stored id"
+                "an omitted Mollie plan code never erases the stored id"
             );
             assert_eq!(
-                updated.adyen_plan_code_yearly.as_deref(),
+                updated.mollie_plan_code_yearly.as_deref(),
                 Some("apexmail_plcov_yearly")
             );
             let rows: i64 =

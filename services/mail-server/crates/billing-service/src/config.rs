@@ -22,9 +22,13 @@ pub struct BillingConfig {
     pub metering_flush_interval_ms: u64,
     /// Service-to-service auth token.
     pub service_auth_token: String,
-    /// Adyen webhook signing secret.
+    /// Mollie API key (`live_...`/`test_...`). Sent as
+    /// `Authorization: Bearer <key>` on every payment, refund, customer,
+    /// mandate, subscription and settlement call. It is the webhook's ONLY
+    /// authentication: the id-only body carries no signature, so the handler
+    /// resolves every id by an authenticated API fetch.
     #[serde(default)]
-    pub adyen_hmac_key: String,
+    pub mollie_api_key: String,
     /// Internal API base URL used for dedicated IP provisioning.
     #[serde(default = "default_api_base_url")]
     pub api_base_url: String,
@@ -94,7 +98,7 @@ impl Default for BillingConfig {
             metering_batch_size: default_metering_batch_size(),
             metering_flush_interval_ms: default_metering_flush_interval_ms(),
             service_auth_token: String::new(),
-            adyen_hmac_key: String::new(),
+            mollie_api_key: String::new(),
             api_base_url: default_api_base_url(),
             overage_rate_per_email_millicents: default_overage_rate_millicents(),
             max_proration_charge_cents: default_max_proration_charge_cents(),

@@ -188,6 +188,6 @@ packages/
 
 ## References
 
-- [Adyen SDK Design](https://adyen.com/docs/libraries)
+- [Mollie SDK Design](https://mollie.com/docs/libraries)
 - [AWS SDK Patterns](https://aws.amazon.com/sdk-for-python/)
-- [Designing APIs for Humans](https://adyen.com/blog/api-design)
+- [Designing APIs for Humans](https://mollie.com/blog/api-design)

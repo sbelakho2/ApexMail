@@ -344,7 +344,7 @@ mod tests {
         // read whatever they resolved to (a filesystem read oracle).
         for bad in [
             "../../etc/passwd",
-            "../secrets/adyen",
+            "../secrets/mollie",
             "foo/bar",
             "foo\\bar",
             "invoice.typ",

@@ -39,7 +39,7 @@ ApexMail uses the following categories of subprocessors. The full list with name
 | Cloud Infrastructure (Hetzner) | Hosting and compute | Encrypted at rest |
 | Email Infrastructure | SMTP relay and delivery | Message content, sender/recipient |
 | Monitoring and Logging | Service health, error tracking | Metadata (not message body) |
-| Payment Processing (Adyen) | Billing | Payment information (not stored by ApexMail) |
+| Payment Processing (Mollie B.V.) | Billing | Payment information (not stored by ApexMail) |
 | Customer Support | Ticket management | Account metadata, support history |
 
 All subprocessors are bound by data processing agreements with terms no less protective than ApexMail's DPA. Subprocessor changes are communicated to customers at least 14 days in advance (per DPA §5.3).
@@ -210,7 +210,7 @@ The timeline is credible and resourced:
 
 ### PCI DSS
 
-**Not applicable.** ApexMail does not store, process, or transmit credit card data. Payment processing is handled entirely by Adyen, which is PCI DSS Level 1 certified. The payment form on the ApexMail dashboard is hosted by Adyen (Adyen Elements); card data never touches ApexMail servers.
+**Not applicable.** ApexMail does not store, process, or transmit credit card data. Payment processing is handled entirely by Mollie B.V., which is PCI DSS Level 1 certified. The payment form on the ApexMail dashboard is hosted by Mollie's checkout; card data never touches ApexMail servers. Mollie B.V. is a payment institution supervised by De Nederlandsche Bank (DNB), with its registered office at Keizersgracht 126, 1015 CW Amsterdam, The Netherlands. Payment data is processed in the Netherlands (EU); card-scheme networks may process it globally under Mollie's Data Processing Agreement.
 
 ### CCPA / CPRA
 

@@ -85,19 +85,19 @@ Pour un achat Enterprise, une revue de sécurité ou la planification d'un cloud
     <legend class="px-2">Préférence de déploiement</legend>
     <div class="space-y-3 mt-3">
       <label class="apex-check">
-        <input type="radio" name="deployment_preference" value="shared" checked />
+        <input type="radio" class="apex-checkbox apex-input" name="deployment_preference" value="shared" checked />
         <span><strong>Cloud mutualisé</strong> — Infrastructure UE multi-tenant</span>
       </label>
       <label class="apex-check">
-        <input type="radio" name="deployment_preference" value="dedicated" />
+        <input type="radio" class="apex-checkbox apex-input" name="deployment_preference" value="dedicated" />
         <span><strong>Tenance dédiée</strong> — Infrastructure isolée mono-tenant</span>
       </label>
       <label class="apex-check">
-        <input type="radio" name="deployment_preference" value="byoc" />
+        <input type="radio" class="apex-checkbox apex-input" name="deployment_preference" value="byoc" />
         <span><strong>BYOC / Déploiement privé</strong> — Déploiement géré dans votre compte cloud</span>
       </label>
       <label class="apex-check">
-        <input type="radio" name="deployment_preference" value="not_sure" />
+        <input type="radio" class="apex-checkbox apex-input" name="deployment_preference" value="not_sure" />
         <span><strong>Pas encore décidé</strong> — Besoin d'aide pour choisir le bon modèle</span>
       </label>
     </div>

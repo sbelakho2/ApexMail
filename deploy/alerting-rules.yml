@@ -104,7 +104,7 @@ groups:
           severity: critical
         annotations:
           summary: "ApexMail billing service is down"
-          description: "The billing-service internal :4100/health presence probe has failed for more than 2 minutes — plan metering, invoices and Adyen webhooks are impacted."
+          description: "The billing-service internal :4100/health presence probe has failed for more than 2 minutes — plan metering, invoices and Mollie webhooks are impacted."
           runbook_url: "https://apexmail.ee/docs/alerts#billing-service-down"
 
       - alert: SyntheticTransactionFailure
@@ -379,16 +379,16 @@ groups:
       - record: apexmail:billing_errors:rate5m
         expr: sum(rate(apexmail_http_requests_total{job="apexmail-api",path_pattern=~"/v1/billing.*",status=~"5.."}[5m]))
 
-      # Adyen webhook processing failures
-      - alert: AdyenWebhookFailures
-        expr: increase(apexmail_http_requests_total{job="apexmail-api",path_pattern=~"/v1/billing.*|/webhooks/adyen",status=~"5.."}[1h]) > 10
+      # Mollie webhook processing failures
+      - alert: MollieWebhookFailures
+        expr: increase(apexmail_http_requests_total{job="apexmail-api",path_pattern=~"/v1/billing.*|/webhooks/mollie",status=~"5.."}[1h]) > 10
         for: 0m
         labels:
           severity: warning
         annotations:
-          summary: "Multiple Adyen webhook processing failures"
-          description: "{{ $value }} Adyen webhook errors in the last hour."
-          runbook_url: "https://apexmail.ee/docs/alerts#adyen-webhook-failures"
+          summary: "Multiple Mollie webhook processing failures"
+          description: "{{ $value }} Mollie webhook errors in the last hour."
+          runbook_url: "https://apexmail.ee/docs/alerts#mollie-webhook-failures"
 
   - name: apexmail-database
     rules:

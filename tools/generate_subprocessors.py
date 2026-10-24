@@ -31,7 +31,7 @@ data in the United States. The tool REFUSES (exit 2) when the derived active
 set contains a US processing/storage region, or a US-domiciled processor
 engaged without an approved GDPR Chapter V transfer basis. The current
 production configuration (SES ``eu-west-1``, S3 ``eu-central-1``, Hetzner
-``fsn1`` DE / ``hel1`` FI, Adyen N.V. NL, EU OAuth regions) passes;
+``fsn1`` DE / ``hel1`` FI, Mollie B.V. NL, EU OAuth regions) passes;
 ``--self-test`` proves the check FAILS when the fixture env sets
 ``us-east-1``.
 
@@ -68,25 +68,45 @@ GENERATED_BANNER = "GENERATED FILE — do not edit by hand"
 
 # The register's own last-updated date. Bumped by hand when the derived set or
 # the catalog facts change (the tool prints it; --check compares it too).
-REGISTER_LAST_UPDATED = "2026-10-15"
+REGISTER_LAST_UPDATED = "2026-10-24"
 CHANGE_HISTORY = [
     (
         "2026-07-29",
         "Initial publication",
         "Subprocessor register published with Hetzner (infrastructure), AWS (S3/SES, when "
-        "enabled), Google (OAuth), GitHub (OAuth) and Adyen (payments). ClickHouse and Redis "
+        "enabled), Google (OAuth), GitHub (OAuth) and Mollie (payments). ClickHouse and Redis "
         "are self-hosted software, not subprocessors (see above).",
     ),
     (
-        REGISTER_LAST_UPDATED,
+        "2026-10-15",
         "Register generated from deployment configuration",
         "The register is now rendered by tools/generate_subprocessors.py from the compose + "
         "env deployment configuration, with a validate-stage gate that fails on drift and a "
-        "zero-US check (sovereign_chain_zero_us) over the active set. Adyen's location column "
-        "now names the contracting entity (Adyen N.V., Amsterdam) instead of the card-network "
+        "zero-US check (sovereign_chain_zero_us) over the active set. Mollie's location column "
+        "now names the contracting entity (Mollie B.V., Amsterdam) instead of the card-network "
         "processing footprint.",
     ),
+    (
+        REGISTER_LAST_UPDATED,
+        "Mollie legal identity stated in full",
+        "The register now states Mollie B.V.'s registered office (Keizersgracht 126, 1015 CW "
+        "Amsterdam, The Netherlands) and its supervision by De Nederlandsche Bank (DNB) as a "
+        "payment institution. Payment processing is in the Netherlands (EU); card-scheme "
+        "networks may process data globally under Mollie's Data Processing Agreement.",
+    ),
 ]
+
+# Canonical payment-processor facts. One source for every rendered surface and
+# for tools/check_processor_facts.py (which holds the committed pages to it).
+MOLLIE_LEGAL_ENTITY = "Mollie B.V."
+MOLLIE_REGISTERED_OFFICE = "Keizersgracht 126, 1015 CW Amsterdam, The Netherlands"
+MOLLIE_SUPERVISOR = "De Nederlandsche Bank (DNB)"
+MOLLIE_PAYMENT_FACTS_EN = (
+    f"{MOLLIE_LEGAL_ENTITY} is a payment institution supervised by {MOLLIE_SUPERVISOR}, "
+    f"with its registered office at {MOLLIE_REGISTERED_OFFICE}. Payment data is processed in "
+    "the Netherlands (EU); card-scheme networks may process it globally under Mollie's Data "
+    "Processing Agreement."
+)
 
 # ── The processor catalog: the legal facts, each with its evidence pointer ──
 #
@@ -205,19 +225,19 @@ PROCESSOR_CATALOG: list[Processor] = [
         optional_note="Optional: active only when GITHUB_CLIENT_ID is configured.",
     ),
     Processor(
-        key="adyen",
-        legal_entity="Adyen N.V.",
-        brand="Adyen",
+        key="mollie",
+        legal_entity="Mollie B.V.",
+        brand="Mollie",
         purpose="Payment processing, subscription management, invoicing",
         data_categories="Payment card details (tokenized — ApexMail never receives full card "
         "numbers), billing address, transaction metadata",
         corporate_country="Netherlands",
-        transfer_basis="Contracting entity is EU-established (Adyen N.V., Amsterdam); card "
-        "scheme networks process globally under the Adyen Data Processing Agreement; PCI DSS "
+        transfer_basis="Contracting entity is EU-established (Mollie B.V., Amsterdam); card "
+        "scheme networks process globally under the Mollie Data Processing Agreement; PCI DSS "
         "Level 1 certified",
         required="Yes — required for paid plans",
         certifications=["PCI DSS Level 1"],
-        region_env="ADYEN_API_KEY",
+        region_env="MOLLIE_API_KEY",
         regions={"__enabled__": ("Netherlands", "Netherlands")},
     ),
 ]
@@ -325,7 +345,7 @@ def is_enabled(config: dict[str, str], processor: Processor) -> tuple[bool, str 
         # A placeholder ("<REQUIRED-…>") is not a configured provider; the
         # example files declare the variable but leave it empty.
         return not raw.startswith("<"), None
-    if processor.key == "adyen":
+    if processor.key == "mollie":
         return not raw.startswith("<"), None
     return True, raw
 
@@ -494,6 +514,10 @@ The following third-party entities process customer personal data on behalf of A
 |---|---|---|---|---|---|---|---|---|---|
 {chr(10).join(rows)}
 
+### Payment processor
+
+{MOLLIE_PAYMENT_FACTS_EN}
+
 ### Self-Hosted Infrastructure (not third-party subprocessors)
 
 The following software is deployed and managed by ApexMail on Hetzner infrastructure. The software publishers do not process customer data.
@@ -550,6 +574,10 @@ A subprocessor is a third-party data processor engaged by ApexMail to process pe
 | Subprocessor | Purpose | Data Processed | Location | Transfer Safeguard |
 |---|---|---|---|---|
 {chr(10).join(rows)}
+
+### Payment processor
+
+{MOLLIE_PAYMENT_FACTS_EN}
 
 Whether an optional subprocessor (OAuth providers, SES, S3 telemetry) is engaged is controlled by the active deployment configuration. This register is generated from that configuration, with a validate-stage gate that fails on drift and a zero-US check over the active set.
 

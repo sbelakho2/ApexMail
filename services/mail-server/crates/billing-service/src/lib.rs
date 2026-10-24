@@ -10,7 +10,8 @@
 pub mod accounting_export;
 /// Posting hooks into the statutory accounting ledger (migration 220).
 pub mod accounting_postings;
-pub mod adyen_webhooks;
+pub mod mollie_client;
+pub mod mollie_webhooks;
 pub mod config;
 pub mod credit_notes;
 pub mod invoices;
@@ -37,7 +38,7 @@ pub mod routes;
 pub mod send_admission;
 pub mod subscriptions;
 /// Shared harness for in-crate adversarial coverage tests (private canonical
-/// DB clones, schema fault injection, dead Redis pools, Adyen signing).
+/// DB clones, schema fault injection, dead Redis pools, Mollie signing).
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod types;

@@ -43,7 +43,11 @@ Enterprise Cloud inclut le routage EU-only : chaque envoi ne part que par les MT
 
 ## Cycle de facturation
 
-Enterprise n'est pas achetable via le Checkout public générique. Le contrat ou l'arrangement de facturation approuvé fait foi pour les droits. Pour les forfaits self-service publics, Adyen Checkout et le webhook d'abonnement Adyen vérifié sont requis avant l'octroi d'un forfait payant.
+Enterprise n'est pas achetable via le Checkout public générique. Le contrat ou l'arrangement de facturation approuvé fait foi pour les droits. Pour les forfaits self-service publics, un paiement Mollie réglé est requis avant l'octroi d'un forfait payant. Mollie ne transmet qu'un id au webhook ; ApexMail récupère et vérifie donc le paiement avec sa clé d'API.
+
+### Prestataire de paiement
+
+Mollie B.V. est un établissement de paiement supervisé par De Nederlandsche Bank (DNB), dont le siège social est situé Keizersgracht 126, 1015 CW Amsterdam, Pays-Bas. Les données de paiement sont traitées aux Pays-Bas (UE) ; les réseaux de cartes peuvent les traiter à l'échelle mondiale dans le cadre de l'accord de traitement des données de Mollie.
 
 ## Contact
 

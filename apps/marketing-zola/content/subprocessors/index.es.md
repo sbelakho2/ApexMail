@@ -23,7 +23,7 @@ Las siguientes entidades externas tratan datos personales de clientes por cuenta
 | Amazon Web Services, Inc. | AWS SES | Transporte de entrega de email | Entrega de email cuando está activada | Contenido de los emails y direcciones de los destinatarios | Región de SES configurada | Región de SES configurada | EE. UU. | Cláusulas Contractuales Tipo de la UE (DPA de AWS) | No — solo cuando la implementación activa usa SES |
 | Google LLC | Google | Autenticación OAuth | Inicio de sesión mediante Google OAuth | Tokens OAuth, dirección de email, nombre | Global (datos de la UE) | Usuarios con sede en el EEE: EEE | EE. UU. | Cláusulas Contractuales Tipo (SCC) | No — solo si el cliente activa Google OAuth |
 | GitHub, Inc. | GitHub | Autenticación OAuth | Inicio de sesión mediante GitHub OAuth | Tokens OAuth, nombre de usuario, dirección de email | Global (datos de la UE) | Usuarios con sede en el EEE: EEE | EE. UU. | Cláusulas Contractuales Tipo (SCC) | No — solo si el cliente activa GitHub OAuth |
-| Adyen N.V. | Adyen | Procesamiento de pagos | Facturación por suscripción, facturación, almacenamiento de métodos de pago | Tokens de métodos de pago, metadatos de transacciones, datos de facturas | Países Bajos | Países Bajos | Países Bajos | Entidad contratante establecida en la UE (Adyen N.V., Ámsterdam); las redes de tarjetas procesan globalmente según el DPA de Adyen; certificación PCI DSS Nivel 1 | Sí — necesario para los planes de pago |
+| Mollie B.V. | Mollie | Procesamiento de pagos | Facturación por suscripción, facturación, almacenamiento de métodos de pago | Tokens de métodos de pago, metadatos de transacciones, datos de facturas | Países Bajos | Países Bajos | Países Bajos | Entidad contratante establecida en la UE (Mollie B.V., Ámsterdam); las redes de tarjetas procesan globalmente según el DPA de Mollie; certificación PCI DSS Nivel 1 | Sí — necesario para los planes de pago |
 
 ### Infraestructura autoalojada (no son subprocesadores externos)
 
@@ -33,6 +33,10 @@ El siguiente software lo despliega y gestiona ApexMail sobre infraestructura de 
 |---|---|---|---|---|---|
 | ClickHouse (código abierto) | Base de datos de analítica | Eventos de entrega, eventos de apertura y clic, datos de rebotes y quejas | Región de implementación configurada | Región de implementación configurada | Autoalojado por ApexMail. ClickHouse, Inc. no trata datos de clientes. |
 | Redis (código abierto) | Caché en memoria | Tokens de sesión, contadores de límite de tasa | Región de implementación configurada | Región de implementación configurada | Autoalojado por ApexMail. Redis Ltd. no trata datos de clientes. |
+
+### Procesador de pagos
+
+Mollie B.V. es una entidad de pago supervisada por De Nederlandsche Bank (DNB), con domicilio social en Keizersgracht 126, 1015 CW Ámsterdam, Países Bajos. Los datos de pago se procesan en los Países Bajos (UE); las redes de tarjetas pueden procesarlos globalmente conforme al Acuerdo de Tratamiento de Datos de Mollie.
 
 ### Notificación
 
@@ -46,4 +50,4 @@ Si se opone a un nuevo subprocesador por motivos razonables de protección de da
 
 | Fecha | Cambio | Descripción |
 |---|---|---|
-| 2026-07-29 | Publicación inicial | Registro de subprocesadores publicado con Hetzner (infraestructura), AWS (S3/SES, cuando están activados), Google (OAuth), GitHub (OAuth) y Adyen (pagos). ClickHouse y Redis son software autoalojado, no subprocesadores (véase arriba). |
+| 2026-07-29 | Publicación inicial | Registro de subprocesadores publicado con Hetzner (infraestructura), AWS (S3/SES, cuando están activados), Google (OAuth), GitHub (OAuth) y Mollie (pagos). ClickHouse y Redis son software autoalojado, no subprocesadores (véase arriba). |

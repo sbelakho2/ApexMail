@@ -104,7 +104,7 @@ https://apexmail.ee/subprocessors
 
 ### 6.1 Primary Location
 
-Core infrastructure processing in Germany and Finland. Optional Google and GitHub OAuth processing. Adyen payment processing. International transfers protected through applicable safeguards.
+Core infrastructure processing in Germany and Finland. Optional Google and GitHub OAuth processing. Mollie B.V. payment processing (Mollie B.V., Keizersgracht 126, 1015 CW Amsterdam, The Netherlands; supervised by De Nederlandsche Bank; processing in the Netherlands/EU; card-scheme networks under Mollie's DPA). International transfers protected through applicable safeguards.
 
 ### 6.2 Transfer Safeguards
 

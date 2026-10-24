@@ -43,7 +43,11 @@ Enterprise Cloud incluye el enrutamiento EU-only: cada envío sale por los MTA e
 
 ## Ciclo de vida de facturación
 
-Enterprise no puede adquirirse a través del Checkout público genérico. El contrato o la disposición de facturación aprobada constituyen la autoridad del derecho. Para los planes públicos de autoservicio, se requieren Adyen Checkout y el webhook verificado de suscripción de Adyen antes de conceder un plan de pago.
+Enterprise no puede adquirirse a través del Checkout público genérico. El contrato o la disposición de facturación aprobada constituyen la autoridad del derecho. Para los planes públicos de autoservicio, se requiere un pago de Mollie liquidado antes de conceder un plan de pago. Mollie envía solo un id al webhook, por lo que ApexMail recupera y verifica el pago con su clave de API.
+
+### Procesador de pagos
+
+Mollie B.V. es una entidad de pago supervisada por De Nederlandsche Bank (DNB), con domicilio social en Keizersgracht 126, 1015 CW Ámsterdam, Países Bajos. Los datos de pago se procesan en los Países Bajos (UE); las redes de tarjetas pueden procesarlos globalmente conforme al Acuerdo de Tratamiento de Datos de Mollie.
 
 ## Contacto
 

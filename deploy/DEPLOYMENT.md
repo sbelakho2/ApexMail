@@ -90,8 +90,8 @@ rendered (empty) so the guards stay satisfied when running the SES transport.
 | `CSRF_SECRET` | `PROD_CSRF_SECRET_FILE` |
 | `DKIM_PRIVATE_KEY_ENCRYPTION_KEY` | `PROD_DKIM_PRIVATE_KEY_ENCRYPTION_KEY_FILE` |
 | `KIWI_SECRET_KEY` | `PROD_KIWI_SECRET_KEY_FILE` |
-| `ADYEN_API_KEY` | `PROD_ADYEN_API_KEY_FILE` |
-| `ADYEN_HMAC_KEY` | `PROD_ADYEN_HMAC_KEY_FILE` |
+| `MOLLIE_API_KEY` | `PROD_MOLLIE_API_KEY_FILE` |
+| `MOLLIE_PROFILE_ID` | `PROD_MOLLIE_PROFILE_ID_FILE` |
 | `AWS_ACCESS_KEY_ID` *(optional)* | `PROD_AWS_ACCESS_KEY_ID_FILE` |
 | `AWS_SECRET_ACCESS_KEY` *(optional)* | `PROD_AWS_SECRET_ACCESS_KEY_FILE` |
 | `SMTP_USERNAME` *(optional)* | `PROD_SMTP_USERNAME_FILE` |
@@ -197,10 +197,11 @@ Notes:
   references; only the image name is canonical.
 - `billing-service` binds `0.0.0.0:4100` (no host port mapping — it is
   service-auth protected and only reachable on the internal Docker networks).
-  Its production Adyen credentials come from the Docker secrets
-  `adyen_api_key` / `adyen_hmac_key` (`PROD_ADYEN_API_KEY_FILE`
-  / `PROD_ADYEN_HMAC_KEY_FILE` in the deployment `.env`); the webhook
-  secret is mandatory — the binary fail-fasts at startup without it.
+  Its production Mollie credentials come from the Docker secrets
+  `mollie_api_key` / `mollie_profile_id` (`PROD_MOLLIE_API_KEY_FILE`
+  / `PROD_MOLLIE_PROFILE_ID_FILE` in the deployment `.env`). The API key is
+  mandatory — the client fails closed without it. The webhook itself carries
+  no secret: it is an id-only form verified by an authenticated API fetch.
 - `sales-autopilot` (internal sales engine: CRM, campaigns, inbox, scheduler)
   binds port `3010` with no host port mapping — the control plane reaches it
   server-side over `apexmail_backend` (`sales-autopilot:3010`). Its only

@@ -7,11 +7,11 @@
 //!   069/093/098 — producers: api-server billing admin routes);
 //! - contract window: `enterprise_contracts` active period
 //!   (migration 022 — producers: enterprise contracts + billing admin);
-//! - subscription state: `adyen_subscriptions` (producer: billing-service
-//!   adyen webhooks);
+//! - subscription state: `mollie_subscriptions` (producer: billing-service
+//!   mollie webhooks);
 //! - monthly usage: `metering_events` `emails_sent` aggregated over the
 //!   SAME window quota enforcement charges — the tenant's anchored billing
-//!   cycle when a Adyen subscription defines one, the UTC calendar month
+//!   cycle when a Mollie subscription defines one, the UTC calendar month
 //!   otherwise (F61: mirroring billing-service `check_quota`'s
 //!   Redis-outage DB fallback exactly, so a tenant whose cycle starts on
 //!   the 15th gets identical usage/remaining from enforcement and here).
@@ -111,8 +111,8 @@ struct TenantEntitlementRow {
     contract_end: Option<NaiveDate>,
     /// `enterprise_contracts.annual_prepay_discount` (percent, 0 = none).
     annual_prepay_discount: Option<i32>,
-    /// Latest adyen subscription status (NULL when never subscribed).
-    adyen_status: Option<String>,
+    /// Latest mollie subscription status (NULL when never subscribed).
+    mollie_status: Option<String>,
 }
 
 /// Effective-plan + contract + subscription lookup. Mirrors billing-service
@@ -132,7 +132,7 @@ const TENANT_ENTITLEMENT_SQL: &str = r#"
             ec.start_date::date                 AS contract_start,
             ec.end_date::date                   AS contract_end,
             ec.annual_prepay_discount,
-            ss.status                           AS adyen_status
+            ss.status                           AS mollie_status
         FROM tenants t
         LEFT JOIN plan_overrides po
                ON po.tenant_id = t.id
@@ -151,7 +151,7 @@ const TENANT_ENTITLEMENT_SQL: &str = r#"
         ) ec ON true
         LEFT JOIN LATERAL (
             SELECT status
-            FROM adyen_subscriptions
+            FROM mollie_subscriptions
             WHERE tenant_id = t.id
             ORDER BY updated_at DESC
             LIMIT 1
@@ -181,7 +181,7 @@ const TENANT_CYCLE_ANCHOR_SQL: &str = r#"
         -- the anchor is consumed as a DATE: without the cast sqlx refuses the
         -- row and every entitlement lookup for a subscribed tenant fails.
         SELECT billing_cycle_start::date
-        FROM adyen_subscriptions
+        FROM mollie_subscriptions
         WHERE tenant_id = $1
           AND status IN ('active', 'trialing', 'past_due')
           AND billing_cycle_start IS NOT NULL
@@ -190,7 +190,7 @@ const TENANT_CYCLE_ANCHOR_SQL: &str = r#"
         "#;
 
 /// The most recent anchored billing-cycle start at or before `at` — the
-/// same day-of-month walk (clamped to month length, Adyen-style) as
+/// same day-of-month walk (clamped to month length, Mollie-style) as
 /// billing-service `most_recent_anchored_cycle`/`anchored_date` (usage.rs),
 /// mirrored here because the compliance crate does not depend on
 /// billing-service. A parity test pins the semantics together.
@@ -351,7 +351,7 @@ pub async fn get_tenant_entitlements(
     };
 
     let suspended = row.status == "suspended";
-    let trial_or_beta = row.adyen_status.as_deref() == Some("trialing");
+    let trial_or_beta = row.mollie_status.as_deref() == Some("trialing");
     // Computed before `features` is moved out of the row.
     let effective_allowance = effective_email_allowance(&row);
 
@@ -544,7 +544,7 @@ mod tests {
             "plan_overrides po",
             "plans p",
             "enterprise_contracts",
-            "adyen_subscriptions",
+            "mollie_subscriptions",
         ] {
             assert!(
                 TENANT_ENTITLEMENT_SQL.contains(table),
@@ -682,7 +682,7 @@ mod tests {
                 contract_start: None,
                 contract_end: None,
                 annual_prepay_discount: None,
-                adyen_status: None,
+                mollie_status: None,
             }
         }
         let now = Utc::now();
@@ -871,8 +871,8 @@ mod db_tests {
         let today = Utc::now().date_naive();
         // Anchor the cycle to today so the window starts today.
         sqlx::query(
-            "INSERT INTO adyen_subscriptions
-               (id, tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
+            "INSERT INTO mollie_subscriptions
+               (id, tenant_id, mollie_subscription_id, plan, status, billing_cycle_start,
                 created_at, updated_at)
              VALUES (gen_random_uuid(), 'ent-usage', $1, 'pro', 'active', $2, NOW(), NOW())",
         )

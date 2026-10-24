@@ -23,7 +23,7 @@ Die folgenden Drittunternehmen verarbeiten personenbezogene Daten von Kunden im 
 | Amazon Web Services, Inc. | AWS SES | E-Mail-Zustelltransport | E-Mail-Zustellung, wenn aktiviert | E-Mail-Inhalte und Empfängeradressen | Konfigurierte SES-Region | Konfigurierte SES-Region | USA | EU-Standardvertragsklauseln (AWS-DPA) | Nein — nur wenn die aktive Bereitstellung SES verwendet |
 | Google LLC | Google | OAuth-Authentifizierung | Anmeldung über Google OAuth | OAuth-Tokens, E-Mail-Adresse, Name | Global (EU-Daten) | Nutzer mit Sitz im EWR: EWR | USA | Standardvertragsklauseln (SCCs) | Nein — nur wenn der Kunde Google OAuth aktiviert |
 | GitHub, Inc. | GitHub | OAuth-Authentifizierung | Anmeldung über GitHub OAuth | OAuth-Tokens, Benutzername, E-Mail-Adresse | Global (EU-Daten) | Nutzer mit Sitz im EWR: EWR | USA | Standardvertragsklauseln (SCCs) | Nein — nur wenn der Kunde GitHub OAuth aktiviert |
-| Adyen N.V. | Adyen | Zahlungsabwicklung | Abonnement-Abrechnung, Rechnungsstellung, Speicherung von Zahlungsmethoden | Tokens für Zahlungsmethoden, Transaktionsmetadaten, Rechnungsdaten | Niederlande | Niederlande | Niederlande | Vertragspartei mit Sitz in der EU (Adyen N.V., Amsterdam); Kartennetzwerke verarbeiten global gemäß dem Adyen-DPA; PCI DSS Level 1 zertifiziert | Ja — erforderlich für kostenpflichtige Tarife |
+| Mollie B.V. | Mollie | Zahlungsabwicklung | Abonnement-Abrechnung, Rechnungsstellung, Speicherung von Zahlungsmethoden | Tokens für Zahlungsmethoden, Transaktionsmetadaten, Rechnungsdaten | Niederlande | Niederlande | Niederlande | Vertragspartei mit Sitz in der EU (Mollie B.V., Amsterdam); Kartennetzwerke verarbeiten global gemäß dem Mollie-DPA; PCI DSS Level 1 zertifiziert | Ja — erforderlich für kostenpflichtige Tarife |
 
 ### Selbst gehostete Infrastruktur (keine Drittanbieter-Unterauftragsverarbeiter)
 
@@ -33,6 +33,10 @@ Die folgende Software wird von ApexMail auf Hetzner-Infrastruktur bereitgestellt
 |---|---|---|---|---|---|
 | ClickHouse (Open Source) | Analytik-Datenbank | Zustellereignisse, Öffnungs- und Klickereignisse, Bounce- und Beschwerdedaten | Konfigurierte Bereitstellungsregion | Konfigurierte Bereitstellungsregion | Von ApexMail selbst gehostet. ClickHouse, Inc. verarbeitet keine Kundendaten. |
 | Redis (Open Source) | In-Memory-Cache | Sitzungstokens, Zähler für Ratenbegrenzung | Konfigurierte Bereitstellungsregion | Konfigurierte Bereitstellungsregion | Von ApexMail selbst gehostet. Redis Ltd. verarbeitet keine Kundendaten. |
+
+### Zahlungsabwickler
+
+Mollie B.V. ist ein von der De Nederlandsche Bank (DNB) beaufsichtigtes Zahlungsinstitut mit Sitz unter Keizersgracht 126, 1015 CW Amsterdam, Niederlande. Zahlungsdaten werden in den Niederlanden (EU) verarbeitet; Kartennetzwerke können sie im Rahmen des Datenverarbeitungsvertrags von Mollie weltweit verarbeiten.
 
 ### Benachrichtigung
 
@@ -46,4 +50,4 @@ Wenn Sie aus berechtigten datenschutzrechtlichen Gründen Widerspruch gegen eine
 
 | Datum | Änderung | Beschreibung |
 |---|---|---|
-| 2026-07-29 | Erstveröffentlichung | Unterauftragsverarbeiter-Register veröffentlicht mit Hetzner (Infrastruktur), AWS (S3/SES, wenn aktiviert), Google (OAuth), GitHub (OAuth) und Adyen (Zahlungen). ClickHouse und Redis sind selbst gehostete Software und keine Unterauftragsverarbeiter (siehe oben). |
+| 2026-07-29 | Erstveröffentlichung | Unterauftragsverarbeiter-Register veröffentlicht mit Hetzner (Infrastruktur), AWS (S3/SES, wenn aktiviert), Google (OAuth), GitHub (OAuth) und Mollie (Zahlungen). ClickHouse und Redis sind selbst gehostete Software und keine Unterauftragsverarbeiter (siehe oben). |

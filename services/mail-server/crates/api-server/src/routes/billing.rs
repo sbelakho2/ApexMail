@@ -236,8 +236,8 @@ struct LegacyPlanDto {
     email_limit: i64,
     api_call_limit: i64,
     features: LegacyPlanFeaturesPayload,
-    adyen_plan_code_monthly: Option<String>,
-    adyen_plan_code_yearly: Option<String>,
+    mollie_plan_code_monthly: Option<String>,
+    mollie_plan_code_yearly: Option<String>,
     is_active: bool,
     sort_order: i32,
     created_at: chrono::DateTime<Utc>,
@@ -256,8 +256,8 @@ impl From<Plan> for LegacyPlanDto {
             email_limit: plan.email_limit,
             api_call_limit: plan.api_call_limit,
             features: plan.features.into(),
-            adyen_plan_code_monthly: plan.adyen_plan_code_monthly,
-            adyen_plan_code_yearly: plan.adyen_plan_code_yearly,
+            mollie_plan_code_monthly: plan.mollie_plan_code_monthly,
+            mollie_plan_code_yearly: plan.mollie_plan_code_yearly,
             is_active: plan.is_active,
             sort_order: plan.sort_order,
             created_at: plan.created_at,
@@ -623,19 +623,13 @@ struct PortalSessionBody {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct TenantAdyenSettings {
+struct TenantMollieSettings {
     billing_email: Option<String>,
     default_from_email: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-struct AdyenCheckoutSessionResponse {
-    id: String,
-    url: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct AdyenPortalSessionResponse {
+struct MolliePortalSessionResponse {
     url: String,
 }
 
@@ -812,12 +806,12 @@ struct AdminBillingAddressRow {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct LegacyAdyenSubscriptionDto {
+struct LegacyMollieSubscriptionDto {
     id: String,
     tenant_id: String,
-    adyen_subscription_id: String,
-    adyen_shopper_reference: String,
-    adyen_plan_code: String,
+    mollie_subscription_id: String,
+    mollie_customer_id: String,
+    mollie_plan_code: String,
     status: String,
     billing_interval: String,
     billing_cycle_start: chrono::DateTime<Utc>,
@@ -830,12 +824,12 @@ struct LegacyAdyenSubscriptionDto {
 }
 
 #[derive(sqlx::FromRow)]
-struct LegacyAdyenSubscriptionRow {
+struct LegacyMollieSubscriptionRow {
     id: String,
     tenant_id: String,
-    adyen_subscription_id: String,
-    adyen_shopper_reference: String,
-    adyen_plan_code: String,
+    mollie_subscription_id: String,
+    mollie_customer_id: String,
+    mollie_plan_code: String,
     status: String,
     billing_interval: String,
     billing_cycle_start: chrono::DateTime<Utc>,
@@ -847,14 +841,14 @@ struct LegacyAdyenSubscriptionRow {
     updated_at: chrono::DateTime<Utc>,
 }
 
-impl From<LegacyAdyenSubscriptionRow> for LegacyAdyenSubscriptionDto {
-    fn from(row: LegacyAdyenSubscriptionRow) -> Self {
+impl From<LegacyMollieSubscriptionRow> for LegacyMollieSubscriptionDto {
+    fn from(row: LegacyMollieSubscriptionRow) -> Self {
         Self {
             id: row.id,
             tenant_id: row.tenant_id,
-            adyen_subscription_id: row.adyen_subscription_id,
-            adyen_shopper_reference: row.adyen_shopper_reference,
-            adyen_plan_code: row.adyen_plan_code,
+            mollie_subscription_id: row.mollie_subscription_id,
+            mollie_customer_id: row.mollie_customer_id,
+            mollie_plan_code: row.mollie_plan_code,
             status: row.status,
             billing_interval: row.billing_interval,
             billing_cycle_start: row.billing_cycle_start,
@@ -912,7 +906,7 @@ struct LegacyBillingAddressDto {
 struct LegacyInvoiceDto {
     id: String,
     tenant_id: String,
-    adyen_psp_reference: Option<String>,
+    mollie_payment_id: Option<String>,
     invoice_number: String,
     status: String,
     currency: String,
@@ -945,7 +939,7 @@ struct LegacyInvoiceDto {
 struct LegacyInvoiceRow {
     id: String,
     tenant_id: String,
-    adyen_psp_reference: Option<String>,
+    mollie_payment_id: Option<String>,
     invoice_number: String,
     status: String,
     currency: String,
@@ -953,7 +947,7 @@ struct LegacyInvoiceRow {
     vat_total: i64,
     total: i64,
     line_items: String,
-    /// Nullable on the table (rows written by the Adyen invoice.paid
+    /// Nullable on the table (rows written by the Mollie invoice.paid
     /// persistence predate address snapshotting) — decoded as an empty
     /// address so a NULL snapshot can never fail the whole list/detail
     /// query (audit F05).
@@ -988,110 +982,6 @@ fn validate_usage_alert_metric(metric: &str) -> bool {
 
 fn validate_usage_alert_channel(channel: &str) -> bool {
     matches!(channel, "email" | "webhook" | "both")
-}
-
-fn adyen_api_base_url() -> String {
-    std::env::var("ADYEN_API_BASE_URL")
-        .unwrap_or_else(|_| "https://checkout-test.adyen.com/v71".into())
-}
-
-#[derive(Clone)]
-struct AdyenClient {
-    http: reqwest::Client,
-    base_url: String,
-    api_key: String,
-    merchant_account: String,
-}
-
-impl AdyenClient {
-    fn from_env(http: &reqwest::Client, is_production: bool) -> Result<Self, String> {
-        let api_key = std::env::var("ADYEN_API_KEY")
-            .map_err(|_| "Adyen API key is not configured".to_string())?;
-        let merchant_account = std::env::var("ADYEN_MERCHANT_ACCOUNT")
-            .map_err(|_| "ADYEN_MERCHANT_ACCOUNT is not configured".to_string())?;
-        let base_url = adyen_api_base_url();
-
-        // Adyen's test endpoint must never silently drive real customer
-        // billing in production; it is only accepted when the deployment
-        // explicitly opts in (a pre-production stack sets
-        // ADYEN_ALLOW_TEST_KEY=true and keeps the test URL).
-        if is_production
-            && base_url.contains("checkout-test")
-            && std::env::var("ADYEN_ALLOW_TEST_KEY").as_deref() != Ok("true")
-        {
-            return Err(
-                "ADYEN_API_BASE_URL points at Adyen's test endpoint in production; set the live checkout URL (https://checkout-live.adyen.com/v71) or set ADYEN_ALLOW_TEST_KEY=true deliberately"
-                    .to_string(),
-            );
-        }
-
-        Ok(Self {
-            http: http.clone(),
-            base_url,
-            api_key,
-            merchant_account,
-        })
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
-    fn new(
-        http: reqwest::Client,
-        base_url: String,
-        api_key: String,
-        merchant_account: String,
-    ) -> Self {
-        Self {
-            http,
-            base_url,
-            api_key,
-            merchant_account,
-        }
-    }
-
-    /// Adyen Checkout API call: JSON body, API key in `X-API-Key`, and the
-    /// API version inside the URL path (`.../v71`) — Adyen has no version
-    /// header. Amounts travel in minor units inside the JSON body.
-    async fn json_post<T: DeserializeOwned>(
-        &self,
-        path: &str,
-        body: &serde_json::Value,
-        idempotency_key: Option<&str>,
-    ) -> Result<T, String> {
-        let response = self
-            .json_request(path, body, idempotency_key)
-            .send()
-            .await
-            .map_err(|error| format!("Adyen request failed: {error}"))?;
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(format!("Adyen returned {status}: {body}"));
-        }
-
-        response
-            .json::<T>()
-            .await
-            .map_err(|error| format!("Adyen response decode failed: {error}"))
-    }
-
-    fn json_request(
-        &self,
-        path: &str,
-        body: &serde_json::Value,
-        idempotency_key: Option<&str>,
-    ) -> reqwest::RequestBuilder {
-        let mut request = self
-            .http
-            .post(format!("{}{}", self.base_url, path))
-            .header("X-API-Key", &self.api_key)
-            .json(body);
-
-        if let Some(idempotency_key) = idempotency_key {
-            request = request.header("Idempotency-Key", idempotency_key);
-        }
-
-        request
-    }
 }
 
 fn is_allowed_billing_redirect_url(
@@ -1135,11 +1025,11 @@ fn billing_operation_failed_response() -> Response {
 }
 
 fn tenant_billing_email(settings_raw: &str) -> Option<String> {
-    let settings: TenantAdyenSettings = serde_json::from_str(settings_raw).unwrap_or_default();
+    let settings: TenantMollieSettings = serde_json::from_str(settings_raw).unwrap_or_default();
     settings.billing_email.or(settings.default_from_email)
 }
 
-async fn get_or_create_adyen_shopper_reference(
+async fn get_or_create_mollie_customer_id(
     state: &AppState,
     tenant_id: &str,
 ) -> Result<String, String> {
@@ -1153,20 +1043,20 @@ async fn get_or_create_adyen_shopper_reference(
         .bind(tenant_id)
         .execute(&mut *tx)
         .await
-        .map_err(|error| format!("Failed to acquire Adyen customer lock: {error}"))?;
+        .map_err(|error| format!("Failed to acquire Mollie customer lock: {error}"))?;
 
-    if let Some(adyen_shopper_reference) = sqlx::query_scalar::<_, String>(
-        "SELECT adyen_shopper_reference FROM adyen_shoppers WHERE tenant_id = $1",
+    if let Some(mollie_customer_id) = sqlx::query_scalar::<_, String>(
+        "SELECT mollie_customer_id FROM mollie_customers WHERE tenant_id = $1",
     )
     .bind(tenant_id)
     .fetch_optional(&mut *tx)
     .await
-    .map_err(|error| format!("Failed to query Adyen customer: {error}"))?
+    .map_err(|error| format!("Failed to query Mollie customer: {error}"))?
     {
         tx.commit()
             .await
             .map_err(|error| format!("Failed to close billing transaction: {error}"))?;
-        return Ok(adyen_shopper_reference);
+        return Ok(mollie_customer_id);
     }
 
     let Some((tenant_name, settings_raw)) = sqlx::query_as::<_, (String, String)>(
@@ -1175,7 +1065,7 @@ async fn get_or_create_adyen_shopper_reference(
     .bind(tenant_id)
     .fetch_optional(&mut *tx)
     .await
-    .map_err(|error| format!("Failed to query tenant for Adyen checkout: {error}"))?
+    .map_err(|error| format!("Failed to query tenant for Mollie checkout: {error}"))?
     else {
         return Err("Tenant not found".into());
     };
@@ -1184,15 +1074,29 @@ async fn get_or_create_adyen_shopper_reference(
         return Err("No billing email configured".into());
     };
 
-    // Adyen has no customer object and no customer-create call: the shopper
-    // reference we choose IS the tenant id, and this row is our own
-    // onboarding record (email/name kept for billing notices).
-    let customer_id = tenant_id.to_string();
+    // Mollie customers are real objects (`cst_…`): the recurring mandate and
+    // every stored-mandate charge hang off this id. Created once per tenant
+    // under the advisory lock above, so a concurrent checkout cannot mint
+    // two customers.
+    let mollie = billing_service::mollie_client::MollieClient::from_env()
+        .map_err(|error| format!("Mollie is not configured: {error}"))?;
+    let customer = mollie
+        .create_customer(
+            &tenant_name,
+            &email,
+            &format!("customer_{tenant_id}"),
+        )
+        .await
+        .map_err(|error| format!("Failed to create the Mollie customer: {error}"))?;
+    if customer.id.is_empty() {
+        return Err("Mollie returned a customer without an id".into());
+    }
+    let customer_id = customer.id;
 
     sqlx::query(
         r#"
-        INSERT INTO adyen_shoppers (
-            id, tenant_id, adyen_shopper_reference, email, name, created_at, updated_at
+        INSERT INTO mollie_customers (
+            id, tenant_id, mollie_customer_id, email, name, created_at, updated_at
         ) VALUES (
             gen_random_uuid(), $1, $2, $3, $4, NOW(), NOW()
         )
@@ -1204,11 +1108,11 @@ async fn get_or_create_adyen_shopper_reference(
     .bind(&tenant_name)
     .execute(&mut *tx)
     .await
-    .map_err(|error| format!("Failed to persist Adyen customer: {error}"))?;
+    .map_err(|error| format!("Failed to persist the Mollie customer: {error}"))?;
 
     tx.commit()
         .await
-        .map_err(|error| format!("Failed to commit Adyen shopper transaction: {error}"))?;
+        .map_err(|error| format!("Failed to commit Mollie shopper transaction: {error}"))?;
 
     Ok(customer_id)
 }
@@ -2178,7 +2082,7 @@ fn map_invoice_row(row: LegacyInvoiceRow) -> LegacyInvoiceDto {
     LegacyInvoiceDto {
         id: row.id,
         tenant_id: row.tenant_id,
-        adyen_psp_reference: row.adyen_psp_reference,
+        mollie_payment_id: row.mollie_payment_id,
         invoice_number: row.invoice_number,
         status: row.status,
         currency: row.currency,
@@ -2249,7 +2153,7 @@ async fn query_invoice_list_rows_with_legacy_fallback(
         SELECT
             id::text AS id,
             tenant_id,
-            adyen_psp_reference,
+            mollie_payment_id,
             invoice_number,
             status::text AS status,
             currency,
@@ -2294,7 +2198,7 @@ async fn query_invoice_list_rows_with_legacy_fallback(
                 SELECT
                     id::text AS id,
                     tenant_id,
-                    adyen_psp_reference,
+                    mollie_payment_id,
                     invoice_number,
                     status::text AS status,
                     currency,
@@ -2340,7 +2244,7 @@ async fn query_invoice_detail_rows_with_legacy_fallback(
         SELECT
             id::text AS id,
             tenant_id,
-            adyen_psp_reference,
+            mollie_payment_id,
             invoice_number,
             status::text AS status,
             currency,
@@ -2377,7 +2281,7 @@ async fn query_invoice_detail_rows_with_legacy_fallback(
                 SELECT
                     id::text AS id,
                     tenant_id,
-                    adyen_psp_reference,
+                    mollie_payment_id,
                     invoice_number,
                     status::text AS status,
                     currency,
@@ -2560,14 +2464,14 @@ async fn get_route_subscription(
     tenant_id: &str,
 ) -> Result<Option<RouteSubscription>, ApiError> {
     // The legacy `subscriptions` table is never populated in production; the
-    // live record is `adyen_subscriptions`. Read the live table first and
+    // live record is `mollie_subscriptions`. Read the live table first and
     // fall back to the legacy one only for old deployments.
     let row: Option<RouteSubscriptionRow> = sqlx::query_as(
         r#"
         SELECT plan AS plan_name, billing_interval,
                billing_cycle_start AS current_period_start,
                billing_cycle_end AS current_period_end
-        FROM adyen_subscriptions
+        FROM mollie_subscriptions
         WHERE tenant_id = $1
           AND status IN ('active', 'trialing', 'past_due')
         ORDER BY created_at DESC
@@ -3176,7 +3080,7 @@ async fn create_checkout_session(
             .into_response());
     }
 
-    // Never forward an arbitrary Adyen price identifier supplied by a
+    // Never forward an arbitrary Mollie price identifier supplied by a
     // customer. The price must map to an active ApexMail plan in our catalog,
     // which prevents cross-product purchases and makes the plan selection
     // independently verifiable when the webhook arrives.
@@ -3190,7 +3094,8 @@ async fn create_checkout_session(
                 .into_response())
         }
     };
-    // Adyen sends amounts inline (minor units): the amount is the canonical
+    // Mollie sends amounts inline as decimal strings; the local amount is the
+    // canonical
     // platform-catalog price for the matched interval — never a client input,
     // never a provider-side price object.
     let Some(plan_row) = platform_catalog::plan_by_name(&plan_name) else {
@@ -3241,89 +3146,79 @@ async fn create_checkout_session(
             .into_response());
     }
 
-    // Configuration first: a deployment without Adyen credentials must fail
-    // closed BEFORE any local write (no shopper onboarding row for a checkout
-    // that can never reach the provider).
-    let adyen = match AdyenClient::from_env(
-        &state.http_client,
-        state.config.environment.is_production(),
-    ) {
-        Ok(adyen) => adyen,
+    // Configuration first: a deployment without Mollie credentials must fail
+    // closed BEFORE any local write (no customer onboarding row for a
+    // checkout that can never reach the provider).
+    let mollie = match billing_service::mollie_client::MollieClient::from_env() {
+        Ok(mollie) => mollie,
         Err(error) => {
-            tracing::error!(tenant_id = %auth.tenant_id, error = %error, "Failed to initialize Adyen client for checkout");
+            tracing::error!(tenant_id = %auth.tenant_id, error = %error, "Failed to initialize Mollie client for checkout");
             return Ok(billing_operation_failed_response());
         }
     };
 
-    let customer_id = match get_or_create_adyen_shopper_reference(&state, &auth.tenant_id).await {
+    let customer_id = match get_or_create_mollie_customer_id(&state, &auth.tenant_id).await {
         Ok(customer_id) => customer_id,
         Err(error) => {
-            tracing::error!(tenant_id = %auth.tenant_id, error = %error, "Failed to resolve Adyen shopper for checkout");
+            tracing::error!(tenant_id = %auth.tenant_id, error = %error, "Failed to resolve the Mollie customer for checkout");
             return Ok(billing_operation_failed_response());
         }
     };
 
-    let session = match adyen
-        .json_post::<AdyenCheckoutSessionResponse>(
-            "/sessions",
-            &serde_json::json!({
-                "amount": { "currency": currency_code, "value": amount_cents },
-                // Cards in either currency plus SEPA Direct Debit for EU
-                // customers (the plan's payment-method set for Adyen).
-                "allowedPaymentMethods": ["scheme", "sepadirectdebit"],
-                "merchantAccount": adyen.merchant_account.clone(),
-                "reference": format!("checkout:{plan_name}:{interval_label}"),
-                "returnUrl": body.success_url,
-                "shopperReference": customer_id,
-                "metadata": {
-                    "tenant_id": auth.tenant_id.clone(),
-                    "plan_name": plan_name.clone(),
-                    "interval": interval_label,
-                },
-                "recurringProcessingModel": "Subscription",
-                "storePaymentMethod": true,
-                "lineItems": [{
-                    "id": price_id,
-                    "description": plan_row.display_name,
-                    "quantity": 1,
-                    "amountIncludingTax": amount_cents,
-                }],
+    let link = match mollie
+        .create_payment(billing_service::mollie_client::CreatePayment {
+            amount: billing_service::mollie_client::Money::new(currency_code, amount_cents),
+            description: format!("ApexMail {}", plan_row.display_name),
+            redirect_url: body.success_url.clone(),
+            // The webhook URL is derived from APP_BASE_URL by the client.
+            webhook_url: None,
+            metadata: serde_json::json!({
+                "tenant_id": auth.tenant_id.clone(),
+                "plan_name": plan_name.clone(),
+                "interval": interval_label,
+                "price_id": price_id,
             }),
+            // Mollie's own method picker: card, iDEAL, SEPA Direct Debit and
+            // the rest of the profile's methods. Forcing a method list would
+            // silently exclude the customer's favourite.
+            method: None,
+            customer_id: Some(customer_id.clone()),
+            mandate_id: None,
+            // `first` mints the mandate that later recurring charges and the
+            // subscription use.
+            sequence_type: Some("first".into()),
             // Deterministic idempotency key so a retried checkout request
-            // (client timeout, network blip) cannot mint duplicate sessions.
-            Some(&format!(
-                "checkout_{}_{}_{}",
-                auth.tenant_id, plan_name, price_id
-            )),
-        )
+            // (client timeout, network blip) cannot mint duplicate payments.
+            idempotency_key: format!("checkout_{}_{}_{}", auth.tenant_id, plan_name, price_id),
+        })
         .await
     {
-        Ok(session) => session,
+        Ok(link) => link,
         Err(error) => {
-            tracing::error!(tenant_id = %auth.tenant_id, error = %error, "Failed to create Adyen checkout session");
+            tracing::error!(tenant_id = %auth.tenant_id, error = %error, "Failed to create the Mollie payment");
             return Ok(billing_operation_failed_response());
         }
     };
 
-    let Some(url) = session.url else {
-        tracing::error!(tenant_id = %auth.tenant_id, session_id = %session.id, "Adyen checkout session returned without URL");
+    let Some(url) = link.checkout_url else {
+        tracing::error!(tenant_id = %auth.tenant_id, payment_id = %link.id, "Mollie payment returned without a checkout URL");
         return Ok(billing_operation_failed_response());
     };
 
     Ok(billing_success_response(serde_json::json!({
-        "sessionId": session.id,
+        "sessionId": link.id,
         "url": url,
     })))
 }
 
-/// Resolve a Adyen price only when it is attached to an active self-service
+/// Resolve a Mollie price only when it is attached to an active self-service
 /// ApexMail plan. Enterprise and PAYG follow managed/contractual flows and
 /// must not be purchased through the generic public Checkout endpoint.
-/// Adyen webhooks separately resolve all active catalog prices before
+/// Mollie webhooks separately resolve all active catalog prices before
 /// granting an entitlement, so manual Enterprise subscriptions can still be
-/// reconciled through their verified Adyen lifecycle.
+/// reconciled through their verified Mollie lifecycle.
 /// Resolve a client-supplied priceId to the active plan it identifies and
-/// the billing interval the matched Adyen plan code implies. Adyen has no
+/// the billing interval the matched Mollie plan code implies. Mollie has no
 /// price objects: the catalog amount is looked up separately and sent inline
 /// with the checkout session.
 async fn active_plan_checkout_target(
@@ -3332,10 +3227,10 @@ async fn active_plan_checkout_target(
 ) -> Result<Option<(String, bool)>, sqlx::Error> {
     sqlx::query_as::<_, (String, bool)>(
         r#"
-        SELECT name, adyen_plan_code_yearly = $1 AS yearly
+        SELECT name, mollie_plan_code_yearly = $1 AS yearly
         FROM plans
         WHERE is_active = true
-          AND (adyen_plan_code_monthly = $1 OR adyen_plan_code_yearly = $1)
+          AND (mollie_plan_code_monthly = $1 OR mollie_plan_code_yearly = $1)
         LIMIT 1
         "#,
     )
@@ -3361,18 +3256,18 @@ async fn create_portal_session(
     }
 
     let shopper_exists = sqlx::query_scalar::<_, String>(
-        "SELECT adyen_shopper_reference FROM adyen_shoppers WHERE tenant_id = $1",
+        "SELECT mollie_customer_id FROM mollie_customers WHERE tenant_id = $1",
     )
     .bind(&auth.tenant_id)
     .fetch_optional(&state.db)
     .await?
     .is_some();
     if !shopper_exists {
-        tracing::error!(tenant_id = %auth.tenant_id, "Adyen portal requested before shopper onboarding");
+        tracing::error!(tenant_id = %auth.tenant_id, "Mollie portal requested before shopper onboarding");
         return Ok(billing_operation_failed_response());
     }
 
-    // Adyen has no hosted billing portal: payment-method management and
+    // Mollie has no hosted billing portal: payment-method management and
     // cancellation live in the console. Return the real billing settings page
     // (the old `/web/billing/portal` target is a POST-only form route, so a
     // GET on it could never render — audit 15 Oct, H1).
@@ -3389,7 +3284,7 @@ async fn create_portal_session(
     console_url.set_path("/settings/billing");
     console_url.set_query(None);
     console_url.set_fragment(None);
-    let session = AdyenPortalSessionResponse {
+    let session = MolliePortalSessionResponse {
         url: console_url.to_string(),
     };
 
@@ -3450,7 +3345,7 @@ async fn get_proration_preview(
     }
 }
 
-/// Direct mutation of a tenant's plan bypasses Adyen's payment confirmation
+/// Direct mutation of a tenant's plan bypasses Mollie's payment confirmation
 /// and webhook reconciliation. Keep the legacy endpoint as an explicit,
 /// safe failure so old clients receive a deterministic migration signal rather
 /// than an accidental paid entitlement.
@@ -3458,7 +3353,7 @@ fn checkout_required_response() -> Response {
     (
         StatusCode::CONFLICT,
         Json(serde_json::json!({
-            "error": "Direct plan changes are disabled. Create a Adyen Checkout session and wait for the verified Adyen webhook before paid access is activated.",
+            "error": "Direct plan changes are disabled. Create a Mollie Checkout session and wait for the verified Mollie webhook before paid access is activated.",
             "code": "CHECKOUT_REQUIRED",
         })),
     )
@@ -3475,7 +3370,7 @@ async fn switch_plan(
 
     tracing::warn!(
         tenant_id = %auth.tenant_id,
-        "rejected direct billing plan transition; checkout and verified Adyen webhooks are required"
+        "rejected direct billing plan transition; checkout and verified Mollie webhooks are required"
     );
 
     Ok(checkout_required_response())
@@ -3489,11 +3384,13 @@ async fn cancel_subscription_request(
     crate::middleware::auth::require_scopes(&auth, &["billing:write"])?;
     let _ = (body.reason, body.feedback);
 
-    // External audit 15 Oct, H1: cancellation is a LOCAL subscription state
-    // change. ApexMail owns the subscription (Adyen's Subscription model is
-    // merchant-initiated; there is no provider-hosted billing portal), so the
-    // next renewal path reads `cancel_at_period_end` and stops charging. The
-    // old refusal sent customers to a portal that does not exist.
+    // External audit 15 Oct, H1: cancellation is an ApexMail-owned state
+    // change (Mollie's Subscription model is merchant-initiated; there is no
+    // provider-hosted billing portal), so the next renewal path reads
+    // `cancel_at_period_end` and stops charging. An immediate cancellation
+    // additionally revokes the Mollie mandate best-effort at the provider;
+    // `mandate_revoked_at` records success and the maintenance sweep retries
+    // any revocation that could not reach Mollie.
     match billing_service::subscriptions::cancel_subscription(
         &state.db,
         &auth.tenant_id,
@@ -3545,8 +3442,8 @@ fn subscription_mutation_payload(
         "billingInterval": serde_json::to_value(subscription.billing_interval).unwrap_or_default(),
         "currentPeriodStart": subscription.current_period_start,
         "currentPeriodEnd": subscription.current_period_end,
-        "adyenSubscriptionId": subscription.adyen_subscription_id,
-        "adyenShopperReference": subscription.adyen_shopper_reference,
+        "mollieSubscriptionId": subscription.mollie_subscription_id,
+        "mollieShopperReference": subscription.mollie_customer_id,
         "cancelAtPeriodEnd": subscription.cancel_at_period_end,
         "createdAt": subscription.created_at,
         "updatedAt": subscription.updated_at,
@@ -3561,14 +3458,14 @@ async fn get_subscription(
     // scope (fail-closed — see get_usage).
     crate::middleware::auth::require_scopes(&auth, &["billing:read"])?;
 
-    let query = sqlx::query_as::<_, LegacyAdyenSubscriptionRow>(
+    let query = sqlx::query_as::<_, LegacyMollieSubscriptionRow>(
         r#"
         SELECT
             id::text AS id,
             tenant_id,
-            adyen_subscription_id,
-            adyen_shopper_reference,
-            adyen_plan_code,
+            mollie_subscription_id,
+            mollie_customer_id,
+            mollie_plan_code,
             status::text AS status,
             billing_interval,
             billing_cycle_start,
@@ -3578,7 +3475,7 @@ async fn get_subscription(
             trial_end,
             created_at,
             updated_at
-        FROM adyen_subscriptions
+        FROM mollie_subscriptions
         WHERE tenant_id = $1 AND status != 'canceled'
         ORDER BY created_at DESC
         LIMIT 1
@@ -3594,7 +3491,7 @@ async fn get_subscription(
 
     match subscription {
         Some(subscription) => Ok(billing_success_response(serde_json::json!({
-            "subscription": LegacyAdyenSubscriptionDto::from(subscription),
+            "subscription": LegacyMollieSubscriptionDto::from(subscription),
         }))),
         None => Ok(billing_success_response(serde_json::json!({
             "subscription": null,
@@ -3781,7 +3678,7 @@ async fn admin_list_tenants(
                     d.status AS dunning_state,
                     w.balance AS wallet_balance
                 FROM tenants t
-                LEFT JOIN adyen_subscriptions s ON t.id = s.tenant_id
+                LEFT JOIN mollie_subscriptions s ON t.id = s.tenant_id
                 LEFT JOIN plans p ON p.name = s.plan
                 LEFT JOIN dunning_records d ON t.id = d.tenant_id
                 LEFT JOIN wallets w ON t.id = w.tenant_id
@@ -3811,7 +3708,7 @@ async fn admin_list_tenants(
                     d.status AS dunning_state,
                     w.balance AS wallet_balance
                 FROM tenants t
-                LEFT JOIN adyen_subscriptions s ON t.id = s.tenant_id
+                LEFT JOIN mollie_subscriptions s ON t.id = s.tenant_id
                 LEFT JOIN plans p ON p.name = s.plan
                 LEFT JOIN dunning_records d ON t.id = d.tenant_id
                 LEFT JOIN wallets w ON t.id = w.tenant_id
@@ -3842,14 +3739,14 @@ async fn admin_get_tenant_details(
         return Ok(response);
     }
 
-    let subscription = match sqlx::query_as::<_, LegacyAdyenSubscriptionRow>(
+    let subscription = match sqlx::query_as::<_, LegacyMollieSubscriptionRow>(
         r#"
         SELECT
             id::text AS id,
             tenant_id,
-            adyen_subscription_id,
-            adyen_shopper_reference,
-            adyen_plan_code,
+            mollie_subscription_id,
+            mollie_customer_id,
+            mollie_plan_code,
             status::text AS status,
             billing_interval,
             billing_cycle_start,
@@ -3859,7 +3756,7 @@ async fn admin_get_tenant_details(
             trial_end,
             created_at,
             updated_at
-        FROM adyen_subscriptions
+        FROM mollie_subscriptions
         WHERE tenant_id = $1 AND status != 'canceled'
         ORDER BY created_at DESC
         LIMIT 1
@@ -3869,7 +3766,7 @@ async fn admin_get_tenant_details(
     .fetch_optional(&state.db)
     .await
     {
-        Ok(subscription) => subscription.map(LegacyAdyenSubscriptionDto::from),
+        Ok(subscription) => subscription.map(LegacyMollieSubscriptionDto::from),
         Err(error) if is_postgres_error_code(&error, "42P01") => None,
         Err(error) => return Err(ApiError::from(error)),
     };
@@ -4296,7 +4193,7 @@ async fn admin_force_subscription_status(
 
     let update = sqlx::query(
         r#"
-        UPDATE adyen_subscriptions
+        UPDATE mollie_subscriptions
         SET status = $2,
             admin_override_at = NOW(),
             admin_override_by = $3,
@@ -4689,7 +4586,7 @@ async fn admin_create_invoice(
     let inserted: (String, chrono::DateTime<Utc>, chrono::DateTime<Utc>) = sqlx::query_as(
         r#"
         INSERT INTO invoices (
-            id, tenant_id, adyen_psp_reference, invoice_number, status, currency,
+            id, tenant_id, mollie_payment_id, invoice_number, status, currency,
             amount, subtotal, vat_total, total, line_items, billing_address,
             billing_registry_code,
             issued_at, due_at, period_start, period_end,
@@ -4728,7 +4625,7 @@ async fn admin_create_invoice(
         billing_success(serde_json::to_value(LegacyInvoiceDto {
             id: inserted.0,
             tenant_id,
-            adyen_psp_reference: None,
+            mollie_payment_id: None,
             invoice_number,
             status: "draft".to_string(),
             currency,
@@ -4783,7 +4680,7 @@ fn invoice_void_error_response(error: billing_service::invoices::InvoiceVoidErro
             StatusCode::CONFLICT,
             format!("Invoice {invoice_id} is in status '{status}': only draft or open (pending) invoices can be voided; refund a paid invoice with a credit note instead"),
         ),
-        VoidError::AdyenUnavailable { .. } | VoidError::AdyenFailed { .. } => {
+        VoidError::MollieUnavailable { .. } | VoidError::MollieFailed { .. } => {
             (StatusCode::CONFLICT, error.to_string())
         }
         // Infra faults (DB / audit pipeline): these are genuine 5xx-s —
@@ -4863,7 +4760,7 @@ fn admin_operation_idempotency_key(headers: &HeaderMap) -> Result<String, Respon
 /// POST /v1/billing/admin/tenants/:tenantId/invoices/:invoiceId/void
 ///
 /// DF-5 finding B: the `void` transition the status filters referenced but
-/// no surface could express. The state machine (idempotency, Adyen-side
+/// no surface could express. The state machine (idempotency, Mollie-side
 /// void, audit event) lives in `billing_service::invoices::void_invoice`;
 /// this handler gates the operator, enforces the header idempotency
 /// contract, maps refusals to honest 4xx-s and attributes the operator on
@@ -5091,7 +4988,7 @@ async fn admin_get_churn_report(
     // Shared with billing-service (audit 2: this local copy priced churn
     // from the tenant's post-cancellation 'free' plan — structurally ~0 —
     // and truncated yearly/12). Single source:
-    // billing_service::routes::CHURN_REPORT_SQL (adyen_plan_code snapshot
+    // billing_service::routes::CHURN_REPORT_SQL (mollie_plan_code snapshot
     // join + unpriced-churn coverage).
     let report: serde_json::Value = sqlx::query_scalar(billing_service::routes::CHURN_REPORT_SQL)
         .fetch_one(&state.db)
@@ -5243,7 +5140,7 @@ async fn admin_export_billing_data(
                     s.billing_interval,
                     s.billing_cycle_start as current_period_start, s.current_period_end,
                     s.created_at, s.canceled_at
-                FROM adyen_subscriptions s
+                FROM mollie_subscriptions s
                 JOIN tenants t ON s.tenant_id = t.id
                 LEFT JOIN plans p ON p.name = s.plan
                 WHERE s.created_at >= $1 AND s.created_at < $2
@@ -5631,7 +5528,7 @@ mod tests {
         assert!(body["error"]
             .as_str()
             .expect("error should be a string")
-            .contains("verified Adyen webhook"));
+            .contains("verified Mollie webhook"));
     }
 
     // External audit 15 Oct, H1: cancellation is NOT checkout-gated any more.
@@ -5694,7 +5591,7 @@ mod tests {
         LegacyInvoiceDto {
             id: "inv_test_123".into(),
             tenant_id: "tenant_123".into(),
-            adyen_psp_reference: None,
+            mollie_payment_id: None,
             invoice_number: "2026-TEST-001".into(),
             status: "paid".into(),
             currency: "eur".into(),
@@ -6179,48 +6076,45 @@ mod tests {
     }
 
     #[test]
-    fn billing_routes_adyen_request_builder_keys_the_api_key_and_idempotency() {
-        let adyen = AdyenClient::new(
-            reqwest::Client::new(),
-            "https://checkout-test.adyen.com/v71".into(),
-            "test_api_key".into(),
-            "TestMerchantAccount".into(),
-        );
-        let request = adyen
-            .json_request(
-                "/sessions",
-                &serde_json::json!({ "reference": "tenant_123" }),
-                Some("checkout_tenant_123"),
-            )
-            .build()
-            .expect("request should build");
+    fn billing_routes_mollie_money_is_decimal_and_checkout_link_is_extracted() {
+        use billing_service::mollie_client::{payment_link_from_json, Money};
 
+        // Mollie amounts are decimal strings, never minor units. 49.00 EUR is
+        // 4900 cents locally and `"49.00"` on the wire.
+        assert_eq!(Money::new("eur", 4_900).wire_value(), "49.00");
+        assert_eq!(Money::new("USD", 1).wire_value(), "0.01");
+        assert_eq!(Money::parse("EUR", "49.00").map(|m| m.cents), Some(4_900));
+        // More than two decimals is refused rather than silently rounded.
+        assert!(Money::parse("EUR", "49.001").is_none());
+
+        // The checkout URL lives at `_links.checkout.href` in Mollie's
+        // payment document; a document without it yields no URL (the caller
+        // fails closed rather than fabricating a redirect).
+        let link = payment_link_from_json(serde_json::json!({
+            "resource": "payment",
+            "id": "tr_checkout_1",
+            "status": "open",
+            "amount": { "currency": "EUR", "value": "49.00" },
+            "_links": {
+                "checkout": {
+                    "href": "https://www.mollie.com/checkout/tr_checkout_1",
+                    "type": "text/html"
+                }
+            }
+        }));
+        assert_eq!(link.id, "tr_checkout_1");
+        assert_eq!(link.status, "open");
         assert_eq!(
-            request.url().as_str(),
-            "https://checkout-test.adyen.com/v71/sessions"
+            link.checkout_url.as_deref(),
+            Some("https://www.mollie.com/checkout/tr_checkout_1")
         );
-        assert_eq!(
-            request
-                .headers()
-                .get("x-api-key")
-                .expect("api key header")
-                .to_str()
-                .expect("api key string"),
-            "test_api_key",
-        );
-        assert_eq!(
-            request
-                .headers()
-                .get("idempotency-key")
-                .expect("idempotency key")
-                .to_str()
-                .expect("idempotency key string"),
-            "checkout_tenant_123",
-        );
-        assert!(
-            request.headers().get("authorization").is_none(),
-            "Adyen authenticates with X-API-Key — there is no bearer authorization header"
-        );
+
+        let no_link = payment_link_from_json(serde_json::json!({
+            "resource": "payment",
+            "id": "tr_checkout_2",
+            "status": "open",
+        }));
+        assert!(no_link.checkout_url.is_none());
     }
 
     #[tokio::test]
@@ -6621,14 +6515,14 @@ mod adversarial_tests {
         email_limit: i64,
         api_limit: i64,
         features: &serde_json::Value,
-        adyen_monthly: Option<&str>,
-        adyen_yearly: Option<&str>,
+        mollie_monthly: Option<&str>,
+        mollie_yearly: Option<&str>,
         is_active: bool,
     ) {
         sqlx::query(
             "INSERT INTO plans (id, name, display_name, description, price_monthly, price_yearly,
                                 email_limit, api_call_limit, features, is_active, sort_order,
-                                adyen_plan_code_monthly, adyen_plan_code_yearly, created_at, updated_at)
+                                mollie_plan_code_monthly, mollie_plan_code_yearly, created_at, updated_at)
              VALUES (LEFT(REPLACE(gen_random_uuid()::text, '-', ''), 26), $1, $2, '', $3, $4,
                      $5, $6, $7, $8, 0, $9, $10, NOW(), NOW())
              ON CONFLICT (name) DO UPDATE SET
@@ -6638,8 +6532,8 @@ mod adversarial_tests {
                  api_call_limit = EXCLUDED.api_call_limit,
                  features = EXCLUDED.features,
                  is_active = EXCLUDED.is_active,
-                 adyen_plan_code_monthly = EXCLUDED.adyen_plan_code_monthly,
-                 adyen_plan_code_yearly = EXCLUDED.adyen_plan_code_yearly",
+                 mollie_plan_code_monthly = EXCLUDED.mollie_plan_code_monthly,
+                 mollie_plan_code_yearly = EXCLUDED.mollie_plan_code_yearly",
         )
         .bind(name)
         .bind(format!("{name} display"))
@@ -6649,8 +6543,8 @@ mod adversarial_tests {
         .bind(api_limit)
         .bind(features)
         .bind(is_active)
-        .bind(adyen_monthly)
-        .bind(adyen_yearly)
+        .bind(mollie_monthly)
+        .bind(mollie_yearly)
         .execute(pool)
         .await
         .expect("seed plan");
@@ -6908,7 +6802,7 @@ mod adversarial_tests {
         let (status, body) = get(&env, "/v1/billing/plans/advpro").await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["data"]["name"], "advpro");
-        assert_eq!(body["data"]["adyenPlanCodeMonthly"], "price_pro_m");
+        assert_eq!(body["data"]["molliePlanCodeMonthly"], "price_pro_m");
         // An inactive plan is still readable by name (legacy clients need
         // it for renewal copy) but is never in the catalog — asserted above.
         let (status, body) = get(&env, "/v1/billing/plans/advlegacy").await;
@@ -7702,7 +7596,7 @@ mod adversarial_tests {
         assert_eq!(status, StatusCode::CONFLICT, "{body}");
         assert_eq!(body["error"]["code"], "CHECKOUT_REQUIRED");
 
-        // Cancellation (external audit 15 Oct, H1) is a LOCAL state change:
+        // Cancellation (external audit 15 Oct, H1) is our own state change:
         // with no subscription it is a coherent 404, never the old portal
         // refusal.
         let (status, body) = post_json(
@@ -7720,7 +7614,7 @@ mod adversarial_tests {
             "{body}"
         );
         let subscriptions: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM adyen_subscriptions WHERE tenant_id = $1")
+            sqlx::query_scalar("SELECT COUNT(*) FROM mollie_subscriptions WHERE tenant_id = $1")
                 .bind(&tenant)
                 .fetch_one(&pool)
                 .await
@@ -7730,10 +7624,10 @@ mod adversarial_tests {
         // Seed the provider-confirmed subscription the webhook path writes,
         // then cancel at period end.
         sqlx::query(
-            "INSERT INTO adyen_subscriptions
-                 (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
-                  billing_cycle_end, adyen_shopper_reference)
-             VALUES ($1, 'psp_advgate_cancel', 'advgate', 'active', NOW(),
+            "INSERT INTO mollie_subscriptions
+                 (tenant_id, mollie_subscription_id, plan, status, billing_cycle_start,
+                  billing_cycle_end, mollie_customer_id)
+             VALUES ($1, 'sub_advgate_cancel', 'advgate', 'active', NOW(),
                      NOW() + INTERVAL '30 days', $1)",
         )
         .bind(&tenant)
@@ -7754,7 +7648,7 @@ mod adversarial_tests {
         let (sub_status, cancel_at_period_end, canceled_at): (String, bool, Option<String>) =
             sqlx::query_as(
                 "SELECT status, cancel_at_period_end, canceled_at::text
-                   FROM adyen_subscriptions WHERE tenant_id = $1",
+                   FROM mollie_subscriptions WHERE tenant_id = $1",
             )
             .bind(&tenant)
             .fetch_one(&pool)
@@ -7776,7 +7670,7 @@ mod adversarial_tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         let (replay_canceled_at,): (Option<String>,) = sqlx::query_as(
-            "SELECT canceled_at::text FROM adyen_subscriptions WHERE tenant_id = $1",
+            "SELECT canceled_at::text FROM mollie_subscriptions WHERE tenant_id = $1",
         )
         .bind(&tenant)
         .fetch_one(&pool)
@@ -7804,7 +7698,7 @@ mod adversarial_tests {
         let (status, _) = post_json(
             &env,
             "/v1/billing/switch-plan",
-            r#"{"planName":"x","adyenKey":"sk_live_leak"}"#,
+            r#"{"planName":"x","mollieKey":"sk_live_leak"}"#,
         )
         .await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
@@ -7845,17 +7739,17 @@ mod adversarial_tests {
         assert_eq!(body["data"]["message"], "No active subscription");
 
         // Seed one active + one canceled row: the active one wins.
-        for (status, adyen_id) in [("canceled", "sub_old"), ("active", "sub_live")] {
+        for (status, mollie_id) in [("canceled", "sub_old"), ("active", "sub_live")] {
             sqlx::query(
-                "INSERT INTO adyen_subscriptions
-                 (id, tenant_id, adyen_subscription_id, adyen_shopper_reference, adyen_plan_code,
+                "INSERT INTO mollie_subscriptions
+                 (id, tenant_id, mollie_subscription_id, mollie_customer_id, mollie_plan_code,
                   status, plan, billing_interval, billing_cycle_start, billing_cycle_end,
                   cancel_at_period_end, created_at, updated_at)
-                 VALUES (gen_random_uuid(), $1, $2, 'cus_x', 'price_x', $3, 'advsub', 'monthly',
+                 VALUES (gen_random_uuid(), $1, $2, 'cst_x', 'plan_x', $3, 'advsub', 'monthly',
                          NOW() - INTERVAL '5 days' - INTERVAL '6 hours', NOW() - INTERVAL '5 days' - INTERVAL '6 hours' + INTERVAL '30 days', false, NOW(), NOW())",
             )
             .bind(&tenant)
-            .bind(adyen_id)
+            .bind(mollie_id)
             .bind(status)
             .execute(&pool)
             .await
@@ -7864,7 +7758,7 @@ mod adversarial_tests {
         let (status, body) = get(&env, "/v1/billing/subscription").await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(
-            body["data"]["subscription"]["adyenSubscriptionId"],
+            body["data"]["subscription"]["mollieSubscriptionId"],
             "sub_live"
         );
         assert_eq!(body["data"]["subscription"]["status"], "active");
@@ -7890,7 +7784,7 @@ mod adversarial_tests {
         let id = uuid::Uuid::new_v4();
         sqlx::query(
             "INSERT INTO invoices
-             (id, tenant_id, adyen_psp_reference, invoice_number, status, currency, amount,
+             (id, tenant_id, mollie_payment_id, invoice_number, status, currency, amount,
               subtotal, vat_total, total, line_items, billing_address, issued_at, due_at,
               paid_at, period_start, period_end, created_at, updated_at)
              VALUES ($1, $2, NULL, $3, $4, 'USD', $5, $5, 0, $5, $6, $7,
@@ -7963,7 +7857,7 @@ mod adversarial_tests {
             Some(hostile_addr.clone()),
         )
         .await;
-        // A Adyen-era row with NULL billing_address and non-array line_items
+        // A Mollie-era row with NULL billing_address and non-array line_items
         // must still list (audit F05).
         seed_invoice(
             &pool,
@@ -8130,7 +8024,7 @@ mod adversarial_tests {
     }
 
     /// A row with NULL period bounds (nullable columns; no migration
-    /// backfills them — legacy Adyen-era or externally imported rows) used
+    /// backfills them — legacy Mollie-era or externally imported rows) used
     /// to 500 the ENTIRE invoice surface: the FromRow decode demanded a
     /// non-Option timestamp. Same class as audit F05's nullable
     /// billing_address: decode as Option, render null, never fail the read.
@@ -8158,7 +8052,7 @@ mod adversarial_tests {
         let id = uuid::Uuid::new_v4();
         sqlx::query(
             "INSERT INTO invoices
-             (id, tenant_id, adyen_psp_reference, invoice_number, status, currency, amount,
+             (id, tenant_id, mollie_payment_id, invoice_number, status, currency, amount,
               subtotal, vat_total, total, line_items, issued_at, due_at,
               period_start, period_end, created_at, updated_at)
              VALUES ($1, $2, NULL, '2026-000042', 'paid', 'EUR', 5000, 5000, 0, 5000, $3::jsonb,
@@ -8205,15 +8099,14 @@ mod adversarial_tests {
             String::from_utf8_lossy(&bytes)
         );
     }
-    // ── Adyen checkout / portal (against a local mock) ─────────
+    // ── Mollie checkout / portal (against a local mock) ─────────
 
-    /// Serialises tests that mutate Adyen process env vars.
-    static ADYEN_ENV_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-    /// Held across awaits on purpose (serialises Adyen env mutation for the
+    /// Held across awaits on purpose (serialises Mollie env mutation for the
     /// duration of the request) — async-aware so the guard is legitimate.
-    async fn lock_adyen_env() -> tokio::sync::MutexGuard<'static, ()> {
-        ADYEN_ENV_MUTEX.lock().await
+    /// The lock is shared with the webhook tests in `app`: `cargo test` runs
+    /// the whole lib suite in one process with one set of credential vars.
+    async fn lock_mollie_env() -> tokio::sync::MutexGuard<'static, ()> {
+        crate::app::test_support::lock_mollie_env().await
     }
 
     /// RAII restore for one env var.
@@ -8243,64 +8136,166 @@ mod adversarial_tests {
     }
 
     #[derive(Default)]
-    struct MockAdyenState {
-        checkout_calls: usize,
+    struct MockMollieState {
+        customer_calls: usize,
+        payment_calls: usize,
+        refund_calls: usize,
         observed: Vec<serde_json::Value>,
-        checkout_without_url: bool,
-        fail_checkout: bool,
+        payment_without_checkout: bool,
+        fail_payment: bool,
+        fail_customer: bool,
     }
 
-    type MockAdyen = Arc<std::sync::Mutex<MockAdyenState>>;
+    type MockMollie = Arc<std::sync::Mutex<MockMollieState>>;
 
-    fn record_call(state: &MockAdyen, kind: &str, headers: &HeaderMap, body: &[u8]) {
+    fn record_call_with_path(
+        state: &MockMollie,
+        kind: &str,
+        headers: &HeaderMap,
+        body: &[u8],
+        path: Option<&str>,
+    ) {
         let mut observed = json!({
             "kind": kind,
-            "apiKey": headers.get("x-api-key").and_then(|v| v.to_str().ok()),
+            "path": path,
+            // Mollie authenticates with `Authorization: Bearer <key>`.
+            "authorization": headers.get("authorization").and_then(|v| v.to_str().ok()),
             "idempotencyKey": headers.get("idempotency-key").and_then(|v| v.to_str().ok()),
             "body": serde_json::from_slice::<serde_json::Value>(body).unwrap_or(serde_json::Value::Null),
         });
-        // Adyen has no version header — the version lives in the URL path.
-        // Recorded only when actually sent so its absence is assertable.
-        if let Some(version) = headers.get("adyen-version").and_then(|v| v.to_str().ok()) {
-            observed["adyenVersion"] = json!(version);
+        // Mollie has no version header — the version lives in the URL path
+        // (`/v2/...`). Recorded only when actually sent so its absence is
+        // assertable.
+        if let Some(version) = headers.get("mollie-version").and_then(|v| v.to_str().ok()) {
+            observed["mollieVersion"] = json!(version);
         }
         state.lock().unwrap().observed.push(observed);
     }
 
-    async fn mock_checkout_session(
-        State(state): State<MockAdyen>,
+    fn record_call(state: &MockMollie, kind: &str, headers: &HeaderMap, body: &[u8]) {
+        record_call_with_path(state, kind, headers, body, None);
+    }
+
+    /// `POST /v2/customers` — a real Mollie customer object (`cst_…`).
+    async fn mock_create_customer(
+        State(state): State<MockMollie>,
         headers: HeaderMap,
         body: axum::body::Bytes,
     ) -> axum::response::Response {
         use axum::response::IntoResponse;
-        record_call(&state, "checkout", &headers, &body);
+        record_call(&state, "customer", &headers, &body);
         let mut guard = state.lock().unwrap();
-        guard.checkout_calls += 1;
-        let fail = guard.fail_checkout;
-        let no_url = guard.checkout_without_url;
+        guard.customer_calls += 1;
+        let fail = guard.fail_customer;
         drop(guard);
         if fail {
-            return (StatusCode::INTERNAL_SERVER_ERROR, "adyen exploded").into_response();
+            return (StatusCode::INTERNAL_SERVER_ERROR, "mollie exploded").into_response();
         }
-        if no_url {
-            return axum::Json(json!({ "id": "cs_mock_no_url" })).into_response();
-        }
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
         axum::Json(json!({
-            "id": "cs_mock_1",
-            "sessionData": "session_data_mock",
-            "url": "https://checkout.adyen.com/pay/cs_mock_1",
+            "resource": "customer",
+            "id": "cst_mock_1",
+            "name": parsed.get("name").cloned().unwrap_or(serde_json::Value::Null),
+            "email": parsed.get("email").cloned().unwrap_or(serde_json::Value::Null),
+            "locale": "en_US",
         }))
         .into_response()
     }
 
-    async fn start_mock_adyen() -> (String, MockAdyen) {
-        let state: MockAdyen = Arc::new(std::sync::Mutex::new(MockAdyenState::default()));
+    /// `POST /v2/payments` — the payment document, whose checkout URL is
+    /// `_links.checkout.href`; amounts are decimal strings.
+    async fn mock_create_payment(
+        State(state): State<MockMollie>,
+        headers: HeaderMap,
+        body: axum::body::Bytes,
+    ) -> axum::response::Response {
+        use axum::response::IntoResponse;
+        record_call(&state, "payment", &headers, &body);
+        let mut guard = state.lock().unwrap();
+        guard.payment_calls += 1;
+        let fail = guard.fail_payment;
+        let no_url = guard.payment_without_checkout;
+        drop(guard);
+        if fail {
+            return (StatusCode::INTERNAL_SERVER_ERROR, "mollie exploded").into_response();
+        }
+        if no_url {
+            return axum::Json(json!({
+                "resource": "payment",
+                "id": "tr_mock_no_url",
+                "status": "open",
+            }))
+            .into_response();
+        }
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+        let amount = parsed
+            .get("amount")
+            .cloned()
+            .unwrap_or_else(|| json!({ "currency": "EUR", "value": "0.00" }));
+        axum::Json(json!({
+            "resource": "payment",
+            "id": "tr_mock_1",
+            "status": "open",
+            "amount": amount,
+            "description": parsed.get("description").cloned().unwrap_or(serde_json::Value::Null),
+            "sequenceType": parsed.get("sequenceType").cloned().unwrap_or(serde_json::Value::Null),
+            "customerId": parsed.get("customerId").cloned().unwrap_or(serde_json::Value::Null),
+            "metadata": parsed.get("metadata").cloned().unwrap_or(serde_json::Value::Null),
+            "_links": {
+                "checkout": {
+                    "href": "https://www.mollie.com/checkout/tr_mock_1",
+                    "type": "text/html"
+                }
+            }
+        }))
+        .into_response()
+    }
+
+    /// `POST /v2/payments/{payment_id}/refunds` — Mollie returns the refund
+    /// object (`re_…`) and echoes the decimal amount.
+    async fn mock_create_refund(
+        State(state): State<MockMollie>,
+        Path(payment_id): Path<String>,
+        headers: HeaderMap,
+        body: axum::body::Bytes,
+    ) -> axum::response::Response {
+        use axum::response::IntoResponse;
+        let path = format!("/payments/{payment_id}/refunds");
+        record_call_with_path(&state, "refund", &headers, &body, Some(&path));
+        state.lock().unwrap().refund_calls += 1;
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+        let amount = parsed
+            .get("amount")
+            .cloned()
+            .unwrap_or_else(|| json!({ "currency": "EUR", "value": "0.00" }));
+        axum::Json(json!({
+            "resource": "refund",
+            "id": "re_mock_1",
+            "paymentId": payment_id,
+            "status": "pending",
+            "amount": amount,
+            "description": parsed.get("description").cloned().unwrap_or(serde_json::Value::Null),
+        }))
+        .into_response()
+    }
+
+    async fn start_mock_mollie() -> (String, MockMollie) {
+        let state: MockMollie = Arc::new(std::sync::Mutex::new(MockMollieState::default()));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base_url = format!("http://{}", listener.local_addr().unwrap());
-        // Adyen Checkout API: sessions only. There is no customer-create call
-        // (shopperReference is the tenant id) and no hosted billing portal.
+        // The v2 surface the checkout/void paths use: real customer objects,
+        // inline-amount payments, and payment-nested refunds. Mollie has no
+        // hosted billing portal, so no portal endpoint exists here either.
         let mock = Router::new()
-            .route("/sessions", post(mock_checkout_session))
+            .route("/customers", post(mock_create_customer))
+            .route("/payments", post(mock_create_payment))
+            .route(
+                "/payments/:payment_id/refunds",
+                post(mock_create_refund),
+            )
             .with_state(state.clone());
         tokio::spawn(async move {
             let _ = axum::serve(listener, mock).await;
@@ -8334,13 +8329,13 @@ mod adversarial_tests {
     }
 
     #[tokio::test]
-    async fn adversarial_checkout_validation_without_adyen_credentials() {
+    async fn adversarial_checkout_validation_without_mollie_credentials() {
         let Some(pool) = pool_for("checkout_validation").await else {
             return;
         };
-        let _guard = lock_adyen_env().await;
-        let _key = EnvRestore::set("ADYEN_API_KEY", None);
-        let _allow = EnvRestore::set("ADYEN_ALLOW_TEST_KEY", None);
+        let _guard = lock_mollie_env().await;
+        let _key = EnvRestore::set("MOLLIE_API_KEY", None);
+        let _allow = EnvRestore::set("MOLLIE_ALLOW_TEST_KEY", None);
         seed_checkout_plan(&pool, "pro").await;
         let (tenant, read_key) = tenant_with_key(&pool, "pro", &["billing:read"]).await;
         set_billing_email(&pool, &tenant, json!({"billingEmail": "billing@acme.test"})).await;
@@ -8379,7 +8374,7 @@ mod adversarial_tests {
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
         // Exactly 128 chars passes the length gate but must still be in the
-        // active catalog (never forwarded to Adyen).
+        // active catalog (never forwarded to Mollie).
         let max_len = format!("price_{}", "x".repeat(122));
         assert_eq!(max_len.len(), 128);
         let (status, body) = post_json(
@@ -8433,8 +8428,8 @@ mod adversarial_tests {
             );
         }
 
-        // Happy metadata but Adyen is not configured: fail closed with the
-        // generic operation-failed body and NO adyen customer row.
+        // Happy metadata but Mollie is not configured: fail closed with the
+        // generic operation-failed body and NO mollie customer row.
         let (status, body) = post_json(
             &env,
             "/v1/billing/checkout",
@@ -8447,14 +8442,14 @@ mod adversarial_tests {
         assert_eq!(body["error"]["code"], "INTERNAL_ERROR");
         assert_eq!(body["error"]["message"], "Operation failed");
         let customers: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM adyen_shoppers WHERE tenant_id = $1")
+            sqlx::query_scalar("SELECT COUNT(*) FROM mollie_customers WHERE tenant_id = $1")
                 .bind(&tenant)
                 .fetch_one(&pool)
                 .await
                 .unwrap();
         assert_eq!(customers, 0);
 
-        // Tenant without any billing email: refused before Adyen.
+        // Tenant without any billing email: refused before Mollie.
         let (_no_email_tenant, no_email_key) =
             tenant_with_key(&pool, "pro", &["billing:write"]).await;
         let no_email = env_for(pool.clone(), no_email_key).await;
@@ -8485,7 +8480,7 @@ mod adversarial_tests {
         assert_eq!(
             status,
             StatusCode::INTERNAL_SERVER_ERROR,
-            "still Adyen-unconfigured, but the email fallback must be reached first"
+            "still Mollie-unconfigured, but the email fallback must be reached first"
         );
 
         // The `system` sentinel has no tenants row: Tenant-not-found arm.
@@ -8501,16 +8496,15 @@ mod adversarial_tests {
     }
 
     #[tokio::test]
-    async fn adversarial_checkout_and_portal_against_adyen_mock() {
+    async fn adversarial_checkout_and_portal_against_mollie_mock() {
         let Some(pool) = pool_for("checkout_mock").await else {
             return;
         };
-        let _guard = lock_adyen_env().await;
-        let (base_url, mock) = start_mock_adyen().await;
-        let _key = EnvRestore::set("ADYEN_API_KEY", Some("sk_test_mock"));
-        let _allow = EnvRestore::set("ADYEN_ALLOW_TEST_KEY", Some("true"));
-        let _base = EnvRestore::set("ADYEN_API_BASE_URL", Some(&base_url));
-        let _merchant = EnvRestore::set("ADYEN_MERCHANT_ACCOUNT", Some("ApexMailMockECOM"));
+        let _guard = lock_mollie_env().await;
+        let (base_url, mock) = start_mock_mollie().await;
+        let _key = EnvRestore::set("MOLLIE_API_KEY", Some("test_mock_key"));
+        let _allow = EnvRestore::set("MOLLIE_ALLOW_TEST_KEY", Some("true"));
+        let _base = EnvRestore::set("MOLLIE_API_BASE_URL", Some(&base_url));
 
         seed_checkout_plan(&pool, "pro").await;
         let (tenant, write_key) = tenant_with_key(&pool, "pro", &["billing:write"]).await;
@@ -8521,8 +8515,9 @@ mod adversarial_tests {
             json!({"priceId": "price_ck_m", "successUrl": valid_url, "cancelUrl": valid_url})
                 .to_string();
 
-        // First checkout: the shopper row (reference = tenant id) is our own
-        // onboarding record, and the provider sees exactly one session call.
+        // First checkout: a real Mollie customer (`cst_…`) is created and
+        // bound to the tenant, then a payment names it with
+        // `sequenceType: first` so the mandate is minted on payment.
         let (status, body_resp) = post_json(&env, "/v1/billing/checkout", &body).await;
         assert_eq!(
             status,
@@ -8530,107 +8525,158 @@ mod adversarial_tests {
             "{body_resp} observed={:?}",
             mock.lock().unwrap().observed
         );
-        assert_eq!(body_resp["data"]["sessionId"], "cs_mock_1");
+        assert_eq!(body_resp["data"]["sessionId"], "tr_mock_1");
         assert_eq!(
             body_resp["data"]["url"],
-            "https://checkout.adyen.com/pay/cs_mock_1"
+            "https://www.mollie.com/checkout/tr_mock_1",
+            "the checkout URL comes from _links.checkout.href"
         );
-        let (shopper_reference, name, email): (String, String, String) = sqlx::query_as(
-            "SELECT adyen_shopper_reference, name, email FROM adyen_shoppers WHERE tenant_id = $1",
+        let (customer_id, name, email): (String, String, String) = sqlx::query_as(
+            "SELECT mollie_customer_id, name, email FROM mollie_customers WHERE tenant_id = $1",
         )
         .bind(&tenant)
         .fetch_one(&pool)
         .await
         .unwrap();
         assert_eq!(
-            shopper_reference, tenant,
-            "the Adyen shopperReference is the tenant id we choose"
+            customer_id, "cst_mock_1",
+            "the tenant binds the real Mollie customer id"
         );
         assert_eq!(name, "adversarial billing");
         assert_eq!(email, "billing@acme.test");
         {
             let state = mock.lock().unwrap();
-            assert_eq!(state.checkout_calls, 1);
+            assert_eq!(state.customer_calls, 1);
+            assert_eq!(state.payment_calls, 1);
+
+            let customer_call = state
+                .observed
+                .iter()
+                .find(|call| call["kind"] == "customer")
+                .expect("customer call");
+            assert_eq!(
+                customer_call["authorization"], "Bearer test_mock_key",
+                "Mollie authenticates with a bearer secret key"
+            );
+            assert_eq!(
+                customer_call["idempotencyKey"],
+                format!("customer_{tenant}"),
+                "customer creation is idempotent per tenant"
+            );
+            assert_eq!(customer_call["body"]["name"], "adversarial billing");
+            assert_eq!(customer_call["body"]["email"], "billing@acme.test");
+
             let checkout = state
                 .observed
                 .iter()
-                .find(|call| call["kind"] == "checkout")
-                .unwrap();
+                .find(|call| call["kind"] == "payment")
+                .expect("payment call");
+            assert_eq!(
+                checkout["authorization"], "Bearer test_mock_key",
+                "Mollie authenticates with a bearer secret key"
+            );
             assert_eq!(
                 checkout["idempotencyKey"],
                 format!("checkout_{tenant}_pro_price_ck_m"),
                 "deterministic dedupe key"
             );
-            assert_eq!(
-                checkout["apiKey"], "sk_test_mock",
-                "Adyen authenticates with X-API-Key"
-            );
             assert!(
-                checkout.get("adyenVersion").is_none(),
-                "Adyen has no version header — the version lives in the URL path"
+                checkout.get("mollieVersion").is_none(),
+                "Mollie has no version header — the version lives in the URL path"
             );
             let sent = &checkout["body"];
             let plan = platform_catalog::plan_by_name("pro").expect("catalog plan");
+            let expected_value = format!(
+                "{}.{:02}",
+                plan.price_monthly_cents / 100,
+                plan.price_monthly_cents % 100
+            );
             assert_eq!(sent["amount"]["currency"], "EUR");
-            assert_eq!(sent["amount"]["value"], plan.price_monthly_cents);
-            assert_eq!(sent["merchantAccount"], "ApexMailMockECOM");
-            assert_eq!(sent["reference"], "checkout:pro:monthly");
-            assert_eq!(sent["shopperReference"], tenant);
+            assert_eq!(
+                sent["amount"]["value"].as_str(),
+                Some(expected_value.as_str()),
+                "Mollie amounts are decimal strings, never minor units"
+            );
+            assert_eq!(sent["customerId"], "cst_mock_1");
+            assert_eq!(
+                sent["sequenceType"], "first",
+                "the first payment mints the mandate"
+            );
             assert_eq!(sent["metadata"]["plan_name"], "pro");
             assert_eq!(sent["metadata"]["interval"], "monthly");
-            assert_eq!(sent["recurringProcessingModel"], "Subscription");
-            assert_eq!(sent["storePaymentMethod"], true);
-            assert_eq!(
-                sent["lineItems"][0]["amountIncludingTax"],
-                plan.price_monthly_cents
+            assert_eq!(sent["metadata"]["tenant_id"], tenant);
+            assert!(
+                sent["description"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .starts_with("ApexMail "),
+                "{sent}"
             );
+            // legacy-wire-negative-test: the pre-cutover wire fields do not
+            // exist in Mollie's payment request.
+            for absent in [
+                "merchantAccount",
+                "reference",
+                "shopperReference",
+                "recurringProcessingModel",
+                "storePaymentMethod",
+                "lineItems",
+            ] {
+                assert!(sent.get(absent).is_none(), "unexpected field {absent}: {sent}");
+            }
         }
 
-        // Retry: one shopper row, never duplicated; one session per call.
+        // Retry: the customer is reused (one row, one provider customer) and
+        // only the payment call repeats.
         let (status, body_resp) = post_json(&env, "/v1/billing/checkout", &body).await;
         assert_eq!(status, StatusCode::OK, "{body_resp}");
-        let shopper_rows: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM adyen_shoppers WHERE tenant_id = $1")
+        let customer_rows: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM mollie_customers WHERE tenant_id = $1")
                 .bind(&tenant)
                 .fetch_one(&pool)
                 .await
                 .unwrap();
         assert_eq!(
-            shopper_rows, 1,
-            "a retried checkout never duplicates the shopper"
+            customer_rows, 1,
+            "a retried checkout never duplicates the customer"
         );
-        assert_eq!(mock.lock().unwrap().checkout_calls, 2);
-
-        // Adyen session without a URL: fail closed, no fake redirect.
-        mock.lock().unwrap().checkout_without_url = true;
-        let (status, body_resp) = post_json(&env, "/v1/billing/checkout", &body).await;
-        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body_resp}");
-        mock.lock().unwrap().checkout_without_url = false;
-
-        // Adyen 5xx: fail closed with the generic body.
-        mock.lock().unwrap().fail_checkout = true;
-        let (status, body_resp) = post_json(&env, "/v1/billing/checkout", &body).await;
-        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body_resp}");
-        mock.lock().unwrap().fail_checkout = false;
-
-        // Missing merchant account: fail closed before any provider call.
         {
-            let _no_merchant = EnvRestore::set("ADYEN_MERCHANT_ACCOUNT", None);
-            let calls_before = mock.lock().unwrap().checkout_calls;
+            let state = mock.lock().unwrap();
+            assert_eq!(state.customer_calls, 1, "the customer is created once");
+            assert_eq!(state.payment_calls, 2, "each checkout opens one payment");
+        }
+
+        // A payment document without `_links.checkout.href`: fail closed, no
+        // fabricated redirect.
+        mock.lock().unwrap().payment_without_checkout = true;
+        let (status, body_resp) = post_json(&env, "/v1/billing/checkout", &body).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body_resp}");
+        mock.lock().unwrap().payment_without_checkout = false;
+
+        // Mollie 5xx: fail closed with the generic body.
+        mock.lock().unwrap().fail_payment = true;
+        let (status, body_resp) = post_json(&env, "/v1/billing/checkout", &body).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body_resp}");
+        mock.lock().unwrap().fail_payment = false;
+
+        // Missing API key: fail closed before any provider call.
+        {
+            let _no_key = EnvRestore::set("MOLLIE_API_KEY", None);
+            let calls_before = mock.lock().unwrap().payment_calls;
             let (status, _) = post_json(&env, "/v1/billing/checkout", &body).await;
             assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
             assert_eq!(
-                mock.lock().unwrap().checkout_calls,
+                mock.lock().unwrap().payment_calls,
                 calls_before,
-                "a misconfigured deployment never reaches Adyen"
+                "a misconfigured deployment never reaches Mollie"
             );
         }
 
-        // Portal: the console billing settings page (Adyen has no hosted
+        // Portal: the console billing settings page (Mollie has no hosted
         // portal; audit 15 Oct H1 also removed the POST-only target) — the
-        // shopper must exist, and no provider call is made.
+        // customer must exist, and no provider call is made.
         let portal_body = json!({"returnUrl": valid_url}).to_string();
-        let checkout_calls_before_portal = mock.lock().unwrap().checkout_calls;
+        let payment_calls_before_portal = mock.lock().unwrap().payment_calls;
         let (status, body_resp) = post_json(&env, "/v1/billing/portal", &portal_body).await;
         assert_eq!(status, StatusCode::OK, "{body_resp}");
         assert_eq!(
@@ -8638,18 +8684,18 @@ mod adversarial_tests {
             "https://app.apexmail.ee/settings/billing"
         );
         assert_eq!(
-            mock.lock().unwrap().checkout_calls,
-            checkout_calls_before_portal,
+            mock.lock().unwrap().payment_calls,
+            payment_calls_before_portal,
             "the portal never calls the provider"
         );
 
-        // Portal without a shopper row: fail closed, never a fabricated URL.
+        // Portal without a customer row: fail closed, never a fabricated URL.
         let (portal_tenant, portal_key) = tenant_with_key(&pool, "pro", &["billing:read"]).await;
         let portal = env_for(pool.clone(), portal_key).await;
         let (status, body_resp) = post_json(&portal, "/v1/billing/portal", &portal_body).await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body_resp}");
 
-        // Bad return URL is rejected before any Adyen call.
+        // Bad return URL is rejected before any Mollie call.
         let (status, _) = post_json(
             &env,
             "/v1/billing/portal",
@@ -8658,16 +8704,16 @@ mod adversarial_tests {
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
 
-        // With a customer row the portal session is created.
+        // With a customer row the portal resolves to our own console page.
         sqlx::query(
-            "INSERT INTO adyen_shoppers (id, tenant_id, adyen_shopper_reference, created_at)
+            "INSERT INTO mollie_customers (id, tenant_id, mollie_customer_id, created_at)
              VALUES (gen_random_uuid(), $1, $1, NOW())",
         )
         .bind(&portal_tenant)
         .execute(&pool)
         .await
         .unwrap();
-        let checkout_calls_before = mock.lock().unwrap().checkout_calls;
+        let payment_calls_before = mock.lock().unwrap().payment_calls;
         let (status, body_resp) = post_json(&portal, "/v1/billing/portal", &portal_body).await;
         assert_eq!(
             status,
@@ -8677,12 +8723,132 @@ mod adversarial_tests {
         );
         assert_eq!(
             body_resp["data"]["url"], "https://app.apexmail.ee/settings/billing",
-            "the portal target is the console billing settings page — Adyen has no hosted portal"
+            "the portal target is the console billing settings page — Mollie has no hosted portal"
         );
         assert_eq!(
-            mock.lock().unwrap().checkout_calls,
-            checkout_calls_before,
+            mock.lock().unwrap().payment_calls,
+            payment_calls_before,
             "the portal never calls the provider"
+        );
+    }
+
+    /// A paid invoice voids through Mollie as a REFUND: `POST
+    /// /payments/{payment_id}/refunds` with a decimal amount and an
+    /// idempotency key, and the refund id is persisted in `mollie_refunds`
+    /// because the refund webhook names only that id.
+    #[tokio::test]
+    async fn adversarial_void_paid_invoice_issues_a_mollie_refund() {
+        let Some(pool) = pool_for("void_refund").await else {
+            return;
+        };
+        let _guard = lock_mollie_env().await;
+        let (base_url, mock) = start_mock_mollie().await;
+        let _key = EnvRestore::set("MOLLIE_API_KEY", Some("test_mock_key"));
+        let _allow = EnvRestore::set("MOLLIE_ALLOW_TEST_KEY", Some("true"));
+        let _base = EnvRestore::set("MOLLIE_API_BASE_URL", Some(&base_url));
+
+        seed_plan(
+            &pool,
+            "advvoid",
+            4900,
+            49000,
+            1000,
+            1000,
+            &tenant_features(),
+            None,
+            None,
+            true,
+        )
+        .await;
+        let (tenant, _) = tenant_with_key(&pool, "advvoid", &["billing:read"]).await;
+        let env = env_for(pool.clone(), admin_key(&pool).await).await;
+        let invoice_id = seed_invoice(
+            &pool,
+            &tenant,
+            "2026-VOID-1",
+            "paid",
+            12_200,
+            sample_line_items(),
+            None,
+        )
+        .await;
+        sqlx::query(
+            "UPDATE invoices SET mollie_payment_id = 'tr_void_paid', currency = 'EUR' WHERE id = $1",
+        )
+        .bind(invoice_id)
+        .execute(&pool)
+        .await
+        .expect("bind the Mollie payment");
+
+        let (status, body) = send(
+            &env,
+            Request::post(format!(
+                "/v1/billing/admin/tenants/{tenant}/invoices/{invoice_id}/void"
+            ))
+            .header("x-api-key", &env.key)
+            .header("idempotency-key", "void-refund-1")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({"reason": "customer cancelled"}).to_string()))
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["status"], "void");
+
+        let (stored_status, stored_payment): (String, Option<String>) =
+            sqlx::query_as("SELECT status::text, mollie_payment_id FROM invoices WHERE id = $1")
+                .bind(invoice_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored_status, "void");
+        assert_eq!(stored_payment.as_deref(), Some("tr_void_paid"));
+
+        // The refund id returned by Mollie is recorded against the payment
+        // it belongs to — the only mapping the refund webhook can use.
+        let (refund_id, refund_payment, refund_cents, refund_status): (
+            String,
+            String,
+            Option<i64>,
+            String,
+        ) = sqlx::query_as(
+            "SELECT id, payment_id, amount_cents, status FROM mollie_refunds WHERE tenant_id = $1",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("refund mapping row");
+        assert_eq!(refund_id, "re_mock_1");
+        assert_eq!(refund_payment, "tr_void_paid");
+        assert_eq!(refund_cents, Some(12_200));
+        assert_eq!(refund_status, "created");
+
+        let state = mock.lock().unwrap();
+        assert_eq!(state.refund_calls, 1);
+        let refund = state
+            .observed
+            .iter()
+            .find(|call| call["kind"] == "refund")
+            .expect("refund call");
+        assert_eq!(refund["path"], "/payments/tr_void_paid/refunds");
+        assert_eq!(refund["authorization"], "Bearer test_mock_key");
+        assert_eq!(
+            refund["idempotencyKey"],
+            format!("invoice-refund:{}", invoice_id.simple()),
+            "the provider refund replays under a deterministic key"
+        );
+        assert_eq!(refund["body"]["amount"]["currency"], "EUR");
+        assert_eq!(
+            refund["body"]["amount"]["value"].as_str(),
+            Some("122.00"),
+            "the refund amount is a decimal string"
+        );
+        assert!(
+            refund["body"]["description"]
+                .as_str()
+                .unwrap_or_default()
+                .contains(&invoice_id.to_string()),
+            "{refund}"
         );
     }
 
@@ -8698,11 +8864,11 @@ mod adversarial_tests {
         status: &str,
     ) {
         sqlx::query(
-            "INSERT INTO adyen_subscriptions
-             (id, tenant_id, adyen_subscription_id, adyen_shopper_reference, adyen_plan_code,
+            "INSERT INTO mollie_subscriptions
+             (id, tenant_id, mollie_subscription_id, mollie_customer_id, mollie_plan_code,
               status, plan, billing_interval, billing_cycle_start, billing_cycle_end,
               cancel_at_period_end, created_at, updated_at)
-             VALUES (gen_random_uuid(), $1, $2, 'cus_x', 'price_x', $3, $4, $5,
+             VALUES (gen_random_uuid(), $1, $2, 'cst_x', 'plan_x', $3, $4, $5,
                      NOW() - make_interval(days => $6::int) - INTERVAL '6 hours',
                      NOW() - make_interval(days => $6::int) - INTERVAL '6 hours'
                          + make_interval(days => $6::int + $7::int),
@@ -8868,7 +9034,7 @@ mod adversarial_tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
 
         // Legacy `subscriptions` table is the documented fallback when the
-        // live adyen_subscriptions row is absent.
+        // live mollie_subscriptions row is absent.
         let (legacy_tenant, legacy_key) =
             tenant_with_key(&pool, "advstarter", &["billing:read"]).await;
         sqlx::query(
@@ -8892,8 +9058,8 @@ mod adversarial_tests {
 
     async fn seed_admin_subscription(pool: &PgPool, tenant: &str, plan: &str, status: &str) {
         sqlx::query(
-            "INSERT INTO adyen_subscriptions
-             (id, tenant_id, adyen_subscription_id, adyen_shopper_reference, adyen_plan_code,
+            "INSERT INTO mollie_subscriptions
+             (id, tenant_id, mollie_subscription_id, mollie_customer_id, mollie_plan_code,
               status, plan, billing_interval, billing_cycle_start, billing_cycle_end,
               cancel_at_period_end, created_at, updated_at)
              VALUES (gen_random_uuid(), $1, $2, 'cus_admin', 'price_admin', $3, $4, 'monthly',
@@ -9640,7 +9806,7 @@ mod adversarial_tests {
             "",
             "ACTIVE",
             "deleted",
-            "suspended'; DROP TABLE adyen_subscriptions;--",
+            "suspended'; DROP TABLE mollie_subscriptions;--",
         ] {
             let (status_code, body) = post_json(
                 &env,
@@ -9670,7 +9836,7 @@ mod adversarial_tests {
         let (row_status, override_by, override_reason): (String, Option<String>, Option<String>) =
             sqlx::query_as(
                 "SELECT status, admin_override_by, admin_override_reason
-                 FROM adyen_subscriptions WHERE tenant_id = $1",
+                 FROM mollie_subscriptions WHERE tenant_id = $1",
             )
             .bind(&tenant)
             .fetch_one(&pool)
@@ -10173,7 +10339,7 @@ mod adversarial_tests {
         LegacyInvoiceDto {
             id: "inv".into(),
             tenant_id: "t".into(),
-            adyen_psp_reference: None,
+            mollie_payment_id: None,
             invoice_number: "2026-1".into(),
             status: "open".into(),
             currency: "EUR".into(),
@@ -10387,7 +10553,7 @@ mod adversarial_tests {
             // One invoice row so the fallback has data to return. Every
             // column the row type decodes as non-optional is populated.
             sqlx::query(
-                "INSERT INTO invoices (id, tenant_id, adyen_psp_reference, invoice_number, status,
+                "INSERT INTO invoices (id, tenant_id, mollie_payment_id, invoice_number, status,
                      currency, subtotal, vat_total, total, line_items, issued_at, due_at,
                      paid_at, period_start, period_end, created_at, updated_at)
                  VALUES (gen_random_uuid(), $1, 'in_probe', 'INV-PROBE-1', 'paid',
@@ -11026,8 +11192,8 @@ mod adversarial_tests {
         assert_eq!(status, StatusCode::OK, "{body}");
     }
 
-    /// The portal's Adyen failure arms: a tenant with no Adyen customer,
-    /// and an unusable Adyen credential, both return the honest generic
+    /// The portal's Mollie failure arms: a tenant with no Mollie customer,
+    /// and an unusable Mollie credential, both return the honest generic
     /// 500 instead of leaking provider detail.
     #[tokio::test]
     async fn portal_needs_a_shopper_and_never_provider_credentials() {
@@ -11037,7 +11203,7 @@ mod adversarial_tests {
         let state = crate::app::test_support::test_state_over(pool).await;
         let auth = auth_user(&["billing:read"], "ten_portal_none");
 
-        // No adyen_shoppers row → generic 500 (never a fabricated URL).
+        // No mollie_customers row → generic 500 (never a fabricated URL).
         let response = create_portal_session(
             State(state.clone()),
             auth.clone(),
@@ -11050,18 +11216,18 @@ mod adversarial_tests {
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
 
         // With a shopper row the portal resolves to our own console page and
-        // needs NO provider credential (Adyen has no hosted portal; there is
+        // needs NO provider credential (Mollie has no hosted portal; there is
         // no provider call to authenticate).
-        let _guard = lock_adyen_env().await;
-        let _key = EnvRestore::set("ADYEN_API_KEY", None);
+        let _guard = lock_mollie_env().await;
+        let _key = EnvRestore::set("MOLLIE_API_KEY", None);
         sqlx::query(
-            "INSERT INTO adyen_shoppers (id, tenant_id, adyen_shopper_reference, created_at)
+            "INSERT INTO mollie_customers (id, tenant_id, mollie_customer_id, created_at)
              VALUES (gen_random_uuid(), $1, $1, NOW())",
         )
         .bind(auth.tenant_id.as_str())
         .execute(&state.db)
         .await
-        .expect("seed adyen shopper");
+        .expect("seed mollie shopper");
         let response = create_portal_session(
             State(state),
             auth,
@@ -11085,9 +11251,9 @@ mod adversarial_tests {
         let state = crate::app::test_support::test_state_over(pool.clone()).await;
         let auth = auth_user(&["billing:read"], "ten_sub_none");
 
-        crate::routes::fault::hide_table(&pool, "adyen_subscriptions")
+        crate::routes::fault::hide_table(&pool, "mollie_subscriptions")
             .await
-            .expect("hide adyen_subscriptions");
+            .expect("hide mollie_subscriptions");
         let response = get_subscription(State(state), auth).await.expect("read");
         assert_eq!(response.status(), StatusCode::OK);
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
@@ -11124,8 +11290,8 @@ mod adversarial_tests {
             email_limit: 1000,
             api_call_limit: 1000,
             features: billing_service::types::PlanFeatures::default(),
-            adyen_plan_code_monthly: None,
-            adyen_plan_code_yearly: None,
+            mollie_plan_code_monthly: None,
+            mollie_plan_code_yearly: None,
             is_active: true,
             sort_order: 0,
             created_at: Utc::now(),

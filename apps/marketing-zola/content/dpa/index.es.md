@@ -50,9 +50,13 @@ La lista actual de subencargados autorizados se mantiene en el [Registro de sube
 | Amazon Web Services, Inc. | Transporte de entrega de correo cuando está habilitado | Región SES configurada | Cláusulas contractuales tipo de la UE (DPA de AWS) |
 | Google LLC | Autenticación OAuth opcional | Global (entidad estadounidense, datos tratados según configuración OAuth) | Cláusulas Contractuales Tipo |
 | GitHub, Inc. | Autenticación OAuth opcional | Global (entidad estadounidense) | Cláusulas Contractuales Tipo |
-| Adyen N.V. | Procesamiento de pagos | Países Bajos (UE); las redes de tarjetas procesan globalmente según el DPA de Adyen | Tratamiento intra-UE (Adyen N.V., Ámsterdam) |
+| Mollie B.V. | Procesamiento de pagos | Países Bajos (UE); las redes de tarjetas procesan globalmente según el DPA de Mollie | Tratamiento intra-UE (Mollie B.V., Ámsterdam) |
 
 La infraestructura autogestionada (ClickHouse, Redis) se ejecuta en servidores Hetzner bajo el control operativo de ApexMail. Los editores upstream de código abierto no procesan datos de clientes.
+
+### Procesador de pagos
+
+Mollie B.V. es una entidad de pago supervisada por De Nederlandsche Bank (DNB), con domicilio social en Keizersgracht 126, 1015 CW Ámsterdam, Países Bajos. Los datos de pago se procesan en los Países Bajos (UE); las redes de tarjetas pueden procesarlos globalmente conforme al Acuerdo de Tratamiento de Datos de Mollie.
 
 ### 5.2 Notificación de cambios
 

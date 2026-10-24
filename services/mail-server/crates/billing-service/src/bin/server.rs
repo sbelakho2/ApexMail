@@ -32,9 +32,9 @@ struct Cli {
     #[arg(long, env = "SERVICE_AUTH_TOKEN", default_value = "")]
     service_auth_token: String,
 
-    /// Adyen webhook signing secret.
-    #[arg(long, env = "ADYEN_HMAC_KEY", default_value = "")]
-    adyen_hmac_key: String,
+    /// Mollie webhook signing secret.
+    #[arg(long, env = "MOLLIE_API_KEY", default_value = "")]
+    mollie_api_key: String,
 
     /// Internal API base URL.
     #[arg(long, env = "API_BASE_URL", default_value = "http://localhost:3001")]
@@ -162,7 +162,7 @@ async fn main() -> anyhow::Result<()> {
     // F1 (audit): bootstrap reconciliation — the `plans` table is converged
     // to the canonical `platform-catalog` catalog on every boot (insert
     // missing tiers, repair drifted prices/limits/features, deactivate
-    // rows that are not catalog plans). Idempotent; adyen price ids
+    // rows that are not catalog plans). Idempotent; mollie price ids
     // survive. The one-shot flag runs the same pass and exits, so ops can
     // converge a live deployment without a restart.
     let reconcile_report = billing_service::plans::reconcile_plans_with_catalog(&db).await?;
@@ -181,7 +181,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // E-SWEEP-TRIGGER: the on-demand overage sweep (the reconcile-plans
-    // one-shot pattern). Deliberately BEFORE the Adyen webhook-secret
+    // one-shot pattern). Deliberately BEFORE the Mollie webhook-secret
     // fail-fast: closing a period is an ops action that must work even when
     // the inbound webhook transport secret is absent — the sweep itself
     // needs only Postgres plus the Redis pool.
@@ -193,7 +193,7 @@ async fn main() -> anyhow::Result<()> {
             redis_url: cli.redis_url,
             listen_addr: cli.listen.clone(),
             service_auth_token: cli.service_auth_token,
-            adyen_hmac_key: cli.adyen_hmac_key,
+            mollie_api_key: cli.mollie_api_key,
             api_base_url: cli.api_base_url,
             ..BillingConfig::default()
         };
@@ -223,7 +223,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // The same one-shot ops pattern for the contract product lines
-    // (Platform + Mailboxes): deliberately BEFORE the Adyen fail-fast for
+    // (Platform + Mailboxes): deliberately BEFORE the Mollie fail-fast for
     // the same reason — closing a contract month needs only Postgres plus
     // the Redis pool. Runs `maintenance::sweep_product_lines_once`, the
     // exact function the nightly loop calls.
@@ -235,7 +235,7 @@ async fn main() -> anyhow::Result<()> {
             redis_url: cli.redis_url,
             listen_addr: cli.listen.clone(),
             service_auth_token: cli.service_auth_token,
-            adyen_hmac_key: cli.adyen_hmac_key,
+            mollie_api_key: cli.mollie_api_key,
             api_base_url: cli.api_base_url,
             ..BillingConfig::default()
         };
@@ -275,7 +275,7 @@ async fn main() -> anyhow::Result<()> {
             redis_url: cli.redis_url,
             listen_addr: cli.listen.clone(),
             service_auth_token: cli.service_auth_token,
-            adyen_hmac_key: cli.adyen_hmac_key,
+            mollie_api_key: cli.mollie_api_key,
             api_base_url: cli.api_base_url,
             ..BillingConfig::default()
         };
@@ -334,18 +334,18 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // BS-001: Fail-fast if Adyen webhook secret is not configured.
-    // The /webhooks/adyen endpoint is exempt from service auth and relies
-    // entirely on HMAC-SHA256 signature verification. An empty secret would
-    // cause all webhook requests to be rejected, but it's better to fail at
-    // startup than silently drop webhook events in production.
-    if cli.adyen_hmac_key.trim().is_empty() {
+    // BS-001: Fail-fast if the Mollie key is not configured.
+    // The /webhooks/mollie endpoint is exempt from service auth: the key IS
+    // the authentication, because every webhook is verified by an
+    // authenticated API fetch. Without it no event can ever be proven, so the
+    // process refuses to start rather than silently drop billing events.
+    if cli.mollie_api_key.trim().is_empty() {
         tracing::error!(
-            "ADYEN_HMAC_KEY is not configured. Adyen webhook signature \
-             verification requires this secret. Set the environment variable or \
-             pass --adyen-webhook-secret."
+            "MOLLIE_API_KEY is not configured. Mollie webhooks are verified by \
+             an authenticated API fetch, which requires this secret. Set the \
+             environment variable or pass --mollie-api-key."
         );
-        anyhow::bail!("ADYEN_HMAC_KEY is required");
+        anyhow::bail!("MOLLIE_API_KEY is required");
     }
 
     // Migrations are managed externally (apexmail-db crate or deploy tooling).
@@ -386,7 +386,7 @@ async fn main() -> anyhow::Result<()> {
         redis_url: cli.redis_url,
         listen_addr: cli.listen.clone(),
         service_auth_token: cli.service_auth_token,
-        adyen_hmac_key: cli.adyen_hmac_key,
+        mollie_api_key: cli.mollie_api_key,
         api_base_url: cli.api_base_url,
         ..BillingConfig::default()
     };
@@ -394,7 +394,7 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState::new(db, redis, config);
     let app = routes::router(state.clone());
     maintenance::start_periodic_jobs(state.clone());
-    billing_service::adyen_webhooks::spawn_deadletter_retry_worker(state.clone());
+    billing_service::mollie_webhooks::spawn_deadletter_retry_worker(state.clone());
 
     // Bind & serve.
     let listener = tokio::net::TcpListener::bind(&cli.listen).await?;

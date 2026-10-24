@@ -85,19 +85,19 @@ Für Enterprise-Beschaffung, Sicherheitsprüfung oder Private-Cloud-Planung fül
     <legend class="px-2">Bevorzugte Bereitstellung</legend>
     <div class="space-y-3 mt-3">
       <label class="apex-check">
-        <input type="radio" name="deployment_preference" value="shared" checked />
+        <input type="radio" class="apex-checkbox apex-input" name="deployment_preference" value="shared" checked />
         <span><strong>Shared Cloud</strong> — Multi-Tenant-EU-Infrastruktur</span>
       </label>
       <label class="apex-check">
-        <input type="radio" name="deployment_preference" value="dedicated" />
+        <input type="radio" class="apex-checkbox apex-input" name="deployment_preference" value="dedicated" />
         <span><strong>Dedicated Tenant</strong> — isolierte Single-Tenant-Infrastruktur</span>
       </label>
       <label class="apex-check">
-        <input type="radio" name="deployment_preference" value="byoc" />
+        <input type="radio" class="apex-checkbox apex-input" name="deployment_preference" value="byoc" />
         <span><strong>BYOC / Private Bereitstellung</strong> — verwaltete Bereitstellung in Ihrem Cloud-Konto</span>
       </label>
       <label class="apex-check">
-        <input type="radio" name="deployment_preference" value="not_sure" />
+        <input type="radio" class="apex-checkbox apex-input" name="deployment_preference" value="not_sure" />
         <span><strong>Noch unsicher</strong> — Beratung zum passenden Modell gewünscht</span>
       </label>
     </div>

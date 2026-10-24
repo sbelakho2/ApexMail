@@ -46,9 +46,9 @@ plan_requires = """SSO assertion tamper and replay tests; sub-account scope in t
 
 [package.billing-service]
 tier = 1
-role = "Subscriptions, Adyen, renewals"
+role = "Subscriptions, Mollie, renewals"
 required_kinds = ["unit", "journey"]
-plan_requires = """Event-order property tests for cancel/resume/renewal (I2); webhook replay idempotency (I3); Adyen test journey (T6)"""
+plan_requires = """Event-order property tests for cancel/resume/renewal (I2); webhook replay idempotency (I3); Mollie test journey (T6)"""
 
 [package.mta]
 tier = 1

@@ -477,15 +477,20 @@ services:
       # key). Publish the value from the signing host with
       # `RECEIPT_SIGNING_KEY=<seed> receipt-public-key`.
       RECEIPT_PUBLIC_KEY: ${RECEIPT_PUBLIC_KEY:-}
-      # External audit 15 Oct, H3: checkout sessions are created HERE, so this
-      # service needs the Adyen credentials itself (only billing-service
-      # received them before, while the example env kept Stripe's
-      # sk_live_/whsec_ placeholders). The base URL is required and must be
-      # Adyen's live endpoint in production — the client refuses the test URL.
-      ADYEN_API_KEY: ""
-      ADYEN_API_KEY_FILE: /run/secrets/adyen_api_key
-      ADYEN_MERCHANT_ACCOUNT: ${ADYEN_MERCHANT_ACCOUNT:?ADYEN_MERCHANT_ACCOUNT is required in production}
-      ADYEN_API_BASE_URL: ${ADYEN_API_BASE_URL:?ADYEN_API_BASE_URL is required in production (https://checkout-live.adyen.com/v71)}
+      # External audit 15 Oct, H3: checkout payments are created HERE, so this
+      # service needs the Mollie credentials itself (only billing-service
+      # received them before). The API key authenticates every fetch and
+      # create; the base URL must be Mollie's live endpoint in production —
+      # the client refuses test credentials unless MOLLIE_ALLOW_TEST_KEY=true.
+      MOLLIE_API_KEY: ""
+      MOLLIE_API_KEY_FILE: /run/secrets/mollie_api_key
+      MOLLIE_PROFILE_ID: ""
+      MOLLIE_PROFILE_ID_FILE: /run/secrets/mollie_profile_id
+      MOLLIE_API_BASE_URL: ${MOLLIE_API_BASE_URL:-https://api.mollie.com/v2}
+      MOLLIE_WEBHOOK_URL: ${MOLLIE_WEBHOOK_URL:-}
+      # Deliberate opt-in ONLY for a pre-production stack; the client refuses
+      # a test key/test base URL in production without it.
+      MOLLIE_ALLOW_TEST_KEY: ${MOLLIE_ALLOW_TEST_KEY:-false}
       WEBHOOK_SIGNING_SECRET_FILE: /run/secrets/webhook_signing_secret
       TRACKING_SECRET_KEY_FILE: /run/secrets/tracking_secret_key
       INTERNAL_SERVICE_TOKEN_FILE: /run/secrets/internal_service_token
@@ -604,7 +609,8 @@ services:
       - kiwi_secret_key
       - aws_access_key_id
       - aws_secret_access_key
-      - adyen_api_key
+      - mollie_api_key
+      - mollie_profile_id
       - mfa_secret_encryption_key
 
   # ===========================================================================
@@ -714,7 +720,7 @@ services:
   # EX_CONFIG): both come from their Docker secrets, never ephemeral values.
   # Invoice PDF renderer — REQUIRED in production: billing-service points
   # at pdf-renderer:3004 (PDF_RENDERER_URL) and every invoice-creating path
-  # (Adyen webhooks, admin invoices, the overage sweep) renders through it.
+  # (Mollie webhooks, admin invoices, the overage sweep) renders through it.
   # It was previously dev-profile-only, so production invoice PDFs silently
   # failed. The base service is profile-gated; !override [] activates it here.
   # F9 (audit): the per-workload dedicated token IS wired — pdf-renderer
@@ -1820,11 +1826,11 @@ services:
           memory: 128M
 
   # ===========================================================================
-  # BILLING SERVICE (plans, metering, invoices, Adyen webhooks)
+  # BILLING SERVICE (plans, metering, invoices, Mollie webhooks)
   # ===========================================================================
   billing-service:
     # The base service is profile-gated (dev/full-stack) so a bare dev stack
-    # stays small; production ALWAYS deploys billing (Adyen webhooks, invoice
+    # stays small; production ALWAYS deploys billing (Mollie webhooks, invoice
     # rendering, overage sweep and the opt-in auto-pay retry loop). !override
     # clears the inherited profiles so `docker compose config`/`up` include it.
     profiles: !override []
@@ -1866,17 +1872,19 @@ services:
       # universal token via SERVICE_AUTH_TOKEN above.
       INTERNAL_SERVICE_TOKEN: ""
       INTERNAL_SERVICE_TOKEN_FILE: /run/secrets/pdf_renderer_auth_token
-      # ── Adyen (secrets via wrapper-managed _FILE bridging) ────────────────
-      ADYEN_API_KEY: ""
-      ADYEN_API_KEY_FILE: /run/secrets/adyen_api_key
-      ADYEN_HMAC_KEY: ""
-      ADYEN_HMAC_KEY_FILE: /run/secrets/adyen_hmac_key
-      # External audit 15 Oct, H3: the recurring-charge / refund / dunning
-      # paths need the merchant account and a LIVE base URL too.
-      ADYEN_MERCHANT_ACCOUNT: ${ADYEN_MERCHANT_ACCOUNT:?ADYEN_MERCHANT_ACCOUNT is required in production}
-      ADYEN_API_BASE_URL: ${ADYEN_API_BASE_URL:?ADYEN_API_BASE_URL is required in production (https://checkout-live.adyen.com/v71)}
+      # ── Mollie (secrets via wrapper-managed _FILE bridging) ──────────────
+      MOLLIE_API_KEY: ""
+      MOLLIE_API_KEY_FILE: /run/secrets/mollie_api_key
+      MOLLIE_PROFILE_ID: ""
+      MOLLIE_PROFILE_ID_FILE: /run/secrets/mollie_profile_id
+      # The refund / dunning / settlement paths use the same Bearer key and
+      # live base URL. The webhook carries no secret: it is an id-only form,
+      # verified by an authenticated fetch.
+      MOLLIE_API_BASE_URL: ${MOLLIE_API_BASE_URL:-https://api.mollie.com/v2}
+      MOLLIE_WEBHOOK_URL: ${MOLLIE_WEBHOOK_URL:-}
+      MOLLIE_ALLOW_TEST_KEY: ${MOLLIE_ALLOW_TEST_KEY:-false}
       # FINANCIALLY SENSITIVE (crates/billing-service/src/maintenance.rs):
-      # when true, the maintenance loop retries OPEN invoices through Adyen
+      # when true, the maintenance loop retries OPEN invoices through Mollie
       # auto-pay — it can move real money without an operator click. Explicit
       # opt-in only; the production default is false. The billing-service
       # reads this var directly (no secret).
@@ -1896,8 +1904,8 @@ services:
       - redis_password
       - internal_service_token
       - pdf_renderer_auth_token
-      - adyen_api_key
-      - adyen_hmac_key
+      - mollie_api_key
+      - mollie_profile_id
     healthcheck:
       # F12 (audit): GET /health (billing-service routes.rs) instead of a
       # bare TCP connect; wget ships in the runtime-base image.
@@ -2241,7 +2249,7 @@ volumes:
 # (postgres, redis, clickhouse, mailstore) can only be
 # reached by containers explicitly attached to it. Services that need
 # outbound connectivity (api-server/worker → SES, mta → mail, billing →
-# Adyen, certbot → ACME) keep their frontend/backend memberships.
+# Mollie, certbot → ACME) keep their frontend/backend memberships.
 #
 # F1 — apexmail_backup_egress is a dedicated NON-internal bridge used ONLY by
 # the two backup containers (postgres-backup, clickhouse-backup). Their data
@@ -2342,10 +2350,10 @@ secrets:
     file: ${PROD_DKIM_PRIVATE_KEY_ENCRYPTION_KEY_FILE:?PROD_DKIM_PRIVATE_KEY_ENCRYPTION_KEY_FILE is required in production}
   kiwi_secret_key:
     file: ${PROD_KIWI_SECRET_KEY_FILE:?PROD_KIWI_SECRET_KEY_FILE is required in production}
-  adyen_api_key:
-    file: ${PROD_ADYEN_API_KEY_FILE:?PROD_ADYEN_API_KEY_FILE is required in production}
-  adyen_hmac_key:
-    file: ${PROD_ADYEN_HMAC_KEY_FILE:?PROD_ADYEN_HMAC_KEY_FILE is required in production}
+  mollie_api_key:
+    file: ${PROD_MOLLIE_API_KEY_FILE:?PROD_MOLLIE_API_KEY_FILE is required in production}
+  mollie_profile_id:
+    file: ${PROD_MOLLIE_PROFILE_ID_FILE:?PROD_MOLLIE_PROFILE_ID_FILE is required in production}
   # ── Capability encryption keys (F1 prod wiring) ───────────────────────────
   # At-rest key for MFA TOTP seeds + webhook signing secrets (api-server and
   # worker). REQUIRED: under ENVIRONMENT=production secret_at_rest refuses to

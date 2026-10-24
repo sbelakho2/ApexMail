@@ -222,9 +222,9 @@ async fn provision(test_name: &str) -> Option<Harness> {
         redis_url: "redis://127.0.0.1:6379".to_string(),
         service_auth_token: "coverage-service-token".to_string(),
         // Hex-encoded key material, exactly like the deployment's
-        // `ADYEN_HMAC_KEY`, so the handler's strict hex-decoding path is
+        // `MOLLIE_API_KEY`, so the handler's strict hex-decoding path is
         // exercised (the raw-bytes fallback is only for non-hex local values).
-        adyen_hmac_key: ADYEN_HMAC_KEY_HEX.to_string(),
+        mollie_api_key: "test_mock_api_key".to_string(),
         api_base_url: "http://127.0.0.1:9".to_string(),
         ..BillingConfig::default()
     };
@@ -359,7 +359,7 @@ async fn seed_plan(pool: &PgPool, name: &str, email_limit: i64, api_call_limit: 
     .expect("seed plan");
 }
 
-async fn seed_adyen_subscription(
+async fn seed_mollie_subscription(
     pool: &PgPool,
     tenant_id: &str,
     subscription_id: &str,
@@ -368,11 +368,12 @@ async fn seed_adyen_subscription(
     cycle_end: DateTime<Utc>,
 ) {
     sqlx::query(
-        // Adyen has no customer object: the shopper reference IS the tenant
+        // Mollie customers are real objects (`cst_…`); the tenant is bound to
+        // one through `mollie_customers`
         // id, and the plan code is OUR merchant-defined catalog code.
-        "INSERT INTO adyen_subscriptions
-             (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
-              billing_cycle_end, adyen_shopper_reference, adyen_plan_code)
+        "INSERT INTO mollie_subscriptions
+             (tenant_id, mollie_subscription_id, plan, status, billing_cycle_start,
+              billing_cycle_end, mollie_customer_id, mollie_plan_code)
          VALUES ($1, $2, 'growth', $3, $4, $5, $1, 'apexmail_growth_monthly')",
     )
     .bind(tenant_id)
@@ -382,7 +383,7 @@ async fn seed_adyen_subscription(
     .bind(cycle_end)
     .execute(pool)
     .await
-    .expect("seed adyen subscription");
+    .expect("seed mollie subscription");
 }
 
 async fn event_count(pool: &PgPool, tenant_id: &str, event_id: Uuid) -> i64 {
@@ -626,7 +627,7 @@ db_test!(
         let now = Utc::now();
         let cycle_start = now - chrono::Duration::days(3);
         let cycle_end = now + chrono::Duration::days(27);
-        seed_adyen_subscription(
+        seed_mollie_subscription(
             &h.pool,
             tenant,
             "sub_cov_anchor",
@@ -1120,7 +1121,7 @@ db_test!(paid_subscription_widens_email_ceiling, |h| {
     let tenant = "cov_quota_paidceil";
     seed_tenant(&h, tenant, "covceil").await;
     seed_plan(&h.pool, "covceil", 100, 100).await;
-    // The paid-subscription gate joins adyen_subscriptions.plan to plans and
+    // The paid-subscription gate joins mollie_subscriptions.plan to plans and
     // requires price_monthly > 0, so the subscription's plan needs a price.
     // Fix #10: the features column must carry a valid PlanFeatures document —
     // the '{}' column default now (correctly) fails plan lookups closed.
@@ -1135,7 +1136,7 @@ db_test!(paid_subscription_widens_email_ceiling, |h| {
     .await
     .expect("seed growth plan");
     let now = Utc::now();
-    seed_adyen_subscription(
+    seed_mollie_subscription(
         &h.pool,
         tenant,
         "sub_cov_ceil",
@@ -1654,7 +1655,7 @@ db_test!(reconcile_plans_converges_to_the_canonical_catalog, |h| {
     }
 
     // No foreign row may be served: test rows deactivated, never deleted
-    // (their adyen/subscription references stay resolvable).
+    // (their mollie/subscription references stay resolvable).
     let catalog_names: Vec<&str> = platform_catalog::PLANS.iter().map(|p| p.name).collect();
     let foreign_active: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM plans WHERE NOT (name = ANY($1)) AND is_active = true",
@@ -2634,7 +2635,7 @@ db_test!(router_quota_and_subscription_surfaces, |h| {
 
     // A seeded active subscription is returned.
     let now = Utc::now();
-    seed_adyen_subscription(
+    seed_mollie_subscription(
         &h.pool,
         tenant,
         "sub_cov_route",
@@ -2654,7 +2655,7 @@ db_test!(router_quota_and_subscription_surfaces, |h| {
     // The subscription view resolves the EFFECTIVE plan from tenants.plan.
     assert_eq!(json["subscription"]["plan_name"], "free", "body: {json}");
     assert_eq!(
-        json["subscription"]["adyen_subscription_id"],
+        json["subscription"]["mollie_subscription_id"],
         "sub_cov_route"
     );
 });
@@ -3553,157 +3554,191 @@ db_test!(overage_sweep_applies_wallet_before_dunning, |h| {
 });
 
 // ---------------------------------------------------------------------------
-// adyen_webhooks.rs — the frozen Adyen wire: in-body HMAC, replay, ordering,
-// unknown events, recurring settlement and token binding
+// mollie_webhooks.rs — Mollie's wire: `id=tr_…`, authenticated fetch, replay,
+// ordering, recurring settlement and token binding
 // ---------------------------------------------------------------------------
 //
-// Request: `POST /webhooks/adyen` with
-// `{"live":"false","notificationItems":[{"NotificationRequestItem":{…}}]}`.
-// The HMAC lives INSIDE the body at `additionalData.hmacSignature`: SHA-256
-// over the colon-joined escaped signing string (key = `ADYEN_HMAC_KEY`
-// hex-decoded, missing fields = empty), digest base64, compared timing-safe.
-// Success is `200` with the bare `[accepted]` body.
+// Mollie posts `application/x-www-form-urlencoded` with ONE parameter `id`
+// (a payment `tr_…` or a refund `re_…`). There is NO signature and NO status
+// on the wire: the only way to know what happened is an authenticated
+// `GET /v2/payments/{id}` with the secret key. These tests run a local mock
+// Mollie API and post the same form bodies Mollie would.
 
-/// 64 hex characters (32 bytes of key material) — the same shape the
-/// deployment's `ADYEN_HMAC_KEY` has, so the handler's strict hex-decoding
-/// path is exercised (its raw-bytes fallback is for non-hex local values).
-const ADYEN_HMAC_KEY_HEX: &str = "9f2b7c4d1e8a3f6b0c5d9e2a7b4f1c8d3e6a9b2c5d8e1f4a7b0c3d6e9f2a5b8c";
-/// A different valid hex key for the forgery attack.
-const ADYEN_HMAC_WRONG_KEY_HEX: &str =
-    "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
 /// The bare acknowledgement the handler returns for an accepted delivery.
-const ADYEN_ACCEPTED: &str = "[accepted]";
+const MOLLIE_ACCEPTED: &str = "[accepted]";
 
-/// Adyen's signing-string escaping: backslashes first, then colons (the
-/// handler's `escape_signing_value`).
-fn escape_adyen_signing_value(value: &str) -> String {
-    value.replace('\\', "\\\\").replace(':', "\\:")
+
+type MockResponses = Arc<std::sync::Mutex<std::collections::HashMap<String, (u16, String)>>>;
+
+struct MockMollie {
+    responses: MockResponses,
 }
 
-/// One signed field as the wire renders it: strings verbatim, numbers as
-/// their decimal text, missing/null = empty.
-fn adyen_signed_field(item: &serde_json::Value, pointer: &str) -> String {
-    match item.pointer(pointer) {
-        Some(serde_json::Value::String(value)) => value.clone(),
-        Some(value) if !value.is_null() => value.to_string(),
-        _ => String::new(),
+impl MockMollie {
+    fn route(&self, path: &str, status: u16, body: impl Into<String>) {
+        self.responses
+            .lock()
+            .expect("lock")
+            .insert(path.to_string(), (status, body.into()));
     }
-}
 
-/// The exact signing string over the eight signed fields (missing = empty).
-fn adyen_signing_string(item: &serde_json::Value) -> String {
-    [
-        adyen_signed_field(item, "/pspReference"),
-        adyen_signed_field(item, "/originalReference"),
-        adyen_signed_field(item, "/merchantAccountCode"),
-        adyen_signed_field(item, "/merchantReference"),
-        adyen_signed_field(item, "/amount/value"),
-        adyen_signed_field(item, "/amount/currency"),
-        adyen_signed_field(item, "/eventCode"),
-        adyen_signed_field(item, "/success"),
-    ]
-    .into_iter()
-    .map(|value| escape_adyen_signing_value(&value))
-    .collect::<Vec<_>>()
-    .join(":")
-}
-
-/// Standard padded base64 (RFC 4648) — the same encoding the handler's
-/// `wire_test_helpers` produces (production verifies, tests sign).
-fn base64_encode(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
-        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
-        let triple = (b0 << 16) | (b1 << 8) | b2;
-        out.push(ALPHABET[(triple >> 18) as usize & 0x3f] as char);
-        out.push(ALPHABET[(triple >> 12) as usize & 0x3f] as char);
-        if chunk.len() > 1 {
-            out.push(ALPHABET[(triple >> 6) as usize & 0x3f] as char);
-        } else {
-            out.push('=');
-        }
-        if chunk.len() > 2 {
-            out.push(ALPHABET[triple as usize & 0x3f] as char);
-        } else {
-            out.push('=');
-        }
-    }
-    out
-}
-
-/// Sign an item exactly like the handler's `wire_test_helpers::sign_item`:
-/// base64(HMAC-SHA256(hex-decoded key, signing string)) written into
-/// `additionalData.hmacSignature`.
-fn sign_adyen_item(item: &mut serde_json::Value, key_hex: &str) {
-    use hmac::{Hmac, Mac};
-    use sha2::Sha256;
-    let key = hex::decode(key_hex.trim()).expect("the test key is valid hex");
-    let mut mac = Hmac::<Sha256>::new_from_slice(&key).expect("HMAC accepts any key length");
-    mac.update(adyen_signing_string(item).as_bytes());
-    let signature = base64_encode(&mac.finalize().into_bytes());
-    if let Some(data) = item
-        .get_mut("additionalData")
-        .and_then(serde_json::Value::as_object_mut)
-    {
-        data.insert(
-            "hmacSignature".to_string(),
-            serde_json::Value::String(signature),
+    fn publish_payment(&self, document: &serde_json::Value) {
+        let id = document["id"].as_str().expect("payment document id");
+        self.route(
+            &format!("/v2/payments/{id}"),
+            200,
+            document.to_string(),
         );
-    } else if let Some(object) = item.as_object_mut() {
-        object.insert(
-            "additionalData".to_string(),
-            serde_json::json!({ "hmacSignature": signature }),
+    }
+
+    fn publish_refunds(&self, payment_id: &str, refunds: &[serde_json::Value]) {
+        self.route(
+            &format!("/v2/payments/{payment_id}/refunds"),
+            200,
+            serde_json::json!({ "_embedded": { "refunds": refunds } }).to_string(),
         );
-    } else {
-        panic!("a notification item must be a JSON object");
     }
 }
 
-/// The handler's deterministic dedupe id (`adn_<sha256 hex>` over the five
-/// retried fields joined with the unit separator).
-fn adyen_notification_id_for(item: &serde_json::Value) -> String {
-    use sha2::Digest;
-    let basis = [
-        adyen_signed_field(item, "/eventCode"),
-        adyen_signed_field(item, "/pspReference"),
-        adyen_signed_field(item, "/success"),
-        adyen_signed_field(item, "/eventDate"),
-        adyen_signed_field(item, "/merchantReference"),
-    ]
-    .join("\u{1f}");
-    format!(
-        "adn_{}",
-        hex::encode(sha2::Sha256::digest(basis.as_bytes()))
+async fn mock_handler(
+    axum::extract::State(responses): axum::extract::State<MockResponses>,
+    request: axum::http::Request<axum::body::Body>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let path = request.uri().path().to_string();
+    let (status, response_body) = responses
+        .lock()
+        .expect("lock")
+        .get(&path)
+        .cloned()
+        .unwrap_or_else(|| {
+            if path.ends_with("/refunds") {
+                (200, r#"{"_embedded":{"refunds":[]}}"#.to_string())
+            } else {
+                (404, r#"{"title":"Not Found"}"#.to_string())
+            }
+        });
+    (
+        axum::http::StatusCode::from_u16(status).expect("status"),
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        response_body,
+    )
+        .into_response()
+}
+
+/// The one process-wide mock Mollie API (own OS thread so it outlives the
+/// per-test runtimes), installing the client configuration exactly once.
+fn mock_mollie_api() -> &'static MockMollie {
+    static MOCK: std::sync::OnceLock<MockMollie> = std::sync::OnceLock::new();
+    MOCK.get_or_init(|| {
+        let responses: MockResponses = Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        ));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking mock listener");
+        let address = listener.local_addr().expect("mock address");
+        let app = axum::Router::new()
+            .fallback(mock_handler)
+            .with_state(responses.clone());
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("mock runtime");
+            runtime.block_on(async move {
+                let listener = tokio::net::TcpListener::from_std(listener).expect("tokio listener");
+                axum::serve(listener, app).await.expect("mock server");
+            });
+        });
+        std::env::set_var("MOLLIE_API_KEY", "test_mock_api_key");
+        std::env::set_var("MOLLIE_API_BASE_URL", format!("http://{address}/v2"));
+        MockMollie { responses }
+    })
+}
+
+fn money_value(cents: i64) -> String {
+    format!("{}.{:02}", cents.div_euclid(100), cents.rem_euclid(100))
+}
+
+/// A fetched Mollie payment document (decimal amounts, camelCase fields).
+#[allow(clippy::too_many_arguments)]
+fn payment_document(
+    payment_id: &str,
+    status: &str,
+    cents: i64,
+    sequence_type: Option<&str>,
+    customer_id: &str,
+    mandate_id: Option<&str>,
+    metadata: serde_json::Value,
+) -> serde_json::Value {
+    serde_json::json!({
+        "id": payment_id,
+        "status": status,
+        "amount": { "currency": "EUR", "value": money_value(cents) },
+        "sequenceType": sequence_type,
+        "customerId": customer_id,
+        "mandateId": mandate_id,
+        "paidAt": "2026-10-14T10:00:00+00:00",
+        "method": "ideal",
+        "metadata": metadata,
+    })
+}
+
+/// A recurring charge against a stored mandate for `invoice_id`.
+fn recurring_payment(
+    payment_id: &str,
+    invoice_id: Uuid,
+    cents: i64,
+    tenant: Option<&str>,
+) -> serde_json::Value {
+    let mut metadata = serde_json::json!({ "reference": format!("invoice:{invoice_id}") });
+    if let Some(tenant) = tenant {
+        metadata["tenant_id"] = serde_json::json!(tenant);
+    }
+    payment_document(
+        payment_id,
+        "paid",
+        cents,
+        Some("recurring"),
+        tenant.unwrap_or("cst_cov"),
+        Some("mdt_cov"),
+        metadata,
     )
 }
 
-/// The frozen Adyen envelope around one item.
-fn adyen_envelope(item: &serde_json::Value) -> Vec<u8> {
-    serde_json::to_vec(&serde_json::json!({
-        "live": "false",
-        "notificationItems": [{ "NotificationRequestItem": item }]
-    }))
-    .expect("envelope serializes")
+/// A first (checkout/mandate-creating) payment for `tenant`.
+fn first_payment(
+    payment_id: &str,
+    tenant: &str,
+    mandate_id: &str,
+    invoice_id: Option<Uuid>,
+) -> serde_json::Value {
+    let mut metadata = serde_json::json!({ "tenant_id": tenant });
+    if let Some(invoice_id) = invoice_id {
+        metadata["reference"] = serde_json::json!(format!("invoice:{invoice_id}"));
+    }
+    payment_document(
+        payment_id,
+        "paid",
+        2_900,
+        Some("first"),
+        tenant,
+        Some(mandate_id),
+        metadata,
+    )
 }
 
-/// Sign `item` and wrap it in the envelope.
-fn signed_adyen_envelope(mut item: serde_json::Value, key_hex: &str) -> Vec<u8> {
-    sign_adyen_item(&mut item, key_hex);
-    adyen_envelope(&item)
-}
-
-/// POST a raw body to `/webhooks/adyen` and return `(status, body-text)`.
-async fn post_adyen(app: &axum::Router, body: Vec<u8>) -> (StatusCode, String) {
+/// POST a raw body to `/webhooks/mollie` and return `(status, body-text)`.
+async fn post_mollie(app: &axum::Router, body: Vec<u8>) -> (StatusCode, String) {
     let response = app
         .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/webhooks/adyen")
-                .header("content-type", "application/json")
+                .uri("/webhooks/mollie")
+                .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from(body))
                 .expect("request"),
         )
@@ -3716,6 +3751,50 @@ async fn post_adyen(app: &axum::Router, body: Vec<u8>) -> (StatusCode, String) {
     (status, String::from_utf8_lossy(&bytes).to_string())
 }
 
+async fn post_mollie_with_header(
+    app: &axum::Router,
+    body: Vec<u8>,
+    header_name: &str,
+    header_value: &str,
+) -> (StatusCode, String) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/webhooks/mollie")
+                .header("content-type", "application/json")
+                .header(header_name, header_value)
+                .body(Body::from(body))
+                .expect("request"),
+        )
+        .await
+        .expect("router is infallible");
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("response body");
+    (status, String::from_utf8_lossy(&bytes).to_string())
+}
+
+/// Deliver a payment id exactly as Mollie's webhook does.
+async fn deliver_payment(app: &axum::Router, payment_id: &str) -> (StatusCode, String) {
+    post_mollie(app, format!("id={payment_id}").into_bytes()).await
+}
+
+async fn expect_mollie_ok(app: &axum::Router, payment_id: &str) {
+    let (status, text) = deliver_payment(app, payment_id).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "webhook {payment_id} rejected: {text}"
+    );
+    assert_eq!(
+        text, MOLLIE_ACCEPTED,
+        "the acknowledgement is the bare [accepted] body"
+    );
+}
+
 /// The `error` field of a JSON refusal body.
 fn json_error(text: &str) -> String {
     serde_json::from_str::<serde_json::Value>(text)
@@ -3724,43 +3803,27 @@ fn json_error(text: &str) -> String {
         .unwrap_or_else(|| panic!("expected a JSON error body, got {text:?}"))
 }
 
-/// Post a signed delivery that MUST be accepted (`200` + the bare
-/// `[accepted]`); on refusal surface the recorded processing error.
-async fn expect_adyen_ok(h: &Harness, app: &axum::Router, body: Vec<u8>, notification_id: &str) {
-    let (status, text) = post_adyen(app, body).await;
-    if status != StatusCode::OK {
-        let error: Option<String> = sqlx::query_scalar(
-            "SELECT error FROM adyen_webhook_events WHERE adyen_notification_id = $1",
-        )
-        .bind(notification_id)
-        .fetch_optional(&h.pool)
-        .await
-        .expect("failed event lookup")
-        .flatten();
-        panic!("webhook {notification_id} rejected: {status} body={text} error={error:?}");
-    }
-    assert_eq!(
-        text, ADYEN_ACCEPTED,
-        "the acknowledgement is the bare [accepted] body"
-    );
-}
+/// Serializes the tests that inspect the process-shared deadletter indexes.
+static WEBHOOK_DEADLETTER_LOCK: tokio::sync::Mutex<()> =
+    tokio::sync::Mutex::const_new(());
 
-/// The `(status, error)` of the `adyen_webhook_events` claim row.
-async fn webhook_event_row(h: &Harness, notification_id: &str) -> (String, Option<String>) {
+/// The `(status, error)` rows recorded for a payment id.
+async fn webhook_rows(h: &Harness, payment_id: &str) -> Vec<(String, Option<String>)> {
     sqlx::query_as(
-        "SELECT status, error FROM adyen_webhook_events WHERE adyen_notification_id = $1",
+        "SELECT status, error FROM mollie_webhook_events
+         WHERE mollie_payment_id = $1 ORDER BY created_at",
     )
-    .bind(notification_id)
-    .fetch_one(&h.pool)
+    .bind(payment_id)
+    .fetch_all(&h.pool)
     .await
-    .expect("webhook event row")
+    .expect("webhook rows")
 }
 
-/// The deadletter entries for one event id (`adyen:deadletter:event:<id>:<ms>`).
-async fn adyen_deadletter_entries(h: &Harness, event_id: &str) -> Vec<serde_json::Value> {
+/// Deadletter entries whose stored payload names one of `needles`.
+async fn deadletters_naming(h: &Harness, needles: &[&str]) -> Vec<serde_json::Value> {
     let mut conn = h.redis.get().await.expect("redis connection");
     let keys: Vec<String> = redis::cmd("KEYS")
-        .arg(format!("adyen:deadletter:event:{event_id}:*"))
+        .arg("mollie:deadletter:event:*")
         .query_async(&mut conn)
         .await
         .expect("deadletter keys");
@@ -3771,33 +3834,37 @@ async fn adyen_deadletter_entries(h: &Harness, event_id: &str) -> Vec<serde_json
             .query_async(&mut conn)
             .await
             .expect("deadletter entry");
-        if let Some(value) = value {
+        let Some(value) = value else { continue };
+        if needles.iter().any(|needle| value.contains(needle)) {
             entries.push(serde_json::from_str(&value).expect("deadletter entry is JSON"));
         }
     }
     entries
 }
 
-/// Delete the deadletter entries for these event ids: Redis is SHARED across
-/// runs (unlike the freshly cloned DB), so stale entries would otherwise
-/// break exact counts.
-async fn clear_adyen_deadletters(h: &Harness, event_ids: &[&str]) {
+/// Delete deadletter entries whose stored payload names any of `needles`.
+async fn clear_deadletters_naming(h: &Harness, needles: &[&str]) {
     let mut conn = h.redis.get().await.expect("redis connection");
-    let mut keys: Vec<String> = Vec::new();
-    for event_id in event_ids {
-        let found: Vec<String> = redis::cmd("KEYS")
-            .arg(format!("adyen:deadletter:event:{event_id}:*"))
+    let keys: Vec<String> = redis::cmd("KEYS")
+        .arg("mollie:deadletter:event:*")
+        .query_async(&mut conn)
+        .await
+        .expect("deadletter keys");
+    for key in keys {
+        let value: Option<String> = redis::cmd("GET")
+            .arg(&key)
             .query_async(&mut conn)
             .await
-            .expect("deadletter keys");
-        keys.extend(found);
-    }
-    if !keys.is_empty() {
-        let _: () = redis::cmd("DEL")
-            .arg(&keys)
-            .query_async(&mut conn)
-            .await
-            .expect("delete deadletters");
+            .expect("deadletter entry");
+        if let Some(value) = value {
+            if needles.iter().any(|needle| value.contains(needle)) {
+                let _: () = redis::cmd("DEL")
+                    .arg(&key)
+                    .query_async(&mut conn)
+                    .await
+                    .expect("delete deadletter");
+            }
+        }
     }
 }
 
@@ -3831,8 +3898,7 @@ async fn seed_cov_local_invoice(
     .expect("seed local invoice");
 }
 
-/// The tenant's `adyen_subscriptions` row (shopper reference = tenant id),
-/// optionally already tokenized.
+/// The tenant's `mollie_subscriptions` row, optionally already tokenized.
 async fn seed_cov_subscription(
     h: &Harness,
     tenant: &str,
@@ -3840,10 +3906,10 @@ async fn seed_cov_subscription(
     token: Option<&str>,
 ) {
     sqlx::query(
-        "INSERT INTO adyen_subscriptions
-             (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
-              billing_cycle_end, adyen_shopper_reference, adyen_plan_code,
-              adyen_recurring_detail_reference)
+        "INSERT INTO mollie_subscriptions
+             (tenant_id, mollie_subscription_id, plan, status, billing_cycle_start,
+              billing_cycle_end, mollie_customer_id, mollie_plan_code,
+              mollie_mandate_id)
          VALUES ($1, $2, 'growth', 'active', NOW(), NOW() + INTERVAL '30 days', $1,
                  'apexmail_growth_monthly', $3)",
     )
@@ -3852,357 +3918,242 @@ async fn seed_cov_subscription(
     .bind(token)
     .execute(&h.pool)
     .await
-    .expect("seed adyen subscription");
+    .expect("seed mollie subscription");
 }
 
-/// A recurring AUTHORISATION item — `invoice:{id}` in `merchantReference`,
-/// MINOR-UNIT amount, in-data processing model + shopper (the tenant id).
-fn cov_authorisation_item(
-    psp_reference: &str,
-    invoice_id: Uuid,
-    value: i64,
-    shopper: Option<&str>,
-) -> serde_json::Value {
-    let mut additional = serde_json::json!({ "recurringProcessingModel": "Subscription" });
-    if let Some(shopper) = shopper {
-        additional["shopperReference"] = serde_json::json!(shopper);
-        additional["metadata"] = serde_json::json!({ "tenant_id": shopper });
-    }
-    serde_json::json!({
-        "pspReference": psp_reference,
-        "originalReference": "psp_cov_original",
-        "merchantAccountCode": "ApexMailECOM",
-        "merchantReference": format!("invoice:{invoice_id}"),
-        "amount": { "currency": "EUR", "value": value },
-        "eventCode": "AUTHORISATION",
-        "eventDate": "2026-10-14T10:00:00+00:00",
-        "success": "true",
-        "paymentMethod": "visa",
-        "additionalData": additional
-    })
-}
-
-/// A `RECURRING_CONTRACT` token delivery; `original_reference` ties it to the
-/// payment's AUTHORISATION.
-fn cov_token_item(
-    psp_reference: &str,
-    original_reference: &str,
-    tenant: &str,
-    token: &str,
-) -> serde_json::Value {
-    serde_json::json!({
-        "pspReference": psp_reference,
-        "originalReference": original_reference,
-        "merchantAccountCode": "ApexMailECOM",
-        "merchantReference": "cov-token-ref",
-        "amount": { "currency": "EUR", "value": 0 },
-        "eventCode": "RECURRING_CONTRACT",
-        "eventDate": "2026-10-14T10:00:05+00:00",
-        "success": "true",
-        "additionalData": {
-            "shopperReference": tenant,
-            "recurringDetailReference": token,
-            "recurringProcessingModel": "Subscription"
-        }
-    })
-}
-
-db_test!(adyen_webhook_signature_attacks_write_nothing, |h| {
+db_test!(mollie_webhook_form_body_is_verified_by_fetch, |h| {
+    let mock = mock_mollie_api();
     let app = billing_service::routes::router(h.state.clone());
-    let tenant = "cov_wh_sig";
+    let tenant = "cov_wh_form";
     seed_tenant(&h, tenant, "free").await;
-
-    let psps = [
-        "cov_wh_sig_missing".to_string(),
-        "cov_wh_sig_wrong_key".to_string(),
-        "cov_wh_sig_tampered".to_string(),
-        "cov_wh_sig_garbage_0".to_string(),
-        "cov_wh_sig_garbage_1".to_string(),
-        "cov_wh_sig_garbage_2".to_string(),
-        "cov_wh_sig_header_only".to_string(),
-    ];
-    let psp_refs: Vec<&str> = psps.iter().map(String::as_str).collect();
-    clear_adyen_deadletters(&h, &psp_refs).await;
-    clear_adyen_deadletters(&h, &["unknown"]).await;
-
     let invoice_id = Uuid::new_v4();
-    let item_for = |psp: &str| cov_authorisation_item(psp, invoice_id, 1_000, Some(tenant));
+    seed_cov_local_invoice(&h, tenant, invoice_id, 1_000, 0, 1_000, "eur").await;
+    mock.publish_payment(&recurring_payment("tr_cov_form", invoice_id, 1_000, Some(tenant)));
 
-    // Missing in-body signature: the wire's only verifiable signature lives
-    // at additionalData.hmacSignature.
-    let mut missing = item_for(&psps[0]);
-    missing
-        .as_object_mut()
-        .expect("item object")
-        .remove("additionalData");
-    let (status, text) = post_adyen(&app, adyen_envelope(&missing)).await;
+    expect_mollie_ok(&app, "tr_cov_form").await;
+
+    let (status_text, allocations, rows): (String, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT status FROM invoices WHERE id = $1),
+                (SELECT COUNT(*) FROM invoice_payment_allocations WHERE invoice_id = $1),
+                (SELECT COUNT(*) FROM mollie_webhook_events
+                 WHERE mollie_payment_id = 'tr_cov_form' AND status = 'processed')",
+    )
+    .bind(invoice_id)
+    .fetch_one(&h.pool)
+    .await
+    .expect("settled state");
+    assert_eq!(status_text, "paid");
+    assert_eq!(allocations, 1, "the fetched payment settles exactly once");
+    assert_eq!(rows, 1);
+});
+
+db_test!(mollie_webhook_refusals_write_nothing_and_deadletter, |h| {
+    let _guard = WEBHOOK_DEADLETTER_LOCK.lock().await;
+    let mock = mock_mollie_api();
+    let app = billing_service::routes::router(h.state.clone());
+    seed_tenant(&h, "cov_wh_refuse", "free").await;
+    let probes = [
+        "tr_cov_unknown_id",
+        "tr_cov_provider_down",
+        "tr_cov_unreadable",
+        "tr_cov_bad_id_0",
+        "tr_cov_legacy",
+    ];
+    clear_deadletters_naming(&h, &probes).await;
+
+    // An id the provider does not know: 200 so the endpoint is never an
+    // existence oracle, and nothing recorded.
+    let (status, text) = deliver_payment(&app, "tr_cov_unknown_id").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json_error(&text), "ignored");
+    assert!(webhook_rows(&h, "tr_cov_unknown_id").await.is_empty());
+
+    // A provider 5xx asks Mollie to retry: 503, never a deadletter.
+    mock.route("/v2/payments/tr_cov_provider_down", 503, "upstream down");
+    let (status, _) = deliver_payment(&app, "tr_cov_provider_down").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(deadletters_naming(&h, &["tr_cov_provider_down"]).await.is_empty());
+    assert!(webhook_rows(&h, "tr_cov_provider_down").await.is_empty());
+
+    // A provider document we cannot read is a refused, deadlettered 400.
+    mock.route("/v2/payments/tr_cov_unreadable", 200, "not json");
+    let (status, text) = deliver_payment(&app, "tr_cov_unreadable").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(
-        status,
-        StatusCode::BAD_REQUEST,
-        "a missing in-body HMAC must be refused"
+        json_error(&text),
+        "Mollie returned an unreadable object"
     );
-    assert_eq!(json_error(&text), "Missing HMAC signature");
-    let entries = adyen_deadletter_entries(&h, &psps[0]).await;
-    assert_eq!(entries.len(), 1, "the refused delivery is deadlettered");
-    assert_eq!(entries[0]["reason"], "missing_signature");
+    let entries = deadletters_naming(&h, &["tr_cov_unreadable"]).await;
+    assert_eq!(entries.len(), 1, "the unreadable object is deadlettered");
+    assert_eq!(entries[0]["reason"], "malformed_provider_object");
+    assert!(webhook_rows(&h, "tr_cov_unreadable").await.is_empty());
 
-    // Wrong key: a valid HMAC-SHA256 minted from different key material.
-    let mut wrong_key = item_for(&psps[1]);
-    sign_adyen_item(&mut wrong_key, ADYEN_HMAC_WRONG_KEY_HEX);
-    let (status, text) = post_adyen(&app, adyen_envelope(&wrong_key)).await;
-    assert_eq!(
-        status,
-        StatusCode::BAD_REQUEST,
-        "a signature from the wrong key must be refused"
-    );
-    assert_eq!(json_error(&text), "Invalid webhook signature");
-    let entries = adyen_deadletter_entries(&h, &psps[1]).await;
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0]["reason"], "invalid_signature");
-
-    // Tampered field: the digest is minted for the ORIGINAL item, then a
-    // SIGNED field (amount.value) changes on the wire.
-    let mut tampered = item_for(&psps[2]);
-    sign_adyen_item(&mut tampered, ADYEN_HMAC_KEY_HEX);
-    tampered["amount"]["value"] = serde_json::json!(999_999);
-    let (status, _) = post_adyen(&app, adyen_envelope(&tampered)).await;
-    assert_eq!(
-        status,
-        StatusCode::BAD_REQUEST,
-        "a post-signature field mutation must not verify"
-    );
-    assert_eq!(adyen_deadletter_entries(&h, &psps[2]).await.len(), 1);
-
-    // Malformed signature material: never a crash, never an accept.
-    for (index, signature) in ["!!!not-base64!!!", "deadbeef", "===="]
-        .into_iter()
-        .enumerate()
-    {
-        let mut item = item_for(&psps[3 + index]);
-        item["additionalData"]["hmacSignature"] = serde_json::json!(signature);
-        let (status, text) = post_adyen(&app, adyen_envelope(&item)).await;
+    // Malformed ids never reach the provider and are deadlettered.
+    for body in [
+        &b""[..],
+        b"id=",
+        b"id=../etc/passwd",
+        b"id=https://evil.example/tr_cov_bad_id_0",
+        b"id=foo_1",
+        b"id=tr_cov_bad_id_0/y",
+        b"{}",
+        &[0xff, 0xfe][..],
+    ] {
+        let (status, text) = post_mollie(&app, body.to_vec()).await;
         assert_eq!(
             status,
             StatusCode::BAD_REQUEST,
-            "malformed signature {signature:?} must be refused"
+            "body {:?}: {text}",
+            String::from_utf8_lossy(body)
         );
-        assert_eq!(json_error(&text), "Invalid webhook signature");
-        assert_eq!(
-            adyen_deadletter_entries(&h, &psps[3 + index]).await.len(),
-            1
-        );
+        assert_eq!(json_error(&text), "Invalid webhook body");
     }
-
-    // FAIL-BEFORE PROOF that the pre-Adyen header scheme is dead: the old
-    // wire authenticated deliveries with an `adyen-hmac-signature: t=…,v1=…`
-    // HEADER. The Adyen contract moved the HMAC INTO the body, so a delivery
-    // carrying ONLY the legacy header has no verifiable in-body signature.
-    fn legacy_header_signature(secret: &str, payload: &[u8], timestamp: i64) -> String {
-        use hmac::{Hmac, Mac};
-        use sha2::Sha256;
-        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC key");
-        mac.update(timestamp.to_string().as_bytes());
-        mac.update(b".");
-        mac.update(payload);
-        format!(
-            "t={timestamp},v1={}",
-            hex::encode(mac.finalize().into_bytes())
-        )
-    }
-    let mut header_only = item_for(&psps[6]);
-    header_only
-        .as_object_mut()
-        .expect("item object")
-        .remove("additionalData");
-    let body = adyen_envelope(&header_only);
-    let legacy_header =
-        legacy_header_signature("cov_wh_legacy_secret", &body, Utc::now().timestamp());
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/webhooks/adyen")
-                .header("content-type", "application/json")
-                .header("adyen-hmac-signature", legacy_header)
-                .body(Body::from(body))
-                .expect("request"),
-        )
-        .await
-        .expect("router is infallible");
-    assert_eq!(
-        response.status(),
-        StatusCode::BAD_REQUEST,
-        "the legacy header authorises nothing"
-    );
-    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("response body");
-    assert_eq!(
-        json_error(&String::from_utf8_lossy(&bytes)),
-        "Missing HMAC signature"
-    );
-    assert_eq!(
-        adyen_deadletter_entries(&h, &psps[6]).await.len(),
-        1,
-        "a legacy-header-only delivery is deadlettered"
+    assert!(
+        !deadletters_naming(&h, &["tr_cov_bad_id_0"]).await.is_empty(),
+        "a refused id is deadlettered for triage"
     );
 
-    // A malformed wire body is refused before any parse of items.
-    let (status, text) = post_adyen(&app, b"not-json{{{".to_vec()).await;
+    // legacy-wire-negative-test: NO signature exists — the pre-Mollie signed
+    // envelope (and a legacy HMAC header) authorise nothing, because the body
+    // names no object id.
+    let legacy_body = serde_json::to_vec(&serde_json::json!({
+        "live": "false",
+        "notificationItems": [{
+            "NotificationRequestItem": {
+                "provider_payment_id": "tr_cov_legacy",
+                "event_code": "AUTHORISATION",
+                "success": "true"
+            }
+        }]
+    }))
+    .expect("legacy body");
+    let (status, text) = post_mollie_with_header(
+        &app,
+        legacy_body,
+        "mollie-hmac-signature",
+        "t=1,v1=deadbeef",
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(json_error(&text), "Invalid JSON payload");
-    assert_eq!(
-        adyen_deadletter_entries(&h, "unknown").await.len(),
-        1,
-        "an unparseable body is deadlettered"
+    assert_eq!(json_error(&text), "Invalid webhook body");
+    assert!(
+        !deadletters_naming(&h, &["tr_cov_legacy"]).await.is_empty(),
+        "the legacy delivery is deadlettered"
     );
 
-    // Every refusal above must have written NO webhook claim row and no
-    // business state.
-    let events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM adyen_webhook_events")
-        .fetch_one(&h.pool)
-        .await
-        .expect("count events");
+    // Every refusal above wrote NO claim row and no business state.
+    let events: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM mollie_webhook_events WHERE mollie_payment_id LIKE 'tr_cov_%'",
+    )
+    .fetch_one(&h.pool)
+    .await
+    .expect("count events");
     assert_eq!(events, 0, "failed verification must write nothing");
     let invoices: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM invoices")
         .fetch_one(&h.pool)
         .await
         .expect("count invoices");
     assert_eq!(invoices, 0);
-    let allocations: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM invoice_payment_allocations")
-        .fetch_one(&h.pool)
-        .await
-        .expect("count allocations");
-    assert_eq!(allocations, 0);
-    let subs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM adyen_subscriptions")
+    let subs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mollie_subscriptions")
         .fetch_one(&h.pool)
         .await
         .expect("count subscriptions");
     assert_eq!(subs, 0);
-    let snapshots: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM adyen_tax_snapshots")
+    let snapshots: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mollie_tax_snapshots")
         .fetch_one(&h.pool)
         .await
         .expect("count tax snapshots");
     assert_eq!(snapshots, 0);
-    let plan: String = sqlx::query_scalar("SELECT plan FROM tenants WHERE id = $1")
-        .bind(tenant)
-        .fetch_one(&h.pool)
-        .await
-        .expect("tenant plan");
-    assert_eq!(plan, "free", "no attack changes business state");
 });
 
-db_test!(
-    adyen_webhook_unknown_event_type_is_acknowledged_not_500,
-    |h| {
-        let app = billing_service::routes::router(h.state.clone());
-        let item = serde_json::json!({
-            "pspReference": "psp_cov_unknown",
-            "originalReference": "psp_cov_original",
-            "merchantAccountCode": "ApexMailECOM",
-            "merchantReference": "cov-unknown-ref",
-            "amount": { "currency": "EUR", "value": 0 },
-            "eventCode": "ORDER_OPENED",
-            "eventDate": "2026-10-14T10:00:00+00:00",
-            "success": "true",
-            "paymentMethod": "visa"
-        });
-        let notification_id = adyen_notification_id_for(&item);
-        expect_adyen_ok(
-            &h,
-            &app,
-            signed_adyen_envelope(item, ADYEN_HMAC_KEY_HEX),
-            &notification_id,
-        )
-        .await;
+db_test!(mollie_webhook_unsettled_status_is_acknowledged_without_effects, |h| {
+    let mock = mock_mollie_api();
+    let app = billing_service::routes::router(h.state.clone());
+    mock.publish_payment(&payment_document(
+        "tr_cov_open",
+        "open",
+        2_900,
+        Some("recurring"),
+        "cst_cov",
+        Some("mdt_cov"),
+        serde_json::json!({ "tenant_id": "cov_wh_open" }),
+    ));
+    expect_mollie_ok(&app, "tr_cov_open").await;
 
-        let (event_type, status_text, psp): (String, String, Option<String>) = sqlx::query_as(
-            "SELECT event_type, status, adyen_psp_reference FROM adyen_webhook_events
-             WHERE adyen_notification_id = $1",
-        )
-        .bind(&notification_id)
+    let events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mollie_webhook_events")
         .fetch_one(&h.pool)
         .await
-        .expect("webhook row");
-        assert_eq!(event_type, "ORDER_OPENED");
-        assert_eq!(
-            status_text, "processed",
-            "unknown events are terminally acknowledged"
-        );
-        assert_eq!(psp.as_deref(), Some("psp_cov_unknown"));
-        let invoices: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM invoices")
-            .fetch_one(&h.pool)
-            .await
-            .expect("count invoices");
-        assert_eq!(
-            invoices, 0,
-            "an unknown event is acknowledged without effect"
-        );
-    }
-);
+        .expect("count events");
+    assert_eq!(events, 0, "open has not settled: no fact to record");
+    let invoices: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM invoices")
+        .fetch_one(&h.pool)
+        .await
+        .expect("count invoices");
+    assert_eq!(invoices, 0);
+});
 
-db_test!(adyen_webhook_replay_is_idempotent_and_reclaims_stale, |h| {
+db_test!(mollie_webhook_replay_is_idempotent_and_reclaims_stale, |h| {
+    let mock = mock_mollie_api();
     let app = billing_service::routes::router(h.state.clone());
     let tenant = "cov_wh_replay";
     seed_tenant(&h, tenant, "free").await;
 
-    // A byte-identical redelivery is the SAME notification: acknowledged,
-    // never re-applied.
     let replay_invoice = Uuid::new_v4();
     seed_cov_local_invoice(&h, tenant, replay_invoice, 1_000, 0, 1_000, "eur").await;
-    let replay_item = cov_authorisation_item("psp_cov_replay", replay_invoice, 1_000, Some(tenant));
-    let replay_id = adyen_notification_id_for(&replay_item);
-    let replay_body = signed_adyen_envelope(replay_item, ADYEN_HMAC_KEY_HEX);
-    expect_adyen_ok(&h, &app, replay_body.clone(), &replay_id).await;
-    expect_adyen_ok(&h, &app, replay_body, &replay_id).await;
+    mock.publish_payment(&recurring_payment(
+        "tr_cov_replay",
+        replay_invoice,
+        1_000,
+        Some(tenant),
+    ));
+    expect_mollie_ok(&app, "tr_cov_replay").await;
+    expect_mollie_ok(&app, "tr_cov_replay").await;
 
     let (status_text, allocations, claims): (String, i64, i64) = sqlx::query_as(
         "SELECT (SELECT status FROM invoices WHERE id = $1),
                 (SELECT COUNT(*) FROM invoice_payment_allocations WHERE invoice_id = $1),
-                (SELECT COUNT(*) FROM adyen_webhook_events WHERE adyen_notification_id = $2)",
+                (SELECT COUNT(*) FROM mollie_webhook_events WHERE mollie_payment_id = 'tr_cov_replay')",
     )
     .bind(replay_invoice)
-    .bind(&replay_id)
     .fetch_one(&h.pool)
     .await
     .expect("replay state");
     assert_eq!(status_text, "paid");
     assert_eq!(allocations, 1, "replay never double-allocates");
-    assert_eq!(claims, 1, "one claim row per notification id");
+    assert_eq!(claims, 1, "one claim row per payment fact");
 
     // Stale-pending reclaim: an 11-minute-old pending row is reclaimed, a
-    // fresh one is left alone; the redelivered notification then settles
-    // exactly once.
+    // fresh one is left alone; the redelivered payment then settles once.
     let stale_invoice = Uuid::new_v4();
     seed_cov_local_invoice(&h, tenant, stale_invoice, 2_500, 0, 2_500, "eur").await;
-    let stale_item =
-        cov_authorisation_item("psp_cov_replay_stale", stale_invoice, 2_500, Some(tenant));
-    let stale_id = adyen_notification_id_for(&stale_item);
-    let stale_body = signed_adyen_envelope(stale_item, ADYEN_HMAC_KEY_HEX);
-    let fresh_id = "adn_cov_replay_fresh_not_stolen";
+    mock.publish_payment(&recurring_payment(
+        "tr_cov_replay_stale",
+        stale_invoice,
+        2_500,
+        Some(tenant),
+    ));
+    let fresh_id = "mollie:cov_replay_fresh_not_stolen";
     sqlx::query(
-        "INSERT INTO adyen_webhook_events
-             (id, adyen_notification_id, event_type, status, created_at, updated_at)
-         VALUES (gen_random_uuid(), $1, 'AUTHORISATION', 'pending',
+        "INSERT INTO mollie_webhook_events
+             (id, mollie_event_id, event_type, status, created_at, updated_at)
+         VALUES (gen_random_uuid(), 'mollie:cov_replay_stale_pending', 'AUTHORISATION', 'pending',
                  NOW() - INTERVAL '20 minutes', NOW() - INTERVAL '11 minutes'),
-                (gen_random_uuid(), $2, 'AUTHORISATION', 'pending', NOW(), NOW())",
+                (gen_random_uuid(), $1, 'AUTHORISATION', 'pending', NOW(), NOW())",
     )
-    .bind(&stale_id)
     .bind(fresh_id)
     .execute(&h.pool)
     .await
     .expect("seed pending rows");
 
-    let reclaimed = billing_service::adyen_webhooks::reclaim_stale_pending_webhooks(&h.state)
+    let reclaimed = billing_service::mollie_webhooks::reclaim_stale_pending_webhooks(&h.state)
         .await
         .expect("reclaim stale pending webhooks");
-    assert_eq!(reclaimed, vec![stale_id.clone()]);
+    assert_eq!(reclaimed, vec!["mollie:cov_replay_stale_pending".to_string()]);
     let (stale_status, fresh_status): (String, String) = sqlx::query_as(
-        "SELECT (SELECT status FROM adyen_webhook_events WHERE adyen_notification_id = $1),
-                (SELECT status FROM adyen_webhook_events WHERE adyen_notification_id = $2)",
+        "SELECT (SELECT status FROM mollie_webhook_events WHERE mollie_event_id = $1),
+                (SELECT status FROM mollie_webhook_events WHERE mollie_event_id = $2)",
     )
-    .bind(&stale_id)
+    .bind("mollie:cov_replay_stale_pending")
     .bind(fresh_id)
     .fetch_one(&h.pool)
     .await
@@ -4210,72 +4161,60 @@ db_test!(adyen_webhook_replay_is_idempotent_and_reclaims_stale, |h| {
     assert_eq!(stale_status, "received", "the abandoned claim is reclaimed");
     assert_eq!(fresh_status, "pending", "fresh pending work is not stolen");
 
-    expect_adyen_ok(&h, &app, stale_body, &stale_id).await;
+    expect_mollie_ok(&app, "tr_cov_replay_stale").await;
     let (status_text, allocations, claims): (String, i64, i64) = sqlx::query_as(
         "SELECT (SELECT status FROM invoices WHERE id = $1),
                 (SELECT COUNT(*) FROM invoice_payment_allocations WHERE invoice_id = $1),
-                (SELECT COUNT(*) FROM adyen_webhook_events WHERE adyen_notification_id = $2)",
+                (SELECT COUNT(*) FROM mollie_webhook_events WHERE mollie_payment_id = 'tr_cov_replay_stale')",
     )
     .bind(stale_invoice)
-    .bind(&stale_id)
     .fetch_one(&h.pool)
     .await
     .expect("stale state");
-    assert_eq!(
-        status_text, "paid",
-        "the reclaimed delivery settles exactly once"
-    );
+    assert_eq!(status_text, "paid");
     assert_eq!(allocations, 1);
     assert_eq!(claims, 1);
 });
 
-db_test!(adyen_webhook_out_of_order_events_never_rewind_state, |h| {
+db_test!(mollie_webhook_out_of_order_events_never_rewind_state, |h| {
+    let mock = mock_mollie_api();
     let app = billing_service::routes::router(h.state.clone());
     let tenant = "cov_wh_order";
     seed_tenant(&h, tenant, "free").await;
-    clear_adyen_deadletters(&h, &["psp_cov_order_second"]).await;
+    clear_deadletters_naming(&h, &["tr_cov_order_second"]).await;
     let invoice_id = Uuid::new_v4();
     seed_cov_local_invoice(&h, tenant, invoice_id, 1_200, 0, 1_200, "eur").await;
 
-    let first = cov_authorisation_item("psp_cov_order_first", invoice_id, 1_200, Some(tenant));
-    let first_id = adyen_notification_id_for(&first);
-    expect_adyen_ok(
-        &h,
-        &app,
-        signed_adyen_envelope(first, ADYEN_HMAC_KEY_HEX),
-        &first_id,
-    )
-    .await;
+    mock.publish_payment(&recurring_payment(
+        "tr_cov_order_first",
+        invoice_id,
+        1_200,
+        Some(tenant),
+    ));
+    expect_mollie_ok(&app, "tr_cov_order_first").await;
 
-    let (paid_at_after_first, psp_after_first): (DateTime<Utc>, Option<String>) =
-        sqlx::query_as("SELECT paid_at, adyen_psp_reference FROM invoices WHERE id = $1")
+    let (paid_at_after_first, payment_after_first): (DateTime<Utc>, Option<String>) =
+        sqlx::query_as("SELECT paid_at, mollie_payment_id FROM invoices WHERE id = $1")
             .bind(invoice_id)
             .fetch_one(&h.pool)
             .await
             .expect("invoice after settlement");
-    assert_eq!(psp_after_first.as_deref(), Some("psp_cov_order_first"));
-
-    // A LATER eventDate + NEW pspReference for the same already-paid invoice
-    // is a NEW notification: the handler idempotently ACKS it (asserted at
-    // the end) — it must not double-settle and must not rewind the recorded
-    // state.
-    let mut second =
-        cov_authorisation_item("psp_cov_order_second", invoice_id, 1_200, Some(tenant));
-    second["eventDate"] = serde_json::json!("2026-10-15T10:00:00+00:00");
-    let second_id = adyen_notification_id_for(&second);
-    assert_ne!(
-        second_id, first_id,
-        "a fresh eventDate is a new notification id"
+    assert_eq!(
+        payment_after_first.as_deref(),
+        Some("tr_cov_order_first")
     );
-    expect_adyen_ok(
-        &h,
-        &app,
-        signed_adyen_envelope(second, ADYEN_HMAC_KEY_HEX),
-        &second_id,
-    )
-    .await;
 
-    let (status_text, allocations, psp, paid_at_after_second): (
+    // A LATER, DIFFERENT payment fact for the already-paid invoice is a NEW
+    // notification: acknowledged idempotently, never re-settled or rewound.
+    mock.publish_payment(&recurring_payment(
+        "tr_cov_order_second",
+        invoice_id,
+        1_200,
+        Some(tenant),
+    ));
+    expect_mollie_ok(&app, "tr_cov_order_second").await;
+
+    let (status_text, allocations, payment_id, paid_at_after_second): (
         String,
         i64,
         Option<String>,
@@ -4283,7 +4222,7 @@ db_test!(adyen_webhook_out_of_order_events_never_rewind_state, |h| {
     ) = sqlx::query_as(
         "SELECT status,
                 (SELECT COUNT(*) FROM invoice_payment_allocations WHERE invoice_id = $1),
-                adyen_psp_reference,
+                mollie_payment_id,
                 paid_at
          FROM invoices WHERE id = $1",
     )
@@ -4291,113 +4230,105 @@ db_test!(adyen_webhook_out_of_order_events_never_rewind_state, |h| {
     .fetch_one(&h.pool)
     .await
     .expect("invoice after the later delivery");
-    assert_eq!(
-        status_text, "paid",
-        "the settled invoice is never rewound to pending"
-    );
-    assert_eq!(
-        allocations, 1,
-        "a second AUTHORISATION never double-settles"
-    );
-    assert_eq!(
-        psp, psp_after_first,
-        "the recorded psp binding is never overwritten"
-    );
+    assert_eq!(status_text, "paid", "the settled invoice is never rewound");
+    assert_eq!(allocations, 1, "a second charge never double-settles");
+    assert_eq!(payment_id, payment_after_first, "the binding is never overwritten");
     assert_eq!(
         paid_at_after_second, paid_at_after_first,
         "paid_at is never re-stamped"
     );
     let processed: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM adyen_webhook_events
-         WHERE adyen_notification_id IN ($1, $2) AND status = 'processed'",
+        "SELECT COUNT(*) FROM mollie_webhook_events
+         WHERE mollie_payment_id IN ('tr_cov_order_first', 'tr_cov_order_second')
+           AND status = 'processed'",
     )
-    .bind(&first_id)
-    .bind(&second_id)
     .fetch_one(&h.pool)
     .await
     .expect("claim rows");
-    assert_eq!(
-        processed, 2,
-        "both deliveries are claimed; the later one acks idempotently"
-    );
+    assert_eq!(processed, 2, "both deliveries are claimed and acked");
     assert!(
-        adyen_deadletter_entries(&h, "psp_cov_order_second")
+        deadletters_naming(&h, &["tr_cov_order_second"])
             .await
             .is_empty(),
         "an idempotent later delivery is acked, not deadlettered"
     );
 });
 
-db_test!(adyen_webhook_unresolvable_authorisation_deadletters, |h| {
+db_test!(mollie_webhook_unresolvable_authorisation_deadletters, |h| {
+    let _guard = WEBHOOK_DEADLETTER_LOCK.lock().await;
+    let mock = mock_mollie_api();
     let app = billing_service::routes::router(h.state.clone());
     let unresolvable = Uuid::new_v4();
-    let item = cov_authorisation_item("psp_cov_unresolved", unresolvable, 700, None);
-    let notification_id = adyen_notification_id_for(&item);
-    // The processing-failure path keys its deadletter entry by the dedupe
-    // notification id (not the psp); clear it so the count is exact.
-    clear_adyen_deadletters(&h, &[&notification_id]).await;
-    let (status, _) = post_adyen(&app, signed_adyen_envelope(item, ADYEN_HMAC_KEY_HEX)).await;
+    clear_deadletters_naming(&h, &["tr_cov_unresolved"]).await;
+    mock.publish_payment(&recurring_payment(
+        "tr_cov_unresolved",
+        unresolvable,
+        700,
+        None,
+    ));
+    let (status, _) = deliver_payment(&app, "tr_cov_unresolved").await;
     assert_eq!(
         status,
         StatusCode::BAD_REQUEST,
         "unresolvable revenue must be refused for replay, not silently dropped"
     );
 
-    let (status_text, error) = webhook_event_row(&h, &notification_id).await;
-    assert_eq!(status_text, "failed");
-    let error = error.unwrap_or_default();
+    let rows = webhook_rows(&h, "tr_cov_unresolved").await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, "failed");
+    let error = rows[0].1.clone().unwrap_or_default();
     assert!(
         error.contains(&unresolvable.to_string()),
         "the deadletter names the unresolvable reference: {error}"
     );
-    let entries = adyen_deadletter_entries(&h, &notification_id).await;
+    let entries = deadletters_naming(&h, &["tr_cov_unresolved"]).await;
     assert_eq!(entries.len(), 1, "the refusal is deadlettered for replay");
 
-    // No local invoice was invented.
     let invoices: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM invoices")
         .fetch_one(&h.pool)
         .await
         .expect("count invoices");
-    assert_eq!(invoices, 0);
+    assert_eq!(invoices, 0, "no local invoice was invented");
 });
 
 db_test!(
-    adyen_webhook_recurring_authorisation_settles_the_local_invoice,
+    mollie_webhook_recurring_authorisation_settles_the_local_invoice,
     |h| {
+        let mock = mock_mollie_api();
         let app = billing_service::routes::router(h.state.clone());
         let tenant = "cov_wh_settle";
         seed_tenant(&h, tenant, "growth").await;
         let invoice_id = Uuid::new_v4();
         seed_cov_local_invoice(&h, tenant, invoice_id, 10_000, 2_400, 12_400, "eur").await;
-        // A cutover-tokenized subscription: the tenant's recurring identity
-        // is in place when the recurring charge arrives.
-        seed_cov_subscription(&h, tenant, "sub_cov_settle", Some("tok_cov_settle")).await;
+        seed_cov_subscription(&h, tenant, "sub_cov_settle", Some("mdt_cov_settle")).await;
+        mock.publish_payment(&recurring_payment(
+            "tr_cov_settle",
+            invoice_id,
+            12_400,
+            Some(tenant),
+        ));
 
-        let item = cov_authorisation_item("psp_cov_settle", invoice_id, 12_400, Some(tenant));
-        let notification_id = adyen_notification_id_for(&item);
-        expect_adyen_ok(
-            &h,
-            &app,
-            signed_adyen_envelope(item, ADYEN_HMAC_KEY_HEX),
-            &notification_id,
+        expect_mollie_ok(&app, "tr_cov_settle").await;
+
+        let (status_text, paid, payment_id, snapshot_id): (
+            String,
+            bool,
+            Option<String>,
+            Option<Uuid>,
+        ) = sqlx::query_as(
+            "SELECT status, paid_at IS NOT NULL, mollie_payment_id, mollie_tax_snapshot_id
+             FROM invoices WHERE id = $1",
         )
-        .await;
-
-        let (status_text, paid, psp, snapshot_id): (String, bool, Option<String>, Option<Uuid>) =
-            sqlx::query_as(
-                "SELECT status, paid_at IS NOT NULL, adyen_psp_reference, adyen_tax_snapshot_id
-                 FROM invoices WHERE id = $1",
-            )
-            .bind(invoice_id)
-            .fetch_one(&h.pool)
-            .await
-            .expect("local invoice");
+        .bind(invoice_id)
+        .fetch_one(&h.pool)
+        .await
+        .expect("local invoice");
         assert_eq!(status_text, "paid");
         assert!(paid, "paid_at is stamped");
         assert_eq!(
-            psp.as_deref(),
-            Some("psp_cov_settle"),
-            "the settlement binds the psp reference"
+            payment_id.as_deref(),
+            Some("tr_cov_settle"),
+            "the settlement binds the Mollie payment id"
         );
 
         let (amount, currency, source, operation): (i64, String, String, String) = sqlx::query_as(
@@ -4408,17 +4339,14 @@ db_test!(
         .fetch_one(&h.pool)
         .await
         .expect("allocation");
-        assert_eq!(
-            amount, 12_400,
-            "the wire amount (minor units) is allocated exactly once"
-        );
+        assert_eq!(amount, 12_400, "the decimal charge allocates exactly once");
         assert_eq!(currency, "EUR");
-        assert_eq!(source, "adyen");
-        assert_eq!(operation, "adyen:psp_cov_settle");
+        assert_eq!(source, "mollie");
+        assert_eq!(operation, "mollie:tr_cov_settle");
 
         let snapshot_id = snapshot_id.expect("the tax snapshot is linked onto the invoice");
         let (authority, validation): (String, String) = sqlx::query_as(
-            "SELECT authority, validation_status FROM adyen_tax_snapshots WHERE id = $1",
+            "SELECT authority, validation_status FROM mollie_tax_snapshots WHERE id = $1",
         )
         .bind(snapshot_id)
         .fetch_one(&h.pool)
@@ -4430,8 +4358,246 @@ db_test!(
         );
         assert_eq!(validation, "validated");
 
-        let (event_status, _) = webhook_event_row(&h, &notification_id).await;
-        assert_eq!(event_status, "processed");
+        let rows = webhook_rows(&h, "tr_cov_settle").await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, "processed");
+    }
+);
+
+db_test!(mollie_webhook_cross_tenant_binding_and_bad_states_refuse, |h| {
+    let _guard = WEBHOOK_DEADLETTER_LOCK.lock().await;
+    let mock = mock_mollie_api();
+    let app = billing_service::routes::router(h.state.clone());
+    let owner = "cov_wh_bind_a";
+    let other = "cov_wh_bind_b";
+    seed_tenant(&h, owner, "free").await;
+    seed_tenant(&h, other, "free").await;
+    seed_cov_subscription(&h, owner, "sub_cov_bound", None).await;
+    let invoice_id = Uuid::new_v4();
+    seed_cov_local_invoice(&h, owner, invoice_id, 4_900, 0, 4_900, "eur").await;
+
+    // The FIRST payment binds the OWNER's subscription: the fetch produces
+    // both an informational authorisation and the RECURRING_CONTRACT fact.
+    mock.publish_payment(&first_payment(
+        "tr_cov_bind_owner",
+        owner,
+        "mdt_cov_owner",
+        Some(invoice_id),
+    ));
+    expect_mollie_ok(&app, "tr_cov_bind_owner").await;
+    let bound: Option<String> = sqlx::query_scalar(
+        "SELECT mollie_mandate_id FROM mollie_subscriptions
+         WHERE mollie_subscription_id = 'sub_cov_bound'",
+    )
+    .fetch_one(&h.pool)
+    .await
+    .expect("owner subscription");
+    assert_eq!(bound.as_deref(), Some("mdt_cov_owner"));
+
+    // The invoice belongs to `owner` but the payment is attributed to
+    // `other`: cross-tenant settlement is refused and nothing moves.
+    clear_deadletters_naming(&h, &["tr_cov_cross"]).await;
+    mock.publish_payment(&recurring_payment(
+        "tr_cov_cross",
+        invoice_id,
+        4_900,
+        Some(other),
+    ));
+    let (status, _) = deliver_payment(&app, "tr_cov_cross").await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a cross-tenant settlement is refused"
+    );
+    let rows = webhook_rows(&h, "tr_cov_cross").await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, "failed");
+    assert!(
+        rows[0].1.clone().unwrap_or_default().contains("cross-tenant"),
+        "the refusal names the condition"
+    );
+    let (invoice_status, payment_id, allocations): (String, Option<String>, i64) = sqlx::query_as(
+        "SELECT status, mollie_payment_id,
+                (SELECT COUNT(*) FROM invoice_payment_allocations WHERE invoice_id = $1)
+         FROM invoices WHERE id = $1",
+    )
+    .bind(invoice_id)
+    .fetch_one(&h.pool)
+    .await
+    .expect("invoice");
+    assert_eq!(invoice_status, "pending");
+    assert_eq!(payment_id, None);
+    assert_eq!(allocations, 0);
+
+    // A token delivery for a tenant with no subscription row is
+    // acknowledged (the mandate is recoverable from the provider) and no
+    // row is invented.
+    mock.publish_payment(&first_payment(
+        "tr_cov_bind_orphan",
+        other,
+        "mdt_cov_orphan",
+        None,
+    ));
+    expect_mollie_ok(&app, "tr_cov_bind_orphan").await;
+    let other_rows: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM mollie_subscriptions WHERE tenant_id = $1")
+            .bind(other)
+            .fetch_one(&h.pool)
+            .await
+            .expect("other subscriptions");
+    assert_eq!(other_rows, 0, "the acknowledgement invents no row");
+    let owner_token_after: Option<String> = sqlx::query_scalar(
+        "SELECT mollie_mandate_id FROM mollie_subscriptions
+         WHERE mollie_subscription_id = 'sub_cov_bound'",
+    )
+    .fetch_one(&h.pool)
+    .await
+    .expect("owner subscription");
+    assert_eq!(
+        owner_token_after.as_deref(),
+        Some("mdt_cov_owner"),
+        "another tenant's delivery never rewrites the owner's binding"
+    );
+});
+
+db_test!(
+    unverified_mollie_contract_binding_never_grants_a_paid_plan,
+    |h| {
+        let mock = mock_mollie_api();
+        let app = billing_service::routes::router(h.state.clone());
+        let tenant = "cov_unverified_price";
+        seed_tenant(&h, tenant, "free").await;
+
+        // A completed first payment is not an entitlement: it mints a
+        // mandate but no plan and no subscription row.
+        mock.publish_payment(&first_payment(
+            "tr_cov_unverified",
+            tenant,
+            "mdt_cov_unverified",
+            None,
+        ));
+        expect_mollie_ok(&app, "tr_cov_unverified").await;
+
+        let plan: String = sqlx::query_scalar("SELECT plan FROM tenants WHERE id = $1")
+            .bind(tenant)
+            .fetch_one(&h.pool)
+            .await
+            .expect("tenant plan");
+        assert_eq!(plan, "free", "Mollie-unverified must never equal paid");
+        let subs: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM mollie_subscriptions WHERE tenant_id = $1")
+                .bind(tenant)
+                .fetch_one(&h.pool)
+                .await
+                .expect("count subscriptions");
+        assert_eq!(subs, 0, "refused events write no subscription rows");
+
+        // A plain checkout AUTHORISATION is informational: acknowledged, and
+        // the plan still never moves.
+        mock.publish_payment(&payment_document(
+            "tr_cov_checkout",
+            "paid",
+            2_900,
+            Some("oneoff"),
+            "cst_cov",
+            None,
+            serde_json::json!({ "tenant_id": tenant, "reference": "checkout:growth:monthly" }),
+        ));
+        expect_mollie_ok(&app, "tr_cov_checkout").await;
+        let plan: String = sqlx::query_scalar("SELECT plan FROM tenants WHERE id = $1")
+            .bind(tenant)
+            .fetch_one(&h.pool)
+            .await
+            .expect("tenant plan");
+        assert_eq!(
+            plan, "free",
+            "a checkout authorisation is never an entitlement"
+        );
+    }
+);
+
+db_test!(
+    double_webhook_recurring_charge_and_token_binding_is_one_transition,
+    |h| {
+        let mock = mock_mollie_api();
+        let app = billing_service::routes::router(h.state.clone());
+        let tenant = "cov_wh_double";
+        seed_tenant(&h, tenant, "free").await;
+        let invoice_id = Uuid::new_v4();
+        seed_cov_local_invoice(&h, tenant, invoice_id, 2_900, 0, 2_900, "eur").await;
+        seed_cov_subscription(&h, tenant, "sub_cov_double", None).await;
+
+        mock.publish_payment(&recurring_payment(
+            "tr_cov_double",
+            invoice_id,
+            2_900,
+            Some(tenant),
+        ));
+        expect_mollie_ok(&app, "tr_cov_double").await;
+
+        // The FIRST payment of the tenant's next cycle mints/binds the
+        // mandate; its informational authorisation settles nothing.
+        mock.publish_payment(&first_payment(
+            "tr_cov_double_token",
+            tenant,
+            "mdt_cov_double",
+            None,
+        ));
+        expect_mollie_ok(&app, "tr_cov_double_token").await;
+
+        let (invoice_status, allocations): (String, i64) = sqlx::query_as(
+            "SELECT status,
+                    (SELECT COUNT(*) FROM invoice_payment_allocations WHERE invoice_id = $1)
+             FROM invoices WHERE id = $1",
+        )
+        .bind(invoice_id)
+        .fetch_one(&h.pool)
+        .await
+        .expect("invoice");
+        assert_eq!(invoice_status, "paid");
+        assert_eq!(allocations, 1, "the two deliveries settle exactly once");
+
+        let (token_bound, sub_status, sub_rows): (Option<String>, String, i64) = sqlx::query_as(
+            "SELECT MIN(mollie_mandate_id), MIN(status), COUNT(*)
+             FROM mollie_subscriptions WHERE tenant_id = $1",
+        )
+        .bind(tenant)
+        .fetch_one(&h.pool)
+        .await
+        .expect("subscription");
+        assert_eq!(
+            token_bound.as_deref(),
+            Some("mdt_cov_double"),
+            "the token delivery binds the mandate"
+        );
+        assert_eq!(
+            sub_status, "active",
+            "the token delivery is not a subscription state transition"
+        );
+        assert_eq!(sub_rows, 1, "no second subscription row is invented");
+
+        let plan: String = sqlx::query_scalar("SELECT plan FROM tenants WHERE id = $1")
+            .bind(tenant)
+            .fetch_one(&h.pool)
+            .await
+            .expect("tenant plan");
+        assert_eq!(
+            plan, "free",
+            "provider deliveries never mint the tenant's plan"
+        );
+
+        let processed: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM mollie_webhook_events
+             WHERE mollie_payment_id IN ('tr_cov_double', 'tr_cov_double_token')
+               AND status = 'processed'",
+        )
+        .fetch_one(&h.pool)
+        .await
+        .expect("claim rows");
+        assert_eq!(
+            processed, 3,
+            "the recurring charge and BOTH facts of the first payment are processed"
+        );
     }
 );
 
@@ -4851,7 +5017,7 @@ db_test!(reconciliation_reports_candidates_and_replays_once, |h| {
 db_test!(
     deadletter_retry_worker_is_a_clean_noop_without_entries,
     |h| {
-        billing_service::adyen_webhooks::retry_deadlettered_webhooks(&h.state)
+        billing_service::mollie_webhooks::retry_deadlettered_webhooks(&h.state)
             .await
             .expect("retry with an empty deadletter set");
     }
@@ -4885,8 +5051,8 @@ db_test!(
 
         // A subscription without a billing cycle cannot be prorated.
         sqlx::query(
-            "INSERT INTO adyen_subscriptions
-             (tenant_id, adyen_subscription_id, plan, status, adyen_shopper_reference)
+            "INSERT INTO mollie_subscriptions
+             (tenant_id, mollie_subscription_id, plan, status, mollie_customer_id)
          VALUES ($1, 'sub_cov_proration', 'growth', 'active', $1)",
         )
         .bind(tenant)
@@ -4894,7 +5060,7 @@ db_test!(
         .await
         .expect("subscription without cycle");
         sqlx::query(
-            "UPDATE adyen_subscriptions SET billing_cycle_start = NULL WHERE tenant_id = $1",
+            "UPDATE mollie_subscriptions SET billing_cycle_start = NULL WHERE tenant_id = $1",
         )
         .bind(tenant)
         .execute(&h.pool)
@@ -4915,7 +5081,7 @@ db_test!(
         // With a real cycle the preview computes and reconciles internally.
         let now = Utc::now();
         sqlx::query(
-            "UPDATE adyen_subscriptions
+            "UPDATE mollie_subscriptions
          SET billing_cycle_start = $2, billing_cycle_end = $3, billing_interval = 'monthly'
          WHERE tenant_id = $1",
         )
@@ -5741,7 +5907,7 @@ db_test!(
         let now = Utc::now();
         let input = || CreateInvoiceInput {
             tenant_id: tenant.to_string(),
-            adyen_psp_reference: None,
+            mollie_payment_id: None,
             line_items: vec![NewLineItem {
                 description: "Usage 2026-09".into(),
                 quantity: 10,
@@ -6054,136 +6220,6 @@ db_test!(overage_sweep_backfills_legacy_pricing_snapshot_once, |h| {
     invalidate_subscription_cache("tenant-that-does-not-exist");
 });
 
-db_test!(
-    adyen_webhook_cross_tenant_binding_and_bad_states_refuse,
-    |h| {
-        let app = billing_service::routes::router(h.state.clone());
-        let owner = "cov_wh_bind_a";
-        let other = "cov_wh_bind_b";
-        seed_tenant(&h, owner, "free").await;
-        seed_tenant(&h, other, "free").await;
-        seed_cov_subscription(&h, owner, "sub_cov_bound", None).await;
-        let invoice_id = Uuid::new_v4();
-        seed_cov_local_invoice(&h, owner, invoice_id, 4_900, 0, 4_900, "eur").await;
-
-        // The token delivery binds the OWNER's subscription (positive control).
-        let owner_token = cov_token_item(
-            "psp_cov_bind_owner",
-            "psp_cov_original",
-            owner,
-            "tok_cov_owner",
-        );
-        let owner_token_id = adyen_notification_id_for(&owner_token);
-        expect_adyen_ok(
-            &h,
-            &app,
-            signed_adyen_envelope(owner_token, ADYEN_HMAC_KEY_HEX),
-            &owner_token_id,
-        )
-        .await;
-        let bound: Option<String> = sqlx::query_scalar(
-            "SELECT adyen_recurring_detail_reference FROM adyen_subscriptions
-             WHERE adyen_subscription_id = 'sub_cov_bound'",
-        )
-        .fetch_one(&h.pool)
-        .await
-        .expect("owner subscription");
-        assert_eq!(bound.as_deref(), Some("tok_cov_owner"));
-
-        // The invoice belongs to `owner` but the notification attributes the
-        // payment to `other`: cross-tenant settlement is refused and the
-        // invoice stays untouched.
-        let cross = cov_authorisation_item("psp_cov_cross", invoice_id, 4_900, Some(other));
-        let cross_id = adyen_notification_id_for(&cross);
-        let (status, _) = post_adyen(&app, signed_adyen_envelope(cross, ADYEN_HMAC_KEY_HEX)).await;
-        assert_eq!(
-            status,
-            StatusCode::BAD_REQUEST,
-            "a cross-tenant settlement is refused"
-        );
-        let (event_status, error) = webhook_event_row(&h, &cross_id).await;
-        assert_eq!(event_status, "failed");
-        assert!(
-            error.unwrap_or_default().contains("cross-tenant"),
-            "the refusal names the condition"
-        );
-        let (invoice_status, psp, allocations): (String, Option<String>, i64) = sqlx::query_as(
-            "SELECT status, adyen_psp_reference,
-                    (SELECT COUNT(*) FROM invoice_payment_allocations WHERE invoice_id = $1)
-             FROM invoices WHERE id = $1",
-        )
-        .bind(invoice_id)
-        .fetch_one(&h.pool)
-        .await
-        .expect("invoice");
-        assert_eq!(
-            invoice_status, "pending",
-            "the foreign shopper cannot settle it"
-        );
-        assert_eq!(psp, None);
-        assert_eq!(allocations, 0);
-
-        // A `RECURRING_CONTRACT` for a tenant with no subscription row has
-        // nothing to bind: refused and deadlettered, never silently dropped.
-        let orphan = cov_token_item(
-            "psp_cov_bind_orphan",
-            "psp_cov_original",
-            other,
-            "tok_cov_orphan",
-        );
-        let orphan_id = adyen_notification_id_for(&orphan);
-        let (status, _) = post_adyen(&app, signed_adyen_envelope(orphan, ADYEN_HMAC_KEY_HEX)).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        let (event_status, error) = webhook_event_row(&h, &orphan_id).await;
-        assert_eq!(event_status, "failed");
-        assert!(
-            error.unwrap_or_default().contains("no subscription row"),
-            "the refusal names the missing binding target"
-        );
-        let other_rows: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM adyen_subscriptions WHERE tenant_id = $1")
-                .bind(other)
-                .fetch_one(&h.pool)
-                .await
-                .expect("other subscriptions");
-        assert_eq!(other_rows, 0, "the refused delivery invents no row");
-        let owner_token_after: Option<String> = sqlx::query_scalar(
-            "SELECT adyen_recurring_detail_reference FROM adyen_subscriptions
-             WHERE adyen_subscription_id = 'sub_cov_bound'",
-        )
-        .fetch_one(&h.pool)
-        .await
-        .expect("owner subscription");
-        assert_eq!(
-            owner_token_after.as_deref(),
-            Some("tok_cov_owner"),
-            "another tenant's refusal never rewrites the owner's binding"
-        );
-
-        // A token delivery without a token binds nothing either.
-        let mut no_token = cov_token_item(
-            "psp_cov_bind_missing",
-            "psp_cov_original",
-            owner,
-            "tok_cov_unused",
-        );
-        no_token["additionalData"]
-            .as_object_mut()
-            .expect("additionalData object")
-            .remove("recurringDetailReference");
-        let no_token_id = adyen_notification_id_for(&no_token);
-        let (status, _) =
-            post_adyen(&app, signed_adyen_envelope(no_token, ADYEN_HMAC_KEY_HEX)).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        let (_, error) = webhook_event_row(&h, &no_token_id).await;
-        assert!(
-            error
-                .unwrap_or_default()
-                .contains("recurringDetailReference"),
-            "the refusal names the missing token"
-        );
-    }
-);
 
 // ---------------------------------------------------------------------------
 // E-SWEEP-TRIGGER — on-demand overage sweep entrypoint
@@ -6564,184 +6600,3 @@ fn overage_math_is_exact_and_quotes_only_catalog_rates() {
     assert_eq!(calculate_overage_cost_with_rate(101, 100, 80), 1);
 }
 
-// Adyen-unverified ≠ paid: no provider delivery may mint entitlement. The
-// token-binding path needs OUR `adyen_subscriptions` row, and an unbound
-// provider contract is refused (deadlettered for replay) instead of being
-// silently mapped to a paid plan.
-db_test!(
-    unverified_adyen_contract_binding_never_grants_a_paid_plan,
-    |h| {
-        let app = billing_service::routes::router(h.state.clone());
-        let tenant = "cov_unverified_price";
-        seed_tenant(&h, tenant, "free").await;
-
-        // Correctly signed, but no subscription row exists to bind: refused.
-        let orphan = cov_token_item(
-            "psp_cov_unverified",
-            "psp_cov_original",
-            tenant,
-            "tok_cov_unverified",
-        );
-        let orphan_id = adyen_notification_id_for(&orphan);
-        let (status, _) = post_adyen(&app, signed_adyen_envelope(orphan, ADYEN_HMAC_KEY_HEX)).await;
-        assert_eq!(
-            status,
-            StatusCode::BAD_REQUEST,
-            "an unbound provider contract must be refused, not silently mapped"
-        );
-        let (event_status, error) = webhook_event_row(&h, &orphan_id).await;
-        assert_eq!(event_status, "failed");
-        assert!(error.unwrap_or_default().contains("no subscription row"));
-
-        let plan: String = sqlx::query_scalar("SELECT plan FROM tenants WHERE id = $1")
-            .bind(tenant)
-            .fetch_one(&h.pool)
-            .await
-            .expect("tenant plan");
-        assert_eq!(plan, "free", "Adyen-unverified must never equal paid");
-        let subs: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM adyen_subscriptions WHERE tenant_id = $1")
-                .bind(tenant)
-                .fetch_one(&h.pool)
-                .await
-                .expect("count subscriptions");
-        assert_eq!(subs, 0, "refused events write no subscription rows");
-
-        // A checkout AUTHORISATION (success WITHOUT the recurring processing
-        // model) is informational: acknowledged, and the plan still never moves.
-        let checkout = serde_json::json!({
-            "pspReference": "psp_cov_checkout",
-            "merchantAccountCode": "ApexMailECOM",
-            "merchantReference": "cov-checkout-ref",
-            "amount": { "currency": "EUR", "value": 2_900 },
-            "eventCode": "AUTHORISATION",
-            "eventDate": "2026-10-14T10:00:00+00:00",
-            "success": "true",
-            "paymentMethod": "visa",
-            "additionalData": { "shopperReference": tenant }
-        });
-        let checkout_id = adyen_notification_id_for(&checkout);
-        expect_adyen_ok(
-            &h,
-            &app,
-            signed_adyen_envelope(checkout, ADYEN_HMAC_KEY_HEX),
-            &checkout_id,
-        )
-        .await;
-        let plan: String = sqlx::query_scalar("SELECT plan FROM tenants WHERE id = $1")
-            .bind(tenant)
-            .fetch_one(&h.pool)
-            .await
-            .expect("tenant plan");
-        assert_eq!(
-            plan, "free",
-            "a checkout authorisation is never an entitlement"
-        );
-        let subs: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM adyen_subscriptions WHERE tenant_id = $1")
-                .bind(tenant)
-                .fetch_one(&h.pool)
-                .await
-                .expect("count subscriptions");
-        assert_eq!(subs, 0, "checkout writes no subscription rows");
-    }
-);
-
-// The Adyen "double webhook": a recurring AUTHORISATION and the
-// RECURRING_CONTRACT token delivery for the SAME payment (tied by
-// `originalReference`) are two deliveries of ONE logical transition —
-// exactly one settlement/allocation, the token bound, and no second
-// transition (no second allocation, no second subscription row, no plan
-// move).
-db_test!(
-    double_webhook_recurring_charge_and_token_binding_is_one_transition,
-    |h| {
-        let app = billing_service::routes::router(h.state.clone());
-        let tenant = "cov_wh_double";
-        seed_tenant(&h, tenant, "free").await;
-        let invoice_id = Uuid::new_v4();
-        seed_cov_local_invoice(&h, tenant, invoice_id, 2_900, 0, 2_900, "eur").await;
-        seed_cov_subscription(&h, tenant, "sub_cov_double", None).await;
-
-        let charge = cov_authorisation_item("psp_cov_double", invoice_id, 2_900, Some(tenant));
-        let charge_id = adyen_notification_id_for(&charge);
-        expect_adyen_ok(
-            &h,
-            &app,
-            signed_adyen_envelope(charge, ADYEN_HMAC_KEY_HEX),
-            &charge_id,
-        )
-        .await;
-
-        let token = cov_token_item(
-            "psp_cov_double_token",
-            "psp_cov_double",
-            tenant,
-            "tok_cov_double",
-        );
-        let token_id = adyen_notification_id_for(&token);
-        assert_ne!(token_id, charge_id, "the two deliveries have distinct ids");
-        expect_adyen_ok(
-            &h,
-            &app,
-            signed_adyen_envelope(token, ADYEN_HMAC_KEY_HEX),
-            &token_id,
-        )
-        .await;
-
-        let (invoice_status, allocations): (String, i64) = sqlx::query_as(
-            "SELECT status,
-                    (SELECT COUNT(*) FROM invoice_payment_allocations WHERE invoice_id = $1)
-             FROM invoices WHERE id = $1",
-        )
-        .bind(invoice_id)
-        .fetch_one(&h.pool)
-        .await
-        .expect("invoice");
-        assert_eq!(invoice_status, "paid");
-        assert_eq!(allocations, 1, "the two deliveries settle exactly once");
-
-        let (token_bound, sub_status, sub_rows): (Option<String>, String, i64) = sqlx::query_as(
-            "SELECT MIN(adyen_recurring_detail_reference), MIN(status), COUNT(*)
-             FROM adyen_subscriptions WHERE tenant_id = $1",
-        )
-        .bind(tenant)
-        .fetch_one(&h.pool)
-        .await
-        .expect("subscription");
-        assert_eq!(
-            token_bound.as_deref(),
-            Some("tok_cov_double"),
-            "the token delivery binds the token"
-        );
-        assert_eq!(
-            sub_status, "active",
-            "the token delivery is not a subscription state transition"
-        );
-        assert_eq!(sub_rows, 1, "no second subscription row is invented");
-
-        let plan: String = sqlx::query_scalar("SELECT plan FROM tenants WHERE id = $1")
-            .bind(tenant)
-            .fetch_one(&h.pool)
-            .await
-            .expect("tenant plan");
-        assert_eq!(
-            plan, "free",
-            "provider deliveries never mint the tenant's plan"
-        );
-
-        let processed: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM adyen_webhook_events
-             WHERE adyen_notification_id IN ($1, $2) AND status = 'processed'",
-        )
-        .bind(&charge_id)
-        .bind(&token_id)
-        .fetch_one(&h.pool)
-        .await
-        .expect("claim rows");
-        assert_eq!(
-            processed, 2,
-            "each delivery has its own claim row; both are processed"
-        );
-    }
-);

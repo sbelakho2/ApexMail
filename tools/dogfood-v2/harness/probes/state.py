@@ -1,6 +1,6 @@
 """State-machine abuse battery (partition: state).
 
-Replay of single-use artifacts (idempotency keys, Adyen events, MFA
+Replay of single-use artifacts (idempotency keys, Mollie events, MFA
 challenges), double-submits under real concurrency, and out-of-order
 transitions with the DB invariant asserted after each.
 """
@@ -8,10 +8,9 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
-import time
 import uuid
 
-from ..adyen import sign_notification
+from ..mollie import MOCK, MockMollieServer, money, post_webhook
 from ..assertions import Checks, refusal_ok
 from ..fixtures import ensure_verified_domain
 from ..identity import Session
@@ -195,91 +194,81 @@ def out_of_order(ctx):
     return checks.obs
 
 
-@probe("p.state.adyen_notification_replay", "state", severity="P1",
-       description="A replayed Adyen notification (valid in-body HMAC) is idempotent and never 5xx")
-def adyen_notification_replay(ctx):
-    checks = Checks("p.state.adyen_notification_replay", "api:POST /webhooks/adyen")
-    secret = _env_value("ADYEN_HMAC_KEY", "dev-adyen-webhook-secret-local-only-0123456789")
-    psp_reference = f"psp_dgv2_{uuid.uuid4().hex[:16]}"
-    item = {
-        "pspReference": psp_reference,
-        "originalReference": "",
-        "merchantAccountCode": "ApexMailDogfoodECOM",
-        "merchantReference": f"dgv2-refund-{uuid.uuid4().hex[:10]}",
-        # amounts are minor units (cents), EUR
-        "amount": {"value": 2900, "currency": "EUR"},
-        "eventCode": "REFUND",
-        "success": "true",
-        "eventDate": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime()),
-        "paymentMethod": "visa",
-    }
-    item["additionalData"] = {"hmacSignature": sign_notification(item, secret)}
-    payload = json.dumps({
-        "live": "false",
-        "notificationItems": [{"NotificationRequestItem": item}],
-    }).encode()
-    headers = {"Content-Type": "application/json"}
-    first = ctx.http.call("POST", "/webhooks/adyen", raw=payload, headers=headers)
-    second = ctx.http.call("POST", "/webhooks/adyen", raw=payload, headers=headers)
-    checks.add(
-        "a correctly signed notification is accepted and answered `[accepted]`",
-        first.status == 200 and "[accepted]" in first.text,
-        observed=f"first={first.status} body={first.text[:80]!r}",
-        expected="200 with the bare `[accepted]` body", severity="P1",
-        surface="api:POST /webhooks/adyen",
-    )
-    checks.add(
-        "the signed notification is never answered with a 5xx",
-        first.status < 500 and second.status < 500,
-        observed=f"first={first.status} second={second.status} bodies={first.text[:80]!r}/{second.text[:80]!r}",
-        expected="2xx/4xx, never a crash", severity="P1", surface="api:POST /webhooks/adyen",
-    )
-    if ctx.db is not None:
-        rows = ctx.db.count("adyen_webhook_events", adyen_psp_reference=psp_reference)
-        checks.add(
-            "the replayed notification does not create duplicate processing rows",
-            rows <= 1, observed=f"adyen_webhook_events rows for the pspReference={rows}",
-            expected="<=1 (idempotent by notification id)", severity="P1",
-            surface="table:adyen_webhook_events",
+@probe("p.state.mollie_notification_replay", "state", severity="P1",
+       description="A replayed id-only Mollie webhook is idempotent and never 5xx")
+def mollie_notification_replay(ctx):
+    checks = Checks("p.state.mollie_notification_replay", "api:POST /webhooks/mollie")
+    server = MockMollieServer(store=MOCK).start()
+    try:
+        payment = server.store.create_payment(
+            {
+                "amount": money("EUR", 2900),
+                "description": f"dogfood-v2 payment {uuid.uuid4().hex[:10]}",
+                "sequenceType": "first",
+                "metadata": {"tenant_id": "dogfood-v2"},
+            }
         )
-    tampered_item = dict(item)
-    tampered_item["additionalData"] = dict(item["additionalData"])
-    tampered_item["success"] = "false"
-    tampered = json.dumps({
-        "live": "false",
-        "notificationItems": [{"NotificationRequestItem": tampered_item}],
-    }).encode()
-    bad = ctx.http.call("POST", "/webhooks/adyen", raw=tampered, headers=headers)
-    checks.add(
-        "a tampered Adyen notification is refused (the HMAC binds the item fields)",
-        bad.status in (400, 401, 403), observed=f"status={bad.status} body={bad.text[:120]!r}",
-        expected="4xx signature refusal", severity="P1", surface="api:POST /webhooks/adyen",
-    )
-    unsigned = ctx.http.call("POST", "/webhooks/adyen", raw=_unsigned_envelope(item), headers=headers)
-    checks.add(
-        "a notification without additionalData.hmacSignature is refused",
-        unsigned.status in (400, 401, 403, 503), observed=f"status={unsigned.status} body={unsigned.text[:120]!r}",
-        expected="4xx/503 named refusal", severity="P1", surface="api:POST /webhooks/adyen",
-    )
+        payment_id = payment["id"]
+        first = post_webhook(ctx.cfg.base, payment_id)
+        second = post_webhook(ctx.cfg.base, payment_id)
+        checks.add(
+            "an id-only payment webhook (form `id=tr_…`) is acknowledged with 200",
+            first[0] == 200,
+            observed=f"status={first[0]} body={first[1][:100]!r}",
+            expected="200 (anything else makes Mollie retry for ~26 hours)",
+            severity="P1",
+            surface="api:POST /webhooks/mollie",
+        )
+        checks.add(
+            "the replayed id-only webhook is acknowledged with 200 too",
+            second[0] == 200,
+            observed=f"status={second[0]} body={second[1][:100]!r}",
+            expected="200 on the replay as well",
+            severity="P1",
+            surface="api:POST /webhooks/mollie",
+        )
+        checks.add(
+            "the webhook never answers with a 5xx",
+            first[0] < 500 and second[0] < 500,
+            observed=f"first={first[0]} second={second[0]}",
+            expected="2xx/4xx, never a crash",
+            severity="P1",
+            surface="api:POST /webhooks/mollie",
+        )
+        unknown_id = f"tr_unknown_{uuid.uuid4().hex[:16]}"
+        unknown = post_webhook(ctx.cfg.base, unknown_id)
+        checks.add(
+            "an unknown Mollie id is acknowledged with 200 (unknown ids stop retries)",
+            unknown[0] == 200,
+            observed=f"status={unknown[0]} body={unknown[1][:100]!r}",
+            expected="200; unknown ids are not an error",
+            severity="P1",
+            surface="api:POST /webhooks/mollie",
+        )
+        malformed = ctx.http.call(
+            "POST",
+            "/webhooks/mollie",
+            raw=b"not-an-id",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        checks.add(
+            "a body without a usable id is a named 4xx, never a 5xx",
+            400 <= malformed.status < 500,
+            observed=f"status={malformed.status} body={malformed.text[:120]!r}",
+            expected="4xx naming the missing/invalid id",
+            severity="P1",
+            surface="api:POST /webhooks/mollie",
+        )
+        if ctx.db is not None:
+            rows = ctx.db.count("mollie_webhook_events", mollie_payment_id=payment_id)
+            checks.add(
+                "the replayed webhook does not create duplicate processing rows",
+                rows <= 1,
+                observed=f"mollie_webhook_events rows for the payment id={rows}",
+                expected="<=1 (idempotent by content-addressed event id)",
+                severity="P1",
+                surface="table:mollie_webhook_events",
+            )
+    finally:
+        server.stop()
     return checks.obs
-
-
-def _unsigned_envelope(item: dict) -> bytes:
-    """The same notification with additionalData stripped (the unsigned arm)."""
-    stripped = dict(item)
-    stripped.pop("additionalData", None)
-    return json.dumps({
-        "live": "false",
-        "notificationItems": [{"NotificationRequestItem": stripped}],
-    }).encode()
-
-
-def _env_value(key: str, fallback: str) -> str:
-    from ..config import REPO_ROOT
-
-    env_file = REPO_ROOT / ".env"
-    if env_file.exists():
-        for line in env_file.read_text(errors="ignore").splitlines():
-            if line.startswith(f"{key}="):
-                return line.split("=", 1)[1].strip()
-    return fallback

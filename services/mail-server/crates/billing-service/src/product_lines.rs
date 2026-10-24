@@ -12,7 +12,7 @@
 //! use — `billing_periods` rows (one per tenant/line/period), an invoice
 //! created with a period-identity marker, per-period state transitions and
 //! the shared collection ladder ([`crate::overage::collect_usage_invoice`]:
-//! wallet first, then the recurring Adyen charge, then dunning).
+//! wallet first, then the recurring Mollie charge, then dunning).
 //!
 //! The three flat lines are recorded by the CP purchase writer
 //! ([`purchase_product_line`] / [`cancel_product_line`]) and billed monthly
@@ -1088,7 +1088,7 @@ async fn process_tenant_month(
 
     let input = CreateInvoiceInput {
         tenant_id: tenant_id.to_string(),
-        adyen_psp_reference: None,
+        mollie_payment_id: None,
         line_items: to_new_line_items(&line_items),
         period_start,
         period_end,

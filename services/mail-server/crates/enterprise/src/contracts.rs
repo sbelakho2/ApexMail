@@ -657,7 +657,7 @@ impl ContractService {
         .map_err(|error| format!("Check replacement contract: {error}"))?;
 
         if should_downgrade_after_contract_termination(has_active_replacement) {
-            // Never mint another paid plan locally. A verified Adyen event
+            // Never mint another paid plan locally. A verified Mollie event
             // or separately active signed contract is required for paid
             // access after this Enterprise authority ends.
             sqlx::query("UPDATE tenants SET plan = $1, updated_at = NOW() WHERE id = $2")

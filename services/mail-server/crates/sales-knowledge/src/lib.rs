@@ -444,7 +444,7 @@ impl SalesKnowledgeBase {
         // ── Security / compliance ───────────────────────────────────────
         facts.push(fact(
             "KB-SEC-FRAMEWORK-STATUS",
-            "As of 2026-07-29 ApexMail holds no SOC 2 Type II certification and no HIPAA certification: SOC 2 Type II and HIPAA are planned, ISO 27001 is not planned, and PCI DSS is handled by Adyen.",
+            "As of 2026-07-29 ApexMail holds no SOC 2 Type II certification and no HIPAA certification: SOC 2 Type II and HIPAA are planned, ISO 27001 is not planned, and PCI DSS is handled by Mollie.",
             KnowledgeStatus::Verified,
             framework_doc,
             None,

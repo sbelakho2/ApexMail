@@ -287,16 +287,18 @@ Dedicated IPs are managed as **Hetzner Cloud floating IPs** by the [`DedicatedIp
 
 #### 3.5.1 Provisioning
 
-Triggered automatically when a tenant upgrades to a plan with dedicated IPs (Adyen webhook → `auto_provision_dedicated_ips_background()`), or manually via `POST /v1/dedicated-ips`.
+Triggered automatically when a tenant upgrades to a plan with dedicated IPs (Mollie webhook → `auto_provision_dedicated_ips_background()`), or manually via `POST /v1/dedicated-ips`.
 
 ```mermaid
 sequenceDiagram
-    participant Adyen as Adyen Webhook
+    participant Mollie as Mollie Webhook
     participant API as API Server
     participant Hetzner as Hetzner Cloud API
     participant DB as PostgreSQL
 
-    Adyen->>API: plan_change event
+    Mollie->>API: POST /webhooks/mollie (id=tr_…)
+    API->>Mollie: GET /v2/payments/{id} (Bearer)
+    Mollie-->>API: payment (status, metadata)
     API->>API: auto_provision_dedicated_ips_background()
     API->>Hetzner: POST /v1/floating_ips (create)
     Hetzner-->>API: floating_ip { id, ip }
@@ -304,7 +306,7 @@ sequenceDiagram
     API->>Hetzner: POST /v1/floating_ips/{id}/actions/change_dns_ptr (rDNS: mail.<domain>)
     API->>DB: INSERT dedicated_ips (status='warming')
     Note over DB: (Historical) trigger updated transport_routing_cache
-    API-->>Adyen: 200 OK
+    API-->>Mollie: 200 OK
 ```
 
 The provisioning flow in detail:
@@ -738,7 +740,7 @@ All events are:
 - [ ] Health endpoints respond: `GET /health`, `GET /ready`
 - [ ] Database migrations applied (the deploy runs the `migrator` one-shot job automatically — see deploy/DEPLOYMENT.md § "Database migrations"; verify `SELECT count(*) FROM _sqlx_migrations` matches the migration count)
 - [ ] WAL archiving and automated backups configured (to Hetzner S3)
-- [ ] Adyen webhook endpoint configured for billing integration
+- [ ] Mollie webhook endpoint configured for billing integration: `MOLLIE_WEBHOOK_URL` points at `/webhooks/mollie` (id-only form; no signature), and `MOLLIE_API_KEY` can fetch the referenced object
 - [ ] Alerting rules configured in Grafana/Prometheus
 
 ---
@@ -771,7 +773,7 @@ All events are:
 |---------|-------------|------------|
 | Messages unexpectedly routed to SES | no `dedicated_ips` row bound to the tenant | Verify the tenant's dedicated IP is `warming`/`active`; route selection reads `dedicated_ips` directly |
 | Messages unexpectedly routed to SMTP | Tenant incorrectly has active dedicated IP | Verify `dedicated_ips` table for the tenant; check if retired IPs are still in cache |
-| Upgrade/downgrade not triggering IP provision/release | Adyen webhook not firing | Check Adyen webhook logs; verify the Adyen webhook reaches `POST /v1/dedicated-ips` |
+| Upgrade/downgrade not triggering IP provision/release | Mollie webhook not firing, or the verification fetch failing | Check that `MOLLIE_WEBHOOK_URL` reaches `/webhooks/mollie`, that `MOLLIE_API_KEY` fetches the payment, and that the webhook path reaches `POST /v1/dedicated-ips` |
 
 ### 7.4 Warmup Schedule Discrepancy
 

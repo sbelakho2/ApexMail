@@ -6119,7 +6119,15 @@ paths:
   /billing/checkout:
     post:
       operationId: createBillingCheckoutSession
-      summary: Create a Adyen checkout session
+      summary: Create a Mollie payment for checkout
+      description: |
+        Resolves `priceId` server-side to an active self-service catalog plan,
+        creates (or reuses) the Mollie customer (`cst_…`) and creates a Mollie
+        payment (`tr_…`) with `sequenceType: first` and the catalog amount as a
+        decimal string. The response carries the hosted `_links.checkout.href`
+        as `url` and the payment id as `sessionId`. Creating the payment does
+        not grant an entitlement; only an authenticated fetch after the
+        id-only webhook can settle it.
       tags:
         - Billing
       parameters:
@@ -6143,13 +6151,13 @@ paths:
               $ref: '#/components/schemas/BillingCheckoutSessionRequest'
       responses:
         '200':
-          description: Checkout session created.
+          description: Mollie payment created; the customer is redirected to `url`.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/BillingCheckoutSessionResponse'
         '400':
-          description: Invalid checkout session input.
+          description: Invalid checkout input (unsupported priceId, unapproved redirect URL, or no Mollie configuration).
           content:
             application/json:
               schema:
@@ -6168,7 +6176,7 @@ paths:
   /billing/portal:
     post:
       operationId: createBillingPortalSession
-      summary: Return the console billing settings URL (Adyen has no hosted portal)
+      summary: Return the console billing settings URL (Mollie has no hosted portal)
       tags:
         - Billing
       parameters:
@@ -6547,7 +6555,7 @@ paths:
     get:
       operationId: getBillingSubscription
       summary: Get subscription details
-      description: Return the current Adyen-backed subscription details for the authenticated tenant.
+      description: Return the current Mollie-backed subscription details for the authenticated tenant.
       tags:
         - Billing
       responses:
@@ -6867,49 +6875,42 @@ paths:
         '429':
           $ref: '#/components/responses/RateLimitError'
 
-  /webhooks/adyen:
+  /webhooks/mollie:
     post:
-      operationId: receiveAdyenWebhook
-      summary: Receive Adyen webhook
-      description: Adyen webhook endpoint with signature verification, event deduplication, and dead-letter handling for malformed or failed events.
+      operationId: receiveMollieWebhook
+      summary: Receive Mollie webhook
+      description: |
+        Mollie posts `application/x-www-form-urlencoded` with one `id`
+        parameter: `id=tr_…` for a payment or `id=re_…` for a refund. There is
+        no signature, status or event type. The endpoint fetches the object
+        with `Authorization: Bearer $MOLLIE_API_KEY`, dedupes the fetched fact,
+        and answers 200 for anything it accepts (including an unknown id).
+        Any non-200 makes Mollie retry (10 attempts over roughly 26 hours).
       tags:
         - Webhooks
         - Billing
-      parameters:
-        - name: adyen-hmac-signature
-          in: header
-          required: true
-          description: Adyen webhook signature header
-          schema:
-            type: string
-        - name: Idempotency-Key
-          in: header
-          required: false
-          description: |
-            Idempotency key. If a request with the same key was processed within the
-            idempotency window (configurable, typically 5 minutes), the cached response
-            is returned without re-execution. Idempotency is scoped to the authenticated
-            principal — two different API keys cannot replay each other's requests.
-          schema:
-            type: string
-            format: uuid
-          example: 7a8e3b1c-9d4f-4e2a-b6c8-1d2e3f4a5b6c
       requestBody:
         required: true
         content:
-          application/json:
+          application/x-www-form-urlencoded:
             schema:
               type: object
-              additionalProperties: true
+              required:
+                - id
+              properties:
+                id:
+                  type: string
+                  pattern: '^(tr|re)_[A-Za-z0-9_]+$'
+                  example: tr_5B8cwPMGnU
       responses:
         '200':
-          description: Webhook accepted or duplicate ignored
+          description: Acknowledged (accepted, duplicate, or unknown id)
           content:
-            application/json:
+            text/plain:
               schema:
-                $ref: '#/components/schemas/AdyenWebhookAck'
+                $ref: '#/components/schemas/MollieWebhookAck'
         '400':
-          description: Missing signature, invalid payload, or processing failure
+          description: Missing or invalid `id`
           content:
             application/json:
               schema:
@@ -11271,11 +11272,11 @@ components:
           description: Monthly API call quota (not per-minute)
         features:
           $ref: '#/components/schemas/BillingPlanFeatures'
-        adyenPlanCodeMonthly:
+        molliePlanCodeMonthly:
           oneOf:
             - type: string
             - type: 'null'
-        adyenPlanCodeYearly:
+        molliePlanCodeYearly:
           oneOf:
             - type: string
             - type: 'null'
@@ -11421,9 +11422,9 @@ components:
       required:
         - id
         - tenantId
-        - adyenSubscriptionId
-        - adyenCustomerId
-        - adyenPriceId
+        - mollieSubscriptionId
+        - mollieCustomerId
+        - molliePriceId
         - status
         - billingInterval
         - billingCycleStart
@@ -11436,11 +11437,11 @@ components:
           type: string
         tenantId:
           type: string
-        adyenSubscriptionId:
+        mollieSubscriptionId:
           type: string
-        adyenCustomerId:
+        mollieCustomerId:
           type: string
-        adyenPriceId:
+        molliePriceId:
           type: string
         status:
           type: string
@@ -11567,7 +11568,7 @@ components:
           type: string
         tenantId:
           type: string
-        adyenInvoiceId:
+        mollieInvoiceId:
           oneOf:
             - type: string
             - type: 'null'
@@ -11903,14 +11904,10 @@ components:
         offset:
           type: integer
 
-    AdyenWebhookAck:
-      type: object
-      properties:
-        received:
-          type: boolean
-          example: true
-      required:
-        - received
+    MollieWebhookAck:
+      type: string
+      description: Short plain-text acknowledgement. Mollie treats only HTTP 200 as success.
+      example: OK
 
     AdminTenantSummary:
       type: object

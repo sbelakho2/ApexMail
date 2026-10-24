@@ -311,7 +311,7 @@ where
 }
 
 /// Every posted entry generated from one source document (traceability:
-/// "which journal did this Adyen event produce?").
+/// "which journal did this Mollie event produce?").
 pub async fn entries_for_source<'e, E>(
     executor: E,
     source_type: &str,

@@ -6,7 +6,7 @@ Authentication: tenant API/session authentication
 
 The plan catalog and entitlement lifecycle are described in
 [Pricing](../../pricing.md) and
-[the Adyen contract](../../tool-contracts/adyen.md).
+[the Mollie contract](../../tool-contracts/mollie.md).
 
 ## Catalog and usage endpoints
 
@@ -41,22 +41,32 @@ Content-Type: application/json
 
 ```json
 {
-  "priceId": "<adyen-plan-code>",
+  "priceId": "<catalog-plan-id>",
   "successUrl": "https://app.apexmail.ee/settings/billing?checkout=success",
   "cancelUrl": "https://app.apexmail.ee/settings/billing?checkout=cancelled"
 }
 ```
 
-`priceId` must be the monthly or yearly Adyen plan code bound to an **active**
-Starter, Pro, Growth, or Scale catalog row. The API rejects blank, unknown,
+`priceId` must identify an **active** Starter, Pro, Growth, or Scale catalog
+row and its monthly or yearly interval. The API rejects blank, unknown,
 inactive, Enterprise, PAYG, and cross-product values. Both redirect URLs must
 be approved ApexMail URLs.
 
-A successful response contains the hosted Adyen Checkout URL and session ID.
-It does **not** grant paid access. The API records the resolved `tenant_id` and
-`plan_name` in the Adyen Checkout session metadata; a verified Adyen webhook
-notification is the only normal self-service path that activates the paid
-entitlement.
+A successful response contains the hosted Mollie Checkout URL and the Mollie
+payment id (`tr_…`) as the session id:
+
+```json
+{
+  "sessionId": "tr_…",
+  "url": "https://www.mollie.com/checkout/…"
+}
+```
+
+It does **not** grant paid access. ApexMail creates (or reuses) the Mollie
+customer `cst_…`, creates the payment with `sequenceType: first` and the
+catalog amount as a decimal string, and records the resolved `tenant_id` and
+`plan_name` in the payment metadata. Only an authenticated fetch of a `paid`
+payment after an id-only Mollie webhook activates the paid entitlement.
 
 ### Create billing portal session
 
@@ -71,12 +81,14 @@ Content-Type: application/json
 }
 ```
 
-Adyen has no hosted billing portal: the response carries the console billing
+Mollie has no hosted billing portal: the response carries the console billing
 settings URL (`/settings/billing`) derived from the validated return URL.
 Payment-method management is arranged with the billing team. Cancellation
 is a local state change (`POST /cancel`), not a portal path (external audit
 15 Oct, H1).
-It requires an existing Adyen customer and an approved return URL.
+It requires an existing Mollie customer (`cst_…`) and an approved return URL.
+Mollie customers and mandates are real objects, so a customer's stored
+payment method is the mandate (`mdt_…`) minted by the first payment.
 
 ### Retired direct-mutation endpoints
 
@@ -85,7 +97,7 @@ a local subscription or tenant plan:
 
 | Method | Endpoint | HTTP status | Code | Required action |
 |---|---|---:|---|---|
-| POST | `/switch-plan` | 409 | `CHECKOUT_REQUIRED` | Start supported Adyen Checkout and await webhook reconciliation |
+| POST | `/switch-plan` | 409 | `CHECKOUT_REQUIRED` | Start a supported Mollie payment and await the id-only webhook plus authenticated fetch |
 
 Direct JSON requests cannot create or switch a paid entitlement.
 `POST /cancel` is not checkout-gated.
@@ -106,12 +118,12 @@ No further renewals are charged.
 
 | Method | Endpoint | Purpose |
 |---|---|---|
-| GET | `/subscription` | Get local Adyen subscription state for the authenticated tenant |
+| GET | `/subscription` | Get local Mollie subscription state for the authenticated tenant |
 | GET | `/invoices` | List tenant invoices |
 | GET | `/invoices/:id` | Get an invoice |
 | GET | `/invoices/:id/pdf` | Render/download invoice HTML for PDF handling |
 | GET | `/invoices/:id/xml` | Get invoice XML |
-| GET | `/proration/:planName` | Informational proration preview only; Adyen controls actual charges |
+| GET | `/proration/:planName` | Informational proration preview only; Mollie controls actual charges |
 
 ## Billing administration
 
@@ -121,7 +133,7 @@ valid active `planId` and a nonempty reason and writes an audit entry. Generic
 tenant editing cannot change a tenant plan.
 
 Other administrative routes cover tenant billing details, credits, dunning,
-invoices, reports, and export. They do not replace the normal Adyen lifecycle
+invoices, reports, and export. They do not replace the normal Mollie lifecycle
 for customer-paid subscription changes.
 
 ## Billing company information

@@ -22,9 +22,13 @@ Evidence: the [Terms](/terms/) name the contracting entity and governing law; th
 
 ## EU data centres
 
-The default shared deployment runs on Hetzner Online GmbH infrastructure in Germany (primary) and Finland (backup). Core service data — account data, hashed API keys, sender and recipient addresses, message content, attachments, delivery events and logs, support tickets, analytics and backups — is processed and replicated inside the EEA, with no third-country transfer for those categories. The genuine exceptions are named rather than hidden: optional OAuth sign-in (Google, GitHub) and payment processing (Adyen N.V.) are separated out in the matrix with their own transfer safeguards.
+The default shared deployment runs on Hetzner Online GmbH infrastructure in Germany (primary) and Finland (backup). Core service data — account data, hashed API keys, sender and recipient addresses, message content, attachments, delivery events and logs, support tickets, analytics and backups — is processed and replicated inside the EEA, with no third-country transfer for those categories. The genuine exceptions are named rather than hidden: optional OAuth sign-in (Google, GitHub) and payment processing (Mollie B.V.) are separated out in the matrix with their own transfer safeguards.
 
 Evidence: the [data location matrix](/data-locations/) lists the primary, backup and processing region for each data category; the [subprocessor register](/subprocessors/) names the entities and their processing and storage countries.
+
+### Payment processor
+
+Mollie B.V. is a payment institution supervised by De Nederlandsche Bank (DNB), with its registered office at Keizersgracht 126, 1015 CW Amsterdam, The Netherlands. Payment data is processed in the Netherlands (EU); card-scheme networks may process it globally under Mollie's Data Processing Agreement.
 
 ## EU-only routing: one setting, fail-closed
 
@@ -68,7 +72,7 @@ Evidence: both endpoints are live, unauthenticated surfaces of the public API; t
 
 ## What EU-only removes from the subprocessor chain
 
-The [subprocessor register](/subprocessors/) is generated from the deployment's own configuration, so the listed set cannot drift from what actually runs. Under EU-only routing, the Amazon Web Services SES entry does not carry a tenant's mail: the message leaves exclusively through ApexMail's own MTAs, operated on Hetzner infrastructure (Hetzner Online GmbH, Germany). The remaining entries are payments (Adyen N.V., Amsterdam) and optional OAuth sign-in (Google, GitHub) — each with its processing country and transfer mechanism stated on the register.
+The [subprocessor register](/subprocessors/) is generated from the deployment's own configuration, so the listed set cannot drift from what actually runs. Under EU-only routing, the Amazon Web Services SES entry does not carry a tenant's mail: the message leaves exclusively through ApexMail's own MTAs, operated on Hetzner infrastructure (Hetzner Online GmbH, Germany). The remaining entries are payments (Mollie B.V., Amsterdam) and optional OAuth sign-in (Google, GitHub) — each with its processing country and transfer mechanism stated on the register.
 
 In other words: under EU-only, no US-controlled third party carries the mail. Under Global, AWS SES does — in an EU region, under AWS's DPA and SCCs, and the register says exactly that.
 

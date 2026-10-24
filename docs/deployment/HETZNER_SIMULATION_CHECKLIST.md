@@ -3,7 +3,7 @@
 This is the simulation/staging deployment runbook for ApexMail on Hetzner infrastructure. It documents the shadow-production environment for realistic load testing, chaos engineering, and continuous verification.
 
 > **Infrastructure Overview:**  
-> - **API Server:** `apex-sim-api` (API + SSR browser surfaces + Adyen webhook handler)  
+> - **API Server:** `apex-sim-api` (API + SSR browser surfaces + Mollie webhook handler)  
 > - **Worker Server:** `apex-sim-worker` (queue workers + sender + webhook dispatcher)  
 > - **Data Server:** `apex-sim-data` (PostgreSQL + Redis)  
 > - **SSH Access:** `ssh -i ~/.ssh/apex-sim-key root@<SERVER_IP>`  
@@ -21,7 +21,7 @@ This is the simulation/staging deployment runbook for ApexMail on Hetzner infras
 6. [CLI Automation](#5-cli-automation)
 7. [Provisioning](#6-provisioning)
 8. [AWS SES Plumbing](#7-aws-ses-plumbing)
-9. [Adyen Billing Simulation](#8-adyen-billing-simulation)
+9. [Mollie Billing Simulation](#8-mollie-billing-simulation)
 10. [Deployment](#9-deployment)
 11. [Load Testing](#10-load-testing)
 12. [Chaos Engineering](#11-chaos-engineering)
@@ -77,7 +77,7 @@ This is the simulation/staging deployment runbook for ApexMail on Hetzner infras
 │  └──────────────────────┘  │  │  └──────────────────────┘  │  │  │  - Session cache     │  │
 │                            │  │                            │  │  └──────────────────────┘  │
 │  ┌──────────────────────┐  │  │  ┌──────────────────────┐  │  │                            │
-│  │  Adyen Webhooks     │  │  │  │  Webhook Dispatcher  │  │  │  ┌──────────────────────┐  │
+│  │  Mollie Webhooks     │  │  │  │  Webhook Dispatcher  │  │  │  ┌──────────────────────┐  │
 │  │  :3000/webhooks      │  │  │  │  - Outbound webhooks │  │  │  │  Toxiproxy           │  │
 │  │  - Subscription mgmt │  │  │  │  - Retry logic       │  │  │  │  - Network chaos     │  │
 │  │  - Entitlement sync  │  │  │  │  - DLQ handling      │  │  │  │  - Latency injection │  │
@@ -151,10 +151,10 @@ ufw allow from 10.0.0.0/24 to any port 8474 comment 'Toxiproxy'
 **Services running:**
 - [x] API Server (Rust on port 3000)
 - [x] SSR browser surfaces (`web` + `control-plane` on port 3000)
-- [x] Adyen webhook handler
+- [x] Mollie webhook handler
 - [x] Assertion daemon
 - [x] Prometheus (port 9090)
-- [x] Adyen CLI (webhook forwarding)
+- [x] Local Mollie API mock (`tools/dogfood-v2/harness/mollie.py`) for webhook/reconciliation runs
 
 **Environment:**
 ```bash
@@ -162,8 +162,10 @@ ufw allow from 10.0.0.0/24 to any port 8474 comment 'Toxiproxy'
 NODE_ENV=staging
 DATABASE_URL=postgresql://apexmail:${DB_PASSWORD}@10.0.0.3:5432/apexmail
 REDIS_URL=redis://:${REDIS_PASSWORD}@10.0.0.3:6379/0
-ADYEN_API_KEY=<adyen-api-key>
-ADYEN_HMAC_KEY=<64-hex-characters>
+MOLLIE_API_KEY=<live_ or test_ API key>
+MOLLIE_PROFILE_ID=<pfl_ payment profile id>
+MOLLIE_API_BASE_URL=https://api.mollie.com/v2
+MOLLIE_WEBHOOK_URL=https://<staging-host>/webhooks/mollie
 SES_REGION=eu-west-1
 SES_CONFIGURATION_SET=apexmail-staging-sim
 RECIPIENT_ALLOWLIST=@example.com,@test.apexmail.dev
@@ -302,29 +304,37 @@ WHERE status = 'accepted'
 |-----------|-----------|----------|
 | **B1:** Tenant sends while not entitled (plan canceled/past due/no subscription) | Cross-reference sends with entitlement state at send time | CRITICAL |
 | **B2:** Tenant blocked while entitled (paid but rejected) | Check rejected sends against active subscriptions | CRITICAL |
-| **B3:** Overage meter ≠ usage ledger (drift) | Compare Adyen meter aggregates with internal usage | HIGH |
-| **B4:** Adyen event replay causes duplicate entitlement transitions | Check for duplicate subscription state changes | CRITICAL |
+| **B3:** Overage meter ≠ usage ledger (drift) | Compare Mollie meter aggregates with internal usage | HIGH |
+| **B4:** Mollie event replay causes duplicate entitlement transitions | Check for duplicate subscription state changes | CRITICAL |
 
 ```sql
--- B1: Sends without entitlement
-SELECT m.id, m.tenant_id, m.created_at, t.subscription_status
+-- B1: Sends without entitlement (tenant not active, or no live local
+-- subscription for the plan the tenant claims)
+SELECT m.id, m.tenant_id, m.created_at, t.status
 FROM messages m
 JOIN tenants t ON m.tenant_id = t.id
+LEFT JOIN mollie_subscriptions s
+  ON s.tenant_id = t.id AND s.status IN ('active', 'trialing')
 WHERE m.created_at > NOW() - INTERVAL '1 hour'
-  AND t.subscription_status NOT IN ('active', 'trialing');
+  AND (t.status <> 'active' OR (t.plan <> 'free' AND s.id IS NULL));
 
--- B3: Usage drift detection
-SELECT 
-  t.id as tenant_id,
-  t.adyen_shopper_reference,
-  COUNT(m.id) as internal_count,
-  t.adyen_usage_reported as adyen_count,
-  ABS(COUNT(m.id) - COALESCE(t.adyen_usage_reported, 0)) as drift
+-- B3: Usage drift detection (messages vs metered emails_sent this month)
+SELECT
+  t.id AS tenant_id,
+  COALESCE(m.cnt, 0) AS messages_this_month,
+  COALESCE(e.units, 0) AS metered_emails,
+  ABS(COALESCE(m.cnt, 0) - COALESCE(e.units, 0)) AS drift
 FROM tenants t
-LEFT JOIN messages m ON m.tenant_id = t.id 
-  AND m.created_at > DATE_TRUNC('month', NOW())
-GROUP BY t.id
-HAVING ABS(COUNT(m.id) - COALESCE(t.adyen_usage_reported, 0)) > 0;
+LEFT JOIN (
+  SELECT tenant_id, COUNT(*) AS cnt FROM messages
+  WHERE created_at >= date_trunc('month', NOW()) GROUP BY tenant_id
+) m ON m.tenant_id = t.id
+LEFT JOIN (
+  SELECT tenant_id, SUM(quantity) AS units FROM metering_events
+  WHERE event_type = 'emails_sent' AND created_at >= date_trunc('month', NOW())
+  GROUP BY tenant_id
+) e ON e.tenant_id = t.id
+WHERE ABS(COALESCE(m.cnt, 0) - COALESCE(e.units, 0)) > 0;
 ```
 
 ### 4.4 Systems Invariants (C)
@@ -340,7 +350,7 @@ HAVING ABS(COUNT(m.id) - COALESCE(t.adyen_usage_reported, 0)) > 0;
 ### 4.5 Assertion Daemon Output
 
 On invariant breach:
-1. Print exact failing keys (`tenant_id`, `message_id`, `event_id`, `adyen_notification_id`)
+1. Print exact failing keys (`tenant_id`, `message_id`, `event_id`, `mollie_event_id`)
 2. Snapshot relevant rows to report bundle
 3. Dump service logs
 4. Exit with nonzero status code
@@ -382,7 +392,7 @@ ops/sim/
 │   ├── provision.sh
 │   ├── teardown.sh
 │   └── ssh.sh
-├── adyen/                    # Adyen CLI scripts
+├── mollie/                    # Mollie CLI scripts
 │   ├── setup-webhooks.sh
 │   ├── trigger-scenarios.sh
 │   └── create-test-customers.sh
@@ -422,7 +432,7 @@ ops/sim/
   --fail-fast
 
 # Phased execution
-./ops/sim/apexsim bootstrap   # hcloud + aws + adyen prep
+./ops/sim/apexsim bootstrap   # hcloud + aws + mollie prep
 ./ops/sim/apexsim deploy      # Deploy stack
 ./ops/sim/apexsim smoke       # 5–10 min, strict invariants
 ./ops/sim/apexsim load        # 60–180 min load test
@@ -549,52 +559,64 @@ Historical implementation example removed. Refer to the current Rust services an
 
 ---
 
-## 8. Adyen Billing Simulation
+## 8. Mollie Billing Simulation
 
-### 8.1 Adyen Webhook Feed
+### 8.1 Mollie Webhook Feed
 
-Adyen delivers notifications directly to the configured endpoint
-(`/webhooks/adyen`); there is no provider CLI forwarder. For local runs, POST
-an HMAC-signed `notificationItems` body to
-`http://127.0.0.1:3000/webhooks/adyen`.
+Mollie delivers notifications directly to the configured endpoint
+(`/webhooks/mollie`); there is no provider CLI forwarder. The body is a single
+form field, `id=tr_…` (payment) or `id=re_…` (refund); there is no signature,
+status or event type. ApexMail authenticates a fetch with
+`Authorization: Bearer $MOLLIE_API_KEY` and answers 200 for anything it accepts
+(including an unknown id, which stops Mollie's retries).
 
 ```bash
-# The signing key must match this deployment's ADYEN_HMAC_KEY (hex-decoded);
-# the recipe and the Accepted answer are in ../tool-contracts/adyen.md.
-# The Customer Area's test-webhook tool emits a fixed AUTHORISATION
-# notification for connectivity checks.
+# A payment id must exist at MOLLIE_API_BASE_URL for the fetch to succeed.
+# For local runs, set MOLLIE_API_BASE_URL to the in-process mock
+# (tools/dogfood-v2/harness/mollie.py) and create the payment there first.
+curl -i -X POST \
+  -H 'Content-Type: application/x-www-form-urlencoded' \
+  --data 'id=tr_dogfood000000000001' \
+  http://127.0.0.1:3000/webhooks/mollie
 ```
+
+The Mollie Dashboard's test mode can also post to a configured webhook.
 
 ### 8.2 Trigger Realistic Billing Notifications
 
 ```bash
-# Standard lifecycle notifications (eventCode)
-#   AUTHORISATION (success true)   — payment confirmed
-#   AUTHORISATION (success false)  — payment refused
-#   RECURRING_CONTRACT             — recurring.token.created
-#   REFUND / REFUND_FAILED         — refund reconciliation
-#   CHARGEBACK / CHARGEBACK_REVERSED — dispute reconciliation
+# Mollie statuses that become facts (normalized event codes in brackets)
+#   paid                              → AUTHORISATION (success true)
+#   failed / canceled / expired       → AUTHORISATION (success false)
+#   first paid payment + mandate      → RECURRING_CONTRACT
+#   REFUND (re_…) status refunded     → REFUND
+#   refund failed / canceled          → REFUND_FAILED
+#   charged_back                      → CHARGEBACK
+#   chargeback reversed               → CHARGEBACK_REVERSED
+#
+# open / pending / authorized settle nothing and are ignored.
 
-# Upgrade/downgrade scenarios are driven through Checkout (direct local plan
-# mutation is refused with 409 CHECKOUT_REQUIRED). Cancellation is a local
-# state change: POST /cancel sets cancel_at_period_end (or cancels
-# immediately) and no further renewals are charged.
+# Upgrade/downgrade scenarios are driven through a Mollie payment (direct
+# local plan mutation is refused with 409 CHECKOUT_REQUIRED). Cancellation is
+# a local state change: POST /cancel sets cancel_at_period_end (or cancels
+# immediately, which also revokes the mandate at Mollie) and no further
+# renewals are charged.
 
 # Past due + recovery
-#   AUTHORISATION (success false), then a successful AUTHORISATION
+#   payment failed, then a later paid payment
 
 # Dispute scenario
-#   CHARGEBACK, then CHARGEBACK_REVERSED when the dispute is reversed
+#   charged_back, then the reversal when the dispute is reversed
 ```
 
 ### 8.3 Automated Billing Churn Script
 
 ```bash
 # Run billing churn simulation
-./ops/sim/adyen/trigger-scenarios.sh --scenario full-lifecycle --tenants 100
+./ops/sim/mollie/trigger-scenarios.sh --scenario full-lifecycle --tenants 100
 
 # Scenarios:
-# - trial-to-active: Trial → Active subscription
+# - first-payment-to-active: first payment + mandate → active subscription
 # - upgrade-downgrade: Plan changes
 # - payment-failure: Payment failures + recovery
 # - cancellation: Subscription cancellation
@@ -790,9 +812,9 @@ reports/2026-02-22T14:30:00Z/
 ├── chaos/
 │   ├── timeline.json         # What chaos was injected when
 │   └── recovery-times.json   # Time to recover from each failure
-└── adyen/
-    ├── events-received.json  # All Adyen events received
-    └── reconciliation.json   # Internal vs Adyen state diff
+└── mollie/
+    ├── events-received.json  # All Mollie events received
+    └── reconciliation.json   # Internal vs Mollie state diff
 ```
 
 ### 12.2 Verification Queries
@@ -809,22 +831,24 @@ SELECT
 FROM messages
 WHERE created_at > NOW() - INTERVAL '24 hours';
 
--- Billing reconciliation
-SELECT 
+-- Billing reconciliation (messages vs metered volume, this month)
+SELECT
   t.id as tenant_id,
-  t.adyen_shopper_reference,
-  t.subscription_status,
+  t.plan,
   COUNT(m.id) as internal_sends,
-  t.adyen_usage_reported as adyen_usage,
-  t.plan_limit,
-  CASE 
-    WHEN COUNT(m.id) > t.plan_limit THEN 'OVERAGE'
+  COALESCE(SUM(e.quantity), 0) as metered_emails,
+  CASE
+    WHEN COALESCE(SUM(e.quantity), 0) > COUNT(m.id) THEN 'METER_AHEAD'
+    WHEN COALESCE(SUM(e.quantity), 0) < COUNT(m.id) THEN 'METER_BEHIND'
     ELSE 'OK'
-  END as limit_status
+  END as meter_status
 FROM tenants t
 LEFT JOIN messages m ON m.tenant_id = t.id
   AND m.created_at > DATE_TRUNC('month', NOW())
-GROUP BY t.id;
+LEFT JOIN metering_events e ON e.tenant_id = t.id
+  AND e.event_type = 'emails_sent'
+  AND e.created_at > DATE_TRUNC('month', NOW())
+GROUP BY t.id, t.plan;
 ```
 
 ---
@@ -841,7 +865,7 @@ A run is **PASS** only if ALL of the following are true:
 | **Backlog growth** | Bounded | Queue depth never exceeds 2x normal |
 | **P95 latency** | < target | Under SLO during target load |
 | **Chaos recovery** | Automatic | No manual intervention required |
-| **Adyen webhook replay** | Idempotent | No duplicate entitlement transitions |
+| **Mollie webhook replay** | Idempotent | No duplicate entitlement transitions |
 | **SES throttle handling** | Backoff | No retry storms (retry rate < 10% of sends) |
 | **Retention/cleanup jobs** | Stable | No impact on system stability |
 
@@ -880,7 +904,7 @@ INVARIANT CHECKS:
   ✓ B1: No unauthorized sends
   ✓ B2: No false rejections
   ✓ B3: Usage drift < 0.01%
-  ✓ B4: Adyen replay idempotent
+  ✓ B4: Mollie replay idempotent
   ✓ C1: Queue age < threshold
   ✓ C2: No worker crash loops
   ✓ C3: DB pool healthy

@@ -229,8 +229,10 @@ curl -X POST https://api.apexmail.ee/v1/account/export \
 | **AWS (Amazon Web Services)** | SES email delivery | eu-west-1 (Ireland) | Email content in transit only | DPA executed, SCCs |
 | **Redis Ltd** | Caching / rate limiting | Same as primary infra | Ephemeral cache data | No persistent storage |
 | **ClickHouse Inc** | Analytics database | Same as primary infra | Aggregated analytics data | EU-hosted |
-| **Adyen N.V.** | Payment processing | Netherlands (EEA), PCI-DSS compliant | Billing data only | DPA executed, EU-based |
+| **Mollie B.V.** | Payment processing | Netherlands (EEA), PCI-DSS compliant | Billing data only | DPA executed, EU-based |
 | **Elastic.co** | Log aggregation | Same as primary infra | Operational logs | EU-hosted |
+
+Mollie B.V. is a payment institution supervised by De Nederlandsche Bank (DNB), with its registered office at Keizersgracht 126, 1015 CW Amsterdam, The Netherlands. Payment data is processed in the Netherlands (EU); card-scheme networks may process it globally under Mollie's Data Processing Agreement.
 
 ### Sub-processor Changes
 
@@ -253,7 +255,7 @@ Where data is processed within the EEA (Finland, Germany, Estonia), no SCCs are 
 | Destination | Legal Basis | Mechanism |
 |-------------|-------------|-----------|
 | AWS Ireland (eu-west-1) | Adequacy decision | EEA-based processing |
-| Adyen N.V. (Netherlands) | Adequacy decision | EEA-based processing |
+| Mollie B.V. (Netherlands) | Adequacy decision | EEA-based processing |
 | Hetzner Finland/Germany | Adequacy decision | EEA-based processing |
 
 ### SCC Execution
@@ -370,7 +372,7 @@ Data subjects can submit DSARs via the same channels listed in §3 (Right to Era
 | PostgreSQL | Account, messages, delivery logs | Direct query via [`compliance/src/routes.rs`](../../services/mail-server/crates/compliance/src/routes.rs) |
 | ClickHouse | Analytics data | Query via [`analytics/src/clickhouse_engine.rs`](../../services/mail-server/crates/analytics/src/clickhouse_engine.rs) |
 | Redis | Session data (ephemeral) | Not collected — ephemeral |
-| Billing (Adyen) | Payment history | API call to Adyen |
+| Billing (Mollie) | Payment history | API call to Mollie |
 
 ---
 

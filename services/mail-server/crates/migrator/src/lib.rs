@@ -719,6 +719,21 @@ pub mod test_support {
     /// succeeds for a privileged role, and for an unprivileged one its error is
     /// the most specific available.
     async fn drop_database(admin: &PgPool, db_name: &str) -> Result<(), ProvisionError> {
+        // A test may only ever drop a PROVISIONED clone. Refuse the base
+        // database named by TEST_DATABASE_URL: a naming bug must fail loudly
+        // instead of deleting the developer's canonical database.
+        if let Some(base) = std::env::var("TEST_DATABASE_URL").ok() {
+            let base_name = base
+                .rsplit_once('/')
+                .map(|(_, tail)| tail.split('?').next().unwrap_or(tail))
+                .unwrap_or_default();
+            if !base_name.is_empty() && db_name == base_name {
+                return Err(ProvisionError::new(
+                    "drop-guard",
+                    format!("refusing to drop the base test database {db_name:?}"),
+                ));
+            }
+        }
         let mut last: Option<sqlx::Error> = None;
         for attempt in 0..5u32 {
             match sqlx::query(&format!(r#"DROP DATABASE IF EXISTS "{db_name}""#))

@@ -5505,7 +5505,7 @@ mod coverage_adversarial {
         let now = Utc::now();
         CreateInvoiceInput {
             tenant_id: tenant.to_string(),
-            adyen_psp_reference: None,
+            mollie_payment_id: None,
             line_items: vec![NewLineItem {
                 description: description.to_string(),
                 quantity: 1,
@@ -6601,7 +6601,7 @@ mod coverage_adversarial {
                 &env.pool,
                 CreateInvoiceInput {
                     tenant_id: addon_tenant.to_string(),
-                    adyen_psp_reference: None,
+                    mollie_payment_id: None,
                     line_items: vec![
                         NewLineItem {
                             description: "Dedicated IP (2026-10) — 15.00/month".to_string(),

@@ -42,8 +42,8 @@ the active deployment before relying on a location for compliance purposes.
 | Data Category | Storage Location |
 |---|---|
 | Account information (names, emails, company) | Database, EU/EEA (Hetzner) |
-| Billing records (invoices, transactions) | Database, EU/EEA (Hetzner); Adyen N.V. (Netherlands, EU) |
-| Payment card details | Not stored by ApexMail — processed by Adyen |
+| Billing records (invoices, transactions) | Database, EU/EEA (Hetzner); Mollie B.V. (Netherlands, EU) |
+| Payment card details | Not stored by ApexMail — processed by Mollie B.V. |
 | API keys (hashed) | Database, EU/EEA (Hetzner) |
 | Audit logs | Database, EU/EEA (Hetzner) + log storage |
 
@@ -88,8 +88,10 @@ Data transfers outside the EEA are limited to:
 
 | Third Country | Purpose | Subprocessor | Transfer Safeguard |
 |---|---|---|---|
-| Netherlands (EU) | Payment processing (tokenized card data and transaction metadata) | Adyen N.V. | Intra-EEA processing (Adyen N.V., Amsterdam); card scheme networks under the Adyen DPA |
+| Netherlands (EU) | Payment processing (tokenized card data and transaction metadata) | Mollie B.V. | Intra-EEA processing (Mollie B.V., Amsterdam); card scheme networks under Mollie's DPA |
 | United States | CRM (prospect and customer communications) | HubSpot, Inc. | EU Standard Contractual Clauses (SCCs) |
+
+Mollie B.V. is a payment institution supervised by De Nederlandsche Bank (DNB), with its registered office at Keizersgracht 126, 1015 CW Amsterdam, The Netherlands. Payment data is processed in the Netherlands (EU); card-scheme networks may process it globally under Mollie's Data Processing Agreement.
 
 Email content, recipient data, and event data use the active deployment's configured providers and regions. The supplied configuration defaults core service and telemetry storage to EEA regions, but a deployment override or enabled provider can change that result. Confirm active locations and apply the appropriate transfer safeguard, including SCCs where required.
 

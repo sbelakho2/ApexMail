@@ -1274,8 +1274,9 @@ pub(crate) async fn enforce_tenant_not_restricted(
 /// method plus a path PREFIX matched against the request path:
 ///
 /// * view invoices (list/detail/PDF/XML exports) — `GET /v1/billing/invoices…`
-/// * enter the billing portal (payment-method management happens inside
-///   the Adyen-hosted portal) — `POST /v1/billing/portal`
+/// * reach the billing settings page (Mollie has no hosted portal; the
+///   console page links to checkout for payment-method changes) —
+///   `POST /v1/billing/portal`
 /// * pay/reactivate through checkout — `POST /v1/billing/checkout`
 /// * view the current subscription — `GET /v1/billing/subscription`
 ///
@@ -1772,8 +1773,8 @@ mod tests {
                 "GET {path} must be recoverable"
             );
         }
-        // Billing portal + checkout (payment-method updates happen inside
-        // the Adyen-hosted portal).
+        // Billing settings + checkout (Mollie has no hosted portal; the
+        // console page links to checkout for payment-method changes).
         assert!(is_billing_recovery_request(
             &Method::POST,
             "/v1/billing/portal"

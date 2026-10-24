@@ -351,14 +351,14 @@ async fn get_predictive_analytics(
     let now = chrono::Utc::now();
 
     // ─── Churn Risk ─────────────────────────────────────────────────────
-    // Subscription existence reads adyen_subscriptions — the table billing
+    // Subscription existence reads mollie_subscriptions — the table billing
     // webhooks write (the legacy `subscriptions` table has no writer).
     let inactive: Vec<InactiveTenantRow> = sqlx::query_as(
         "SELECT
             t.id::text as tenant_id,
             COALESCE(EXTRACT(EPOCH FROM (NOW() - MAX(m.created_at))) / 86400, 365)::bigint as days_inactive,
             MAX(m.created_at) as last_message_at,
-            EXISTS(SELECT 1 FROM adyen_subscriptions s WHERE s.tenant_id::text = t.id::text AND s.status IN ('active', 'trialing', 'past_due')) as has_subscription,
+            EXISTS(SELECT 1 FROM mollie_subscriptions s WHERE s.tenant_id::text = t.id::text AND s.status IN ('active', 'trialing', 'past_due')) as has_subscription,
             CASE
                 WHEN COUNT(*) FILTER (WHERE m.status IN ('sent', 'delivered', 'bounced', 'failed')) > 0
                 THEN COUNT(*) FILTER (WHERE m.status IN ('bounced', 'failed'))::float8
@@ -372,7 +372,7 @@ async fn get_predictive_analytics(
          WHERE t.status = 'active'
          GROUP BY t.id
          HAVING COALESCE(EXTRACT(EPOCH FROM (NOW() - MAX(m.created_at))) / 86400, 365) > 14
-            OR EXISTS(SELECT 1 FROM adyen_subscriptions s WHERE s.tenant_id::text = t.id::text AND s.status = 'canceled')
+            OR EXISTS(SELECT 1 FROM mollie_subscriptions s WHERE s.tenant_id::text = t.id::text AND s.status = 'canceled')
          ORDER BY days_inactive DESC
          LIMIT 100",
     )
@@ -536,7 +536,7 @@ async fn get_predictive_analytics(
         "SELECT COUNT(*)::bigint FROM (
             SELECT t.id
             FROM tenants t
-            JOIN adyen_subscriptions s ON s.tenant_id::text = t.id::text
+            JOIN mollie_subscriptions s ON s.tenant_id::text = t.id::text
             WHERE s.status IN ('active', 'trialing', 'past_due')
               AND NOT EXISTS (
                 SELECT 1 FROM events e WHERE e.tenant_id::text = t.id::text
@@ -643,7 +643,7 @@ async fn get_churn_risk(
             t.id::text as tenant_id,
             COALESCE(EXTRACT(EPOCH FROM (NOW() - MAX(m.created_at))) / 86400, 365)::bigint as days_inactive,
             MAX(m.created_at) as last_message_at,
-            EXISTS(SELECT 1 FROM adyen_subscriptions s WHERE s.tenant_id::text = t.id::text AND s.status IN ('active', 'trialing', 'past_due')) as has_subscription,
+            EXISTS(SELECT 1 FROM mollie_subscriptions s WHERE s.tenant_id::text = t.id::text AND s.status IN ('active', 'trialing', 'past_due')) as has_subscription,
             CASE
                 WHEN COUNT(*) FILTER (WHERE m.status IN ('sent', 'delivered', 'bounced', 'failed')) > 0
                 THEN COUNT(*) FILTER (WHERE m.status IN ('bounced', 'failed'))::float8
@@ -1231,7 +1231,7 @@ mod tests {
 
     async fn seed_active_subscription(pool: &sqlx::PgPool, tenant_id: &str) {
         sqlx::query(
-            "INSERT INTO adyen_subscriptions (tenant_id, adyen_subscription_id, plan, status)
+            "INSERT INTO mollie_subscriptions (tenant_id, mollie_subscription_id, plan, status)
              VALUES ($1, $2, 'pro', 'active')",
         )
         .bind(tenant_id)

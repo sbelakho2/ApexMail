@@ -28,7 +28,7 @@ AUTH_ROUTE = ROOT / "services/mail-server/crates/api-server/src/routes/auth.rs"
 API_BILLING_ROUTE = ROOT / "services/mail-server/crates/api-server/src/routes/billing.rs"
 UI_ROUTER = ROOT / "services/mail-server/crates/ui-foundation/src/axum_router.rs"
 UI_VIEWS = ROOT / "services/mail-server/crates/ui-foundation/src/leptos_views.rs"
-ADYEN_WEBHOOKS = ROOT / "services/mail-server/crates/billing-service/src/adyen_webhooks.rs"
+MOLLIE_WEBHOOKS = ROOT / "services/mail-server/crates/billing-service/src/mollie_webhooks.rs"
 # The root compliance/ package was removed in the 2026-09-30 audit campaign
 # (SM8 F9: dead drifted duplicate); the live legal-entity module is the crate copy.
 ROOT_CANONICAL_RUST = ROOT / "services/mail-server/crates/compliance/src/legal_entity.rs"
@@ -46,7 +46,7 @@ MARKETING_FAQ = ROOT / "apps/marketing-zola/templates/partials/generated/pricing
 EXPLORER_ROUTE = ROOT / "services/mail-server/crates/api-server/src/routes/explorer.rs"
 DOCS_PRICING = ROOT / "docs/pricing.md"
 BILLING_LIFECYCLE = ROOT / "docs/architecture/billing-lifecycle.md"
-ADYEN_CONTRACT = ROOT / "docs/tool-contracts/adyen.md"
+MOLLIE_CONTRACT = ROOT / "docs/tool-contracts/mollie.md"
 PRICING_AUTHORITY = ROOT / "docs/pricing-authority.md"
 GENERATED_MARKETING = ROOT / "apps/marketing-zola/public"
 
@@ -553,9 +553,9 @@ def display_limit(value: int) -> str:
 
 def validate_pricing_reference(catalog: dict[str, ParsedPlan], errors: list[str]) -> None:
     text = read(DOCS_PRICING)
-    check_contains(DOCS_PRICING, "the active `plans` records, and verified Adyen webhooks", errors)
+    check_contains(DOCS_PRICING, "the active `plans` records, and verified Mollie webhooks", errors)
     check_contains(DOCS_PRICING, "HIPAA availability is **not currently offered**", errors)
-    check_contains(DOCS_PRICING, "Only `active` or `trialing`", errors)
+    check_contains(DOCS_PRICING, "The local `mollie_subscriptions` row is the entitlement authority", errors)
     for plan_id in MARKETING_PLAN_IDS:
         plan = catalog.get(plan_id)
         if plan is None:
@@ -877,10 +877,12 @@ def validate_marketing_source(catalog: dict[str, ParsedPlan], errors: list[str])
     for needle in (
         "€0.80, Pro €0.60, Growth/Business €0.35",
         "HIPAA availability is not currently offered",
-        "Adyen billing portal",
-        "verified Adyen webhook",
+        "billing settings in the console",
+        "webhook carries only the payment id",
     ):
         check(needle in faq, f"pricing FAQ is missing {needle!r}", errors)
+    for stale in ("Mollie billing portal", "portail de facturation Mollie", "portal de facturación de Mollie", "Mollie-Abrechnungsportal"):
+        check(stale not in faq, f"pricing FAQ claims a non-existent Mollie billing portal ({stale!r})", errors)
     if savings_needle is not None:
         check(
             savings_needle in faq,
@@ -907,7 +909,7 @@ def validate_canonical_artifacts(errors: list[str]) -> None:
         return
     check("pricing_plans" not in canonical, "canonical.json must not contain a duplicate pricing catalog", errors)
     check(
-        canonical.get("_pricing_authority") == "services/mail-server/crates/billing-service/src/plans.rs (plus active plans table and verified Adyen webhooks)",
+        canonical.get("_pricing_authority") == "services/mail-server/crates/billing-service/src/plans.rs (plus active plans table and verified Mollie webhooks)",
         "canonical.json must point to the runtime pricing authority",
         errors,
     )
@@ -936,7 +938,7 @@ def validate_entitlement_boundaries(errors: list[str]) -> None:
     # public signup options.
     signup_view_implementation = views.split("\n#[cfg(test)]", 1)[0]
     billing = read(API_BILLING_ROUTE)
-    webhooks = read(ADYEN_WEBHOOKS)
+    webhooks = read(MOLLIE_WEBHOOKS)
 
     for source_name, source in (("auth", auth), ("UI router", router)):
         allowed = extract_string_array(source, "PUBLIC_SIGNUP_PLAN_IDS")
@@ -966,18 +968,19 @@ def validate_entitlement_boundaries(errors: list[str]) -> None:
         errors,
     )
     for needle in (
-        # The Adyen-era checkout keeps every safety boundary the pre-cutover
-        # checkout carried: the client-supplied priceId resolves server-side to
-        # an active self-serve plan, and the session carries server-set tenant
-        # and plan bindings (tenant metadata + shopper reference + immutable
-        # merchant reference) that the verified webhook reconciles back.
+        # The Mollie checkout keeps every safety boundary: the client-supplied
+        # priceId resolves server-side to an active self-serve plan, the
+        # customer is a real Mollie object, the payment carries server-set
+        # tenant/plan metadata and `sequenceType: first`, and creates are
+        # idempotent so a retry cannot mint a second payment.
         "active_plan_checkout_target",
         "is_active = true",
         "SELF_SERVE_CHECKOUT_PLAN_IDS.contains",
         '"tenant_id": auth.tenant_id.clone(),',
         '"plan_name": plan_name.clone(),',
-        '"shopperReference": customer_id,',
-        '"reference": format!("checkout:{plan_name}:{interval_label}")',
+        "get_or_create_mollie_customer_id",
+        'sequence_type: Some("first".into()),',
+        "idempotency_key: format!",
         '"code": "CHECKOUT_REQUIRED"',
         # External audit 15 Oct, H1: cancellation is a local state change, not
         # a portal redirect. The route must call the shared cancellation
@@ -995,21 +998,21 @@ def validate_entitlement_boundaries(errors: list[str]) -> None:
     for unsafe in ("UPDATE tenants SET plan = $1, updated_at = $2 WHERE id = $3", "Subscription cancelled immediately"):
         check(unsafe not in billing, f"billing route contains direct local mutation {unsafe!r}", errors)
 
-    # The safety boundary the old pre-cutover reconciliation encoded (entitlement
-    # only from verified provider state, cross-tenant events refused, amounts
-    # never invented) is carried by DIFFERENT constructs under the Adyen wire
-    # (2026-10-14): HMAC verification per notification item, settlement keyed
-    # on OUR merchant reference, and an explicit no-entitlement checkout arm.
+    # Mollie's wire has no signature: the id in the form body is turned into
+    # an authenticated fetch, the fetched payment/refund is normalized into
+    # provider notifications, and the content-addressed event id makes a
+    # replay collapse. Entitlement still follows provider state, cross-tenant
+    # events are refused, and amounts are never invented.
     for needle in (
-        "fn verify_item_hmac",
-        "fn handle_recurring_authorisation",
-        "fn parse_merchant_reference_invoice_id",
+        "webhook_object_id",
+        "notifications_from_payment",
+        "notification_from_refund",
         "refusing to settle an unidentifiable obligation",
         "cross-tenant event refused",
         "entitlement follows the recurring/our-side subscription state",
-        "adyen_notification_id",
+        "mollie_event_id",
     ):
-        check(needle in webhooks, f"Adyen webhook reconciliation is missing {needle!r}", errors)
+        check(needle in webhooks, f"Mollie webhook reconciliation is missing {needle!r}", errors)
 
 
 def extract_sla_credit_caps(errors: list[str]) -> dict[str, int]:
@@ -1074,17 +1077,17 @@ def validate_sla_credit_docs(errors: list[str]) -> None:
 
 def validate_lifecycle_docs(errors: list[str]) -> None:
     lifecycle = read(BILLING_LIFECYCLE)
-    adyen = read(ADYEN_CONTRACT)
+    mollie = read(MOLLIE_CONTRACT)
     authority = read(PRICING_AUTHORITY)
     for needle in (
-        "does not change tenant status or grant an entitlement",
-        "Only verified `active` and `trialing` Adyen subscriptions grant",
+        "Payment creation does not change the tenant plan",
+        "Entitlement follows the LOCAL `mollie_subscriptions` row",
         "sets `cancel_at_period_end`",
         "period-end sweep",
-        "persists the monthly and yearly Adyen plan codes",
+        "persists the monthly and yearly plan codes",
     ):
         check(needle in lifecycle, f"billing lifecycle doc is missing {needle!r}", errors)
-    check("does not persist Adyen price columns" not in lifecycle, "billing lifecycle retains false plans-table claim", errors)
+    check("does not persist Mollie price columns" not in lifecycle, "billing lifecycle retains false plans-table claim", errors)
     check(
         "BILLING_PORTAL_REQUIRED" not in lifecycle,
         "billing lifecycle still documents the removed portal refusal (audit 15 Oct H1)",
@@ -1092,27 +1095,27 @@ def validate_lifecycle_docs(errors: list[str]) -> None:
     )
     for needle in (
         "The public Checkout endpoint accepts",
-        "An `AUTHORISATION` notification is informational only",
-        "Only `active` and `trialing` statuses grant",
+        "An authorization is not a settlement",
+        "ApexMail does not create Mollie subscription objects",
     ):
-        check(needle in adyen, f"Adyen contract is missing {needle!r}", errors)
+        check(needle in mollie, f"Mollie contract is missing {needle!r}", errors)
     check(
-        "`/switch-plan`" in adyen and "`409 CHECKOUT_REQUIRED`" in adyen,
-        "Adyen contract is missing the checkout-gated switch-plan boundary",
+        "`/switch-plan`" in mollie and "`409 CHECKOUT_REQUIRED`" in mollie,
+        "Mollie contract is missing the checkout-gated switch-plan boundary",
         errors,
     )
     check(
-        "/cancel" in adyen and "cancel_at_period_end" in adyen,
-        "Adyen contract is missing the local cancellation boundary (audit 15 Oct H1)",
+        "/cancel" in mollie and "cancel_at_period_end" in mollie,
+        "Mollie contract is missing the local cancellation boundary (audit 15 Oct H1)",
         errors,
     )
     check(
-        "BILLING_PORTAL_REQUIRED" not in adyen,
-        "Adyen contract still documents the removed portal refusal (audit 15 Oct H1)",
+        "BILLING_PORTAL_REQUIRED" not in mollie,
+        "Mollie contract still documents the removed portal refusal (audit 15 Oct H1)",
         errors,
     )
-    for stale in ("14-day free trial", "adyen.subscriptions.update", "Full access for 7 d grace period"):
-        check(stale not in adyen, f"Adyen contract contains unsupported claim {stale!r}", errors)
+    for stale in ("14-day free trial", "mollie.subscriptions.update", "Full access for 7 d grace period"):
+        check(stale not in mollie, f"Mollie contract contains unsupported claim {stale!r}", errors)
     check("Operational authority" in authority, "pricing authority map is missing operational authority section", errors)
 
 

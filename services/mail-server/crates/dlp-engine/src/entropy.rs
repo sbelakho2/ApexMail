@@ -208,7 +208,11 @@ fn has_known_key_prefix(token: &str) -> bool {
         "AKIA", "ASIA", "ABIA", "ACCA", // GitHub
         "ghp_", "gho_", "ghs_", "ghr_", // Slack
         "xox", "xoxa-", "xoxb-", "xoxp-", "xoxr-", // OpenAI
-        "sk-",   // Adyen
+        "sk-",   // Stripe-style secret keys
+        // Mollie (payments): live_/test_ API keys, access_ organization
+        // tokens and pfl_ profile keys. The prefix alone is not enough below
+        // the entropy floor, but it makes a genuine key a certain finding.
+        "live_", "access_", "pfl_",
         "rk_", "whsec_", "sk_live_", "sk_test_", "pk_live_", "pk_test_", // GitLab
         "glpat-",   // npm
         "npm_",     // Twilio

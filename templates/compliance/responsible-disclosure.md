@@ -31,7 +31,7 @@ Services covered: REST API, SMTP relay, message queue, dashboard, authentication
 
 ### 3.2 Out-of-Scope Systems
 
-- Third-party services we do not own or operate (Adyen, Hetzner Cloud, Let's Encrypt).
+- Third-party services we do not own or operate (Mollie, Hetzner Cloud, Let's Encrypt).
 - Subdomains not listed in section 3.1.
 - Systems not owned or operated by {{LEGAL_NAME}}.
 - Social media accounts, marketing microsites not hosted on `apexmail.ee` or `apexmail.com`.

@@ -368,7 +368,7 @@ pub async fn materialize_invoice_recognition(
 }
 
 /// Read one invoice and materialize its recognition. Runs its own
-/// transaction; used by the Adyen settlement path after the local invoice
+/// transaction; used by the Mollie settlement path after the local invoice
 /// was marked paid (the row is re-read, so paid_at is visible).
 pub async fn materialize_invoice_recognition_by_id(
     db: &PgPool,
@@ -437,7 +437,7 @@ pub async fn materialize_invoice_recognition_by_id(
 ///
 /// Scheduled (audit F7): `maintenance::start_periodic_jobs` runs this in the
 /// KMD loop, BEFORE the return generation, so the `cash_special_due` output
-/// VAT is in the period being filed — the adyen-webhook comment that "the
+/// VAT is in the period being filed — the mollie-webhook comment that "the
 /// sweep" handles the fallback is now true. Also exposed so operations can
 /// run it one-shot.
 pub async fn materialize_due_cash_special(db: &PgPool, now: DateTime<Utc>) -> Result<u64, String> {

@@ -1,12 +1,12 @@
 //! Subscription management – create, get, update plan, cancel.
 //!
-//! Adyen is the payment authority: subscription persistence and plan
-//! activation are driven by verified Adyen webhooks, and direct create/plan
+//! Mollie is the payment authority: subscription persistence and plan
+//! activation are driven by verified Mollie webhooks, and direct create/plan
 //! changes remain refused. CANCELLATION is different (external audit 15 Oct,
 //! H1): ApexMail owns the subscription state, so a customer cancelling from
 //! the product is a LOCAL state change — `cancel_at_period_end` stops the next
 //! renewal charge and a period-end sweep downgrades the tenant. The old
-//! refusal pointed customers at an Adyen hosted billing portal that does not
+//! refusal pointed customers at an Mollie hosted billing portal that does not
 //! exist, leaving them no way to stop being charged.
 
 #[cfg(test)]
@@ -24,9 +24,9 @@ use crate::types::{BillingInterval, Subscription, SubscriptionStatus};
 
 /// Direct local subscription creation is disabled.
 ///
-/// Verified Adyen webhook handling owns subscription persistence. Retaining
+/// Verified Mollie webhook handling owns subscription persistence. Retaining
 /// this public helper as a safe failure prevents future callers from creating
-/// an `active` local record without a matching Adyen event.
+/// an `active` local record without a matching Mollie event.
 pub async fn create_subscription(
     _pool: &PgPool,
     _input: CreateSubscriptionInput,
@@ -36,9 +36,9 @@ pub async fn create_subscription(
 
 /// SQL used by [`get_subscription`] to read the live subscription.
 ///
-/// Fix C — entitlement writers only ever touch `adyen_subscriptions` +
+/// Fix C — entitlement writers only ever touch `mollie_subscriptions` +
 /// `tenants.plan`; the legacy `subscriptions` table stays empty, so reads
-/// must resolve against adyen_subscriptions (period bounds live in
+/// must resolve against mollie_subscriptions (period bounds live in
 /// billing_cycle_start/end) and join tenants for the effective plan name.
 const GET_SUBSCRIPTION_SQL: &str = r#"
         SELECT
@@ -47,9 +47,9 @@ const GET_SUBSCRIPTION_SQL: &str = r#"
             s.status, s.billing_interval,
             s.billing_cycle_start AS current_period_start,
             s.billing_cycle_end AS current_period_end,
-            s.adyen_subscription_id, s.adyen_shopper_reference,
+            s.mollie_subscription_id, s.mollie_customer_id,
             s.cancel_at_period_end, s.created_at, s.updated_at
-        FROM adyen_subscriptions s
+        FROM mollie_subscriptions s
         JOIN tenants t ON t.id = s.tenant_id
         WHERE s.tenant_id = $1
           AND s.status IN ('active', 'trialing', 'past_due')
@@ -71,8 +71,8 @@ pub async fn get_subscription(
     row.map(|r| r.into_subscription()).transpose()
 }
 
-/// Direct subscription changes are deliberately blocked. Adyen is the source
-/// of payment confirmation, and only verified Adyen webhook processing may
+/// Direct subscription changes are deliberately blocked. Mollie is the source
+/// of payment confirmation, and only verified Mollie webhook processing may
 /// update an entitlement-bearing tenant plan.
 pub async fn update_plan(
     _pool: &PgPool,
@@ -91,9 +91,70 @@ pub async fn update_plan(
 /// keeps the original `canceled_at`.
 ///
 /// The state change is written in one transaction with a chained audit row;
-/// no provider call is required because Adyen's Subscription processing model
+/// no provider call is required because Mollie's Subscription processing model
 /// is merchant-initiated (there is no provider-side plan that keeps charging
 /// on its own). Every renewal path reads this row, so the next charge stops.
+/// Revoke the tenant's Mollie mandate at the provider.
+///
+/// A local cancellation stops OUR charges, but a valid mandate at Mollie is
+/// still a standing permission to debit the customer. Revoking it is the only
+/// provider-side guarantee, so cancellation calls this and records the
+/// result on `mollie_customers.mandate_revoked_at` (NULL after a canceled
+/// subscription is the retry signal for the maintenance sweep).
+///
+/// Returns `Ok(false)` when the tenant has no stored mandate or Mollie is not
+/// configured (nothing to revoke). Provider failures are returned so the
+/// caller can log them without failing the already-committed cancellation.
+pub async fn revoke_tenant_mandate_at_provider(
+    pool: &PgPool,
+    tenant_id: &str,
+) -> Result<bool, String> {
+    use crate::mollie_client::MollieClient;
+
+    let stored: Option<(Option<String>, Option<String>)> = sqlx::query_as(
+        r#"
+        SELECT s.mollie_customer_id, s.mollie_mandate_id
+        FROM mollie_subscriptions s
+        WHERE s.tenant_id = $1
+          AND s.mollie_mandate_id IS NOT NULL
+          AND s.mollie_mandate_id <> ''
+        ORDER BY s.created_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(tenant_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("Failed to load the tenant mandate: {error}"))?;
+
+    let Some((customer_id, mandate_id)) = stored else {
+        return Ok(false);
+    };
+    let (Some(customer_id), Some(mandate_id)) = (customer_id, mandate_id) else {
+        return Ok(false);
+    };
+
+    let Ok(mollie) = MollieClient::from_env() else {
+        return Ok(false);
+    };
+    mollie
+        .revoke_mandate(&customer_id, &mandate_id)
+        .await
+        .map_err(|error| format!("Mollie mandate revocation failed: {error}"))?;
+
+    sqlx::query(
+        "UPDATE mollie_customers
+            SET mandate_revoked_at = NOW(), updated_at = NOW()
+          WHERE tenant_id = $1",
+    )
+    .bind(tenant_id)
+    .execute(pool)
+    .await
+    .map_err(|error| format!("Failed to record the mandate revocation: {error}"))?;
+
+    Ok(true)
+}
+
 pub async fn cancel_subscription(
     pool: &PgPool,
     tenant_id: &str,
@@ -106,7 +167,7 @@ pub async fn cancel_subscription(
     let subscription_id: Option<Uuid> = sqlx::query_scalar(
         r#"
         SELECT id
-        FROM adyen_subscriptions
+        FROM mollie_subscriptions
         WHERE tenant_id = $1
           AND status IN ('active', 'trialing', 'past_due', 'unpaid')
         ORDER BY created_at DESC
@@ -126,7 +187,7 @@ pub async fn cancel_subscription(
     let now = Utc::now();
     let action = if immediately {
         sqlx::query(
-            "UPDATE adyen_subscriptions
+            "UPDATE mollie_subscriptions
                 SET status = 'canceled',
                     cancel_at_period_end = false,
                     canceled_at = COALESCE(canceled_at, $2),
@@ -150,7 +211,7 @@ pub async fn cancel_subscription(
         "billing.subscription_canceled"
     } else {
         sqlx::query(
-            "UPDATE adyen_subscriptions
+            "UPDATE mollie_subscriptions
                 SET cancel_at_period_end = true,
                     canceled_at = COALESCE(canceled_at, $2),
                     updated_at = $2
@@ -181,7 +242,57 @@ pub async fn cancel_subscription(
 
     tx.commit().await.map_err(SubscriptionError::Db)?;
 
+    // Immediate cancellation also revokes the mandate at Mollie: the local
+    // state already refuses every future charge, but a live mandate is a
+    // standing permission at the provider. Best-effort by design (the cancel
+    // is committed); a failure leaves `mandate_revoked_at` NULL, which the
+    // maintenance sweep retries.
+    if immediately {
+        if let Err(error) = revoke_tenant_mandate_at_provider(pool, tenant_id).await {
+            tracing::warn!(
+                tenant_id = %tenant_id,
+                error = %error,
+                "subscription canceled locally but the Mollie mandate revocation failed; the sweep will retry"
+            );
+        }
+    }
+
     subscription_by_id(pool, subscription_id).await
+}
+
+/// Retry mandate revocations for tenants whose subscription ended but whose
+/// mandate is still live at Mollie (`mandate_revoked_at IS NULL`). Idempotent:
+/// the provider call is a DELETE and a successful revoke stamps the row.
+pub async fn sweep_pending_mandate_revocations(pool: &PgPool) -> Result<u64, String> {
+    let tenants: Vec<String> = sqlx::query_scalar(
+        r#"
+        SELECT DISTINCT s.tenant_id
+        FROM mollie_subscriptions s
+        JOIN mollie_customers c ON c.tenant_id = s.tenant_id
+        WHERE s.status = 'canceled'
+          AND s.mollie_mandate_id IS NOT NULL
+          AND s.mollie_mandate_id <> ''
+          AND c.mandate_revoked_at IS NULL
+        LIMIT 100
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|error| format!("Failed to load pending mandate revocations: {error}"))?;
+
+    let mut revoked = 0u64;
+    for tenant_id in tenants {
+        match revoke_tenant_mandate_at_provider(pool, &tenant_id).await {
+            Ok(true) => revoked += 1,
+            Ok(false) => {}
+            Err(error) => tracing::warn!(
+                tenant_id = %tenant_id,
+                error = %error,
+                "mandate revocation retry failed"
+            ),
+        }
+    }
+    Ok(revoked)
 }
 
 /// The latest subscription row for a tenant regardless of status (the
@@ -193,9 +304,9 @@ const GET_LATEST_SUBSCRIPTION_SQL: &str = r#"
             s.status, s.billing_interval,
             s.billing_cycle_start AS current_period_start,
             s.billing_cycle_end AS current_period_end,
-            s.adyen_subscription_id, s.adyen_shopper_reference,
+            s.mollie_subscription_id, s.mollie_customer_id,
             s.cancel_at_period_end, s.created_at, s.updated_at
-        FROM adyen_subscriptions s
+        FROM mollie_subscriptions s
         JOIN tenants t ON t.id = s.tenant_id
         WHERE s.id = $1
         "#;
@@ -222,8 +333,8 @@ pub struct CreateSubscriptionInput {
     pub billing_interval: BillingInterval,
     pub period_start: DateTime<Utc>,
     pub period_end: DateTime<Utc>,
-    pub adyen_subscription_id: Option<String>,
-    pub adyen_shopper_reference: Option<String>,
+    pub mollie_subscription_id: Option<String>,
+    pub mollie_customer_id: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -287,8 +398,8 @@ struct SubRow {
     billing_interval: String,
     current_period_start: DateTime<Utc>,
     current_period_end: DateTime<Utc>,
-    adyen_subscription_id: Option<String>,
-    adyen_shopper_reference: Option<String>,
+    mollie_subscription_id: Option<String>,
+    mollie_customer_id: Option<String>,
     cancel_at_period_end: bool,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
@@ -312,8 +423,8 @@ impl SubRow {
             billing_interval: parse_interval(&self.billing_interval),
             current_period_start: self.current_period_start,
             current_period_end: self.current_period_end,
-            adyen_subscription_id: self.adyen_subscription_id,
-            adyen_shopper_reference: self.adyen_shopper_reference,
+            mollie_subscription_id: self.mollie_subscription_id,
+            mollie_customer_id: self.mollie_customer_id,
             cancel_at_period_end: self.cancel_at_period_end,
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -409,10 +520,10 @@ mod tests {
             billing_interval: "monthly".into(),
             current_period_start: now,
             current_period_end: now,
-            // A subscription id is a Adyen pspReference; the shopper
-            // reference IS the tenant id (Adyen has no customer object).
-            adyen_subscription_id: Some("8815393378561587".into()),
-            adyen_shopper_reference: Some("tenant_01HZY2Q4YQ0L8QW8Q7Q28WKSFJ".into()),
+            // Provider handles use Mollie's prefixes; the customer is its
+            // own object (the tenant is resolved through the mapping row).
+            mollie_subscription_id: Some("sub_8Kq2Mz9Wn1".into()),
+            mollie_customer_id: Some("cst_6Bn4Yt2Rq8".into()),
             cancel_at_period_end: false,
             created_at: now,
             updated_at: now,
@@ -434,8 +545,8 @@ mod tests {
             billing_interval: "monthly".into(),
             current_period_start: now,
             current_period_end: now,
-            adyen_subscription_id: None,
-            adyen_shopper_reference: None,
+            mollie_subscription_id: None,
+            mollie_customer_id: None,
             cancel_at_period_end: false,
             created_at: now,
             updated_at: now,
@@ -460,13 +571,13 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Fix C — the subscription reader must target the table the Adyen
+    // Fix C — the subscription reader must target the table the Mollie
     // webhook writers actually populate.
     // ------------------------------------------------------------------
 
     #[test]
-    fn get_subscription_reads_adyen_subscriptions_not_legacy_table() {
-        assert!(GET_SUBSCRIPTION_SQL.contains("FROM adyen_subscriptions s"));
+    fn get_subscription_reads_mollie_subscriptions_not_legacy_table() {
+        assert!(GET_SUBSCRIPTION_SQL.contains("FROM mollie_subscriptions s"));
         assert!(!GET_SUBSCRIPTION_SQL.contains("FROM subscriptions\n"));
         assert!(GET_SUBSCRIPTION_SQL.contains("JOIN tenants t"));
         assert!(GET_SUBSCRIPTION_SQL.contains("s.billing_cycle_start"));
@@ -489,8 +600,8 @@ mod tests {
                     billing_interval: BillingInterval::Monthly,
                     period_start: now,
                     period_end: now,
-                    adyen_subscription_id: Some("8815393378561587".into()),
-                    adyen_shopper_reference: Some("tenant_123".into()),
+                    mollie_subscription_id: Some("sub_8Kq2Mz9Wn1".into()),
+                    mollie_customer_id: Some("tenant_123".into()),
                 },
             )
             .await,
@@ -516,9 +627,9 @@ mod tests {
         let tenant = format!("subcancel-{}", &suffix[..10]);
         crate::test_support::seed_tenant(&env.pool, &tenant, "growth").await;
         sqlx::query(
-            "INSERT INTO adyen_subscriptions
-                 (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
-                  billing_cycle_end, adyen_shopper_reference)
+            "INSERT INTO mollie_subscriptions
+                 (tenant_id, mollie_subscription_id, plan, status, billing_cycle_start,
+                  billing_cycle_end, mollie_customer_id)
              VALUES ($1, $2, 'growth', 'active', NOW(), NOW() + INTERVAL '30 days', $1)",
         )
         .bind(&tenant)
@@ -535,7 +646,7 @@ mod tests {
         let (status, cancel_at_period_end, canceled_at): (String, bool, Option<String>) =
             sqlx::query_as(
                 "SELECT status, cancel_at_period_end, canceled_at::text
-                   FROM adyen_subscriptions WHERE tenant_id = $1",
+                   FROM mollie_subscriptions WHERE tenant_id = $1",
             )
             .bind(&tenant)
             .fetch_one(&env.pool)
@@ -551,7 +662,7 @@ mod tests {
             .expect("idempotent replay");
         assert!(again.cancel_at_period_end);
         let (replay_instant,): (Option<String>,) = sqlx::query_as(
-            "SELECT canceled_at::text FROM adyen_subscriptions WHERE tenant_id = $1",
+            "SELECT canceled_at::text FROM mollie_subscriptions WHERE tenant_id = $1",
         )
         .bind(&tenant)
         .fetch_one(&env.pool)

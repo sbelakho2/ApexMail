@@ -547,7 +547,7 @@ pub fn seed_cost_model() -> CostModel {
         monthly_estimate_eur: 200.0,
         unit: CostUnit::Per1000Recipients,
         unit_cost_eur: 0.005,
-        notes: Some("Adyen fees ~1.5% + €0.25 per transaction".into()),
+        notes: Some("Mollie published NL pricing: iDEAL EUR 0.29, EU cards 1.8% + EUR 0.25, non-EEA cards 2.9% + EUR 0.25, SEPA Direct Debit EUR 0.35".into()),
     });
 
     model.add_line_item(CostLineItem {

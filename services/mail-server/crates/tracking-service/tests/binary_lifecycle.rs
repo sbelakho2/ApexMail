@@ -58,8 +58,37 @@ fn child_env() -> Option<Vec<(String, String)>> {
             .to_string();
         (host, port, db_index.to_string(), password)
     };
+    // The service's config prefers the DB_* parts over DATABASE_URL, and the
+    // repo .env carries dev DB_* values (a different port). Derive them from
+    // TEST_DATABASE_URL so the child talks to the SAME database the test
+    // provisioned, whichever way the config resolves.
+    let (db_host, db_port, db_user, db_password, db_name) = {
+        let rest = db.split_once("://").map(|(_, rest)| rest).unwrap_or(&db);
+        let (auth, hostpath) = match rest.rsplit_once('@') {
+            Some((auth, hostpath)) => (Some(auth), hostpath),
+            None => (None, rest),
+        };
+        let (hostport, name) = hostpath.split_once('/').unwrap_or((hostpath, ""));
+        let (host, port) = hostport.rsplit_once(':').unwrap_or((hostport, "5432"));
+        let (user, password) = auth
+            .and_then(|auth| auth.split_once(':'))
+            .map(|(user, password)| (user.to_string(), password.to_string()))
+            .unwrap_or_else(|| (String::new(), String::new()));
+        (
+            host.to_string(),
+            port.to_string(),
+            user,
+            password,
+            name.split('?').next().unwrap_or(name).to_string(),
+        )
+    };
     Some(vec![
         ("DATABASE_URL".into(), db),
+        ("DB_HOST".into(), db_host),
+        ("DB_PORT".into(), db_port),
+        ("DB_USER".into(), db_user),
+        ("DB_PASSWORD".into(), db_password),
+        ("DB_NAME".into(), db_name),
         ("REDIS_HOST".into(), redis_host),
         ("REDIS_PORT".into(), redis_port),
         ("REDIS_DB".into(), redis_db),

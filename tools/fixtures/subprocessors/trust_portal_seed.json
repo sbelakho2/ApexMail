@@ -1,6 +1,6 @@
 {
   "generated_by": "tools/generate_subprocessors.py",
-  "last_updated": "2026-10-15",
+  "last_updated": "2026-10-24",
   "check": "sovereign_chain_zero_us",
   "subprocessors": [
     {
@@ -26,8 +26,8 @@
       "public": true
     },
     {
-      "name": "Adyen N.V.",
-      "purpose": "Payment processing, subscription management, invoicing (Adyen)",
+      "name": "Mollie B.V.",
+      "purpose": "Payment processing, subscription management, invoicing (Mollie)",
       "location": "Netherlands; storage Netherlands",
       "data_categories": [
         "Payment card details (tokenized — ApexMail never receives full card numbers)",

@@ -39,7 +39,7 @@
 | Database Credentials | Every 180 days | — | — | Critical |
 | Redis Credentials | Every 180 days | — | — | Medium |
 | AWS SES Credentials | Every 180 days (or immediate upon IAM rotation) | — | — | High |
-| Adyen API Keys | Per Adyen recommendation | — | — | Low |
+| Mollie API Keys | Per Mollie recommendation | — | — | Low |
 
 ---
 

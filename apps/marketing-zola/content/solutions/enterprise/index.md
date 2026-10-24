@@ -44,9 +44,13 @@ The sales team will confirm the available deployment model, support terms, data-
 
 ## Billing and Entitlement Lifecycle
 
-Enterprise access is created through the approved contractual process. For self-service plans, a selected plan is only activated after Adyen confirms billing and ApexMail processes the verified subscription webhook. A Checkout completion page alone does not grant an entitlement.
+Enterprise access is created through the approved contractual process. For self-service plans, a selected plan is only activated after a Mollie payment settles and ApexMail has fetched and verified it (the webhook carries only the payment id). A Checkout completion page alone does not grant an entitlement.
 
 Existing subscription changes and cancellations are made from the billing settings page in the console. Enterprise changes, renewals, and termination follow the signed contract.
+
+### Payment processor
+
+Mollie B.V. is a payment institution supervised by De Nederlandsche Bank (DNB), with its registered office at Keizersgracht 126, 1015 CW Amsterdam, The Netherlands. Payment data is processed in the Netherlands (EU); card-scheme networks may process it globally under Mollie's Data Processing Agreement.
 
 ## Procurement Materials
 

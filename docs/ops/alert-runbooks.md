@@ -75,10 +75,11 @@ If an alert is caused by monitoring drift rather than a service failure, fix the
 - Check ingestion queues, worker consumers, and any Redis or database dependency needed for event flow.
 - Compare against recent frontend or redirect changes that could have stopped event generation at the source.
 
-<h2 id="adyen-webhook-failures">AdyenWebhookFailures</h2>
+<h2 id="mollie-webhook-failures">MollieWebhookFailures</h2>
 
-- Inspect webhook signature validation, payload parsing, and billing-side database writes.
-- Check whether Adyen is retrying the same events or whether new events are failing uniformly.
+- Inspect the id-only form parsing (`id=tr_…`/`id=re_…`), the authenticated Mollie API fetch (Bearer key, base URL), and billing-side database writes.
+- Remember that a non-200 makes Mollie retry for roughly 26 hours; unknown ids must still be acknowledged with 200 so they stop retrying.
+- Check whether Mollie is retrying the same ids or whether new ids are failing uniformly (a bad key/base URL fails all of them).
 - If necessary, pause automated billing side effects until webhook correctness is restored.
 
 <h2 id="postgres-down">PostgresDown</h2>

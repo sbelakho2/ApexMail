@@ -15,16 +15,12 @@
 
 use std::time::Duration;
 
-use hmac::{Hmac, Mac};
-use sha2::Sha256;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use std::sync::Arc;
 
 use crate::config::BillingConfig;
 use crate::AppState;
-
-type HmacSha256 = Hmac<Sha256>;
 
 const MAX_DB_NAME_LEN: usize = 63;
 
@@ -44,8 +40,8 @@ pub(crate) fn ensure_trace_subscriber() {
     }
 }
 
-/// The Adyen signing secret baked into every provisioned [`AppState`].
-pub(crate) const TEST_ADYEN_SECRET: &str = "whsec_adversarial";
+/// The Mollie signing secret baked into every provisioned [`AppState`].
+pub(crate) const TEST_MOLLIE_SECRET: &str = "whsec_adversarial";
 
 /// Serializes canonical-template clones process-wide: PostgreSQL rejects a
 /// `CREATE DATABASE ... TEMPLATE x` while any other session (including a
@@ -234,7 +230,7 @@ pub(crate) async fn provision(tag: &str) -> Option<TestEnv> {
         database_url: format!("{server_part}/{db_name}"),
         redis_url: "redis://127.0.0.1:6379".to_string(),
         service_auth_token: "adversarial-service-token".to_string(),
-        adyen_hmac_key: TEST_ADYEN_SECRET.to_string(),
+        mollie_api_key: TEST_MOLLIE_SECRET.to_string(),
         api_base_url: "http://127.0.0.1:9".to_string(),
         ..BillingConfig::default()
     };
@@ -288,18 +284,6 @@ pub(crate) fn spawn_isolated_redis() -> IsolatedRedis {
     IsolatedRedis { pool, server }
 }
 
-/// Build a real Adyen-style `Adyen-Signature` header over `payload`.
-pub(crate) fn sign_adyen(secret: &str, payload: &[u8], timestamp: i64) -> String {
-    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC key");
-    mac.update(timestamp.to_string().as_bytes());
-    mac.update(b".");
-    mac.update(payload);
-    format!(
-        "t={timestamp},v1={}",
-        hex::encode(mac.finalize().into_bytes())
-    )
-}
-
 /// A lazy pool that fails on first acquire (nonexistent database): drives
 /// `begin()`-failure arms deterministically without touching real servers.
 pub(crate) fn broken_db_pool() -> PgPool {
@@ -320,7 +304,7 @@ pub(crate) fn state_with_broken_db() -> Arc<AppState> {
             database_url: "postgresql://127.0.0.1:5432/apexmail_no_such_database_cov".to_string(),
             redis_url: "redis://127.0.0.1:6379".to_string(),
             service_auth_token: "adversarial-service-token".to_string(),
-            adyen_hmac_key: TEST_ADYEN_SECRET.to_string(),
+            mollie_api_key: TEST_MOLLIE_SECRET.to_string(),
             api_base_url: "http://127.0.0.1:9".to_string(),
             ..BillingConfig::default()
         },
@@ -336,22 +320,11 @@ pub(crate) fn state_with_dead_redis(pool: &PgPool) -> Arc<AppState> {
             database_url: "postgresql://127.0.0.1:5432/apexmail_no_such_database_cov".to_string(),
             redis_url: "redis://127.0.0.1:1".to_string(),
             service_auth_token: "adversarial-service-token".to_string(),
-            adyen_hmac_key: TEST_ADYEN_SECRET.to_string(),
+            mollie_api_key: TEST_MOLLIE_SECRET.to_string(),
             api_base_url: "http://127.0.0.1:9".to_string(),
             ..BillingConfig::default()
         },
     )
-}
-
-/// An AppState over `pool`/`redis` with an empty Adyen webhook secret.
-pub(crate) fn state_with_empty_adyen_secret(
-    pool: &PgPool,
-    redis: &deadpool_redis::Pool,
-    config: &BillingConfig,
-) -> Arc<AppState> {
-    let mut config = config.clone();
-    config.adyen_hmac_key = String::new();
-    AppState::new(pool.clone(), redis.clone(), config)
 }
 
 /// Common seeding: an active tenant (unique tag prefix keeps Redis counters
@@ -369,14 +342,14 @@ pub(crate) async fn seed_tenant(pool: &PgPool, tenant: &str, plan: &str) {
     .expect("seed tenant");
 }
 
-/// Seed a plan with a merchant-defined Adyen `plan_code` (the monthly
-/// catalog key Adyen checkout quotes; there are no provider price objects).
+/// Seed a plan with a merchant-defined Mollie `plan_code` (the monthly
+/// catalog key Mollie checkout quotes; there are no provider price objects).
 pub(crate) async fn seed_plan(pool: &PgPool, name: &str, plan_code: &str) {
     sqlx::query(
         "INSERT INTO plans (id, name, display_name, price_cents, email_limit, api_call_limit,
-                            adyen_plan_code_monthly, is_active)
+                            mollie_plan_code_monthly, is_active)
          VALUES ($1, $2, $2, 4900, 100000, 100000, $3, true)
-         ON CONFLICT (name) DO UPDATE SET adyen_plan_code_monthly = EXCLUDED.adyen_plan_code_monthly,
+         ON CONFLICT (name) DO UPDATE SET mollie_plan_code_monthly = EXCLUDED.mollie_plan_code_monthly,
              is_active = true",
     )
     .bind(format!("plan_{name}"))
@@ -388,7 +361,7 @@ pub(crate) async fn seed_plan(pool: &PgPool, name: &str, plan_code: &str) {
 }
 
 /// Cross-process serialization for tests whose Redis keyspace is SHARED by
-/// the whole suite (pending metering events, Adyen deadletters): a drain or
+/// the whole suite (pending metering events, Mollie deadletters): a drain or
 /// a clear-and-scan in one process otherwise races another's. A session-level
 /// Postgres advisory lock on the admin database; released when the pool drops.
 ///

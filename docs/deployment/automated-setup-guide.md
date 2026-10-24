@@ -293,8 +293,10 @@ Set these environment variables on the API server (`apx-api-1`) and the worker s
 |----------|----------|---------|-------------|
 | [`DATABASE_URL`](../../.env.production.example:5) | **Yes** | — | PostgreSQL connection string (points to `10.0.1.4:5432`) |
 | [`REDIS_URL`](../../.env.production.example:15) | **Yes** | — | Redis connection string (points to `10.0.1.4:6379`) |
-| [`ADYEN_API_KEY`](../../.env.production.example:84) | **Yes** | — | Adyen secret key for webhook verification |
-| [`ADYEN_HMAC_KEY`](../../.env.production.example:85) | **Yes** | — | Adyen webhook signing secret |
+| [`MOLLIE_API_KEY`](../../.env.production.example:163) | **Yes** | — | Mollie API key; authenticates every payment/refund/customer/subscription call and the webhook's verification fetch |
+| [`MOLLIE_PROFILE_ID`](../../.env.production.example:164) | **Yes** | — | Mollie payment profile id (`pfl_...`) |
+| [`MOLLIE_API_BASE_URL`](../../.env.production.example:165) | **Yes** | — | `https://api.mollie.com/v2` |
+| [`MOLLIE_WEBHOOK_URL`](../../.env.production.example:166) | **Yes** | — | The public `https://<host>/webhooks/mollie` URL Mollie posts the id to |
 | [`JWT_SECRET`](../../.env.production.example:55) | **Yes** | — | Secret for JWT token signing |
 | [`JWT_PUBLIC_KEY`](../../.env.production.example:59) | **Yes** | — | RSA public key for JWT verification |
 | `DKIM_PRIVATE_KEY_ENCRYPTION_KEY` | **Yes** | — | 64 hexadecimal characters used to encrypt generated per-domain private keys |
@@ -336,10 +338,12 @@ HETZNER_DEFAULT_RDNS=ip<N>.dedicated.apexmail.ee
 HETZNER_POOL_MIN_FREE=5
 
 # =============================================================================
-# Adyen
+# Mollie
 # =============================================================================
-ADYEN_API_KEY=<adyen-api-key>
-ADYEN_HMAC_KEY=<64-hex-characters>
+MOLLIE_API_KEY=<live_ or test_ API key>
+MOLLIE_PROFILE_ID=<pfl_ payment profile id>
+MOLLIE_API_BASE_URL=https://api.mollie.com/v2
+MOLLIE_WEBHOOK_URL=https://api.apexmail.ee/webhooks/mollie
 
 # =============================================================================
 # DKIM
@@ -438,13 +442,13 @@ Once Phase 1 is complete, customer provisioning is fully automated. Here is exac
 
 ### B. Customer Upgrades to a Paid Plan
 
-#### Step 1: Adyen Webhook Fires
+#### Step 1: Mollie Webhook Fires
 
-When the customer upgrades (e.g., from Free to Growth), Adyen sends a verified subscription notification (`AUTHORISATION` / `RECURRING_CONTRACT`) to the ApexMail webhook endpoint.
+When the customer upgrades (e.g., from Free to Growth), ApexMail creates a Mollie payment and the customer pays at Mollie's hosted checkout. Mollie then posts the id-only webhook (`id=tr_…`); ApexMail fetches the payment with its Bearer API key. A fetched `paid` status is normalized to `AUTHORISATION`, and a first paid payment that produced a mandate is normalized to `RECURRING_CONTRACT`.
 
 #### Step 2: Auto-Provision Background Job
 
-The webhook handler calls [`auto_provision_dedicated_ips_background()`](../../services/mail-server/crates/billing-service/src/adyen_webhooks.rs:1153) — a background async job that:
+The webhook handler calls [`auto_provision_dedicated_ips_background()`](../../services/mail-server/crates/billing-service/src/mollie_webhooks.rs:1153) — a background async job that:
 
 1. Reads the plan allocation (e.g., Growth = 1 dedicated IP, Scale = 3, Enterprise = 10+).
 2. Calls the **Hetzner Cloud API** to create Floating IPs:
@@ -708,7 +712,7 @@ IP and limit) rather than fixed message strings; inspect the worker logs for
 
 ### Auto-provisioning failed on upgrade
 
-1. **Check Adyen webhook logs**: Look for `AUTHORISATION` (success `true`) and `RECURRING_CONTRACT` notifications.
+1. **Check Mollie webhook logs**: Look for an accepted id-only webhook (`id=tr_…`), a successful authenticated payment fetch with status `paid` (normalized `AUTHORISATION` success), and the `RECURRING_CONTRACT` event when the first payment produced a mandate.
 2. **Check API server logs**: Look for `auto_provision_dedicated_ips_background` errors.
 3. **Check Hetzner API token validity**: Ensure the token has `read/write` for `floating_ip` and `server`.
 4. **Check Floating IP quota**: Verify the project has available quota.

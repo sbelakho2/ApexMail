@@ -50,9 +50,13 @@ The current authorised subprocessors are maintained in the [ApexMail Subprocesso
 | Amazon Web Services, Inc. | Email-delivery transport when enabled | Configured SES region | EU Standard Contractual Clauses (AWS DPA) |
 | Google LLC | Optional OAuth authentication | Global (US entity, data processed per OAuth config) | Standard Contractual Clauses |
 | GitHub, Inc. | Optional OAuth authentication | Global (US entity) | Standard Contractual Clauses |
-| Adyen N.V. | Payment processing | Netherlands (EU); card scheme networks process globally under the Adyen DPA | Intra-EEA processing (Adyen N.V., Amsterdam) |
+| Mollie B.V. | Payment processing | Netherlands (EU); card scheme networks process globally under the Mollie DPA | Intra-EEA processing (Mollie B.V., Amsterdam) |
 
 Self-hosted infrastructure (ClickHouse, Redis) runs on Hetzner servers under ApexMail's operational control. The upstream open-source publishers do not process customer data.
+
+### Payment processor
+
+Mollie B.V. is a payment institution supervised by De Nederlandsche Bank (DNB), with its registered office at Keizersgracht 126, 1015 CW Amsterdam, The Netherlands. Payment data is processed in the Netherlands (EU); card-scheme networks may process it globally under Mollie's Data Processing Agreement.
 
 ### 5.2 Notification of Changes
 

@@ -38,7 +38,7 @@ pub const STANDARD_CHART: &[AccountSpec] = &[
         name: "Payment processor clearing",
         account_type: "asset",
         normal_balance: "debit",
-        role: Some(ROLE_ADYEN_CLEARING),
+        role: Some(ROLE_PAYMENT_CLEARING),
         vat_code: None,
     },
     AccountSpec {
@@ -190,7 +190,7 @@ pub const STANDARD_CHART: &[AccountSpec] = &[
         name: "Payment processing fees",
         account_type: "expense",
         normal_balance: "debit",
-        role: Some(ROLE_ADYEN_FEES),
+        role: Some(ROLE_MOLLIE_FEES),
         vat_code: None,
     },
     AccountSpec {

@@ -108,6 +108,10 @@ The term "System Integrity Controls" refers to the combination of these controls
   - Final root-cause analysis: published when validation completes.
 - Breach notification to customers without undue delay after becoming aware of a personal data breach. Supervisory authority notification as required under GDPR Article 33 (within 72 hours where applicable).
 
+### Payment processor
+
+Mollie B.V. is a payment institution supervised by De Nederlandsche Bank (DNB), with its registered office at Keizersgracht 126, 1015 CW Amsterdam, The Netherlands. Payment data is processed in the Netherlands (EU); card-scheme networks may process it globally under Mollie's Data Processing Agreement.
+
 ## Audit and Compliance Evidence
 
 - Penetration test summary: planned for publication after the first external application penetration test is completed and high/critical findings are remediated. Not currently available.

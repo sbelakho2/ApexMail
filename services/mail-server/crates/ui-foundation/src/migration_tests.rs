@@ -16,7 +16,9 @@ use crate::ssr;
 
 const UI_RUST_MIGRATION_PLAN_JSON: &str =
     include_str!("../../../../../docs/development/ui-rust-migration-plan.json");
-const ADYEN_TOOL_CONTRACT_MD: &str = include_str!("../../../../../docs/tool-contracts/adyen.md");
+const MOLLIE_TOOL_CONTRACT_MD: &str = include_str!("../../../../../docs/tool-contracts/mollie.md");
+const MOLLIE_BILLING_RENAMES_SQL: &str =
+    include_str!("../../../migrations/269_mollie_billing_renames.sql");
 
 fn rendered_routes() -> Vec<ssr::SsrRoute> {
     ssr::ssr_routes()
@@ -51,20 +53,22 @@ fn assert_no_unmigrated_markers(label: &str, html: &str) {
     }
 }
 
-fn assert_no_adyen_browser_embed(label: &str, html: &str) {
+fn assert_no_mollie_browser_embed(label: &str, html: &str) {
+    // Mollie's checkout is a server-created redirect (the `_links.checkout`
+    // URL). No rendered ApexMail page embeds a Mollie script, posts to a
+    // browser checkout API, or exposes the webhook endpoint.
     let forbidden = [
-        "https://js.adyen.com",
-        "js.adyen.com",
-        "checkout.adyen.com",
+        "js.mollie.com",
+        "mollie.com/checkout/select-method",
         "/api/billing/checkout",
         "/api/checkout/create",
-        "/webhooks/adyen",
+        "/webhooks/mollie",
     ];
 
     for marker in forbidden {
         assert!(
             !html.contains(marker),
-            "{} should not embed Adyen browser integration marker {:?}",
+            "{} should not embed Mollie browser integration marker {:?}",
             label,
             marker
         );
@@ -226,7 +230,7 @@ fn migration_all_93_routes_have_view_functions() {
 }
 
 #[test]
-fn migration_docs_define_rust_ui_and_current_adyen_boundary() {
+fn migration_docs_define_rust_ui_and_current_mollie_boundary() {
     assert!(
         UI_RUST_MIGRATION_PLAN_JSON.contains("\"next\": \"axum-plus-leptos-router\""),
         "migration plan no longer requires axum + Leptos router replacement"
@@ -239,23 +243,158 @@ fn migration_docs_define_rust_ui_and_current_adyen_boundary() {
         UI_RUST_MIGRATION_PLAN_JSON.contains("\"radix\": \"replace-with-rust-native-primitives\""),
         "migration plan no longer requires Rust-native primitive replacement"
     );
+    // The boundary is server-side: Mollie's webhook carries only an object
+    // id, so verification is an authenticated fetch, not a body signature.
     assert!(
-        ADYEN_TOOL_CONTRACT_MD.contains("ApexMail creates a Adyen Checkout Session in subscription mode"),
-        "Adyen tool contract no longer documents the current server-side Adyen integration boundary"
+        MOLLIE_TOOL_CONTRACT_MD.contains("ApexMail") && MOLLIE_TOOL_CONTRACT_MD.contains("Mollie"),
+        "Mollie tool contract no longer documents the ApexMail/Mollie boundary"
     );
     assert!(
-        ADYEN_TOOL_CONTRACT_MD.contains("the in-body `additionalData.hmacSignature`")
-            && ADYEN_TOOL_CONTRACT_MD
-                .contains("HMAC SHA256 signature over the escaped colon-joined"),
-        "Adyen tool contract no longer documents the in-body HMAC webhook verification ownership"
+        MOLLIE_TOOL_CONTRACT_MD.contains("/webhooks/mollie"),
+        "Mollie tool contract no longer documents the webhook endpoint"
     );
     assert!(
-        ADYEN_TOOL_CONTRACT_MD.contains("`[accepted]`"),
-        "Adyen tool contract no longer documents the [accepted] acknowledgement"
+        MOLLIE_TOOL_CONTRACT_MD.contains("Bearer") && MOLLIE_TOOL_CONTRACT_MD.contains("v2/payments"),
+        "Mollie tool contract no longer documents fetch-verify with the Bearer key"
+    );
+    // The pre-cutover wire vocabulary has no Mollie analog: a contract that
+    // still names it documents a protocol Mollie does not speak.
+    for banned in [
+        "hmacSignature",
+        "notificationItems",
+        "NotificationRequestItem",
+        "pspReference",
+        "[accepted]",
+        "resultCode",
+        "X-API-Key",
+    ] {
+        assert!(
+            !MOLLIE_TOOL_CONTRACT_MD.contains(banned),
+            "Mollie tool contract still carries the pre-cutover wire token {banned:?}"
+        );
+    }
+}
+
+#[test]
+fn migration_269_renames_the_billing_schema_to_mollie() {
+    // Migration 269 is the schema half of the processor switch: every
+    // renamed table/column the code reads must be named there.
+    for table in [
+        "mollie_customers",
+        "mollie_subscriptions",
+        "mollie_tax_snapshots",
+        "mollie_webhook_events",
+        "mollie_refunds",
+    ] {
+        assert!(
+            MOLLIE_BILLING_RENAMES_SQL.contains(table),
+            "migration 269 does not create/rename {table}"
+        );
+    }
+    // The renames the runtime SQL depends on.
+    for (old_column, new_column) in [
+        ("adyen_shopper_reference", "mollie_customer_id"),
+        ("adyen_subscription_id", "mollie_subscription_id"),
+        ("adyen_plan_code", "mollie_plan_code"),
+        ("adyen_psp_reference", "mollie_payment_id"),
+        ("adyen_notification_id", "mollie_event_id"),
+        ("adyen_recurring_detail_reference", "mollie_mandate_id"),
+        ("adyen_recurring_processing_model", "mollie_sequence_type"),
+    ] {
+        assert!(
+            MOLLIE_BILLING_RENAMES_SQL.contains(old_column)
+                && MOLLIE_BILLING_RENAMES_SQL.contains(new_column),
+            "migration 269 does not rename {old_column} -> {new_column}"
+        );
+    }
+    // The refund mapping is the only way a refund webhook (which names just
+    // `re_…`) can be resolved to its payment.
+    assert!(
+        MOLLIE_BILLING_RENAMES_SQL.contains("CREATE TABLE IF NOT EXISTS mollie_refunds")
+            && MOLLIE_BILLING_RENAMES_SQL.contains("payment_id"),
+        "migration 269 does not create the refund -> payment mapping"
+    );
+    // The migration itself proves no schema object keeps the old processor
+    // name (tables and columns), and refuses to complete otherwise.
+    assert!(
+        MOLLIE_BILLING_RENAMES_SQL.contains("RAISE EXCEPTION")
+            && MOLLIE_BILLING_RENAMES_SQL.contains("column_name ILIKE '%adyen%'")
+            && MOLLIE_BILLING_RENAMES_SQL.contains("table_name ILIKE '%adyen%'"),
+        "migration 269 no longer asserts that no adyen-named schema object remains"
+    );
+    // ...and the proof covers indexes, constraints, functions and triggers.
+    for proof in [
+        "indexname ILIKE '%adyen%'",
+        "conname ILIKE '%adyen%'",
+        "pg_get_constraintdef(oid) ILIKE '%adyen%'",
+        "proname ILIKE '%adyen%'",
+        "tgname ILIKE '%adyen%'",
+    ] {
+        assert!(
+            MOLLIE_BILLING_RENAMES_SQL.contains(proof),
+            "migration 269's proof block no longer checks {proof:?}"
+        );
+    }
+
+    // Triggers and the immutability function carry the processor name.
+    for (old, new) in [
+        (
+            "trg_adyen_shoppers_updated_at",
+            "trg_mollie_customers_updated_at",
+        ),
+        (
+            "trg_adyen_subscriptions_updated_at",
+            "trg_mollie_subscriptions_updated_at",
+        ),
+        (
+            "trg_adyen_webhook_events_updated_at",
+            "trg_mollie_webhook_events_updated_at",
+        ),
+        (
+            "trg_adyen_tax_snapshots_immutable",
+            "trg_mollie_tax_snapshots_immutable",
+        ),
+        (
+            "prevent_adyen_tax_snapshot_mutation",
+            "prevent_mollie_tax_snapshot_mutation",
+        ),
+    ] {
+        assert!(
+            MOLLIE_BILLING_RENAMES_SQL.contains(old)
+                && MOLLIE_BILLING_RENAMES_SQL.contains(new),
+            "migration 269 does not rename {old} -> {new}"
+        );
+    }
+    // The replacement tax-snapshot guard reads the renamed column.
+    assert!(
+        MOLLIE_BILLING_RENAMES_SQL.contains("OLD.mollie_payment_id"),
+        "the Mollie tax-snapshot guard must read the renamed payment column"
+    );
+
+    // CHECK allowlists must accept the values the Rust code writes, or the
+    // schema rejects Mollie's own bookkeeping at insert time.
+    for allowed in [
+        "'mollie'",
+        "'mollie_settlement'",
+        "'mollie_clearing'",
+        "'mollie_fees'",
+    ] {
+        assert!(
+            MOLLIE_BILLING_RENAMES_SQL.contains(allowed),
+            "migration 269 does not widen a CHECK allowlist to {allowed}"
+        );
+    }
+
+    // Immediate cancellation revokes the mandate at Mollie; the column is
+    // the durable evidence and the retry signal for the sweep.
+    assert!(
+        MOLLIE_BILLING_RENAMES_SQL.contains("mandate_revoked_at TIMESTAMPTZ"),
+        "migration 269 does not add mollie_customers.mandate_revoked_at"
     );
     assert!(
-        ADYEN_TOOL_CONTRACT_MD.contains("Adyen redirects the customer to the approved return URL"),
-        "Adyen tool contract no longer documents hosted Adyen checkout"
+        MOLLIE_BILLING_RENAMES_SQL.contains("idx_mollie_refunds_payment")
+            && MOLLIE_BILLING_RENAMES_SQL.contains("idx_mollie_refunds_tenant"),
+        "migration 269 does not index the refund mapping both ways"
     );
 }
 
@@ -465,11 +604,11 @@ fn migration_all_rendered_routes_are_free_of_unmigrated_runtime_markers() {
 }
 
 #[test]
-fn migration_ui_routes_do_not_embed_adyen_browser_flow() {
+fn migration_ui_routes_do_not_embed_mollie_browser_flow() {
     for route in rendered_routes() {
         let label = format!("[{}] {}", route.surface, route.pattern);
         let html = render_or_panic(&route);
-        assert_no_adyen_browser_embed(&label, &html);
+        assert_no_mollie_browser_embed(&label, &html);
     }
 }
 
@@ -566,7 +705,7 @@ fn migration_unknown_routes_are_rejected_for_every_surface() {
     let unknown = [
         "/definitely-missing",
         "/billing/checkout",
-        "/webhooks/adyen",
+        "/webhooks/mollie",
         "/_next/static/app.js",
     ];
     let surfaces = ["web", "control-plane", "marketing", "marketing-zola"];

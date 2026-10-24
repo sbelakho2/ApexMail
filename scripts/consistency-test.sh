@@ -37,7 +37,7 @@ assert company.get("legal_name") == "Bel Consulting OÜ"
 assert company.get("registry_code") == "16588745"
 assert data.get("_pricing_authority") == (
     "services/mail-server/crates/billing-service/src/plans.rs "
-    "(plus active plans table and verified Adyen webhooks)"
+    "(plus active plans table and verified Mollie webhooks)"
 )
 assert "pricing_plans" not in data
 assert "HIPAA not currently available" in data.get("claims", {}).get(

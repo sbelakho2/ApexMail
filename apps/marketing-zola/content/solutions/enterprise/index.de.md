@@ -47,9 +47,13 @@ Das Vertriebsteam bestätigt vor Vertragsschluss das verfügbare Bereitstellungs
 
 ## Abrechnungs- und Anspruchs-Lebenszyklus
 
-Enterprise-Zugang wird über den genehmigten Vertragsprozess erstellt. Bei Self-Service-Tarifen wird ein gewählter Tarif erst aktiviert, nachdem Adyen die Abrechnung bestätigt und ApexMail den verifizierten Subscription-Webhook verarbeitet hat. Eine abgeschlossene Checkout-Seite allein gewährt keinen Anspruch.
+Enterprise-Zugang wird über den genehmigten Vertragsprozess erstellt. Bei Self-Service-Tarifen wird ein gewählter Tarif erst aktiviert, nachdem eine Mollie-Zahlung abgeschlossen ist und ApexMail sie über die API abgerufen und geprüft hat (der Webhook enthält nur die Zahlungs-Id). Eine abgeschlossene Checkout-Seite allein gewährt keinen Anspruch.
 
-Änderungen und Kündigungen bestehender Abonnements erfolgen über das Adyen-Billing-Portal. Enterprise-Änderungen, Verlängerungen und Beendigungen folgen dem unterzeichneten Vertrag.
+Änderungen und Kündigungen bestehender Abonnements erfolgen über die Abrechnungseinstellungen im Konsolenbereich. Enterprise-Änderungen, Verlängerungen und Beendigungen folgen dem unterzeichneten Vertrag.
+
+### Zahlungsabwickler
+
+Mollie B.V. ist ein von der De Nederlandsche Bank (DNB) beaufsichtigtes Zahlungsinstitut mit Sitz unter Keizersgracht 126, 1015 CW Amsterdam, Niederlande. Zahlungsdaten werden in den Niederlanden (EU) verarbeitet; Kartennetzwerke können sie im Rahmen des Datenverarbeitungsvertrags von Mollie weltweit verarbeiten.
 
 ## Beschaffungsunterlagen
 

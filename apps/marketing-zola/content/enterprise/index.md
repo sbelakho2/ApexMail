@@ -43,7 +43,11 @@ Enterprise Cloud includes EU-only routing: every send leaves through ApexMail's 
 
 ## Billing Lifecycle
 
-Enterprise is not purchasable through generic public Checkout. The contract or approved billing arrangement is the entitlement authority. For the public self-service plans, Adyen Checkout and the verified Adyen subscription webhook are required before a paid plan is granted.
+Enterprise is not purchasable through generic public Checkout. The contract or approved billing arrangement is the entitlement authority. For the public self-service plans, a settled Mollie payment is required before a paid plan is granted. Mollie posts only an id to the webhook, so ApexMail fetches and verifies the payment with its API key.
+
+### Payment processor
+
+Mollie B.V. is a payment institution supervised by De Nederlandsche Bank (DNB), with its registered office at Keizersgracht 126, 1015 CW Amsterdam, The Netherlands. Payment data is processed in the Netherlands (EU); card-scheme networks may process it globally under Mollie's Data Processing Agreement.
 
 ## Contact
 

@@ -85,19 +85,19 @@ Para compras empresariales, revisiones de seguridad o planificación de nube pri
     <legend class="px-2">Preferencia de despliegue</legend>
     <div class="space-y-3 mt-3">
       <label class="apex-check">
-        <input type="radio" name="deployment_preference" value="shared" checked />
+        <input type="radio" class="apex-checkbox apex-input" name="deployment_preference" value="shared" checked />
         <span><strong>Nube compartida</strong> — Infraestructura multi-tenant en la UE</span>
       </label>
       <label class="apex-check">
-        <input type="radio" name="deployment_preference" value="dedicated" />
+        <input type="radio" class="apex-checkbox apex-input" name="deployment_preference" value="dedicated" />
         <span><strong>Inquilino dedicado</strong> — Infraestructura aislada de inquilino único</span>
       </label>
       <label class="apex-check">
-        <input type="radio" name="deployment_preference" value="byoc" />
+        <input type="radio" class="apex-checkbox apex-input" name="deployment_preference" value="byoc" />
         <span><strong>BYOC / Implementación privada</strong> — Despliegue gestionado en su propia cuenta cloud</span>
       </label>
       <label class="apex-check">
-        <input type="radio" name="deployment_preference" value="not_sure" />
+        <input type="radio" class="apex-checkbox apex-input" name="deployment_preference" value="not_sure" />
         <span><strong>Aún no lo tengo claro</strong> — Necesito orientación sobre el modelo más adecuado</span>
       </label>
     </div>

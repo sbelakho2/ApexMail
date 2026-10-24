@@ -22,7 +22,7 @@ Die unten genannten Einträge zu Dedicated Tenant und BYOC beschreiben ein Model
 | 5 | Anhänge | EU-Rechenzentrum — Deutschland | EU-Rechenzentrum — Finnland | EWR (keine Drittlandübermittlung) | Übermittlung innerhalb der EEA; die Kapitel-V-Regeln der DSGVO finden keine Anwendung |
 | 6 | Ereignisse und Protokolle (Zustellung, Öffnung, Klick, Bounce) | EU-Rechenzentrum — Deutschland | EU-Rechenzentrum — Finnland | EWR (keine Drittlandübermittlung) | Übermittlung innerhalb der EEA; die Kapitel-V-Regeln der DSGVO finden keine Anwendung |
 | 7 | Authentifizierung (OAuth-Token, MFA-Geheimnisse) | EU-Rechenzentrum — Deutschland; Google LLC / GitHub, Inc. (OAuth) | Anbieter-verwaltet | EWR (Kern); US für OAuth-Anbieter | SCCs (OAuth-Anbieter) |
-| 8 | Abrechnung (Rechnungen, Transaktionen, Zahlungstoken) | EU-Rechenzentrum — Deutschland; Adyen N.V. (Niederlande, EU) | Anbieter-verwaltet innerhalb der EU | EWR (ApexMail und Adyen); Kartennetzwerke gemäß Adyen-DPA | Verarbeitung innerhalb der EU (Adyen N.V., Amsterdam) |
+| 8 | Abrechnung (Rechnungen, Transaktionen, Zahlungstoken) | EU-Rechenzentrum — Deutschland; Mollie B.V. (Niederlande, EU) | Anbieter-verwaltet innerhalb der EU | EWR (ApexMail und Mollie); Kartennetzwerke gemäß Mollie-DPA | Verarbeitung innerhalb der EU (Mollie B.V., Amsterdam) |
 | 9 | Support-Tickets | EU-Rechenzentrum — Deutschland | EU-Rechenzentrum — Finnland | EWR (keine Drittlandübermittlung) | Übermittlung innerhalb der EEA; die Kapitel-V-Regeln der DSGVO finden keine Anwendung |
 | 10 | Analytik (aggregierte Zustellmetriken, Engagement) | EU-Rechenzentrum — Deutschland | EU-Rechenzentrum — Finnland | EWR (keine Drittlandübermittlung) | Übermittlung innerhalb der EEA; die Kapitel-V-Regeln der DSGVO finden keine Anwendung |
 | 11 | Sicherheitsprotokolle (Audit-Trails, Zugriffsprotokolle) | EU-Rechenzentrum — Deutschland | EU-Rechenzentrum — Finnland | EWR (keine Drittlandübermittlung) | Übermittlung innerhalb der EEA; die Kapitel-V-Regeln der DSGVO finden keine Anwendung |
@@ -35,9 +35,13 @@ Die unten genannten Einträge zu Dedicated Tenant und BYOC beschreiben ein Model
 | Hetzner Online GmbH | Kerninfrastruktur (Compute, Storage, Netzwerk) | Deutschland und Finnland (EU) | Übermittlung innerhalb der EEA; die Kapitel-V-Regeln der DSGVO finden keine Anwendung |
 | Amazon Web Services, Inc. (AWS S3) | Telemetrie-Objektspeicher, wenn aktiviert | Konfigurierte S3-Region (Standard: `eu-central-1`) | EU-Standardvertragsklauseln (AWS-DPA) |
 | Amazon Web Services, Inc. (AWS SES) | E-Mail-Zustelltransport, wenn aktiviert | Konfigurierte SES-Region | EU-Standardvertragsklauseln (AWS-DPA) |
-| Adyen N.V. | Zahlungsabwicklung | Niederlande (EU); Kartennetzwerke verarbeiten global gemäß dem Adyen-DPA | Verarbeitung innerhalb der EU (Adyen N.V., Amsterdam) |
+| Mollie B.V. | Zahlungsabwicklung | Niederlande (EU); Kartennetzwerke verarbeiten global gemäß dem Mollie-DPA | Verarbeitung innerhalb der EU (Mollie B.V., Amsterdam) |
 | Google LLC | Optionale OAuth-Authentifizierung | US | EU-Standardvertragsklauseln |
 | GitHub, Inc. | Optionale OAuth-Authentifizierung | US | EU-Standardvertragsklauseln |
+
+### Zahlungsabwickler
+
+Mollie B.V. ist ein von der De Nederlandsche Bank (DNB) beaufsichtigtes Zahlungsinstitut mit Sitz unter Keizersgracht 126, 1015 CW Amsterdam, Niederlande. Zahlungsdaten werden in den Niederlanden (EU) verarbeitet; Kartennetzwerke können sie im Rahmen des Datenverarbeitungsvertrags von Mollie weltweit verarbeiten.
 
 ## Bereitstellungsmodelle
 

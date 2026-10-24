@@ -21,7 +21,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import parse_qs, quote as urllib_quote, urlparse
 
-from .adyen import notification_id, notification_items, verify_notification
+from .mollie import MOCK, content_digest
 from .config import REPO_ROOT, PASSWORD as LIVE_PASSWORD
 from .identity import totp
 
@@ -1449,8 +1449,8 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 return True
             self._ok({"data": []})
             return True
-        if path == "/webhooks/adyen" and method == "POST":
-            return self._adyen(method, path)
+        if path == "/webhooks/mollie" and method == "POST":
+            return self._mollie(method, path)
         if path.startswith("/v1/admin/") and method == "GET":
             if self._admin(method, path):
                 return True
@@ -1519,49 +1519,55 @@ class FixtureHandler(BaseHTTPRequestHandler):
             self._ok({"ok": True})
         return True
 
-    def _adyen(self, method, path) -> bool:
-        """The Adyen notification endpoint, per the frozen contract: body
-        `{"notificationItems": [{"NotificationRequestItem": {...}}]}`, the HMAC
-        inside the body at `additionalData.hmacSignature` (base64 over the
-        escaped colon-joined fields, key = hex-decoded ADYEN_HMAC_KEY), the
-        success answer the bare body `[accepted]`.
+    def _mollie(self, method, path) -> bool:
+        """The application's Mollie webhook: an id-only form body.
 
-        The fixture VERIFIES the HMAC (same recipe as the live endpoint): the
-        battery's tampered/unsigned refusals are covered contract checks, so an
-        accept-everything double would silently delete real assertions. The
-        probe signs with the same shared helpers, so mock and probe cannot
-        drift.
+        Mollie posts ``id=tr_…`` (payment) or ``id=re_…`` (refund) with
+        ``application/x-www-form-urlencoded`` and no signature, status or event
+        type. The application then authenticates a fetch with its Bearer key.
+        A 200 acknowledges the id (Mollie retries any other answer, including
+        for ids it no longer knows); an unparseable/missing id is a 400.
+
+        The fixture has no provider state, so it keys idempotency on the id it
+        was handed. It consults the shared mock store when the id exists there
+        so a paid/refunded fixture payment records its normalized fact.
         """
         raw = self._read()
-        try:
-            envelope = json.loads(raw)
-        except Exception:  # noqa: BLE001
-            self._err(400, "VALIDATION_ERROR", "Invalid JSON payload")
-            return True
-        items = notification_items(envelope)
-        if not items:
-            self._err(400, "VALIDATION_ERROR",
-                      "invalid notification: notificationItems is required")
-            return True
-        secret = _env_value("ADYEN_HMAC_KEY", "dev-adyen-webhook-secret-local-only-0123456789")
-        for item in items:
-            signature = (item.get("additionalData") or {}).get("hmacSignature") or ""
-            if not signature:
-                self._err(400, "VALIDATION_ERROR", "Missing additionalData.hmacSignature")
+        content_type = (self.headers.get("content-type") or "").lower()
+        object_id = ""
+        if "application/json" in content_type:
+            try:
+                envelope = json.loads(raw) if raw.strip() else {}
+            except Exception:  # noqa: BLE001
+                self._err(400, "VALIDATION_ERROR", "Invalid JSON payload")
                 return True
-            if not verify_notification(item, signature, secret):
-                self._err(400, "VALIDATION_ERROR", "Invalid webhook signature")
-                return True
-        for item in items:
-            # Adyen retries the same notification; the ledger dedupes on the
-            # digest over (eventCode, pspReference, success, eventDate,
-            # merchantReference). pspReference is stored for support lookups.
-            entry_id = notification_id(item)
-            if not self.state.find_one("adyen_webhook_events", adyen_notification_id=entry_id):
-                self.state.insert("adyen_webhook_events", adyen_notification_id=entry_id,
-                                  adyen_psp_reference=str(item.get("pspReference", "")),
-                                  event_type=str(item.get("eventCode", "")), status="processed")
-        self._html(200, "[accepted]", ctype="text/plain")
+            if isinstance(envelope, dict):
+                object_id = str(envelope.get("id") or "").strip()
+        else:
+            form = {key: value[0] for key, value in parse_qs(raw.decode(errors="replace")).items()}
+            object_id = form.get("id", "").strip()
+        if not re.fullmatch(r"(?:tr|re)_[A-Za-z0-9_]+", object_id):
+            self._err(400, "VALIDATION_ERROR", "a single Mollie `id` (tr_…/re_…) is required")
+            return True
+
+        event_type = ""
+        if object_id.startswith("tr_"):
+            payment = MOCK.get_payment(object_id)
+            event_type = payment["status"] if payment else ""
+        else:
+            refund = MOCK.refunds.get(object_id)
+            event_type = refund["status"] if refund else ""
+
+        entry_id = content_digest(object_id)
+        if not self.state.find_one("mollie_webhook_events", mollie_event_id=entry_id):
+            self.state.insert(
+                "mollie_webhook_events",
+                mollie_event_id=entry_id,
+                mollie_payment_id=object_id,
+                event_type=event_type,
+                status="processed",
+            )
+        self._html(200, "OK", ctype="text/plain")
         return True
 
     def _webhook_fire(self, tenant_id: str, event: str, payload: dict) -> None:

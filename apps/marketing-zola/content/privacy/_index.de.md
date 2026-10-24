@@ -20,7 +20,7 @@ Bel Consulting OÜ (Handelsname ApexMail) („wir", „uns") verpflichtet sich, 
 
 - **Webseitenbesucher (Marketing-Website):** IP-Adresse, Browsertyp und User-Agent, Geräteinformationen, besuchte Seiten, Referrer-URL und Zeitstempel — automatisch über Server-Zugriffsprotokolle erhoben. Die Marketing-Website setzt keine Analyse-Skripte ein und bettet keine Tracking-Pixel oder Werbe-Cookies ein.
 - **Interessenten:** Name, E-Mail-Adresse, Unternehmensname, Telefonnummer (falls angegeben) und Kommunikationsverlauf, bereitgestellt über Kontaktformulare oder E-Mail.
-- **Kontodaten:** Name, E-Mail, Unternehmen, Rechnungsadresse, USt-IdNr., Zahlungsdaten-Tokens (Kartendaten werden von Adyen verarbeitet und erreichen niemals unsere Server), API-Schlüssel-Metadaten, Anmeldezeitstempel, IP-Adressen und Audit-Log-Einträge.
+- **Kontodaten:** Name, E-Mail, Unternehmen, Rechnungsadresse, USt-IdNr., Zahlungsdaten-Tokens (Kartendaten werden von Mollie verarbeitet und erreichen niemals unsere Server), API-Schlüssel-Metadaten, Anmeldezeitstempel, IP-Adressen und Audit-Log-Einträge.
 - **Nutzungsdaten:** API-Aufrufe, E-Mail-Versandvolumen, Zustellereignisse sowie Engagement-Ereignisse (Öffnungen und Klicks) für Ihre gesendeten Nachrichten.
 - **Empfängerdaten (als Auftragsverarbeiter für unsere Kunden):** E-Mail-Adressen und Namen der Empfänger, E-Mail-Inhalte (Betreff, Text, Header, Anhänge) sowie Zustell- und Engagement-Metadaten. Wenn der versendende Kunde das Tracking aktiviert, werden bei Öffnungs- und Klick-Ereignissen zusätzlich IP-Adresse und User-Agent des Empfängers erfasst.
 - **Technische Daten:** IP-Adressen (für Authentifizierung, Rate-Limiting sowie Betrugs- und Missbrauchsprävention), Browsertyp, Geräteinformationen.
@@ -40,12 +40,16 @@ Die bereitgestellte Konfiguration zielt für Kern-E-Mail-Daten und Telemetriespe
 |---|---|---|---|
 | Kern-E-Mail-Infrastruktur (Nachrichten, Zustellmetadaten, Kontodaten) | EU-Rechenzentrum — Deutschland | EU-Rechenzentrum — Finnland | EWR — keine Drittlandübermittlung |
 | OAuth-Authentifizierungstoken | Google LLC / GitHub, Inc. (US-Unternehmen, SCCs) | Anbieter-verwaltet | US (SCCs) |
-| Zahlungs- und Abrechnungsdaten | Adyen N.V. (Niederlande, EU) | Anbieter-verwaltet innerhalb der EU | EWR — keine Drittlandübermittlung (Kartennetzwerke gemäß Adyen-DPA) |
+| Zahlungs- und Abrechnungsdaten | Mollie B.V. (Niederlande, EU) | Anbieter-verwaltet innerhalb der EU | EWR — keine Drittlandübermittlung (Kartennetzwerke gemäß Mollie-DPA) |
 | Support-Tickets | EU-Rechenzentrum — Deutschland | EU-Rechenzentrum — Finnland | EWR — keine Drittlandübermittlung |
 
 Wir übermitteln keine personenbezogenen Daten außerhalb des EWR ohne angemessene Garantien (Standardvertragsklauseln oder einen Angemessenheitsbeschluss gemäß Artikel 45).
 
 <span id="data-retention"></span>
+
+### Zahlungsabwickler
+
+Mollie B.V. ist ein von der De Nederlandsche Bank (DNB) beaufsichtigtes Zahlungsinstitut mit Sitz unter Keizersgracht 126, 1015 CW Amsterdam, Niederlande. Zahlungsdaten werden in den Niederlanden (EU) verarbeitet; Kartennetzwerke können sie im Rahmen des Datenverarbeitungsvertrags von Mollie weltweit verarbeiten.
 
 ## 5. Datenspeicherfristen
 

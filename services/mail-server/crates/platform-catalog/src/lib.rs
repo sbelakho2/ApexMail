@@ -9,7 +9,7 @@
 //! convert. Limits are per month; -1 means unlimited.
 //!
 //! Every self-serve plan carries the owner's two list prices: EUR (what the
-//! Adyen checkout charges) and USD (the published dollar list). Annual
+//! Mollie checkout charges) and USD (the published dollar list). Annual
 //! pricing is the documented 10-months-for-12 rule in BOTH currencies.
 
 /// One canonical plan row.

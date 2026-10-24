@@ -43,7 +43,11 @@ Enterprise Cloud enthält EU-only-Routing: Jede Nachricht verlässt das System �
 
 ## Abrechnungslebenszyklus
 
-Enterprise ist nicht über den generischen öffentlichen Checkout kaufbar. Der Vertrag oder die genehmigte Abrechnungsregelung ist die maßgebliche Berechtigungsgrundlage. Für die öffentlichen Self-Service-Tarife sind Adyen Checkout und der verifizierte Adyen-Subscription-Webhook erforderlich, bevor ein kostenpflichtiger Tarif freigeschaltet wird.
+Enterprise ist nicht über den generischen öffentlichen Checkout kaufbar. Der Vertrag oder die genehmigte Abrechnungsregelung ist die maßgebliche Berechtigungsgrundlage. Für die öffentlichen Self-Service-Tarife ist eine abgeschlossene Mollie-Zahlung erforderlich, bevor ein kostenpflichtiger Tarif freigeschaltet wird. Mollie übermittelt am Webhook nur eine Id; ApexMail ruft die Zahlung daher mit seinem API-Schlüssel ab und prüft sie.
+
+### Zahlungsabwickler
+
+Mollie B.V. ist ein von der De Nederlandsche Bank (DNB) beaufsichtigtes Zahlungsinstitut mit Sitz unter Keizersgracht 126, 1015 CW Amsterdam, Niederlande. Zahlungsdaten werden in den Niederlanden (EU) verarbeitet; Kartennetzwerke können sie im Rahmen des Datenverarbeitungsvertrags von Mollie weltweit verarbeiten.
 
 ## Kontakt
 

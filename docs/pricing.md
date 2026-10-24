@@ -6,13 +6,14 @@ runtime authority for entitlement or charging. The canonical plan facts
 [the platform catalog](../services/mail-server/crates/platform-catalog/src/lib.rs);
 the operational authority is
 [the billing plan seeds](../services/mail-server/crates/billing-service/src/plans.rs),
-the active `plans` records, and verified Adyen webhooks. See
+the active `plans` records, and verified Mollie webhooks. See
 [the authority map](pricing-authority.md) for the boundary between runtime and
 presentation data.
 
 All published prices below are EUR. A selected plan during registration is only
 an intent: new workspaces start on Free, and paid access begins only after
-Adyen confirms the subscription through a verified webhook.
+Mollie reports a settled payment that ApexMail fetches and verifies with its
+API key.
 
 ## Subscription catalog
 
@@ -120,13 +121,17 @@ parentheses):
 ## Billing lifecycle
 
 1. A customer creates or signs in to a workspace.
-2. The authenticated billing surface creates a Adyen Checkout or billing
-   portal session for an allowed catalog plan.
-3. ApexMail verifies Adyen's signed webhook and maps the notified charge back
-   to an active catalog plan.
-4. Only `active` or `trialing` verified subscriptions grant the paid plan;
-   incomplete, delinquent, paused, unpaid, and canceled subscriptions resolve
-   to Free access.
+2. The authenticated billing surface resolves an allowed catalog plan and
+   creates a Mollie payment (`sequenceType: first`) for it. Mollie returns the
+   hosted checkout URL; there is no billing portal.
+3. The customer pays at Mollie. Mollie posts an id-only webhook
+   (`id=tr_…`); ApexMail fetches the payment with its Bearer API key and
+   records the fetched `paid` fact (the payment does not itself change the
+   plan).
+4. The local `mollie_subscriptions` row is the entitlement authority
+   (status plus catalog plan). The mandate minted by the first payment is what
+   later renewals charge; an immediate cancellation revokes it at Mollie so
+   the account cannot be charged again.
 
 See [billing lifecycle](architecture/billing-lifecycle.md) and the
-[Adyen contract](tool-contracts/adyen.md) for the integration requirements.
+[Mollie contract](tool-contracts/mollie.md) for the integration requirements.

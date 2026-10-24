@@ -118,7 +118,7 @@ Service credits do not apply to:
 - Beta, preview, or experimental features.
 - Third-party service failures outside ApexMail's control.
 - Suspension per the Acceptable Use Policy.
-- Adyen payment-processing outages.
+- Mollie payment-processing outages.
 - DNS provider outages.
 - Recipient mail server rejections or delivery failures (bounces, blocks, greylisting).
 

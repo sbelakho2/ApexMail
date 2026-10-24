@@ -80,7 +80,8 @@ every 30 seconds in-memory) so routing decisions are O(1).
 
 When a tenant upgrades to a plan with dedicated IPs or purchases an add-on:
 
-1. **Billing webhook** (`billing-service/src/adyen_webhooks.rs`,
+1. **Billing reconciliation** (`billing-service/src/mollie_webhooks.rs`:
+   id-only webhook + authenticated Mollie API fetch,
    `auto_provision_dedicated_ips_background()`) calls `POST /v1/dedicated-ips`
 2. **API handler** calls `DedicatedIpProvider::allocate_ip()`
 3. `DedicatedIpProvider` does:
@@ -172,7 +173,7 @@ When a tenant downgrades or releases an IP:
 
 ### Billing Integration
 
-- `auto_provision_dedicated_ips_background()` in `billing-service/src/adyen_webhooks.rs` calls the API
+- `auto_provision_dedicated_ips_background()` in `billing-service/src/mollie_webhooks.rs` calls the API
 - Plan features control: `dedicated_ip` (boolean), `dedicated_ip_count` (included IPs)
 - Add-on IPs: €49/month for the first, €69/month for each additional (the runtime estimator's ladder)
 - Releasing an IP sets `billing_status = 'pending_cancel'`

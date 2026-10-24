@@ -50,9 +50,13 @@ Die aktuelle Liste der autorisierten Unterauftragsverarbeiter wird im [ApexMail-
 | Amazon Web Services, Inc. | E-Mail-Zustelltransport, wenn aktiviert | Konfigurierte SES-Region | EU-Standardvertragsklauseln (AWS-DPA) |
 | Google LLC | Optionale OAuth-Authentifizierung | Global (US-Unternehmen, Datenverarbeitung gemäß OAuth-Konfiguration) | Standardvertragsklauseln |
 | GitHub, Inc. | Optionale OAuth-Authentifizierung | Global (US-Unternehmen) | Standardvertragsklauseln |
-| Adyen N.V. | Zahlungsabwicklung | Niederlande (EU); Kartennetzwerke verarbeiten global gemäß dem Adyen-DPA | Verarbeitung innerhalb der EU (Adyen N.V., Amsterdam) |
+| Mollie B.V. | Zahlungsabwicklung | Niederlande (EU); Kartennetzwerke verarbeiten global gemäß dem Mollie-DPA | Verarbeitung innerhalb der EU (Mollie B.V., Amsterdam) |
 
 Self-gehostete Infrastruktur (ClickHouse, Redis) läuft auf Hetzner-Servern unter der operativen Kontrolle von ApexMail. Die Upstream-Open-Source-Herausgeber verarbeiten keine Kundendaten.
+
+### Zahlungsabwickler
+
+Mollie B.V. ist ein von der De Nederlandsche Bank (DNB) beaufsichtigtes Zahlungsinstitut mit Sitz unter Keizersgracht 126, 1015 CW Amsterdam, Niederlande. Zahlungsdaten werden in den Niederlanden (EU) verarbeitet; Kartennetzwerke können sie im Rahmen des Datenverarbeitungsvertrags von Mollie weltweit verarbeiten.
 
 ### 5.2 Benachrichtigung über Änderungen
 

@@ -5,9 +5,9 @@
 //! effect of the existing flow (no billing rewrite):
 //!
 //! * invoice finalization → `overage.rs::finalize_collection` and the
-//!   Adyen-paid import path in `adyen_webhooks.rs`;
+//!   Mollie-paid import path in `mollie_webhooks.rs`;
 //! * settlement → the `invoice_payment_allocations` writers in
-//!   `adyen_webhooks.rs` (Adyen) and `overage.rs` (wallet);
+//!   `mollie_webhooks.rs` (Mollie) and `overage.rs` (wallet);
 //! * credit notes and refunds → `credit_notes.rs::create_credit_note`.
 //!
 //! Failure policy: accounting posting is **best effort from the billing
@@ -147,7 +147,7 @@ pub async fn post_invoice_issued_in(tx: &mut PgConnection, invoice_id: Uuid) {
     }
 }
 
-/// Invoice finalization on the pool (Adyen-imported invoice path).
+/// Invoice finalization on the pool (Mollie-imported invoice path).
 pub async fn post_invoice_issued(db: &PgPool, invoice_id: Uuid) {
     match adapters::post_invoice_issued(db, invoice_id).await {
         Ok(outcome) => log_post_success("invoice_issued", &invoice_id.to_string(), &outcome),

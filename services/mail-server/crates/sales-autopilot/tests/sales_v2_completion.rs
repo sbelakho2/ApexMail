@@ -229,7 +229,7 @@ async fn outcome_replay_is_idempotent_and_revenue_is_not_double_counted() {
     record.discovery_source = Some("live_test_source".into());
     record.offer = Some("deliverability_audit".into());
     record.value_eur = 500.0;
-    record.provider = Some("adyen".into());
+    record.provider = Some("mollie".into());
 
     let first_id = record_outcome(&pool, &tenant, &record)
         .await

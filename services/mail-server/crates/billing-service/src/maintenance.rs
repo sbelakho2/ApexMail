@@ -27,6 +27,7 @@ const DEDICATED_IP_TASK_INTERVAL: Duration = Duration::from_secs(30);
 const METERING_TASK_INTERVAL: Duration = Duration::from_secs(60);
 const USAGE_ALERT_TASK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const COST_MARGIN_TASK_INTERVAL: Duration = Duration::from_secs(15 * 60);
+const MANDATE_REVOCATION_TASK_INTERVAL: Duration = Duration::from_secs(15 * 60);
 const DAILY_TASK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 const METERING_SCAN_COUNT: usize = 200;
 const METERING_RECOVERY_LIMIT: usize = 10_000;
@@ -234,6 +235,27 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
         }
     });
 
+    // Provider-side mandate revocation: a canceled account must not remain
+    // chargeable at Mollie. The cancel path attempts the DELETE immediately;
+    // this sweep retries every tenant whose revocation is still outstanding
+    // (the `mandate_revoked_at` NULL marker).
+    let mandate_state = state.clone();
+    tokio::spawn(async move {
+        let mut interval = interval_at(
+            Instant::now() + task_interval(MANDATE_REVOCATION_TASK_INTERVAL),
+            task_interval(MANDATE_REVOCATION_TASK_INTERVAL),
+        );
+        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            match crate::subscriptions::sweep_pending_mandate_revocations(&mandate_state.db).await {
+                Ok(0) => {}
+                Ok(revoked) => info!(revoked, "revoked pending Mollie mandates"),
+                Err(error) => error!(error = %error, "mandate revocation sweep failed"),
+            }
+        }
+    });
+
     let metering_state = state.clone();
     tokio::spawn(async move {
         // Startup drain with monitoring (metrics + alerting)
@@ -380,7 +402,7 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
             // tenant+period; paid subscriptions may send into an overage
             // allowance — see usage::record_with_quota_check and the
             // overage module). Every created invoice is COLLECTED: wallet
-            // first, then Adyen invoice item / dunning (see overage.rs).
+            // first, then Mollie invoice item / dunning (see overage.rs).
             match sweep_overage_once(sla_state.as_ref()).await {
                 Ok(_) => {}
                 Err(error_message) => {
@@ -455,19 +477,19 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
                     info!(
                         attempted = result.attempted,
                         succeeded = result.succeeded,
-                        "processed scheduled Adyen retries"
+                        "processed scheduled Mollie retries"
                     );
                 }
                 Ok(_) => {}
                 Err(error_message) => {
-                    error!(error = %error_message, "failed to process scheduled Adyen retries");
+                    error!(error = %error_message, "failed to process scheduled Mollie retries");
                 }
             }
 
             // Audit F33 — resume stranded usage-invoice collection
             // operations (invoice created, collection interrupted): the
             // idempotent ladder re-runs wallet application, the finalized
-            // Adyen invoice and the dunning handoff until the outbox row
+            // Mollie invoice and the dunning handoff until the outbox row
             // is done. Exhausted attempts dead-letter visibly.
             match crate::overage::resume_pending_collections(grace_state.as_ref()).await {
                 Ok(stats) if stats.resumed > 0 || stats.dead_lettered > 0 => {
@@ -486,25 +508,25 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
             // Audit F66 — the hourly subscription_change_saga cleanup job was
             // removed: no migration or writer ever created that table (every
             // run failed with 42P01). Subscription-change persistence and
-            // recovery are the canonical adyen_webhook_events store
+            // recovery are the canonical mollie_webhook_events store
             // (migrations 127/128) plus the deadletter retry ladder — there
             // is no separate saga to clean up.
         }
     });
 
-    // ── Adyen webhook stale-pending reclaim (startup + hourly, Fix G) ──
+    // ── Mollie webhook stale-pending reclaim (startup + hourly, Fix G) ──
     let webhook_state = state.clone();
     tokio::spawn(async move {
-        match crate::adyen_webhooks::reclaim_stale_pending_webhooks(webhook_state.as_ref()).await {
+        match crate::mollie_webhooks::reclaim_stale_pending_webhooks(webhook_state.as_ref()).await {
             Ok(reclaimed) if !reclaimed.is_empty() => {
                 info!(
                     count = reclaimed.len(),
-                    "reclaimed stale pending adyen webhooks on startup"
+                    "reclaimed stale pending mollie webhooks on startup"
                 );
             }
             Ok(_) => {}
             Err(error_message) => {
-                error!(error = %error_message, "failed to reclaim stale pending adyen webhooks on startup");
+                error!(error = %error_message, "failed to reclaim stale pending mollie webhooks on startup");
             }
         }
 
@@ -517,18 +539,18 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
         loop {
             interval.tick().await;
 
-            match crate::adyen_webhooks::reclaim_stale_pending_webhooks(webhook_state.as_ref())
+            match crate::mollie_webhooks::reclaim_stale_pending_webhooks(webhook_state.as_ref())
                 .await
             {
                 Ok(reclaimed) if !reclaimed.is_empty() => {
                     info!(
                         count = reclaimed.len(),
-                        "reclaimed stale pending adyen webhooks"
+                        "reclaimed stale pending mollie webhooks"
                     );
                 }
                 Ok(_) => {}
                 Err(error_message) => {
-                    error!(error = %error_message, "failed to reclaim stale pending adyen webhooks");
+                    error!(error = %error_message, "failed to reclaim stale pending mollie webhooks");
                 }
             }
         }
@@ -569,7 +591,7 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
 
             // F7 (audit): the third-month fallback for cash-accounting
             // (`cash_special`) VAT. `materialize_due_cash_special` used to
-            // have no caller while adyen_webhooks.rs claimed "the sweep"
+            // have no caller while mollie_webhooks.rs claimed "the sweep"
             // handled it — an invoice that stayed unpaid past the third
             // month never materialized its `cash_special_due` recognition
             // entry, so the KMD aggregation silently omitted that output
@@ -718,7 +740,7 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
     });
 
     // ── Trial-expiry sweep (daily) ──────────────────────────────
-    // The ONLY writers of terminal subscription states are verified Adyen
+    // The ONLY writers of terminal subscription states are verified Mollie
     // webhooks. If the webhook chain dies during a trial→paid transition
     // (deadletter exhausts after 5 retries), a trialing row whose period
     // ended keeps granting the paid entitlement forever. This sweep is the
@@ -1320,7 +1342,7 @@ fn audit_signing_key() -> String {
 /// subscription transition and the tenant downgrade in bulk, then ONE
 /// multi-row audit append — 3 statements per sweep instead of ~3 per row, so
 /// a mass-cancellation event no longer holds long per-row write loops on
-/// `tenants`/`adyen_subscriptions`. Status values, timestamp columns, the
+/// `tenants`/`mollie_subscriptions`. Status values, timestamp columns, the
 /// `plan <> 'free'` guard and the audit payload are byte-identical to the
 /// per-row loop this replaced.
 async fn sweep_canceled_at_period_end(state: &AppState) -> Result<u64, String> {
@@ -1337,7 +1359,7 @@ async fn sweep_canceled_at_period_end(state: &AppState) -> Result<u64, String> {
         r#"
         WITH due AS (
             SELECT s.id, s.tenant_id
-            FROM adyen_subscriptions s
+            FROM mollie_subscriptions s
             WHERE s.cancel_at_period_end = true
               AND s.status IN ('active', 'trialing', 'past_due', 'unpaid')
               AND s.billing_cycle_end IS NOT NULL
@@ -1345,7 +1367,7 @@ async fn sweep_canceled_at_period_end(state: &AppState) -> Result<u64, String> {
             FOR UPDATE SKIP LOCKED
         ),
         ended AS (
-            UPDATE adyen_subscriptions s
+            UPDATE mollie_subscriptions s
                SET status = 'canceled',
                    cancel_at_period_end = false,
                    updated_at = NOW()
@@ -1413,17 +1435,17 @@ async fn sweep_expired_trials(state: &AppState) -> Result<u64, String> {
     let stale: Vec<(String, String)> = sqlx::query_as(
         r#"
         WITH stale AS (
-            SELECT DISTINCT s.tenant_id, s.adyen_subscription_id
-            FROM adyen_subscriptions s
+            SELECT DISTINCT s.tenant_id, s.mollie_subscription_id
+            FROM mollie_subscriptions s
             JOIN tenants t ON t.id = s.tenant_id AND t.plan <> 'free'
             WHERE s.status = 'trialing'
               AND COALESCE(s.trial_end, s.billing_cycle_end) < NOW() - INTERVAL '24 hours'
         ),
         canceled AS (
-            UPDATE adyen_subscriptions s
+            UPDATE mollie_subscriptions s
                SET status = 'canceled', updated_at = NOW()
               FROM stale
-             WHERE s.adyen_subscription_id = stale.adyen_subscription_id
+             WHERE s.mollie_subscription_id = stale.mollie_subscription_id
                AND s.status = 'trialing'
         ),
         downgraded AS (
@@ -1432,7 +1454,7 @@ async fn sweep_expired_trials(state: &AppState) -> Result<u64, String> {
               FROM stale
              WHERE t.id = stale.tenant_id
         )
-        SELECT tenant_id, adyen_subscription_id
+        SELECT tenant_id, mollie_subscription_id
         FROM stale
         ORDER BY tenant_id
         "#,
@@ -1453,7 +1475,7 @@ async fn sweep_expired_trials(state: &AppState) -> Result<u64, String> {
             .map(|(tenant_id, subscription_id)| BatchedAuditEntry {
                 tenant_id: tenant_id.clone(),
                 action: "billing.trial_expired_sweep",
-                resource_type: "adyen_subscription",
+                resource_type: "mollie_subscription",
                 resource_id: Some(subscription_id.clone()),
                 metadata: serde_json::json!({
                     "reason": "trialing subscription period ended without a terminal webhook",
@@ -1812,14 +1834,16 @@ struct DedicatedIpPendingRow {
     id: String,
     tenant_id: String,
     ip_address: String,
-    adyen_recurring_detail_reference: Option<String>,
+    mollie_mandate_id: Option<String>,
 }
 
 #[derive(Debug, FromRow)]
-struct TenantAdyenSubscriptionRow {
+struct TenantMollieSubscriptionRow {
+    /// The Mollie customer that owns the stored mandate.
+    mollie_customer_id: Option<String>,
     /// The stored-payment token recurring charges replay; `None` until the
-    /// customer re-tokenizes at cutover (migration 252).
-    adyen_recurring_detail_reference: Option<String>,
+    /// customer re-tokenizes.
+    mollie_mandate_id: Option<String>,
 }
 
 #[derive(Debug, FromRow)]
@@ -1978,7 +2002,7 @@ async fn drain_counter_keys(
     let rows: Vec<DrainCycleAnchorRow> = sqlx::query_as(
         r#"
         SELECT tenant_id, billing_cycle_start
-        FROM adyen_subscriptions
+        FROM mollie_subscriptions
         WHERE tenant_id = ANY($1)
           AND status IN ('active', 'trialing', 'past_due')
           AND billing_cycle_start IS NOT NULL
@@ -2396,13 +2420,15 @@ fn normalize_metering_event_id(raw_id: &str) -> Uuid {
 #[derive(Debug, FromRow)]
 struct RetryCandidateRow {
     tenant_id: String,
+    /// The Mollie customer that owns the stored mandate.
+    mollie_customer_id: Option<String>,
     /// The stored-payment token the recurring charge replays
-    /// (`adyen_subscriptions.adyen_recurring_detail_reference`); `None`
-    /// until the customer re-tokenizes at cutover.
-    adyen_recurring_detail_reference: Option<String>,
+    /// (`mollie_subscriptions.mollie_mandate_id`); `None`
+    /// until the customer re-tokenizes.
+    mollie_mandate_id: Option<String>,
 }
 
-/// Whether the scheduled auto-pay job may charge tenants' saved Adyen
+/// Whether the scheduled auto-pay job may charge tenants' saved Mollie
 /// payment methods for open invoices. Default: disabled — auto-charging is
 /// financially sensitive and must be opted into explicitly via
 /// `AUTO_PAY_OPEN_INVOICES=true` (or `1`).
@@ -2472,7 +2498,7 @@ async fn process_scheduled_retries(
     // dunning retries remain visible in logs without moving money.
     if !auto_pay_open_invoices_enabled() {
         info!(
-            "AUTO_PAY_OPEN_INVOICES disabled — skipping scheduled Adyen auto-pay retries \
+            "AUTO_PAY_OPEN_INVOICES disabled — skipping scheduled Mollie auto-pay retries \
              (set AUTO_PAY_OPEN_INVOICES=true to enable)"
         );
         return Ok(RetryResult {
@@ -2483,9 +2509,9 @@ async fn process_scheduled_retries(
 
     let rows = sqlx::query_as::<_, RetryCandidateRow>(
         r#"
-        SELECT d.tenant_id, s.adyen_recurring_detail_reference
+        SELECT d.tenant_id, s.mollie_customer_id, s.mollie_mandate_id
         FROM dunning_records d
-        JOIN adyen_subscriptions s ON s.tenant_id = d.tenant_id
+        JOIN mollie_subscriptions s ON s.tenant_id = d.tenant_id
         WHERE d.next_retry_at IS NOT NULL
           AND d.next_retry_at <= NOW()
           AND d.status IN ('warning', 'soft_suspended')
@@ -2499,7 +2525,7 @@ async fn process_scheduled_retries(
     )
     .fetch_all(&state.db)
     .await
-    .map_err(|error| format!("Failed to load scheduled Adyen retries: {error}"))?;
+    .map_err(|error| format!("Failed to load scheduled Mollie retries: {error}"))?;
 
     let mut attempted = 0_i64;
     let mut succeeded = 0_i64;
@@ -2516,7 +2542,7 @@ async fn process_scheduled_retries(
         attempted += 1;
 
         let retry_result: Result<(), String> = async {
-            // Adyen has no provider-side invoice objects: the retry charges
+            // Mollie has no provider-side invoice objects: the retry charges
             // the tenant's OWN open (pending) local invoice against the
             // stored recurring token. No open invoice → nothing to retry.
             let invoice = open_invoices.get(&row.tenant_id).cloned();
@@ -2541,25 +2567,37 @@ async fn process_scheduled_retries(
             }
 
             let Some(stored_payment_method_id) = row
-                .adyen_recurring_detail_reference
+                .mollie_mandate_id
                 .as_deref()
                 .map(str::trim)
                 .filter(|token| !token.is_empty())
             else {
                 return Err(
-                    "the tenant has no stored Adyen recurring token to charge".to_string()
+                    "the tenant has no stored Mollie recurring token to charge".to_string()
                 );
             };
 
-            let response = adyen_charge_stored_payment_method(
+            let Some(customer_id) = row
+                .mollie_customer_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+            else {
+                return Err(
+                    "the tenant has no Mollie customer to charge a stored mandate".to_string()
+                );
+            };
+
+            let response = mollie_charge_stored_payment_method(
                 client,
                 &format!("invoice:{invoice_id}"),
                 &row.tenant_id,
+                customer_id,
                 stored_payment_method_id,
                 outstanding_cents,
                 &currency,
                 // One key per invoice: a retry after a lost response must
-                // replay the SAME Adyen charge call, not charge twice.
+                // replay the SAME Mollie charge call, not charge twice.
                 &format!("autopay_{}", invoice_id.simple()),
                 serde_json::json!({
                     "apexmailInvoiceId": invoice_id.to_string(),
@@ -2568,27 +2606,27 @@ async fn process_scheduled_retries(
             )
             .await?;
 
-            // Bind the charge's pspReference to the local invoice (the
-            // webhook settles on `reference = invoice:{id}`); an existing
-            // different binding is never overwritten.
+            // Bind the charge's payment id to the local invoice (the webhook
+            // settles on `reference = invoice:{id}`); an existing different
+            // binding is never overwritten.
             let bound = sqlx::query(
                 r#"
                 UPDATE invoices
-                SET adyen_psp_reference = $2, updated_at = NOW()
+                SET mollie_payment_id = $2, updated_at = NOW()
                 WHERE id = $1
                   AND status = 'pending'
-                  AND adyen_psp_reference IS NULL
+                  AND mollie_payment_id IS NULL
                 "#,
             )
             .bind(invoice_id)
-            .bind(&response.psp_reference)
+            .bind(&response.payment_id)
             .execute(&state.db)
             .await
-            .map_err(|error| format!("Failed to bind the Adyen payment to the invoice: {error}"))?;
+            .map_err(|error| format!("Failed to bind the Mollie payment to the invoice: {error}"))?;
             if bound.rows_affected() == 0 {
                 warn!(
                     invoice_id = %invoice_id,
-                    "dunning retry charge accepted but the invoice already carries a Adyen binding — left untouched"
+                    "dunning retry charge accepted but the invoice already carries a Mollie binding — left untouched"
                 );
             }
 
@@ -2602,7 +2640,7 @@ async fn process_scheduled_retries(
                 succeeded += 1;
             }
             Err(error_message) => {
-                warn!(tenant_id = %row.tenant_id, error = %error_message, "scheduled Adyen retry failed");
+                warn!(tenant_id = %row.tenant_id, error = %error_message, "scheduled Mollie retry failed");
                 if let Err(error) = sqlx::query(
                     r#"
                     UPDATE dunning_records
@@ -2614,7 +2652,7 @@ async fn process_scheduled_retries(
                 .execute(&state.db)
                 .await
                 {
-                    error!(tenant_id = %row.tenant_id, error = %error, "failed to reschedule dunning retry after Adyen retry failure");
+                    error!(tenant_id = %row.tenant_id, error = %error, "failed to reschedule dunning retry after Mollie retry failure");
                 }
             }
         }
@@ -3441,7 +3479,7 @@ async fn process_pending_dedicated_ip_charges(
     // per-row processing now share one explicit transaction; each row runs
     // inside a SAVEPOINT so one failure does not roll back the others.
     // Double-charging remains impossible even if the transaction is lost
-    // after the Adyen call thanks to the Idempotency-Key.
+    // after the Mollie call thanks to the Idempotency-Key.
     let mut tx = state
         .db
         .begin()
@@ -3450,7 +3488,7 @@ async fn process_pending_dedicated_ip_charges(
 
     let rows = match sqlx::query_as::<_, DedicatedIpPendingRow>(
         r#"
-        SELECT id, tenant_id, ip_address, adyen_recurring_detail_reference
+        SELECT id, tenant_id, ip_address, mollie_mandate_id
         FROM dedicated_ips
         WHERE billing_status = 'pending_charge'
           AND (billing_retry_after IS NULL OR billing_retry_after <= NOW())
@@ -3499,7 +3537,7 @@ async fn process_pending_dedicated_ip_charges(
                 // Record the backoff on the outer transaction (outside the
                 // rolled-back savepoint) so failed rows are retried later.
                 update_dedicated_ip_retry_metadata(&mut tx, &row.id).await;
-                warn!(tenant_id = %row.tenant_id, ip_id = %row.id, ip_address = %row.ip_address, error = %error_message, "failed to charge the dedicated IP add-on via Adyen");
+                warn!(tenant_id = %row.tenant_id, ip_id = %row.id, ip_address = %row.ip_address, error = %error_message, "failed to charge the dedicated IP add-on via Mollie");
             }
         }
     }
@@ -3524,7 +3562,7 @@ async fn process_pending_dedicated_ip_cancels(
 
     let rows = match sqlx::query_as::<_, DedicatedIpPendingRow>(
         r#"
-        SELECT id, tenant_id, ip_address, adyen_recurring_detail_reference
+        SELECT id, tenant_id, ip_address, mollie_mandate_id
         FROM dedicated_ips
         WHERE billing_status = 'pending_cancel'
         ORDER BY updated_at ASC
@@ -3581,11 +3619,11 @@ async fn process_pending_dedicated_ip_cancels(
     Ok(processed)
 }
 
-/// Charge one dedicated-IP add-on activation via Adyen.
+/// Charge one dedicated-IP add-on activation via Mollie.
 ///
-/// Adyen has no subscription-item object: the add-on is OUR row and the
+/// Mollie has no subscription-item object: the add-on is OUR row and the
 /// charge is a recurring `POST /payments` against the tenant subscription's
-/// stored token, priced ONLY from `ADYEN_DEDICATED_IP_PRICE` (cents), with
+/// stored token, priced ONLY from `DEDICATED_IP_PRICE_CENTS` (cents), with
 /// `reference = dedicated_ip:{dedicated_ips.id}` (the add-on's own identity —
 /// there is no local invoice for an add-on activation, and the base
 /// subscription id is shared by every add-on of the tenant).
@@ -3595,10 +3633,10 @@ async fn charge_dedicated_ip(
     row: &DedicatedIpPendingRow,
     price_cents: i64,
 ) -> Result<(), String> {
-    let subscription = sqlx::query_as::<_, TenantAdyenSubscriptionRow>(
+    let subscription = sqlx::query_as::<_, TenantMollieSubscriptionRow>(
         r#"
-        SELECT adyen_recurring_detail_reference
-        FROM adyen_subscriptions
+        SELECT mollie_customer_id, mollie_mandate_id
+        FROM mollie_subscriptions
         WHERE tenant_id = $1
           AND status = 'active'
         ORDER BY created_at DESC
@@ -3608,26 +3646,36 @@ async fn charge_dedicated_ip(
     .bind(&row.tenant_id)
     .fetch_optional(&mut **tx)
     .await
-    .map_err(|error| format!("Failed to load tenant Adyen subscription: {error}"))?;
+    .map_err(|error| format!("Failed to load tenant Mollie subscription: {error}"))?;
 
     let Some(subscription) = subscription else {
-        return Err("No active Adyen subscription for tenant".to_string());
+        return Err("No active Mollie subscription for tenant".to_string());
     };
     let Some(stored_payment_method_id) = subscription
-        .adyen_recurring_detail_reference
+        .mollie_mandate_id
         .as_deref()
         .map(str::trim)
         .filter(|token| !token.is_empty())
     else {
         return Err(
-            "the tenant's active Adyen subscription carries no stored recurring token".to_string(),
+            "the tenant's active Mollie subscription carries no stored recurring token".to_string(),
         );
     };
 
-    let response = adyen_charge_stored_payment_method(
+    let Some(customer_id) = subscription
+        .mollie_customer_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    else {
+        return Err("the tenant's Mollie subscription carries no customer id".to_string());
+    };
+
+    let response = mollie_charge_stored_payment_method(
         client,
         &format!("dedicated_ip:{}", row.id),
         &row.tenant_id,
+        customer_id,
         stored_payment_method_id,
         price_cents,
         "EUR",
@@ -3647,7 +3695,7 @@ async fn charge_dedicated_ip(
         r#"
         UPDATE dedicated_ips
         SET billing_status = 'active',
-            adyen_recurring_detail_reference = $2,
+            mollie_mandate_id = $2,
             billing_started_at = NOW(),
             billing_failure_count = 0,
             billing_retry_after = NULL,
@@ -3656,9 +3704,9 @@ async fn charge_dedicated_ip(
         "#,
     )
     .bind(&row.id)
-    // The activation charge's pspReference is the add-on's provider-side
-    // reference (there is no subscription item to store).
-    .bind(response.psp_reference)
+    // The activation charge's payment id is the add-on's provider-side
+    // reference (there is no subscription object to store).
+    .bind(response.payment_id)
     .execute(&mut **tx)
     .await
     .map_err(|error| format!("Failed to mark dedicated IP billing active: {error}"))?;
@@ -3666,7 +3714,7 @@ async fn charge_dedicated_ip(
     Ok(())
 }
 
-/// Stop billing a dedicated-IP add-on. Adyen has no provider-side
+/// Stop billing a dedicated-IP add-on. Mollie has no provider-side
 /// subscription-item object to delete and NO automatic future charges for
 /// the add-on (each activation is charged by our own sweep), so ending the
 /// add-on is a LOCAL transition: the row flips to `canceled` and no further
@@ -3676,11 +3724,11 @@ async fn cancel_dedicated_ip_billing(
     _client: &Client,
     row: &DedicatedIpPendingRow,
 ) -> Result<(), String> {
-    if let Some(provider_reference) = &row.adyen_recurring_detail_reference {
+    if let Some(provider_reference) = &row.mollie_mandate_id {
         info!(
             ip_id = %row.id,
             provider_reference = %provider_reference,
-            "cancel: no provider-side dedicated IP object exists under Adyen — the add-on stops with its local row"
+            "cancel: no provider-side dedicated IP object exists under Mollie — the add-on stops with its local row"
         );
     }
 
@@ -3703,7 +3751,7 @@ async fn cancel_dedicated_ip_billing(
 }
 
 /// The dedicated-IP activation charge's Idempotency-Key: deterministic per
-/// add-on and bounded to Adyen's 64-char limit (production ids are 36-char
+/// add-on and bounded to Mollie's 64-char limit (production ids are 36-char
 /// UUIDs, `dedicated_ip_` + 36 = 49; anything longer is folded into a
 /// fixed-width digest).
 fn dedicated_ip_idempotency_key(ip_id: &str) -> String {
@@ -3717,12 +3765,12 @@ fn dedicated_ip_idempotency_key(ip_id: &str) -> String {
 
 /// The dedicated-IP add-on price in CENTS (minor units). The canonical
 /// price lives in `platform-catalog` (the plan's rule: prices change only at
-/// the source); `ADYEN_DEDICATED_IP_PRICE` stays as an explicit operator
+/// the source); `DEDICATED_IP_PRICE_CENTS` stays as an explicit operator
 /// override. An explicit non-positive override (0 or negative) disables the
 /// sweep; a missing/blank/unparseable value falls back to the catalog price
 /// (and the unparseable case warns loudly).
 fn dedicated_ip_price_cents() -> Option<i64> {
-    match std::env::var("ADYEN_DEDICATED_IP_PRICE") {
+    match std::env::var("DEDICATED_IP_PRICE_CENTS") {
         Ok(raw) => {
             let trimmed = raw.trim();
             if trimmed.is_empty() {
@@ -3734,7 +3782,7 @@ fn dedicated_ip_price_cents() -> Option<i64> {
                 Err(_) => {
                     tracing::warn!(
                         value = %trimmed,
-                        "ADYEN_DEDICATED_IP_PRICE is not an integer — falling back to the platform-catalog price"
+                        "DEDICATED_IP_PRICE_CENTS is not an integer — falling back to the platform-catalog price"
                     );
                     Some(platform_catalog::DEDICATED_IP_FIRST_CENTS)
                 }
@@ -4959,106 +5007,93 @@ pub async fn resolve_abuse_report(
     review_abuse_report(db, report_id, "resolved", reviewed_by, notes).await
 }
 
-fn adyen_api_base_url() -> String {
-    std::env::var("ADYEN_API_BASE_URL")
-        .unwrap_or_else(|_| "https://checkout-test.adyen.com/v71".into())
-}
-
-fn adyen_api_key() -> Result<String, String> {
-    std::env::var("ADYEN_API_KEY")
-        .ok()
-        .map(|key| key.trim().to_string())
-        .filter(|key| !key.is_empty())
-        .ok_or_else(|| "ADYEN_API_KEY is not configured".to_string())
-}
-
-fn adyen_merchant_account() -> Result<String, String> {
-    std::env::var("ADYEN_MERCHANT_ACCOUNT")
-        .ok()
-        .map(|account| account.trim().to_string())
-        .filter(|account| !account.is_empty())
-        .ok_or_else(|| "ADYEN_MERCHANT_ACCOUNT is not configured".to_string())
-}
-
-/// A Adyen Checkout `POST /payments` response (the fields this sweep reads).
-#[derive(Debug, Deserialize)]
-struct AdyenPaymentResponse {
-    #[serde(rename = "pspReference")]
-    psp_reference: String,
-    #[serde(rename = "resultCode")]
-    result_code: String,
-}
-
-/// One Adyen recurring charge against a STORED payment method
-/// (`POST /payments`): JSON body with the amount in MINOR UNITS, the API key
-/// in `X-API-Key` (the version lives in the base URL path, there is no
-/// version header), the merchant account required in every body, and a
-/// deterministic `Idempotency-Key` so a timeout between Adyen executing the
-/// charge and the response reaching us cannot double-charge on a retry.
+/// One Mollie recurring charge against a STORED mandate.
 ///
-/// `reference` is the frozen logical-operation identity the webhook settles
-/// on (`invoice:{local_invoice_id}` for invoice charges); the caller keeps it
-/// deterministic. A non-success `resultCode` (Refused, Error, ...) is an
-/// `Err` — HTTP 200 does not mean the money moved.
-#[allow(clippy::too_many_arguments)]
-async fn adyen_charge_stored_payment_method(
-    client: &Client,
+/// A repeat payment is `POST /payments` with `sequenceType: "recurring"`,
+/// the Mollie customer and the mandate — NOT a subscription object (the add-on
+/// is OUR row, and the mandate is shared by every add-on of the tenant).
+/// Amounts travel as decimal strings, the key as a Bearer token, and a
+/// deterministic `Idempotency-Key` makes a retried call replay instead of
+/// double-charging.
+///
+/// The returned [`MollieCharge`] carries the payment id and the status. A
+/// `failed`/`canceled`/`expired` status is an `Err`; `paid` and the async
+/// states (`open`, `pending`, `authorized`) are accepted — the webhook
+/// settles the final outcome.
+async fn mollie_charge_stored_payment_method(
+    _client: &Client,
     reference: &str,
     tenant_id: &str,
-    stored_payment_method_id: &str,
+    customer_id: &str,
+    mandate_id: &str,
     amount_cents: i64,
     currency: &str,
     idempotency_key: &str,
     metadata: serde_json::Value,
-) -> Result<AdyenPaymentResponse, String> {
-    let api_key = adyen_api_key()?;
-    let merchant_account = adyen_merchant_account()?;
+) -> Result<MollieCharge, String> {
+    use crate::mollie_client::{MollieClient, Money};
 
-    let body = serde_json::json!({
-        "amount": { "currency": currency.trim().to_uppercase(), "value": amount_cents },
-        "merchantAccount": merchant_account,
-        "reference": reference,
-        "paymentMethod": {
-            "type": "scheme",
-            "storedPaymentMethodId": stored_payment_method_id,
-        },
-        "shopperReference": tenant_id,
-        "recurringProcessingModel": "Subscription",
-        "metadata": metadata,
-    });
-
-    let response = client
-        .post(format!("{}/payments", adyen_api_base_url()))
-        .header("X-API-Key", api_key)
-        .header("Idempotency-Key", idempotency_key)
-        .json(&body)
-        .timeout(std::time::Duration::from_secs(30))
-        .send()
+    let mollie = MollieClient::from_env().map_err(|error| error.to_string())?;
+    let mut metadata = metadata;
+    if let Some(object) = metadata.as_object_mut() {
+        object.insert(
+            "reference".into(),
+            serde_json::Value::String(reference.to_string()),
+        );
+        object.insert(
+            "tenant_id".into(),
+            serde_json::Value::String(tenant_id.to_string()),
+        );
+    }
+    let link = mollie
+        .create_payment(crate::mollie_client::CreatePayment {
+            amount: Money::new(currency, amount_cents),
+            description: format!("ApexMail {reference}"),
+            // A recurring charge is API-initiated: there is no browser
+            // redirect to return to.
+            redirect_url: String::new(),
+            webhook_url: None,
+            metadata,
+            method: None,
+            customer_id: Some(customer_id.to_string()),
+            mandate_id: Some(mandate_id.to_string()),
+            sequence_type: Some("recurring".into()),
+            idempotency_key: idempotency_key.to_string(),
+        })
         .await
-        .map_err(|error| format!("Adyen charge request failed: {error}"))?;
+        .map_err(|error| format!("Mollie charge failed ({reference}): {error}"))?;
 
-    let charge = decode_adyen_response::<AdyenPaymentResponse>(response).await?;
-    match charge.result_code.as_str() {
-        "Authorised" | "Pending" | "Received" => Ok(charge),
+    match link.status.as_str() {
+        "paid" | "open" | "pending" | "authorized" => Ok(MollieCharge {
+            payment_id: link.id,
+            status: link.status,
+        }),
         other => Err(format!(
-            "Adyen declined the charge ({reference}): resultCode {other}"
+            "Mollie declined the charge ({reference}): status {other}"
         )),
     }
 }
 
-async fn decode_adyen_response<T: DeserializeOwned>(
+/// The accepted recurring-charge outcome.
+#[derive(Debug, Clone)]
+struct MollieCharge {
+    payment_id: String,
+    status: String,
+}
+
+async fn decode_mollie_response<T: DeserializeOwned>(
     response: reqwest::Response,
 ) -> Result<T, String> {
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        return Err(format!("Adyen returned {status}: {body}"));
+        return Err(format!("Mollie returned {status}: {body}"));
     }
 
     response
         .json::<T>()
         .await
-        .map_err(|error| format!("Adyen response decode failed: {error}"))
+        .map_err(|error| format!("Mollie response decode failed: {error}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -5136,7 +5171,7 @@ mod tests {
     }
 
     /// F7: the third-month cash-accounting fallback is SCHEDULED in the
-    /// periodic KMD job (it previously had no caller while adyen_webhooks
+    /// periodic KMD job (it previously had no caller while mollie_webhooks
     /// claimed "the sweep" handled it) and it runs BEFORE the return
     /// generation, so the `cash_special_due` output VAT is included in the
     /// period being filed. This pins the production source (test code is
@@ -5423,7 +5458,7 @@ mod coverage_adversarial {
             database_url,
             redis_url: "redis://127.0.0.1:6379".to_string(),
             service_auth_token: "coverage".to_string(),
-            adyen_hmac_key: "whsec_coverage".to_string(),
+            mollie_api_key: "whsec_coverage".to_string(),
             ..BillingConfig::default()
         };
         let state = AppState::new(pool.clone(), redis.clone(), config);
@@ -6000,8 +6035,8 @@ mod coverage_adversarial {
                 (free, "sub_trial_free", now - chrono::Duration::hours(48)),
             ] {
                 sqlx::query(
-                    "INSERT INTO adyen_subscriptions
-                     (tenant_id, adyen_subscription_id, plan, status, trial_end,
+                    "INSERT INTO mollie_subscriptions
+                     (tenant_id, mollie_subscription_id, plan, status, trial_end,
                       billing_cycle_start, billing_cycle_end)
                  VALUES ($1, $2, 'growth', 'trialing', $3, $4, $5)",
                 )
@@ -6022,7 +6057,7 @@ mod coverage_adversarial {
             assert_eq!(sweep_expired_trials(&env.state).await.expect("replay"), 0);
             let (plan, status): (String, String) = sqlx::query_as(
                 "SELECT t.plan, s.status FROM tenants t
-                            JOIN adyen_subscriptions s ON s.tenant_id = t.id WHERE t.id = $1",
+                            JOIN mollie_subscriptions s ON s.tenant_id = t.id WHERE t.id = $1",
             )
             .bind(stale)
             .fetch_one(&env.pool)
@@ -6031,7 +6066,7 @@ mod coverage_adversarial {
             assert_eq!(plan, "free");
             assert_eq!(status, "canceled");
             let fresh_status: String =
-                sqlx::query_scalar("SELECT status FROM adyen_subscriptions WHERE tenant_id = $1")
+                sqlx::query_scalar("SELECT status FROM mollie_subscriptions WHERE tenant_id = $1")
                     .bind(fresh)
                     .fetch_one(&env.pool)
                     .await
@@ -6923,44 +6958,43 @@ mod coverage_adversarial {
         }
     );
 
-    // ---------------- dedicated IP billing (mock Adyen) ----------------
+    // ---------------- dedicated IP billing (mock Mollie) ----------------
 
     #[tokio::test]
-    async fn dedicated_ip_charge_and_cancel_use_mocked_adyen() {
+    async fn dedicated_ip_charge_and_cancel_use_mocked_mollie() {
         let Some(env) = provision("dedicated_ip_charge_and_cancel").await else {
             return;
         };
         let mock = Mock::default();
-        // Adyen has no subscription-item object: an add-on activation is ONE
-        // recurring `POST /payments` against the tenant's stored token, and
-        // the 404 fallback carried the old two-step item protocol.
+        // Mollie has no subscription-item object: an add-on activation is ONE
+        // recurring `POST /v2/payments` against the tenant's stored mandate.
         mock.route(
-            "/payments",
+            "/v2/payments",
             200,
-            r#"{"pspReference":"psp_dip_cov","resultCode":"Authorised"}"#,
+            r#"{"id":"tr_dip_cov","status":"paid","_links":{"checkout":{"href":"https://www.mollie.com/checkout/select-method/dip"}}}"#,
         );
         let base = spawn_mock(mock.clone()).await;
 
         let guard = ENV_LOCK.lock().await;
         let previous = (
-            std::env::var("ADYEN_API_KEY").ok(),
-            std::env::var("ADYEN_API_BASE_URL").ok(),
-            std::env::var("ADYEN_MERCHANT_ACCOUNT").ok(),
-            std::env::var("ADYEN_DEDICATED_IP_PRICE").ok(),
+            std::env::var("MOLLIE_API_KEY").ok(),
+            std::env::var("MOLLIE_API_BASE_URL").ok(),
+            std::env::var("MOLLIE_PROFILE_ID").ok(),
+            std::env::var("DEDICATED_IP_PRICE_CENTS").ok(),
         );
-        std::env::set_var("ADYEN_API_KEY", "adyen-test-key-fixture");
-        std::env::set_var("ADYEN_API_BASE_URL", &base);
-        std::env::set_var("ADYEN_MERCHANT_ACCOUNT", "ApexMailTestECOM");
+        std::env::set_var("MOLLIE_API_KEY", "mollie-test-key-fixture");
+        std::env::set_var("MOLLIE_API_BASE_URL", format!("{base}/v2"));
+        std::env::set_var("MOLLIE_PROFILE_ID", "ApexMailTestECOM");
         // The add-on price is CENTS (minor units) — never a provider price id.
-        std::env::set_var("ADYEN_DEDICATED_IP_PRICE", "500");
+        std::env::set_var("DEDICATED_IP_PRICE_CENTS", "500");
 
         let tenant = "mtcov_dip";
         seed_tenant(&env, tenant, "growth", "active").await;
         sqlx::query(
-            "INSERT INTO adyen_subscriptions
-                 (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
-                  billing_cycle_end, adyen_shopper_reference,
-                  adyen_recurring_detail_reference)
+            "INSERT INTO mollie_subscriptions
+                 (tenant_id, mollie_subscription_id, plan, status, billing_cycle_start,
+                  billing_cycle_end, mollie_customer_id,
+                  mollie_mandate_id)
              VALUES ($1, 'psp_dip_sub', 'growth', 'active', NOW(), NOW() + INTERVAL '30 days',
                      $1, 'tok_dip_cov')",
         )
@@ -6984,16 +7018,16 @@ mod coverage_adversarial {
             .expect("dip billing");
         assert_eq!(result.charged, 1, "one charge processed");
         assert_eq!(result.canceled, 1, "one cancel processed");
-        // The activation charge's pspReference becomes the add-on's
-        // provider-side reference (there is no subscription item to store).
+        // The activation charge's Mollie payment id becomes the add-on's
+        // provider-side reference.
         let (charge_status, provider_ref): (String, Option<String>) = sqlx::query_as(
-            "SELECT billing_status, adyen_recurring_detail_reference FROM dedicated_ips WHERE id = 'cov_dip_charge'",
+            "SELECT billing_status, mollie_mandate_id FROM dedicated_ips WHERE id = 'cov_dip_charge'",
         )
         .fetch_one(&env.pool)
         .await
         .expect("charged ip");
         assert_eq!(charge_status, "active");
-        assert_eq!(provider_ref.as_deref(), Some("psp_dip_cov"));
+        assert_eq!(provider_ref.as_deref(), Some("tr_dip_cov"));
         let cancel_status: String = sqlx::query_scalar(
             "SELECT billing_status FROM dedicated_ips WHERE id = 'cov_dip_cancel'",
         )
@@ -7002,15 +7036,20 @@ mod coverage_adversarial {
         .expect("canceled ip");
         assert_eq!(cancel_status, "canceled", "cancel is a local transition");
 
-        // The single payment call carries the frozen contract: API key
-        // header, deterministic idempotency key, stored-token payment method
-        // and the minor-unit add-on price with its own reference identity.
-        assert_eq!(mock.call_count("/payments"), 1, "cancels make no HTTP call");
-        let call = mock.last_call("/payments").expect("charge call");
+        // The single payment call carries the Mollie contract: Bearer auth,
+        // deterministic Idempotency-Key, decimal amount, sequenceType
+        // recurring with customer+mandate, and our reference in metadata.
+        assert_eq!(
+            mock.call_count("/v2/payments"),
+            1,
+            "cancels make no HTTP call"
+        );
+        let call = mock.last_call("/v2/payments").expect("charge call");
         assert_eq!(call.method, "POST");
         assert_eq!(
-            call.headers.get("x-api-key").map(String::as_str),
-            Some("adyen-test-key-fixture")
+            call.headers.get("authorization").map(String::as_str),
+            Some("Bearer mollie-test-key-fixture"),
+            "the secret key authenticates the charge"
         );
         assert_eq!(
             call.headers.get("idempotency-key").map(String::as_str),
@@ -7020,26 +7059,19 @@ mod coverage_adversarial {
         let body: serde_json::Value = serde_json::from_str(&call.body).expect("payment body JSON");
         assert_eq!(
             body["amount"],
-            serde_json::json!({"currency": "EUR", "value": 500}),
-            "the dedicated-IP price travels as cents"
+            serde_json::json!({"currency": "EUR", "value": "5.00"}),
+            "Mollie amounts travel as decimal strings, never minor units"
         );
         assert_eq!(
-            body["merchantAccount"],
-            serde_json::json!("ApexMailTestECOM")
+            body["sequenceType"],
+            serde_json::json!("recurring"),
+            "the add-on is charged against the stored mandate"
         );
+        assert_eq!(body["customerId"], serde_json::json!(tenant));
+        assert_eq!(body["mandateId"], serde_json::json!("tok_dip_cov"));
         assert_eq!(
-            body["reference"],
+            body["metadata"]["reference"],
             serde_json::json!("dedicated_ip:cov_dip_charge")
-        );
-        assert_eq!(body["paymentMethod"]["type"], serde_json::json!("scheme"));
-        assert_eq!(
-            body["paymentMethod"]["storedPaymentMethodId"],
-            serde_json::json!("tok_dip_cov")
-        );
-        assert_eq!(body["shopperReference"], serde_json::json!(tenant));
-        assert_eq!(
-            body["recurringProcessingModel"],
-            serde_json::json!("Subscription")
         );
         assert_eq!(
             body["metadata"]["type"],
@@ -7056,7 +7088,7 @@ mod coverage_adversarial {
         .execute(&env.pool)
         .await
         .expect("orphan ip");
-        sqlx::query("UPDATE adyen_subscriptions SET status = 'canceled' WHERE tenant_id = $1")
+        sqlx::query("UPDATE mollie_subscriptions SET status = 'canceled' WHERE tenant_id = $1")
             .bind(tenant)
             .execute(&env.pool)
             .await
@@ -7080,30 +7112,30 @@ mod coverage_adversarial {
             "still pending, never silently dropped"
         );
         assert_eq!(
-            mock.call_count("/payments"),
+            mock.call_count("/v2/payments"),
             1,
             "a tokenless/subscriptionless charge never reaches the provider"
         );
 
         match previous {
             (Some(key), Some(url), Some(merchant), Some(price)) => {
-                std::env::set_var("ADYEN_API_KEY", key);
-                std::env::set_var("ADYEN_API_BASE_URL", url);
-                std::env::set_var("ADYEN_MERCHANT_ACCOUNT", merchant);
-                std::env::set_var("ADYEN_DEDICATED_IP_PRICE", price);
+                std::env::set_var("MOLLIE_API_KEY", key);
+                std::env::set_var("MOLLIE_API_BASE_URL", url);
+                std::env::set_var("MOLLIE_PROFILE_ID", merchant);
+                std::env::set_var("DEDICATED_IP_PRICE_CENTS", price);
             }
             _ => {
-                std::env::remove_var("ADYEN_API_KEY");
-                std::env::remove_var("ADYEN_API_BASE_URL");
-                std::env::remove_var("ADYEN_MERCHANT_ACCOUNT");
-                std::env::remove_var("ADYEN_DEDICATED_IP_PRICE");
+                std::env::remove_var("MOLLIE_API_KEY");
+                std::env::remove_var("MOLLIE_API_BASE_URL");
+                std::env::remove_var("MOLLIE_PROFILE_ID");
+                std::env::remove_var("DEDICATED_IP_PRICE_CENTS");
             }
         }
         drop(guard);
         env.finish().await;
     }
 
-    // ---------------- scheduled retries (mock Adyen) ----------------
+    // ---------------- scheduled retries (mock Mollie) ----------------
 
     #[tokio::test]
     async fn scheduled_retries_pay_the_open_invoice_once() {
@@ -7111,27 +7143,27 @@ mod coverage_adversarial {
             return;
         };
         let mock = Mock::default();
-        // Adyen has no provider-side invoice objects: the retry charges the
+        // Mollie has no provider-side invoice objects: the retry charges the
         // tenant's OWN open (pending) LOCAL invoice with ONE recurring
-        // `POST /payments` against the stored token.
+        // `POST /v2/payments` against the stored mandate.
         mock.route(
-            "/payments",
+            "/v2/payments",
             200,
-            r#"{"pspReference":"psp_retry_pay","resultCode":"Authorised"}"#,
+            r#"{"id":"tr_retry_pay","status":"paid","_links":{"checkout":{"href":"https://www.mollie.com/checkout/select-method/retry"}}}"#,
         );
         let base = spawn_mock(mock.clone()).await;
 
         let guard = ENV_LOCK.lock().await;
         let previous = (
             std::env::var("AUTO_PAY_OPEN_INVOICES").ok(),
-            std::env::var("ADYEN_API_KEY").ok(),
-            std::env::var("ADYEN_API_BASE_URL").ok(),
-            std::env::var("ADYEN_MERCHANT_ACCOUNT").ok(),
+            std::env::var("MOLLIE_API_KEY").ok(),
+            std::env::var("MOLLIE_API_BASE_URL").ok(),
+            std::env::var("MOLLIE_PROFILE_ID").ok(),
         );
         std::env::set_var("AUTO_PAY_OPEN_INVOICES", "true");
-        std::env::set_var("ADYEN_API_KEY", "adyen-test-key-fixture");
-        std::env::set_var("ADYEN_API_BASE_URL", &base);
-        std::env::set_var("ADYEN_MERCHANT_ACCOUNT", "ApexMailTestECOM");
+        std::env::set_var("MOLLIE_API_KEY", "mollie-test-key-fixture");
+        std::env::set_var("MOLLIE_API_BASE_URL", format!("{base}/v2"));
+        std::env::set_var("MOLLIE_PROFILE_ID", "ApexMailTestECOM");
 
         let tenant = "mtcov_retry";
         seed_tenant(&env, tenant, "growth", "active").await;
@@ -7144,10 +7176,10 @@ mod coverage_adversarial {
         .await
         .expect("dunning");
         sqlx::query(
-            "INSERT INTO adyen_subscriptions
-                 (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
-                  billing_cycle_end, adyen_shopper_reference,
-                  adyen_recurring_detail_reference)
+            "INSERT INTO mollie_subscriptions
+                 (tenant_id, mollie_subscription_id, plan, status, billing_cycle_start,
+                  billing_cycle_end, mollie_customer_id,
+                  mollie_mandate_id)
              VALUES ($1, 'psp_retry_sub', 'growth', 'past_due', NOW(),
                      NOW() + INTERVAL '30 days', $1, 'tok_retry')",
         )
@@ -7179,15 +7211,15 @@ mod coverage_adversarial {
         assert_eq!(result.attempted, 1);
         assert_eq!(result.succeeded, 1);
         assert_eq!(
-            mock.call_count("/payments"),
+            mock.call_count("/v2/payments"),
             1,
             "the open invoice is paid exactly once"
         );
-        let call = mock.last_call("/payments").expect("retry payment call");
+        let call = mock.last_call("/v2/payments").expect("retry payment call");
         assert_eq!(call.method, "POST");
         assert_eq!(
-            call.headers.get("x-api-key").map(String::as_str),
-            Some("adyen-test-key-fixture")
+            call.headers.get("authorization").map(String::as_str),
+            Some("Bearer mollie-test-key-fixture")
         );
         assert_eq!(
             call.headers.get("idempotency-key").map(String::as_str),
@@ -7197,32 +7229,27 @@ mod coverage_adversarial {
         let body: serde_json::Value = serde_json::from_str(&call.body).expect("payment body JSON");
         assert_eq!(
             body["amount"],
-            serde_json::json!({"currency": "EUR", "value": 4900}),
-            "the amount is the local invoice's minor-unit total"
+            serde_json::json!({"currency": "EUR", "value": "49.00"}),
+            "the amount is the local invoice's total as a decimal string"
         );
+        assert_eq!(body["sequenceType"], serde_json::json!("recurring"));
+        assert_eq!(body["customerId"], serde_json::json!(tenant));
+        assert_eq!(body["mandateId"], serde_json::json!("tok_retry"));
         assert_eq!(
-            body["merchantAccount"],
-            serde_json::json!("ApexMailTestECOM")
-        );
-        assert_eq!(
-            body["reference"],
+            body["metadata"]["reference"],
             serde_json::json!(format!("invoice:{invoice_id}"))
         );
-        assert_eq!(
-            body["paymentMethod"]["storedPaymentMethodId"],
-            serde_json::json!("tok_retry")
-        );
-        assert_eq!(body["shopperReference"], serde_json::json!(tenant));
-        // The charge's pspReference is bound to the local invoice for the
-        // webhook to settle on `reference = invoice:{id}`.
+        assert_eq!(body["metadata"]["tenant_id"], serde_json::json!(tenant));
+        // The charge's payment id is bound to the local invoice for the
+        // webhook to settle on `metadata.reference = invoice:{id}`.
         let (status, bound): (String, Option<String>) =
-            sqlx::query_as("SELECT status, adyen_psp_reference FROM invoices WHERE id = $1")
+            sqlx::query_as("SELECT status, mollie_payment_id FROM invoices WHERE id = $1")
                 .bind(invoice_id)
                 .fetch_one(&env.pool)
                 .await
                 .expect("invoice");
         assert_eq!(status, "pending");
-        assert_eq!(bound.as_deref(), Some("psp_retry_pay"));
+        assert_eq!(bound.as_deref(), Some("tr_retry_pay"));
         let status: String =
             sqlx::query_scalar("SELECT status FROM dunning_records WHERE tenant_id = $1")
                 .bind(tenant)
@@ -7234,15 +7261,15 @@ mod coverage_adversarial {
         match previous {
             (Some(auto), Some(key), Some(url), Some(merchant)) => {
                 std::env::set_var("AUTO_PAY_OPEN_INVOICES", auto);
-                std::env::set_var("ADYEN_API_KEY", key);
-                std::env::set_var("ADYEN_API_BASE_URL", url);
-                std::env::set_var("ADYEN_MERCHANT_ACCOUNT", merchant);
+                std::env::set_var("MOLLIE_API_KEY", key);
+                std::env::set_var("MOLLIE_API_BASE_URL", url);
+                std::env::set_var("MOLLIE_PROFILE_ID", merchant);
             }
             _ => {
                 std::env::remove_var("AUTO_PAY_OPEN_INVOICES");
-                std::env::remove_var("ADYEN_API_KEY");
-                std::env::remove_var("ADYEN_API_BASE_URL");
-                std::env::remove_var("ADYEN_MERCHANT_ACCOUNT");
+                std::env::remove_var("MOLLIE_API_KEY");
+                std::env::remove_var("MOLLIE_API_BASE_URL");
+                std::env::remove_var("MOLLIE_PROFILE_ID");
             }
         }
         drop(guard);
@@ -7693,8 +7720,8 @@ mod coverage_adversarial {
                     // `...:c<year>-<month>` (cycle start), not the calendar
                     // month key a tenant without a subscription uses.
                     sqlx::query(
-                        "INSERT INTO adyen_subscriptions
-                         (tenant_id, adyen_subscription_id, plan, status,
+                        "INSERT INTO mollie_subscriptions
+                         (tenant_id, mollie_subscription_id, plan, status,
                           billing_cycle_start, billing_cycle_end)
                          VALUES ($1, $2, 'growth', 'active', $3, $4)",
                     )
@@ -7983,7 +8010,7 @@ mod coverage_adversarial {
         }
     );
 
-    // ---------------- scheduled Adyen retries ----------------
+    // ---------------- scheduled Mollie retries ----------------
 
     async fn seed_retry_candidate(env: &Env, tenant: &str, dunning_status: &str, sub_status: &str) {
         seed_tenant(env, tenant, "growth", "active").await;
@@ -7998,9 +8025,9 @@ mod coverage_adversarial {
         .await
         .expect("dunning");
         sqlx::query(
-            "INSERT INTO adyen_subscriptions
-                 (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
-                  billing_cycle_end, adyen_shopper_reference)
+            "INSERT INTO mollie_subscriptions
+                 (tenant_id, mollie_subscription_id, plan, status, billing_cycle_start,
+                  billing_cycle_end, mollie_customer_id)
              VALUES ($1, $2, 'growth', $3, NOW(), NOW() + INTERVAL '30 days', $1)",
         )
         .bind(tenant)
@@ -8017,30 +8044,30 @@ mod coverage_adversarial {
     env_test!(scheduled_retries_skip_canceled_at_period_end, |env| {
         let mock = Mock::default();
         mock.route(
-            "/payments",
+            "/v2/payments",
             200,
-            r#"{"pspReference":"psp_should_not_happen","resultCode":"Authorised"}"#,
+            r#"{"id":"tr_should_not_happen","status":"paid"}"#,
         );
         let base = spawn_mock(mock.clone()).await;
         let guard = ENV_LOCK.lock().await;
         let previous = (
             std::env::var("AUTO_PAY_OPEN_INVOICES").ok(),
-            std::env::var("ADYEN_API_KEY").ok(),
-            std::env::var("ADYEN_API_BASE_URL").ok(),
-            std::env::var("ADYEN_MERCHANT_ACCOUNT").ok(),
+            std::env::var("MOLLIE_API_KEY").ok(),
+            std::env::var("MOLLIE_API_BASE_URL").ok(),
+            std::env::var("MOLLIE_PROFILE_ID").ok(),
         );
         std::env::set_var("AUTO_PAY_OPEN_INVOICES", "true");
-        std::env::set_var("ADYEN_API_KEY", "adyen-test-key-fixture");
-        std::env::set_var("ADYEN_API_BASE_URL", &base);
-        std::env::set_var("ADYEN_MERCHANT_ACCOUNT", "ApexMailTestECOM");
+        std::env::set_var("MOLLIE_API_KEY", "mollie-test-key-fixture");
+        std::env::set_var("MOLLIE_API_BASE_URL", format!("{base}/v2"));
+        std::env::set_var("MOLLIE_PROFILE_ID", "ApexMailTestECOM");
 
         let tenant = "mtcov_retry_canceled";
         seed_retry_candidate(env, tenant, "warning", "past_due").await;
         sqlx::query(
-            "UPDATE adyen_subscriptions
+            "UPDATE mollie_subscriptions
                 SET cancel_at_period_end = true,
                     canceled_at = NOW(),
-                    adyen_recurring_detail_reference = 'tok_retry_canceled'
+                    mollie_mandate_id = 'tok_retry_canceled'
               WHERE tenant_id = $1",
         )
         .bind(tenant)
@@ -8070,7 +8097,7 @@ mod coverage_adversarial {
             "a canceled subscription is never retried"
         );
         assert_eq!(
-            mock.call_count("/payments"),
+            mock.call_count("/v2/payments"),
             0,
             "no provider charge may be attempted after cancellation"
         );
@@ -8094,10 +8121,10 @@ mod coverage_adversarial {
             seed_tenant(env, future_tenant, "growth", "active").await;
             for (tenant, due) in [(now_tenant, true), (future_tenant, false)] {
                 sqlx::query(
-                    "INSERT INTO adyen_subscriptions
-                     (tenant_id, adyen_subscription_id, plan, status,
+                    "INSERT INTO mollie_subscriptions
+                     (tenant_id, mollie_subscription_id, plan, status,
                       billing_cycle_start, billing_cycle_end,
-                      cancel_at_period_end, canceled_at, adyen_shopper_reference)
+                      cancel_at_period_end, canceled_at, mollie_customer_id)
                  VALUES ($1, $2, 'growth', 'active',
                          NOW() - INTERVAL '30 days',
                          CASE WHEN $3 THEN NOW() - INTERVAL '1 hour'
@@ -8117,7 +8144,7 @@ mod coverage_adversarial {
                 .expect("sweep");
             assert_eq!(ended, 1, "only the ended cycle is reconciled");
             let (status, cancel_at_period_end): (String, bool) = sqlx::query_as(
-                "SELECT status, cancel_at_period_end FROM adyen_subscriptions WHERE tenant_id = $1",
+                "SELECT status, cancel_at_period_end FROM mollie_subscriptions WHERE tenant_id = $1",
             )
             .bind(now_tenant)
             .fetch_one(&env.pool)
@@ -8142,7 +8169,7 @@ mod coverage_adversarial {
             assert_eq!(audits, 1, "the ending is audit-chained");
 
             let future_status: String =
-                sqlx::query_scalar("SELECT status FROM adyen_subscriptions WHERE tenant_id = $1")
+                sqlx::query_scalar("SELECT status FROM mollie_subscriptions WHERE tenant_id = $1")
                     .bind(future_tenant)
                     .fetch_one(&env.pool)
                     .await
@@ -8158,29 +8185,29 @@ mod coverage_adversarial {
         }
     );
 
-    env_test!(scheduled_retries_reschedule_after_adyen_failure, |env| {
+    env_test!(scheduled_retries_reschedule_after_mollie_failure, |env| {
         let mock = Mock::default();
-        mock.route("/payments", 500, "adyen down");
+        mock.route("/v2/payments", 500, "mollie down");
         let base = spawn_mock(mock.clone()).await;
         let guard = ENV_LOCK.lock().await;
         let previous = (
             std::env::var("AUTO_PAY_OPEN_INVOICES").ok(),
-            std::env::var("ADYEN_API_KEY").ok(),
-            std::env::var("ADYEN_API_BASE_URL").ok(),
-            std::env::var("ADYEN_MERCHANT_ACCOUNT").ok(),
+            std::env::var("MOLLIE_API_KEY").ok(),
+            std::env::var("MOLLIE_API_BASE_URL").ok(),
+            std::env::var("MOLLIE_PROFILE_ID").ok(),
         );
         std::env::set_var("AUTO_PAY_OPEN_INVOICES", "true");
-        std::env::set_var("ADYEN_API_KEY", "adyen-test-key-fixture");
-        std::env::set_var("ADYEN_API_BASE_URL", &base);
-        std::env::set_var("ADYEN_MERCHANT_ACCOUNT", "ApexMailTestECOM");
+        std::env::set_var("MOLLIE_API_KEY", "mollie-test-key-fixture");
+        std::env::set_var("MOLLIE_API_BASE_URL", format!("{base}/v2"));
+        std::env::set_var("MOLLIE_PROFILE_ID", "ApexMailTestECOM");
 
         let tenant = "mtcov_retry_fail";
         seed_retry_candidate(env, tenant, "warning", "past_due").await;
-        // The retry only reaches Adyen when the tenant HAS an open local
+        // The retry only reaches Mollie when the tenant HAS an open local
         // invoice to collect; seed one so the provider failure is the thing
         // under test (not the nothing-to-collect early exit).
         sqlx::query(
-            "UPDATE adyen_subscriptions SET adyen_recurring_detail_reference = 'tok_retry_fail'
+            "UPDATE mollie_subscriptions SET mollie_mandate_id = 'tok_retry_fail'
              WHERE tenant_id = $1",
         )
         .bind(tenant)
@@ -8221,12 +8248,12 @@ mod coverage_adversarial {
             "failure backs off a full day"
         );
         assert_eq!(
-            mock.call_count("/payments"),
+            mock.call_count("/v2/payments"),
             1,
             "the failed charge is attempted exactly once and never replayed blindly"
         );
         let (invoice_status, bound): (String, Option<String>) =
-            sqlx::query_as("SELECT status, adyen_psp_reference FROM invoices WHERE id = $1")
+            sqlx::query_as("SELECT status, mollie_payment_id FROM invoices WHERE id = $1")
                 .bind(invoice_id)
                 .fetch_one(&env.pool)
                 .await
@@ -8234,21 +8261,21 @@ mod coverage_adversarial {
         assert_eq!(invoice_status, "pending");
         assert!(
             bound.is_none(),
-            "a failed charge binds no pspReference to the invoice"
+            "a failed charge binds no Mollie payment id to the invoice"
         );
 
         match previous {
             (Some(auto), Some(key), Some(url), Some(merchant)) => {
                 std::env::set_var("AUTO_PAY_OPEN_INVOICES", auto);
-                std::env::set_var("ADYEN_API_KEY", key);
-                std::env::set_var("ADYEN_API_BASE_URL", url);
-                std::env::set_var("ADYEN_MERCHANT_ACCOUNT", merchant);
+                std::env::set_var("MOLLIE_API_KEY", key);
+                std::env::set_var("MOLLIE_API_BASE_URL", url);
+                std::env::set_var("MOLLIE_PROFILE_ID", merchant);
             }
             _ => {
                 std::env::remove_var("AUTO_PAY_OPEN_INVOICES");
-                std::env::remove_var("ADYEN_API_KEY");
-                std::env::remove_var("ADYEN_API_BASE_URL");
-                std::env::remove_var("ADYEN_MERCHANT_ACCOUNT");
+                std::env::remove_var("MOLLIE_API_KEY");
+                std::env::remove_var("MOLLIE_API_BASE_URL");
+                std::env::remove_var("MOLLIE_PROFILE_ID");
             }
         }
         drop(guard);
@@ -8262,14 +8289,14 @@ mod coverage_adversarial {
             let guard = ENV_LOCK.lock().await;
             let previous = (
                 std::env::var("AUTO_PAY_OPEN_INVOICES").ok(),
-                std::env::var("ADYEN_API_KEY").ok(),
-                std::env::var("ADYEN_API_BASE_URL").ok(),
-                std::env::var("ADYEN_MERCHANT_ACCOUNT").ok(),
+                std::env::var("MOLLIE_API_KEY").ok(),
+                std::env::var("MOLLIE_API_BASE_URL").ok(),
+                std::env::var("MOLLIE_PROFILE_ID").ok(),
             );
             std::env::set_var("AUTO_PAY_OPEN_INVOICES", "1");
-            std::env::set_var("ADYEN_API_KEY", "adyen-test-key-fixture");
-            std::env::set_var("ADYEN_API_BASE_URL", &base);
-            std::env::set_var("ADYEN_MERCHANT_ACCOUNT", "ApexMailTestECOM");
+            std::env::set_var("MOLLIE_API_KEY", "mollie-test-key-fixture");
+            std::env::set_var("MOLLIE_API_BASE_URL", format!("{base}/v2"));
+            std::env::set_var("MOLLIE_PROFILE_ID", "ApexMailTestECOM");
 
             let tenant = "mtcov_retry_empty";
             seed_retry_candidate(env, tenant, "soft_suspended", "unpaid").await;
@@ -8297,7 +8324,7 @@ mod coverage_adversarial {
             .expect("dunning");
             assert!(retry.is_none(), "nothing to collect: retry cleared");
             assert_eq!(
-                mock.call_count("/payments"),
+                mock.call_count("/v2/payments"),
                 0,
                 "no open LOCAL invoice exists, so the provider is never called"
             );
@@ -8305,15 +8332,15 @@ mod coverage_adversarial {
             match previous {
                 (Some(auto), Some(key), Some(url), Some(merchant)) => {
                     std::env::set_var("AUTO_PAY_OPEN_INVOICES", auto);
-                    std::env::set_var("ADYEN_API_KEY", key);
-                    std::env::set_var("ADYEN_API_BASE_URL", url);
-                    std::env::set_var("ADYEN_MERCHANT_ACCOUNT", merchant);
+                    std::env::set_var("MOLLIE_API_KEY", key);
+                    std::env::set_var("MOLLIE_API_BASE_URL", url);
+                    std::env::set_var("MOLLIE_PROFILE_ID", merchant);
                 }
                 _ => {
                     std::env::remove_var("AUTO_PAY_OPEN_INVOICES");
-                    std::env::remove_var("ADYEN_API_KEY");
-                    std::env::remove_var("ADYEN_API_BASE_URL");
-                    std::env::remove_var("ADYEN_MERCHANT_ACCOUNT");
+                    std::env::remove_var("MOLLIE_API_KEY");
+                    std::env::remove_var("MOLLIE_API_BASE_URL");
+                    std::env::remove_var("MOLLIE_PROFILE_ID");
                 }
             }
             drop(guard);
@@ -8386,7 +8413,7 @@ mod coverage_adversarial {
     ) {
         sqlx::query(
             "INSERT INTO dedicated_ips (id, tenant_id, ip_address, status, billing_status,
-                                        adyen_recurring_detail_reference)
+                                        mollie_mandate_id)
              VALUES ($1, $2, $3, 'active', $4, $5)",
         )
         .bind(ip_id)
@@ -8403,7 +8430,7 @@ mod coverage_adversarial {
         dedicated_ip_charge_without_price_cents_moves_nothing,
         |env| {
             let guard = ENV_LOCK.lock().await;
-            let previous = std::env::var("ADYEN_DEDICATED_IP_PRICE").ok();
+            let previous = std::env::var("DEDICATED_IP_PRICE_CENTS").ok();
 
             let tenant = "mtcov_dip_noprice";
             seed_tenant(env, tenant, "growth", "active").await;
@@ -8424,8 +8451,8 @@ mod coverage_adversarial {
             // operator's disable switch and moves nothing.
             for price in [None, Some(""), Some("   "), Some("abc")] {
                 match price {
-                    Some(value) => std::env::set_var("ADYEN_DEDICATED_IP_PRICE", value),
-                    None => std::env::remove_var("ADYEN_DEDICATED_IP_PRICE"),
+                    Some(value) => std::env::set_var("DEDICATED_IP_PRICE_CENTS", value),
+                    None => std::env::remove_var("DEDICATED_IP_PRICE_CENTS"),
                 }
                 // No stored token on the seeded subscription: the sweep runs
                 // at the catalog price and reports the charge as a failure
@@ -8437,7 +8464,7 @@ mod coverage_adversarial {
             }
             for price in [Some("0"), Some("-5")] {
                 if let Some(value) = price {
-                    std::env::set_var("ADYEN_DEDICATED_IP_PRICE", value);
+                    std::env::set_var("DEDICATED_IP_PRICE_CENTS", value);
                 }
                 let result = process_dedicated_ip_billing(&env.state, &client)
                     .await
@@ -8448,7 +8475,7 @@ mod coverage_adversarial {
                     "explicit non-positive override disables the sweep: {price:?}"
                 );
             }
-            std::env::remove_var("ADYEN_DEDICATED_IP_PRICE");
+            std::env::remove_var("DEDICATED_IP_PRICE_CENTS");
             let (billing, failures): (String, i32) = sqlx::query_as(
                 "SELECT billing_status, COALESCE(billing_failure_count, 0)
              FROM dedicated_ips WHERE id = 'cov_dip_noprice'",
@@ -8467,8 +8494,8 @@ mod coverage_adversarial {
             );
 
             match previous {
-                Some(price) => std::env::set_var("ADYEN_DEDICATED_IP_PRICE", price),
-                None => std::env::remove_var("ADYEN_DEDICATED_IP_PRICE"),
+                Some(price) => std::env::set_var("DEDICATED_IP_PRICE_CENTS", price),
+                None => std::env::remove_var("DEDICATED_IP_PRICE_CENTS"),
             }
             drop(guard);
         }
@@ -8479,17 +8506,17 @@ mod coverage_adversarial {
         let base = spawn_mock(mock.clone()).await;
         let guard = ENV_LOCK.lock().await;
         let previous = (
-            std::env::var("ADYEN_API_KEY").ok(),
-            std::env::var("ADYEN_API_BASE_URL").ok(),
-            std::env::var("ADYEN_DEDICATED_IP_PRICE").ok(),
+            std::env::var("MOLLIE_API_KEY").ok(),
+            std::env::var("MOLLIE_API_BASE_URL").ok(),
+            std::env::var("DEDICATED_IP_PRICE_CENTS").ok(),
         );
-        std::env::set_var("ADYEN_API_KEY", "adyen-test-key-fixture");
-        std::env::set_var("ADYEN_API_BASE_URL", &base);
-        std::env::set_var("ADYEN_DEDICATED_IP_PRICE", "500");
+        std::env::set_var("MOLLIE_API_KEY", "mollie-test-key-fixture");
+        std::env::set_var("MOLLIE_API_BASE_URL", format!("{base}/v2"));
+        std::env::set_var("DEDICATED_IP_PRICE_CENTS", "500");
 
         let tenant = "mtcov_dip_cancel";
         seed_tenant(env, tenant, "growth", "active").await;
-        // Adyen has no provider-side subscription-item object AND no
+        // Mollie has no provider-side subscription-item object AND no
         // automatic future charges for the add-on (each activation is
         // charged by our own sweep), so a cancel is a LOCAL transition:
         // with or without a stale stored reference, no HTTP is ever made.
@@ -8533,20 +8560,20 @@ mod coverage_adversarial {
             ],
             "cancel is timestamped and never wedges on a stale provider reference"
         );
-        for path in ["/payments", "/v1/subscription_items/si_gone"] {
+        for path in ["/v2/payments"] {
             assert_eq!(mock.call_count(path), 0, "no HTTP for {path}");
         }
 
         match previous {
             (Some(key), Some(url), Some(price)) => {
-                std::env::set_var("ADYEN_API_KEY", key);
-                std::env::set_var("ADYEN_API_BASE_URL", url);
-                std::env::set_var("ADYEN_DEDICATED_IP_PRICE", price);
+                std::env::set_var("MOLLIE_API_KEY", key);
+                std::env::set_var("MOLLIE_API_BASE_URL", url);
+                std::env::set_var("DEDICATED_IP_PRICE_CENTS", price);
             }
             _ => {
-                std::env::remove_var("ADYEN_API_KEY");
-                std::env::remove_var("ADYEN_API_BASE_URL");
-                std::env::remove_var("ADYEN_DEDICATED_IP_PRICE");
+                std::env::remove_var("MOLLIE_API_KEY");
+                std::env::remove_var("MOLLIE_API_BASE_URL");
+                std::env::remove_var("DEDICATED_IP_PRICE_CENTS");
             }
         }
         drop(guard);
@@ -8554,11 +8581,11 @@ mod coverage_adversarial {
 
     env_test!(dedicated_ip_missing_table_is_a_clean_noop, |env| {
         let guard = ENV_LOCK.lock().await;
-        let previous = std::env::var("ADYEN_DEDICATED_IP_PRICE").ok();
+        let previous = std::env::var("DEDICATED_IP_PRICE_CENTS").ok();
         // A VALID cents price: with the sweep disabled the missing table
         // would never be queried and the test would pass for the wrong
         // reason.
-        std::env::set_var("ADYEN_DEDICATED_IP_PRICE", "500");
+        std::env::set_var("DEDICATED_IP_PRICE_CENTS", "500");
         sqlx::query("DROP TABLE IF EXISTS dedicated_ips CASCADE")
             .execute(&env.pool)
             .await
@@ -8571,8 +8598,8 @@ mod coverage_adversarial {
         assert_eq!((result.charged, result.canceled), (0, 0));
 
         match previous {
-            Some(price) => std::env::set_var("ADYEN_DEDICATED_IP_PRICE", price),
-            None => std::env::remove_var("ADYEN_DEDICATED_IP_PRICE"),
+            Some(price) => std::env::set_var("DEDICATED_IP_PRICE_CENTS", price),
+            None => std::env::remove_var("DEDICATED_IP_PRICE_CENTS"),
         }
         drop(guard);
     });
@@ -8896,7 +8923,7 @@ mod coverage_adversarial {
         .await
         .expect("archivable invoice");
         sqlx::query(
-            "INSERT INTO adyen_webhook_events (id, adyen_notification_id, event_type, status, updated_at)
+            "INSERT INTO mollie_webhook_events (id, mollie_event_id, event_type, status, updated_at)
              VALUES (gen_random_uuid(), 'evt_mtcov_stale', 'invoice.paid', 'pending',
                      NOW() - INTERVAL '20 minutes')",
         )
@@ -8932,7 +8959,7 @@ mod coverage_adversarial {
         let reclaim_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let reclaimed: String = loop {
             let status: String = sqlx::query_scalar(
-                "SELECT status FROM adyen_webhook_events WHERE adyen_notification_id = 'evt_mtcov_stale'",
+                "SELECT status FROM mollie_webhook_events WHERE mollie_event_id = 'evt_mtcov_stale'",
             )
             .fetch_one(&env.pool)
             .await
@@ -8957,21 +8984,21 @@ mod coverage_adversarial {
         crate::test_support::ensure_trace_subscriber();
         // A VALID cents price: without it the dedicated-IP sweep returns
         // before touching the table and its error arm would stay cold.
-        let previous_price = std::env::var("ADYEN_DEDICATED_IP_PRICE").ok();
-        std::env::set_var("ADYEN_DEDICATED_IP_PRICE", "500");
+        let previous_price = std::env::var("DEDICATED_IP_PRICE_CENTS").ok();
+        std::env::set_var("DEDICATED_IP_PRICE_CENTS", "500");
         // Break the tables the startup sweeps read: every Err arm must be an
         // error! log, never a panic or an aborted task.
         env.break_table("invoices").await;
-        env.break_table("adyen_webhook_events").await;
+        env.break_table("mollie_webhook_events").await;
         env.break_table("dedicated_ips").await;
         start_periodic_jobs(env.state.clone());
         tokio::time::sleep(std::time::Duration::from_millis(40)).await;
         env.restore_table("invoices").await;
-        env.restore_table("adyen_webhook_events").await;
+        env.restore_table("mollie_webhook_events").await;
         env.restore_table("dedicated_ips").await;
         match previous_price {
-            Some(value) => std::env::set_var("ADYEN_DEDICATED_IP_PRICE", value),
-            None => std::env::remove_var("ADYEN_DEDICATED_IP_PRICE"),
+            Some(value) => std::env::set_var("DEDICATED_IP_PRICE_CENTS", value),
+            None => std::env::remove_var("DEDICATED_IP_PRICE_CENTS"),
         }
         env.finish().await;
     }
@@ -9113,9 +9140,9 @@ mod coverage_adversarial {
             ),
         ] {
             sqlx::query(
-                "INSERT INTO adyen_subscriptions
-                     (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
-                      billing_cycle_end, trial_end, adyen_shopper_reference)
+                "INSERT INTO mollie_subscriptions
+                     (tenant_id, mollie_subscription_id, plan, status, billing_cycle_start,
+                      billing_cycle_end, trial_end, mollie_customer_id)
                  VALUES ($1, $2, 'growth', 'trialing', NOW() - INTERVAL '20 days',
                          NOW() - INTERVAL '2 days', $3::timestamptz, $1)",
             )
@@ -9130,7 +9157,7 @@ mod coverage_adversarial {
         let swept = sweep_expired_trials(&env.state).await.expect("sweep");
         assert_eq!(swept, 1, "only the stale trial is downgraded");
         let (stale_status, stale_plan): (String, String) = sqlx::query_as(
-            "SELECT (SELECT status FROM adyen_subscriptions WHERE adyen_subscription_id = 'sub_mtcov_stale'),
+            "SELECT (SELECT status FROM mollie_subscriptions WHERE mollie_subscription_id = 'sub_mtcov_stale'),
                     (SELECT plan FROM tenants WHERE id = 'mtcov_trial_stale')",
         )
         .fetch_one(&env.pool)
@@ -9750,10 +9777,10 @@ mod coverage_adversarial {
     /// leaves behind for a period-end stop (`cancel_at_period_end = true`).
     async fn seed_period_end_subscription(env: &Env, tenant: &str, due: bool, status: &str) {
         sqlx::query(
-            "INSERT INTO adyen_subscriptions
-                 (tenant_id, adyen_subscription_id, plan, status,
+            "INSERT INTO mollie_subscriptions
+                 (tenant_id, mollie_subscription_id, plan, status,
                   billing_cycle_start, billing_cycle_end,
-                  cancel_at_period_end, canceled_at, adyen_shopper_reference)
+                  cancel_at_period_end, canceled_at, mollie_customer_id)
              VALUES ($1, $2, 'growth', $4,
                      NOW() - INTERVAL '30 days',
                      CASE WHEN $3 THEN NOW() - INTERVAL '1 hour'
@@ -9812,7 +9839,7 @@ mod coverage_adversarial {
                 capture.statements()
             );
             assert_eq!(
-                capture.count_starting_with("UPDATE adyen_subscriptions"),
+                capture.count_starting_with("UPDATE mollie_subscriptions"),
                 0,
                 "no per-row subscription updates: {:?}",
                 capture.statements()
@@ -9849,7 +9876,7 @@ mod coverage_adversarial {
             assert_eq!(ended, 2, "both due subscriptions end");
             for tenant in [due_a, due_b] {
                 let (status, cancel_at_period_end): (String, bool) = sqlx::query_as(
-                    "SELECT status, cancel_at_period_end FROM adyen_subscriptions
+                    "SELECT status, cancel_at_period_end FROM mollie_subscriptions
                      WHERE tenant_id = $1",
                 )
                 .bind(tenant)
@@ -9866,7 +9893,7 @@ mod coverage_adversarial {
                 assert_eq!(plan, "free");
             }
             let future_status: String =
-                sqlx::query_scalar("SELECT status FROM adyen_subscriptions WHERE tenant_id = $1")
+                sqlx::query_scalar("SELECT status FROM mollie_subscriptions WHERE tenant_id = $1")
                     .bind(future)
                     .fetch_one(&env.pool)
                     .await
@@ -9885,7 +9912,7 @@ mod coverage_adversarial {
             // per-row append produced (resource_id is the subscription's
             // internal id, as in the original loop).
             let subscriptions: Vec<(uuid::Uuid, String)> = sqlx::query_as(
-                "SELECT id, tenant_id FROM adyen_subscriptions
+                "SELECT id, tenant_id FROM mollie_subscriptions
                  WHERE tenant_id IN ($1, $2) AND status = 'canceled'",
             )
             .bind(due_a)
@@ -10039,8 +10066,8 @@ mod coverage_adversarial {
                 (free, "psp_trial_free", now - chrono::Duration::hours(48)),
             ] {
                 sqlx::query(
-                    "INSERT INTO adyen_subscriptions
-                         (tenant_id, adyen_subscription_id, plan, status, trial_end,
+                    "INSERT INTO mollie_subscriptions
+                         (tenant_id, mollie_subscription_id, plan, status, trial_end,
                           billing_cycle_start, billing_cycle_end)
                      VALUES ($1, $2, 'growth', 'trialing', $3, $4, $5)",
                 )
@@ -10074,7 +10101,7 @@ mod coverage_adversarial {
                 capture.statements()
             );
             assert_eq!(
-                capture.count_starting_with("UPDATE adyen_subscriptions"),
+                capture.count_starting_with("UPDATE mollie_subscriptions"),
                 0,
                 "no per-row subscription cancellations: {:?}",
                 capture.statements()
@@ -10107,7 +10134,7 @@ mod coverage_adversarial {
             for tenant in [stale_a, stale_b] {
                 let (plan, status): (String, String) = sqlx::query_as(
                     "SELECT t.plan, s.status FROM tenants t
-                     JOIN adyen_subscriptions s ON s.tenant_id = t.id WHERE t.id = $1",
+                     JOIN mollie_subscriptions s ON s.tenant_id = t.id WHERE t.id = $1",
                 )
                 .bind(tenant)
                 .fetch_one(&env.pool)
@@ -10117,14 +10144,14 @@ mod coverage_adversarial {
                 assert_eq!(status, "canceled");
             }
             let fresh_status: String =
-                sqlx::query_scalar("SELECT status FROM adyen_subscriptions WHERE tenant_id = $1")
+                sqlx::query_scalar("SELECT status FROM mollie_subscriptions WHERE tenant_id = $1")
                     .bind(fresh)
                     .fetch_one(&env.pool)
                     .await
                     .expect("fresh status");
             assert_eq!(fresh_status, "trialing", "a recent trial is never raced");
             let free_status: String =
-                sqlx::query_scalar("SELECT status FROM adyen_subscriptions WHERE tenant_id = $1")
+                sqlx::query_scalar("SELECT status FROM mollie_subscriptions WHERE tenant_id = $1")
                     .bind(free)
                     .fetch_one(&env.pool)
                     .await
@@ -10146,7 +10173,7 @@ mod coverage_adversarial {
             .expect("audit rows");
             assert_eq!(audits.len(), 2, "one audit row per downgraded tenant");
             for (index, (tenant_id, resource, resource_id, details)) in audits.iter().enumerate() {
-                assert_eq!(resource, "adyen_subscription");
+                assert_eq!(resource, "mollie_subscription");
                 let expected_sub = if index == 0 {
                     "psp_trial_stale_a"
                 } else {
@@ -10794,30 +10821,30 @@ mod coverage_adversarial {
         crate::test_support::ensure_trace_subscriber();
 
         let mock = Mock::default();
-        // Dedicated-IP activation: ONE recurring `POST /payments` per add-on
-        // against the tenant's stored token.
+        // Dedicated-IP activation: ONE recurring `POST /v2/payments` per
+        // add-on against the tenant's stored mandate.
         mock.route(
-            "/payments",
+            "/v2/payments",
             200,
-            r#"{"pspReference":"psp_w6c_drv","resultCode":"Authorised"}"#,
+            r#"{"id":"tr_w6c_drv","status":"paid"}"#,
         );
         let base = spawn_mock(mock.clone()).await;
 
         let _env_guard = ENV_LOCK.lock().await;
         let previous_env = (
             std::env::var("PERIODIC_TASK_INTERVAL_MS").ok(),
-            std::env::var("ADYEN_DEDICATED_IP_PRICE").ok(),
-            std::env::var("ADYEN_API_KEY").ok(),
-            std::env::var("ADYEN_API_BASE_URL").ok(),
-            std::env::var("ADYEN_MERCHANT_ACCOUNT").ok(),
+            std::env::var("DEDICATED_IP_PRICE_CENTS").ok(),
+            std::env::var("MOLLIE_API_KEY").ok(),
+            std::env::var("MOLLIE_API_BASE_URL").ok(),
+            std::env::var("MOLLIE_PROFILE_ID").ok(),
             std::env::var("AUTO_PAY_OPEN_INVOICES").ok(),
         );
         std::env::set_var("PERIODIC_TASK_INTERVAL_MS", "10");
         // Cents, not a provider price id.
-        std::env::set_var("ADYEN_DEDICATED_IP_PRICE", "500");
-        std::env::set_var("ADYEN_API_KEY", "adyen-test-key-fixture");
-        std::env::set_var("ADYEN_API_BASE_URL", &base);
-        std::env::set_var("ADYEN_MERCHANT_ACCOUNT", "ApexMailTestECOM");
+        std::env::set_var("DEDICATED_IP_PRICE_CENTS", "500");
+        std::env::set_var("MOLLIE_API_KEY", "mollie-test-key-fixture");
+        std::env::set_var("MOLLIE_API_BASE_URL", format!("{base}/v2"));
+        std::env::set_var("MOLLIE_PROFILE_ID", "ApexMailTestECOM");
         std::env::set_var("AUTO_PAY_OPEN_INVOICES", "true");
 
         let env = &owned;
@@ -10827,10 +10854,10 @@ mod coverage_adversarial {
         // the stored recurring token the charge replays.
         seed_tenant_plan(env, "w6cdrv_ip", "growth", "active").await;
         sqlx::query(
-            "INSERT INTO adyen_subscriptions
-                 (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
-                  billing_cycle_end, adyen_shopper_reference,
-                  adyen_recurring_detail_reference)
+            "INSERT INTO mollie_subscriptions
+                 (tenant_id, mollie_subscription_id, plan, status, billing_cycle_start,
+                  billing_cycle_end, mollie_customer_id,
+                  mollie_mandate_id)
              VALUES ('w6cdrv_ip', 'psp_w6cdrv_ip', 'growth', 'active', NOW(),
                      NOW() + INTERVAL '30 days', 'w6cdrv_ip', 'tok_w6cdrv')",
         )
@@ -10887,9 +10914,9 @@ mod coverage_adversarial {
         // the retry without ever calling the provider.
         seed_tenant_plan(env, "w6cdrv_pay", "growth", "active").await;
         sqlx::query(
-            "INSERT INTO adyen_subscriptions
-                 (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
-                  billing_cycle_end, adyen_shopper_reference)
+            "INSERT INTO mollie_subscriptions
+                 (tenant_id, mollie_subscription_id, plan, status, billing_cycle_start,
+                  billing_cycle_end, mollie_customer_id)
              VALUES ('w6cdrv_pay', 'psp_w6cdrv_pay', 'growth', 'past_due', NOW(),
                      NOW() + INTERVAL '30 days', 'w6cdrv_pay')",
         )
@@ -10969,7 +10996,7 @@ mod coverage_adversarial {
         // it (the tick arm cannot be reached by pre-seeded rows alone).
         for event in ["evt_w6cdrv_startup", "evt_w6cdrv_tick"] {
             sqlx::query(
-                "INSERT INTO adyen_webhook_events (id, adyen_notification_id, event_type, status,
+                "INSERT INTO mollie_webhook_events (id, mollie_event_id, event_type, status,
                                                     updated_at)
                  VALUES (gen_random_uuid(), $1, 'invoice.paid', 'pending',
                          NOW() - INTERVAL '1 hour')",
@@ -10986,7 +11013,7 @@ mod coverage_adversarial {
         // of the loops only fire for work that appears afterwards.
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         sqlx::query(
-            "INSERT INTO adyen_webhook_events (id, adyen_notification_id, event_type, status,
+            "INSERT INTO mollie_webhook_events (id, mollie_event_id, event_type, status,
                                                 updated_at)
              VALUES (gen_random_uuid(), 'evt_w6cdrv_tick2', 'invoice.paid', 'pending',
                      NOW() - INTERVAL '1 hour')",
@@ -11094,8 +11121,8 @@ mod coverage_adversarial {
         // reclaimed to 'received'.
         poll_until!(
             deadline,
-            "SELECT COUNT(*) FROM adyen_webhook_events
-             WHERE adyen_notification_id IN ('evt_w6cdrv_startup', 'evt_w6cdrv_tick', 'evt_w6cdrv_tick2')
+            "SELECT COUNT(*) FROM mollie_webhook_events
+             WHERE mollie_event_id IN ('evt_w6cdrv_startup', 'evt_w6cdrv_tick', 'evt_w6cdrv_tick2')
                AND status = 'received'",
             |count| count == 3,
             "all stale webhooks reclaimed (startup + tick)"
@@ -11137,20 +11164,20 @@ mod coverage_adversarial {
             None => std::env::remove_var("PERIODIC_TASK_INTERVAL_MS"),
         }
         match price {
-            Some(value) => std::env::set_var("ADYEN_DEDICATED_IP_PRICE", value),
-            None => std::env::remove_var("ADYEN_DEDICATED_IP_PRICE"),
+            Some(value) => std::env::set_var("DEDICATED_IP_PRICE_CENTS", value),
+            None => std::env::remove_var("DEDICATED_IP_PRICE_CENTS"),
         }
         match secret {
-            Some(value) => std::env::set_var("ADYEN_API_KEY", value),
-            None => std::env::remove_var("ADYEN_API_KEY"),
+            Some(value) => std::env::set_var("MOLLIE_API_KEY", value),
+            None => std::env::remove_var("MOLLIE_API_KEY"),
         }
         match api_base {
-            Some(value) => std::env::set_var("ADYEN_API_BASE_URL", value),
-            None => std::env::remove_var("ADYEN_API_BASE_URL"),
+            Some(value) => std::env::set_var("MOLLIE_API_BASE_URL", value),
+            None => std::env::remove_var("MOLLIE_API_BASE_URL"),
         }
         match merchant {
-            Some(value) => std::env::set_var("ADYEN_MERCHANT_ACCOUNT", value),
-            None => std::env::remove_var("ADYEN_MERCHANT_ACCOUNT"),
+            Some(value) => std::env::set_var("MOLLIE_PROFILE_ID", value),
+            None => std::env::remove_var("MOLLIE_PROFILE_ID"),
         }
         match auto_pay {
             Some(value) => std::env::set_var("AUTO_PAY_OPEN_INVOICES", value),
@@ -11443,30 +11470,30 @@ mod coverage_adversarial {
 
     // ── dedicated-IP cancel fault arms ──────────────────────────────────
 
-    env_test!(dedicated_ip_cancel_is_local_and_never_calls_adyen, |env| {
+    env_test!(dedicated_ip_cancel_is_local_and_never_calls_mollie, |env| {
         let mock = Mock::default();
         let base = spawn_mock(mock.clone()).await;
 
         let guard = ENV_LOCK.lock().await;
         let previous = (
-            std::env::var("ADYEN_API_KEY").ok(),
-            std::env::var("ADYEN_API_BASE_URL").ok(),
-            std::env::var("ADYEN_DEDICATED_IP_PRICE").ok(),
+            std::env::var("MOLLIE_API_KEY").ok(),
+            std::env::var("MOLLIE_API_BASE_URL").ok(),
+            std::env::var("DEDICATED_IP_PRICE_CENTS").ok(),
         );
-        std::env::set_var("ADYEN_API_KEY", "adyen-test-key-fixture");
-        std::env::set_var("ADYEN_API_BASE_URL", &base);
-        std::env::set_var("ADYEN_DEDICATED_IP_PRICE", "500");
+        std::env::set_var("MOLLIE_API_KEY", "mollie-test-key-fixture");
+        std::env::set_var("MOLLIE_API_BASE_URL", format!("{base}/v2"));
+        std::env::set_var("DEDICATED_IP_PRICE_CENTS", "500");
 
-        // Under Adyen there is no provider-side subscription-item object to
+        // Under Mollie there is no provider-side subscription-item object to
         // delete and no automatic future add-on charges: ending the add-on
         // is a LOCAL transition for every row — stale stored references
-        // included (they are activation pspReferences now, not deletable
+        // included (they are activation payment ids now, not deletable
         // items). The old two-step failure matrix (500 rolls back, 404
-        // succeeds) pinned a pre-cutover mechanic with no Adyen analog.
+        // succeeds) pinned a pre-cutover mechanic with no Mollie analog.
         seed_tenant_plan(env, "w6cdip_cancel", "growth", "active").await;
         sqlx::query(
             "INSERT INTO dedicated_ips (id, tenant_id, ip_address, status, billing_status,
-                                        adyen_recurring_detail_reference)
+                                        mollie_mandate_id)
              VALUES ('w6cdip-dead', 'w6cdip_cancel', '192.0.2.51', 'active', 'pending_cancel', 'psp_dead'),
                     ('w6cdip-gone', 'w6cdip_cancel', '192.0.2.52', 'active', 'pending_cancel', 'psp_gone')",
         )
@@ -11494,21 +11521,21 @@ mod coverage_adversarial {
             "no provider call exists to succeed or fail: both rows finalize"
         );
         assert_eq!(
-            mock.call_count("/payments"),
+            mock.call_count("/v2/payments"),
             0,
             "cancelling an add-on never moves money"
         );
 
         match previous {
             (Some(a), Some(b), Some(c)) => {
-                std::env::set_var("ADYEN_API_KEY", a);
-                std::env::set_var("ADYEN_API_BASE_URL", b);
-                std::env::set_var("ADYEN_DEDICATED_IP_PRICE", c);
+                std::env::set_var("MOLLIE_API_KEY", a);
+                std::env::set_var("MOLLIE_API_BASE_URL", b);
+                std::env::set_var("DEDICATED_IP_PRICE_CENTS", c);
             }
             _ => {
-                std::env::remove_var("ADYEN_API_KEY");
-                std::env::remove_var("ADYEN_API_BASE_URL");
-                std::env::remove_var("ADYEN_DEDICATED_IP_PRICE");
+                std::env::remove_var("MOLLIE_API_KEY");
+                std::env::remove_var("MOLLIE_API_BASE_URL");
+                std::env::remove_var("DEDICATED_IP_PRICE_CENTS");
             }
         }
         drop(guard);

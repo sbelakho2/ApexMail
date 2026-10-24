@@ -116,7 +116,7 @@
       "alerts": [
         "BillingServiceDown"
       ],
-      "notes": "Adyen + wallet + invoicing"
+      "notes": "Mollie + wallet + invoicing"
     },
     {
       "name": "sales-autopilot",

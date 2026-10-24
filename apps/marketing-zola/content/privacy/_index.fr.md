@@ -20,7 +20,7 @@ Bel Consulting OÜ (nom commercial ApexMail) (« nous », « notre ») s'engage 
 
 - **Visiteurs du site (site marketing) :** adresse IP, type de navigateur et user agent, informations sur l'appareil, pages visitées, URL de provenance et horodatages — collectés automatiquement via les journaux d'accès du serveur. Le site marketing n'exécute aucun script d'analyse et n'intègre aucun pixel de suivi ni cookie publicitaire.
 - **Prospects :** nom, adresse email, nom de l'entreprise, numéro de téléphone (si fourni) et historique des communications, fournis via les formulaires de contact ou par email.
-- **Données de compte :** nom, email, entreprise, adresse de facturation, numéro de TVA, jetons de moyen de paiement (les données de carte sont traitées par Adyen et n'atteignent jamais nos serveurs), métadonnées de clés API, horodatages de connexion, adresses IP et entrées de journal d'audit.
+- **Données de compte :** nom, email, entreprise, adresse de facturation, numéro de TVA, jetons de moyen de paiement (les données de carte sont traitées par Mollie et n'atteignent jamais nos serveurs), métadonnées de clés API, horodatages de connexion, adresses IP et entrées de journal d'audit.
 - **Données d'utilisation :** appels API, volumes d'envoi d'emails, événements de livraison et événements d'engagement (ouvertures et clics) pour les messages que vous envoyez.
 - **Données des destinataires (en tant que sous-traitant pour nos clients) :** adresses email et noms des destinataires, contenu des emails (objet, corps, en-têtes, pièces jointes) et métadonnées de livraison et d'engagement. Lorsque le suivi est activé par le client expéditeur, les événements d'ouverture et de clic enregistrent également l'adresse IP et le user agent du destinataire.
 - **Données techniques :** adresses IP (utilisées pour l'authentification, la limitation de débit et la prévention des fraudes et abus), type de navigateur, informations sur l'appareil.
@@ -40,12 +40,16 @@ La configuration fournie cible des régions de l'EEE pour les données de messag
 |---|---|---|---|
 | Infrastructure de messagerie principale (messages, métadonnées de livraison, données de compte) | Centre de données UE — Allemagne | Centre de données UE — Finlande | EEE — aucun transfert vers un pays tiers |
 | Jetons d'authentification OAuth | Google LLC / GitHub, Inc. (entités américaines, CCT) | Géré par le fournisseur | États-Unis (CCT) |
-| Données de paiement et de facturation | Adyen N.V. (Pays-Bas, UE) | Géré par le fournisseur au sein de l'UE | EEE — pas de transfert vers des pays tiers (réseaux de cartes selon le DPA Adyen) |
+| Données de paiement et de facturation | Mollie B.V. (Pays-Bas, UE) | Géré par le fournisseur au sein de l'UE | EEE — pas de transfert vers des pays tiers (réseaux de cartes selon le DPA Mollie) |
 | Tickets de support | Centre de données UE — Allemagne | Centre de données UE — Finlande | EEE — aucun transfert vers un pays tiers |
 
 Nous ne transférons pas de données personnelles en dehors de l'EEE sans garanties appropriées (Clauses contractuelles types ou décision d'adéquation en vertu de l'Article 45).
 
 <span id="data-retention"></span>
+
+### Prestataire de paiement
+
+Mollie B.V. est un établissement de paiement supervisé par De Nederlandsche Bank (DNB), dont le siège social est situé Keizersgracht 126, 1015 CW Amsterdam, Pays-Bas. Les données de paiement sont traitées aux Pays-Bas (UE) ; les réseaux de cartes peuvent les traiter à l'échelle mondiale dans le cadre de l'accord de traitement des données de Mollie.
 
 ## 5. Conservation des données
 

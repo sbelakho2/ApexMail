@@ -14,7 +14,7 @@
 +    }
      let (action, outcome) = if immediately {
          sqlx::query(
-             "UPDATE adyen_subscriptions
+             "UPDATE mollie_subscriptions
                  SET status = 'canceled',
                      cancel_at_period_end = false,
                      canceled_at = COALESCE(canceled_at, $2),

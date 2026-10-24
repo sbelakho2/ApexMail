@@ -10077,8 +10077,8 @@ mod tests {
             "__NEXT_DATA__",
             "data-reactroot",
             "_next/static",
-            "https://js.adyen.com",
-            "checkout.adyen.com",
+            "https://js.mollie.com",
+            "mollie.com/checkout/select-method",
         ];
 
         for (name, html) in &fns {

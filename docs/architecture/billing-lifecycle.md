@@ -46,50 +46,91 @@ See `docs/pricing.md` for the user-facing plan summary.
 
 ### Checkout and activation
 
-- An `AUTHORISATION` notification is recorded as an informational event only;
-  it does not change tenant status or grant an entitlement.
-- `RECURRING_CONTRACT` (`recurring.token.created`) notifications bind the
-  stored recurring detail and upsert `adyen_subscriptions` after signature,
-  tenant-binding, catalog-price, and status-transition checks; later
-  successful recurring `AUTHORISATION` notifications reconcile the state
-  changes.
-- The live `plans` table persists the monthly and yearly Adyen plan codes;
-  amounts come inline from the platform catalog. A generic public Checkout
-  request is accepted only for an active Starter, Pro, Growth, or Scale plan;
+Mollie is object-based: a customer (`cst_…`), a mandate (`mdt_…`), payments
+(`tr_…`), refunds (`re_…`) and subscriptions (`sub_…`) are real provider
+objects. ApexMail stores their ids and reconciles from authenticated fetches.
+
+- `POST /v2/payments` creates a payment with `sequenceType: first`, the
+  catalog amount as a decimal string, the approved return URL, the webhook URL
+  (`/webhooks/mollie`) and the tenant/plan metadata. The response's
+  `_links.checkout.href` is the hosted checkout URL; creating the payment does
+  not grant access.
+- The first paid payment that produced a mandate establishes the recurring
+  contract. A `RECURRING_CONTRACT` event binds the Mollie customer/mandate
+  (and `sequenceType: recurring`) onto the tenant's `mollie_subscriptions`
+  rows; a mandate that arrives before any row exists is acknowledged and
+  re-read from `GET /v2/customers/{cst}/mandates` when a row appears. Later
+  recurring payments (`sequenceType: recurring` + customer + mandate) settle
+  their invoices.
+- The id-only webhook (`id=tr_…` / `id=re_…`) is never trusted by itself:
+  ApexMail fetches the object with `Authorization: Bearer
+  $MOLLIE_API_KEY` and derives the fact from the fetched status. `open`,
+  `pending` and `authorized` are not settled facts.
+- The live `plans` table persists the monthly and yearly plan codes used by
+  checkout to resolve a `priceId` to its plan and interval; amounts come
+  inline from the platform catalog. A generic public Checkout request is
+  accepted only for an active Starter, Pro, Growth, or Scale plan;
   Enterprise and PAYG use managed flows.
-- Only verified `active` and `trialing` Adyen subscriptions grant the mapped
-	paid tenant plan. Incomplete, delinquent, paused, unpaid, and canceled
-	states resolve the tenant to `free`.
-- When a subscription becomes active, the billing service can auto-provision
-	included dedicated IPs.
+- Entitlement follows the LOCAL `mollie_subscriptions` row (status plus the
+  catalog plan), not a provider object: ApexMail creates no Mollie
+  subscription objects, so recurring collection is an explicit payment
+  against the mandate.
+- When a recurring invoice settles, the billing service can auto-provision
+  included dedicated IPs.
 
 ### Plan changes
 
-`POST /checkout` is the only self-service plan-change entry point. It accepts
-only an Adyen plan code that maps to an active self-service ApexMail plan and
-adds the tenant and resolved plan name to the Adyen Checkout session metadata.
+`POST /checkout` accepts only a `priceId` that maps to an active self-service
+ApexMail plan and its interval, and creates a Mollie payment whose metadata
+carries the tenant, resolved plan, interval and price. What the code does and
+does not do is stated here exactly:
 
-- Checkout creation does not change the tenant plan.
-- A verified `RECURRING_CONTRACT` and successful recurring `AUTHORISATION`
-  notifications map the confirmed charge back to the active ApexMail plan and
-  update the tenant in a transaction.
+- Payment creation does not change the tenant plan, and a paid checkout does
+  not grant entitlement by itself: the checkout webhook is informational
+  (the `RECURRING_CONTRACT` event binds the mandate it produced to the
+  tenant's existing subscription rows).
+- The console's plan-change form (`POST /web/billing/checkout`) does not open
+  a checkout at all: it records the request for the billing team and says so
+  in the flash, because plan activation (invoice issuance, proration and
+  entitlement) is an operator action in the current product. The JSON
+  `/v1/billing/checkout` endpoint exists for managed flows and carries the
+  same rule: it takes no entitlement decision.
 - `POST /switch-plan` is a retained compatibility endpoint that always returns
   `409 CHECKOUT_REQUIRED`; it cannot update tenant or subscription records.
-- Plan-change proration is calculated and applied by Adyen. Any ApexMail
-  proration preview is informational only and never changes a subscription or
+- Proration previews are informational and never change a subscription or
   tenant entitlement.
+
+### Refunds and chargebacks
+
+- A refund is `POST /v2/payments/{paymentId}/refunds` (amount as a decimal
+  string, description, `Idempotency-Key`) and is fetched back by
+  `GET /v2/payments/{paymentId}/refunds/{refundId}`.
+- A refund webhook carries only `id=re_…`; the payment id comes from the local
+  `mollie_refunds` mapping, then the refund is fetched for its authoritative
+  status.
+- A payment status of `refunded` or `charged_back` is reconciled against the
+  invoice/payment allocation; no local row is mutated from the webhook body.
+- Settlements (`GET /v2/settlements`) are read for operator payout
+  reconciliation; they are independent of customer entitlement and no
+  automated settlement posting runs.
 
 ### Cancellation
 
-`POST /cancel` is a local subscription state change. ApexMail owns the
-subscription. Adyen has no hosted billing portal, and its Subscription charges
-are merchant-initiated.
+`POST /cancel` changes the local subscription row; ApexMail owns it and
+Mollie has no hosted billing portal. The provider-side guarantee is the
+MANDATE: an immediate cancel revokes it
+(`DELETE /v2/customers/{cst}/mandates/{mdt}`), so no recurring charge can ever
+be created against the account again. The revocation is best-effort at the
+moment of cancellation (the local state is already committed); a failure
+leaves `mollie_customers.mandate_revoked_at` NULL and the 15-minute
+maintenance sweep retries it until the provider confirms.
 
 - A period-end cancel sets `cancel_at_period_end` and `canceled_at`. Access
   continues to `billing_cycle_end`. The period-end sweep then marks the row
-  `canceled` and downgrades the tenant to `free`.
-- An immediate cancel marks the row `canceled` now and downgrades the tenant
-  now.
+  `canceled`, downgrades the tenant to `free`, and the same revocation sweep
+  removes the mandate at the provider.
+- An immediate cancel marks the row `canceled` now, downgrades the tenant now,
+  and revokes the mandate immediately.
 - With no active subscription the route answers `404`. A replay keeps the
   original `canceled_at`.
 - Renewal paths skip `cancel_at_period_end` rows, so no next charge happens.
@@ -106,11 +147,11 @@ The contract cancellation API supports immediate termination only. It rejects a
 future effective date rather than pretending that a scheduler will later change
 access. Immediate termination is transactional: it downgrades the tenant to
 Free only when no other current active Enterprise contract remains. It never
-substitutes another paid plan or creates a Adyen entitlement locally.
+substitutes another paid plan or creates a Mollie entitlement locally.
 
 ## Proration Logic
 
-Plan-change previews are diagnostic estimates only; Adyen is the source of
+Plan-change previews are diagnostic estimates only; Mollie is the source of
 truth for charge and credit calculations.
 
 The current implementation:
@@ -204,14 +245,20 @@ VAT is calculated in `calculate_vat()`:
 
 ### Payment-state updates
 
-Adyen webhooks drive the current invoice state transitions:
+The id-only Mollie webhook plus an authenticated fetch drive the current
+invoice state transitions:
 
-- a successful `AUTHORISATION` marks matching invoices as paid and sets `paid_at`
-- a failed `AUTHORISATION` records dunning state and enqueues a `payment_failed` notification
+- a fetched payment with status `paid` (normalized `AUTHORISATION` success)
+  marks matching invoices as paid and sets `paid_at`
+- a fetched payment with status `failed`, `canceled` or `expired` (normalized
+  `AUTHORISATION` failure) records dunning state and enqueues a
+  `payment_failed` notification
+- a fetched refund with status `refunded` (normalized `REFUND`) reconciles the
+  refund against the payment allocation; `charged_back` records the chargeback
 
 ## Operational Notes
 
-- Dedicated IP auto-provisioning is tied to active Adyen subscription state and the plan's `dedicated_ip_count` feature flag.
+- Dedicated IP auto-provisioning is tied to the local subscription's active state and the plan's `dedicated_ip_count` feature flag.
 - The billing service also exposes PAYG pricing and estimate endpoints backed by `PaygPricing::default()`.
 - The pricing tiers for PAYG are `0-10k`, `10k-100k`, `100k-1M`, and `1M+` emails, with API-call billing after the first `100,000` monthly API calls.
 
@@ -222,6 +269,6 @@ Adyen webhooks drive the current invoice state transitions:
 - `services/mail-server/crates/billing-service/src/subscriptions.rs`
 - `services/mail-server/crates/billing-service/src/usage.rs`
 - `services/mail-server/crates/billing-service/src/invoices.rs`
-- `services/mail-server/crates/billing-service/src/adyen_webhooks.rs`
+- `services/mail-server/crates/billing-service/src/mollie_webhooks.rs`
 - `services/mail-server/crates/billing-service/src/types.rs`
 - `services/mail-server/crates/billing-service/src/config.rs`

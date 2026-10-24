@@ -591,7 +591,7 @@ def enumerate_api_surfaces() -> tuple[list[Surface], list[str]]:
                 pending.append((inner_path, inner_map))
     warnings.extend(_dedupe(list(warnings)))
 
-    # app.rs-inline routers (absolute paths; assets, grader, placement, adyen)
+    # app.rs-inline routers (absolute paths; assets, grader, placement, mollie)
     app_surfaces: list[Surface] = []
     for match in ROUTE_CALL.finditer(app_source):
         literal = match.group(2)
@@ -744,7 +744,7 @@ DROP_TABLE_RE = re.compile(
     re.IGNORECASE,
 )
 # RENAMEs matter to the net-schema computation: migration 252 renames the
-# provider tables (`stripe_webhook_events` → `adyen_webhook_events`, …) inside
+# provider tables (`stripe_webhook_events` → `mollie_webhook_events`, …) inside
 # DO $$ blocks, so without this the ledger planned tables the live DB no
 # longer has (every renamed table looked missing, every current name orphaned).
 RENAME_TABLE_RE = re.compile(

@@ -821,7 +821,7 @@ async fn run_worker(
     // background-execution home, so the periodic jobs run here. A
     // session-level Postgres advisory lock elects ONE runner across
     // replicas: the jobs are idempotent per tenant+period, but duplicate
-    // Adyen dunning traffic is still worth preventing at the source.
+    // Mollie dunning traffic is still worth preventing at the source.
     if settings.run_billing_maintenance {
         match std::env::var("DATABASE_URL") {
             Ok(database_url) if !database_url.trim().is_empty() => {
@@ -853,7 +853,7 @@ async fn run_worker(
                     info!("billing maintenance: lease acquired; starting periodic jobs");
                     let billing_config = billing_service::config::BillingConfig {
                         database_url,
-                        adyen_hmac_key: std::env::var("ADYEN_HMAC_KEY").unwrap_or_default(),
+                        mollie_api_key: std::env::var("MOLLIE_API_KEY").unwrap_or_default(),
                         ..Default::default()
                     };
                     let state =

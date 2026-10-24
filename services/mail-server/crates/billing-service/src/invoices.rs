@@ -221,7 +221,7 @@ async fn generate_invoice_number_tx(
 
 pub struct CreateInvoiceInput {
     pub tenant_id: String,
-    pub adyen_psp_reference: Option<String>,
+    pub mollie_payment_id: Option<String>,
     pub line_items: Vec<NewLineItem>,
     pub period_start: DateTime<Utc>,
     pub period_end: DateTime<Utc>,
@@ -232,7 +232,7 @@ pub struct CreateInvoiceInput {
     /// invoice settles. `invoices.overage_period` is written in the SAME
     /// INSERT as the invoice row, so the check-then-insert idempotency in
     /// the overage sweep can never observe a marker-less invoice. `None`
-    /// for non-sweep writers (Adyen webhook invoice persistence, the
+    /// for non-sweep writers (Mollie webhook invoice persistence, the
     /// admin invoice writer).
     pub overage_period: Option<DateTime<Utc>>,
     /// Idempotency marker for the CONTRACT product-line sweep (migration
@@ -545,7 +545,7 @@ pub async fn create_invoice_in_tx(
     sqlx::query(
         r#"
         INSERT INTO invoices (
-            id, tenant_id, adyen_psp_reference, invoice_number, status,
+            id, tenant_id, mollie_payment_id, invoice_number, status,
             currency, amount, subtotal, vat_total, total, line_items,
             issued_at, due_at, period_start, period_end,
             billing_country, vat_rate, overage_period, billing_address,
@@ -567,7 +567,7 @@ pub async fn create_invoice_in_tx(
     )
     .bind(id)
     .bind(&input.tenant_id)
-    .bind(&input.adyen_psp_reference)
+    .bind(&input.mollie_payment_id)
     .bind(&invoice_number)
     .bind(&currency)
     .bind(subtotal)
@@ -620,7 +620,7 @@ pub async fn create_invoice_in_tx(
     Ok(Invoice {
         id,
         tenant_id: input.tenant_id,
-        adyen_psp_reference: input.adyen_psp_reference,
+        mollie_payment_id: input.mollie_payment_id,
         invoice_number,
         status: InvoiceStatus::Draft,
         currency,
@@ -659,7 +659,7 @@ pub fn compute_outstanding(
 /// payment allocations (migration 140) minus the DEBT-REDUCTION part of
 /// credit notes (migration 183 — only that part reduces the unpaid
 /// obligation; the refunded part returned value that was actually paid).
-/// This is the single derivation UI, wallet application, Adyen
+/// This is the single derivation UI, wallet application, Mollie
 /// collection, dunning and credit limits must use (audits F35/F60).
 pub async fn invoice_outstanding_cents(
     pool: &PgPool,
@@ -985,7 +985,7 @@ pub async fn list_invoices(
     let rows: Vec<InvoiceRow> = sqlx::query_as(
         r#"
         SELECT
-            id, tenant_id, adyen_psp_reference, invoice_number,
+            id, tenant_id, mollie_payment_id, invoice_number,
             status, currency, subtotal, vat_total, us_sales_tax_cents,
             us_sales_tax_snapshot, total,
             line_items,
@@ -1022,7 +1022,7 @@ pub async fn get_invoice_by_id(
     let row: Option<InvoiceRow> = sqlx::query_as(
         r#"
         SELECT
-            id, tenant_id, adyen_psp_reference, invoice_number,
+            id, tenant_id, mollie_payment_id, invoice_number,
             status, currency, subtotal, vat_total, us_sales_tax_cents,
             us_sales_tax_snapshot, total,
             line_items,
@@ -1075,33 +1075,33 @@ pub enum InvoiceVoidError {
     InvoiceNotFound(Uuid),
     /// Only draft/pending invoices void locally. A PAID invoice voids as a
     /// provider refund of its bound payment; without a bound payment
-    /// (`adyen_psp_reference`) there is nothing provider-side to return, so
+    /// (`mollie_payment_id`) there is nothing provider-side to return, so
     /// the refusal carries the refusing state verbatim — a wallet-settled
     /// paid invoice is refunded with a credit note instead.
     #[error(
         "invoice {invoice_id} is in status '{status}': only draft or open (pending) invoices can \
-         be voided, and a paid invoice only when it is bound to a Adyen payment \
-         (adyen_psp_reference)"
+         be voided, and a paid invoice only when it is bound to a Mollie payment \
+         (mollie_payment_id)"
     )]
     NotVoidable { invoice_id: Uuid, status: String },
-    /// The invoice carries a Adyen payment (`adyen_psp_reference`) whose
-    /// refund is required, but this deployment cannot reach Adyen (no
-    /// `ADYEN_API_KEY`/`ADYEN_MERCHANT_ACCOUNT`): refused HONESTLY — the
+    /// The invoice carries a Mollie payment (`mollie_payment_id`) whose
+    /// refund is required, but this deployment cannot reach Mollie (no
+    /// `MOLLIE_API_KEY`/`MOLLIE_PROFILE_ID`): refused HONESTLY — the
     /// local row is left untouched rather than drifting from the provider
     /// state.
     #[error(
-        "invoice {invoice_id} is bound to Adyen payment {adyen_psp_reference} but Adyen is not \
-         configured (ADYEN_API_KEY/ADYEN_MERCHANT_ACCOUNT): the refund cannot be issued from this \
+        "invoice {invoice_id} is bound to Mollie payment {mollie_payment_id} but Mollie is not \
+         configured (MOLLIE_API_KEY/MOLLIE_PROFILE_ID): the refund cannot be issued from this \
          deployment, so the local invoice was left in status '{status}'"
     )]
-    AdyenUnavailable {
+    MollieUnavailable {
         invoice_id: Uuid,
-        adyen_psp_reference: String,
+        mollie_payment_id: String,
         status: String,
     },
-    /// Adyen was configured but refused/completed-with-error on the refund.
-    #[error("Adyen refused the invoice refund: {message}")]
-    AdyenFailed { message: String },
+    /// Mollie was configured but refused/completed-with-error on the refund.
+    #[error("Mollie refused the invoice refund: {message}")]
+    MollieFailed { message: String },
     #[error("audit log failure: {0}")]
     Audit(String),
     /// The void committed but the re-read of the voided invoice failed
@@ -1111,103 +1111,47 @@ pub enum InvoiceVoidError {
     Readback(#[from] InvoiceError),
 }
 
-/// The Adyen Checkout credentials a provider refund needs, isolated for
-/// testability (tests point `ADYEN_API_BASE_URL` at a local mock).
-/// `Err(())` means the deployment lacks Adyen credentials; the caller maps
-/// that to the honest [`InvoiceVoidError::AdyenUnavailable`] refusal.
-#[derive(Debug, Clone)]
-pub struct AdyenVoidConfig {
-    pub base_url: String,
-    pub api_key: String,
-    pub merchant_account: String,
-}
-
-fn adyen_void_config_from_env() -> Result<AdyenVoidConfig, ()> {
-    let api_key = std::env::var("ADYEN_API_KEY")
-        .ok()
-        .map(|key| key.trim().to_string())
-        .filter(|key| !key.is_empty())
-        .ok_or(())?;
-    let merchant_account = std::env::var("ADYEN_MERCHANT_ACCOUNT")
-        .ok()
-        .map(|account| account.trim().to_string())
-        .filter(|account| !account.is_empty())
-        .ok_or(())?;
-    Ok(AdyenVoidConfig {
-        base_url: std::env::var("ADYEN_API_BASE_URL")
-            .unwrap_or_else(|_| "https://checkout-test.adyen.com/v71".into()),
-        api_key,
-        merchant_account,
-    })
-}
-
-/// The new `pspReference` Adyen minted for the refund (when the response
-/// carries one), recorded on the audit event.
-#[derive(Debug, serde::Deserialize)]
-struct AdyenRefundResponse {
-    #[serde(rename = "pspReference")]
-    psp_reference: Option<String>,
-}
-
-/// One Adyen refund of a captured payment, isolated for testability.
+/// Issue the provider refund for a paid invoice through the Mollie API.
 ///
-/// `POST {base}/payments/{paymentPspReference}/refunds` with the JSON body
-/// Adyen expects — `merchantAccount` + the amount in MINOR UNITS + a
-/// `reference` — the API key in `X-API-Key` (the version lives in the base
-/// URL path, there is no version header) and a deterministic
-/// `Idempotency-Key`. The refund outcome is ASYNC at Adyen: a 2xx means the
-/// refund request is accepted, the webhook settles the final state.
-async fn adyen_refund_payment(
-    config: &AdyenVoidConfig,
-    payment_psp_reference: &str,
+/// Mollie refunds are `POST /payments/{payment_id}/refunds` with a decimal
+/// amount, the secret key as a Bearer token and a deterministic
+/// `Idempotency-Key` (one refund per invoice, so a retried void replays the
+/// same request). The refund settles asynchronously: a 2xx means Mollie
+/// accepted it, and the webhook records the final state.
+async fn mollie_refund_payment(
+    invoice_id: Uuid,
+    invoice_status: &str,
+    payment_id: &str,
     amount_cents: i64,
     currency: &str,
     reference: &str,
     idempotency_key: &str,
 ) -> Result<Option<String>, InvoiceVoidError> {
-    let client = reqwest::Client::new();
-    let response = client
-        .post(format!(
-            "{}/payments/{}/refunds",
-            config.base_url.trim_end_matches('/'),
-            // Adyen ids are `[a-zA-Z0-9_]+`; the path segment is still built
-            // through the typed client URL, never a raw string concat of
-            // user input (the id comes from our own DB column).
-            payment_psp_reference,
-        ))
-        .header("X-API-Key", &config.api_key)
-        .header("Idempotency-Key", idempotency_key)
-        .json(&serde_json::json!({
-            "merchantAccount": config.merchant_account,
-            "amount": { "currency": currency.trim().to_uppercase(), "value": amount_cents },
-            "reference": reference,
-        }))
-        .timeout(std::time::Duration::from_secs(30))
-        .send()
-        .await
-        .map_err(|error| InvoiceVoidError::AdyenFailed {
-            message: format!("Adyen refund request failed: {error}"),
+    use crate::mollie_client::{MollieClient, Money};
+
+    let client =
+        MollieClient::from_env().map_err(|_| InvoiceVoidError::MollieUnavailable {
+            invoice_id,
+            mollie_payment_id: payment_id.to_string(),
+            status: invoice_status.to_string(),
         })?;
-    let status = response.status();
-    let body = response.text().await.unwrap_or_default();
-    if !status.is_success() {
-        // Truncate the provider body: the operator needs the reason, not a
-        // multi-kilobyte HTML error page in an API envelope.
-        let mut message = body;
-        if message.len() > 300 {
-            message.truncate(300);
-        }
-        return Err(InvoiceVoidError::AdyenFailed {
-            message: format!("Adyen returned {status}: {message}"),
-        });
-    }
-    Ok(serde_json::from_str::<AdyenRefundResponse>(&body)
-        .ok()
-        .and_then(|refund| refund.psp_reference))
+    let refund = client
+        .create_refund(
+            payment_id,
+            Money::new(currency, amount_cents),
+            &format!("Refund {reference}"),
+            idempotency_key,
+        )
+        .await
+        .map_err(|error| InvoiceVoidError::MollieFailed {
+            message: format!("Mollie refund request failed: {error}"),
+        })?;
+    // The refund id is the provider-side handle the webhook will name.
+    Ok(Some(refund.id).filter(|id| !id.is_empty()))
 }
 
 /// The locally-voidable pre-states: `draft` and `pending` (the platform's
-/// open/unpaid states — a pending invoice is issued but unsettled). Adyen
+/// open/unpaid states — a pending invoice is issued but unsettled). Mollie
 /// has no provider-side invoice object, so an unpaid invoice's provider-side
 /// "void" is a no-op and these transition locally with NO provider call.
 /// `uncollectible` refuses (a deliberate write-off state, not an open
@@ -1219,20 +1163,20 @@ fn is_voidable_status(status: &str) -> bool {
 /// Void an invoice **idempotently** (DF-5 finding B).
 ///
 /// * `draft`/`pending` → `void` with `closed_at` pinned, audited on the
-///   canonical 7-segment chain (`billing.invoice_voided`). Adyen has no
+///   canonical 7-segment chain (`billing.invoice_voided`). Mollie has no
 ///   provider-side invoice to void (no invoice/customer/subscription
 ///   objects exist provider-side), so this is a LOCAL transition — no
-///   provider call, no Adyen configuration required.
+///   provider call, no Mollie configuration required.
 /// * An already-`void` invoice returns the SAME invoice unchanged — the
 ///   requested end-state — and writes nothing further (retries and duplicate
 ///   submissions are never duplicate rows or duplicate audit events).
-/// * `paid` with a bound payment (`adyen_psp_reference`) voids as a
+/// * `paid` with a bound payment (`mollie_payment_id`) voids as a
 ///   REFUND: `POST /payments/{paymentPspReference}/refunds` for the local
 ///   invoice's full amount/currency is issued FIRST (deterministic
 ///   `Idempotency-Key`, so a retried void replays the same refund), then the
-///   local rows flip to `void`. A Adyen refusal or an unconfigured Adyen
+///   local rows flip to `void`. A Mollie refusal or an unconfigured Mollie
 ///   deployment leaves the local row untouched — never a fake local-only
-///   success. The refund outcome is async at Adyen; the webhook settles it.
+///   success. The refund outcome is async at Mollie; the webhook settles it.
 /// * `paid` with NO bound payment (e.g. wallet settlement) and
 ///   `uncollectible` refuse with [`InvoiceVoidError::NotVoidable`] naming
 ///   the current status; a wallet-paid invoice is refunded via a credit
@@ -1242,7 +1186,7 @@ pub async fn void_invoice(
     input: VoidInvoiceInput,
 ) -> Result<Invoice, InvoiceVoidError> {
     // ── 1. Lock + validate the current state ────────────────────────────
-    let (status, adyen_psp_reference, total_cents, currency): (
+    let (status, mollie_payment_id, total_cents, currency): (
         String,
         Option<String>,
         i64,
@@ -1250,7 +1194,7 @@ pub async fn void_invoice(
     ) = {
         let mut tx = pool.begin().await.map_err(InvoiceVoidError::Db)?;
         let row: Option<(String, Option<String>, i64, String)> = sqlx::query_as(
-            "SELECT status::text, adyen_psp_reference,
+            "SELECT status::text, mollie_payment_id,
                     COALESCE(total, amount, 0)::bigint, currency
              FROM invoices
              WHERE id = $1 AND tenant_id = $2 FOR UPDATE",
@@ -1260,7 +1204,7 @@ pub async fn void_invoice(
         .fetch_optional(&mut *tx)
         .await
         .map_err(InvoiceVoidError::Db)?;
-        let Some((status, adyen_psp_reference, total_cents, currency)) = row else {
+        let Some((status, mollie_payment_id, total_cents, currency)) = row else {
             return Err(InvoiceVoidError::InvoiceNotFound(input.invoice_id));
         };
         if status == "void" {
@@ -1271,59 +1215,64 @@ pub async fn void_invoice(
                 .await?
                 .ok_or(InvoiceVoidError::InvoiceNotFound(input.invoice_id));
         }
-        // Unpaid (draft/pending) invoices void LOCALLY — Adyen has no
+        // Unpaid (draft/pending) invoices void LOCALLY — Mollie has no
         // provider-side invoice object to void. A PAID invoice voids as a
         // provider refund, but only when a payment is BOUND
-        // (`adyen_psp_reference`): without one (e.g. wallet settlement)
+        // (`mollie_payment_id`): without one (e.g. wallet settlement)
         // there is nothing provider-side to return and the void refuses,
         // exactly like every other non-voidable state.
-        let paid_refund = status == "paid" && adyen_psp_reference.is_some();
+        let paid_refund = status == "paid" && mollie_payment_id.is_some();
         if !is_voidable_status(&status) && !paid_refund {
             return Err(InvoiceVoidError::NotVoidable {
                 invoice_id: input.invoice_id,
                 status,
             });
         }
-        // The DB lock is released before any Adyen HTTP call: no database
-        // transaction is held across provider I/O. The post-Adyen append
+        // The DB lock is released before any Mollie HTTP call: no database
+        // transaction is held across provider I/O. The post-Mollie append
         // re-locks and re-validates below.
         tx.rollback().await.map_err(InvoiceVoidError::Db)?;
-        (status, adyen_psp_reference, total_cents, currency)
+        (status, mollie_payment_id, total_cents, currency)
     };
 
-    // ── 2. Adyen refund FIRST (only a paid invoice has provider money) ──
+    // ── 2. Mollie refund FIRST (only a paid invoice has provider money) ──
     let mut refund_psp_reference: Option<String> = None;
     if status == "paid" {
-        let payment_psp_reference = adyen_psp_reference
+        let payment_psp_reference = mollie_payment_id
             .clone()
             .expect("paid refund path requires a bound payment");
-        match adyen_void_config_from_env() {
-            Ok(config) => {
-                // Idempotency on the provider call is derived from the
-                // immutable local operation identity — one refund per
-                // invoice, so a retried void replays the SAME Adyen request
-                // (the provider key stays within Adyen's 64-char bound).
-                let key = format!("invoice-refund:{}", input.invoice_id.simple());
-                let reference = format!("invoice:{}", input.invoice_id);
-                refund_psp_reference = adyen_refund_payment(
-                    &config,
-                    &payment_psp_reference,
-                    total_cents,
-                    &currency,
-                    &reference,
-                    &key,
-                )
-                .await?;
-            }
-            // Honest degradation: without provider credentials the refund
-            // cannot be issued, so the local row does NOT move either.
-            Err(()) => {
-                return Err(InvoiceVoidError::AdyenUnavailable {
-                    invoice_id: input.invoice_id,
-                    adyen_psp_reference: payment_psp_reference,
-                    status,
-                });
-            }
+        // A missing key is an honest refusal: without provider credentials
+        // the refund cannot be issued, so the local row does not move.
+        let key = format!("invoice-refund:{}", input.invoice_id.simple());
+        let reference = format!("invoice:{}", input.invoice_id);
+        refund_psp_reference = mollie_refund_payment(
+            input.invoice_id,
+            &status,
+            &payment_psp_reference,
+            total_cents,
+            &currency,
+            &reference,
+            &key,
+        )
+        .await?;
+
+        // The refund webhook names only the refund id, and Mollie's API needs
+        // the payment id to fetch it: persist the mapping now, before the
+        // provider can call us back.
+        if let Some(refund_id) = refund_psp_reference.as_deref() {
+            sqlx::query(
+                "INSERT INTO mollie_refunds (id, payment_id, tenant_id, amount_cents, currency, status)
+                 VALUES ($1, $2, $3, $4, $5, 'created')
+                 ON CONFLICT (id) DO NOTHING",
+            )
+            .bind(refund_id)
+            .bind(&payment_psp_reference)
+            .bind(&input.tenant_id)
+            .bind(total_cents)
+            .bind(currency.to_ascii_uppercase())
+            .execute(pool)
+            .await
+            .map_err(InvoiceVoidError::Db)?;
         }
     }
 
@@ -1382,9 +1331,9 @@ pub async fn void_invoice(
             "idempotencyKey": input.idempotency_key,
             // A paid void returned provider money via an async refund; an
             // unpaid void needed no provider call at all.
-            "adyenRefunded": status == "paid",
-            "adyenRefundPspReference": refund_psp_reference,
-            "adyenPaymentPspReference": adyen_psp_reference,
+            "mollieRefunded": status == "paid",
+            "mollieRefundPaymentId": refund_psp_reference,
+            "molliePaymentPspReference": mollie_payment_id,
         }),
         now,
     )
@@ -1406,7 +1355,7 @@ pub async fn void_invoice(
 struct InvoiceRow {
     id: Uuid,
     tenant_id: String,
-    adyen_psp_reference: Option<String>,
+    mollie_payment_id: Option<String>,
     invoice_number: String,
     status: String,
     currency: String,
@@ -1497,7 +1446,7 @@ impl InvoiceRow {
         Ok(Invoice {
             id: self.id,
             tenant_id: self.tenant_id,
-            adyen_psp_reference: self.adyen_psp_reference,
+            mollie_payment_id: self.mollie_payment_id,
             invoice_number: self.invoice_number,
             status,
             currency: self.currency,
@@ -1799,7 +1748,7 @@ mod tests {
         let row = InvoiceRow {
             id: invoice_id,
             tenant_id: "tenant_01HZY2Q4YQ0L8QW8Q7Q28WKSFJ".into(),
-            adyen_psp_reference: None,
+            mollie_payment_id: None,
             invoice_number: "2026-000002".into(),
             status: "pending".into(),
             currency: "eur".into(),
@@ -2000,7 +1949,7 @@ mod tests {
         let row = InvoiceRow {
             id: Uuid::new_v4(),
             tenant_id: "tenant_01HZY2Q4YQ0L8QW8Q7Q28WKSFJ".into(),
-            adyen_psp_reference: None,
+            mollie_payment_id: None,
             invoice_number: "2026-000001".into(),
             status: "paid".into(),
             currency: "eur".into(),
@@ -2541,7 +2490,7 @@ mod coverage_adversarial {
         let now = Utc::now();
         CreateInvoiceInput {
             tenant_id: tenant.to_string(),
-            adyen_psp_reference: None,
+            mollie_payment_id: None,
             line_items: vec![line("Coverage line", 1, 10_000)],
             period_start: now,
             period_end: now,
@@ -3096,7 +3045,7 @@ mod coverage_adversarial {
     // -------------------------------------------------------------------
     // DF-5 finding B — the invoice VOID transition (previously referenced
     // by status filters but expressible NOWHERE). The transition matrix,
-    // idempotency, Adyen honesty and audit re-derivability.
+    // idempotency, Mollie honesty and audit re-derivability.
     // -------------------------------------------------------------------
 
     fn void_input(tenant: &str, invoice: Uuid, key: &str) -> VoidInvoiceInput {
@@ -3113,12 +3062,12 @@ mod coverage_adversarial {
         tenant: &str,
         status: &str,
         total: i64,
-        adyen_psp_reference: Option<&str>,
+        mollie_payment_id: Option<&str>,
     ) -> Uuid {
         let id = Uuid::new_v4();
         sqlx::query(
             "INSERT INTO invoices (id, tenant_id, amount, currency, status, invoice_number,
-                                   subtotal, vat_total, total, adyen_psp_reference,
+                                   subtotal, vat_total, total, mollie_payment_id,
                                    issued_at, due_at, period_start, period_end,
                                    created_at, updated_at)
              VALUES ($1, $2, $3, 'EUR', $4, $5, $3, 0, $3, $6,
@@ -3129,7 +3078,7 @@ mod coverage_adversarial {
         .bind(total)
         .bind(status)
         .bind(format!("IVCOV-{}", id.simple()))
-        .bind(adyen_psp_reference)
+        .bind(mollie_payment_id)
         .execute(&env.pool)
         .await
         .expect("seed invoice");
@@ -3165,7 +3114,7 @@ mod coverage_adversarial {
             .expect("pending voids");
         assert!(matches!(voided.status, crate::types::InvoiceStatus::Void));
 
-        // paid WITHOUT a bound Adyen payment → REFUSED, the state named:
+        // paid WITHOUT a bound Mollie payment → REFUSED, the state named:
         // there is nothing provider-side to refund, so a wallet-settled
         // paid invoice is refunded with a credit note instead.
         let paid = seed_invoice_status(env, tenant, "paid", 9_000, None).await;
@@ -3293,21 +3242,21 @@ mod coverage_adversarial {
 
         assert_eq!(resource, "invoice");
         assert_eq!(resource_id.as_deref(), Some(draft.to_string().as_str()));
-        // An unpaid local void issues NO provider refund (Adyen has no
+        // An unpaid local void issues NO provider refund (Mollie has no
         // provider-side invoice object): the audit row records the honest
-        // adyenRefunded=false and no refund pspReference.
+        // mollieRefunded=false and no provider refund id.
         assert_eq!(
-            details["adyenRefunded"],
+            details["mollieRefunded"],
             serde_json::Value::Bool(false),
-            "a local-only void records an honest adyenRefunded=false"
+            "a local-only void records an honest mollieRefunded=false"
         );
         assert!(
-            details["adyenRefundPspReference"].is_null(),
-            "no refund pspReference without provider money to return: {details}"
+            details["mollieRefundPaymentId"].is_null(),
+            "no refund id without provider money to return: {details}"
         );
         assert!(
-            details["adyenPaymentPspReference"].is_null(),
-            "a draft carries no bound Adyen payment: {details}"
+            details["molliePaymentPspReference"].is_null(),
+            "a draft carries no bound Mollie payment: {details}"
         );
 
         // Byte-exact re-derivation: the canonical 7-segment formula over the
@@ -3355,48 +3304,48 @@ mod coverage_adversarial {
         drop(guard);
     });
 
-    // Adyen honesty, both directions of the frozen checkout contract:
-    // * an UNPAID (draft/pending) invoice voids LOCALLY — Adyen has no
-    //   provider-side invoice object, so no provider call and no Adyen
-    //   configuration is involved, even when a pspReference is recorded;
+    // Mollie honesty, both directions of the checkout contract:
+    // * an UNPAID (draft/pending) invoice voids LOCALLY — Mollie has no
+    //   provider-side invoice object, so no provider call and no Mollie
+    //   configuration is involved, even when a payment id is recorded;
     // * a PAID invoice voids as an async REFUND of its bound payment
-    //   (`POST /payments/{pspReference}/refunds`): refused honestly when
-    //   Adyen is unconfigured, refused when Adyen declines, and both sides
-    //   moved when the refund request is accepted.
-    env_test!(void_with_a_adyen_payment_is_honest_both_sides, |env| {
+    //   (`POST /v2/payments/{paymentId}/refunds`): refused honestly when
+    //   Mollie is unconfigured, refused when Mollie declines, and both sides
+    //   move when the refund request is accepted.
+    env_test!(void_with_a_mollie_payment_is_honest_both_sides, |env| {
         let guard = ENV_LOCK.lock().await;
         let previous = (
-            std::env::var("ADYEN_API_KEY").ok(),
-            std::env::var("ADYEN_API_BASE_URL").ok(),
-            std::env::var("ADYEN_MERCHANT_ACCOUNT").ok(),
+            std::env::var("MOLLIE_API_KEY").ok(),
+            std::env::var("MOLLIE_API_BASE_URL").ok(),
+            std::env::var("MOLLIE_PROFILE_ID").ok(),
         );
 
         let mock = Mock::default();
         // The PAID refund path's payment: a separate binding from the
-        // unpaid arm's (the schema keeps pspReferences unique).
+        // unpaid arm's (the schema keeps payment ids unique).
         mock.route(
-            "/payments/psp_void_paid/refunds",
+            "/v2/payments/tr_void_paid/refunds",
             200,
-            r#"{"pspReference":"psp_void_refund","resultCode":"Received"}"#,
+            r#"{"id":"re_void_refund","status":"pending","amount":{"currency":"EUR","value":"62.00"}}"#,
         );
         let base = spawn_mock(mock.clone()).await;
 
-        let tenant = "ivcov_voidadyen";
+        let tenant = "ivcov_voidmollie";
         seed_tenant(env, tenant).await;
 
-        // 1. UNPAID with a bound pspReference and Adyen UNCONFIGURED: the
+        // 1. UNPAID with a bound payment id and Mollie UNCONFIGURED: the
         // void still succeeds LOCALLY (no provider object exists to void),
         // and no provider call is made.
-        std::env::remove_var("ADYEN_API_KEY");
-        std::env::remove_var("ADYEN_API_BASE_URL");
-        std::env::remove_var("ADYEN_MERCHANT_ACCOUNT");
-        let unpaid = seed_invoice_status(env, tenant, "pending", 6_000, Some("psp_void_cov")).await;
+        std::env::remove_var("MOLLIE_API_KEY");
+        std::env::remove_var("MOLLIE_API_BASE_URL");
+        std::env::remove_var("MOLLIE_PROFILE_ID");
+        let unpaid = seed_invoice_status(env, tenant, "pending", 6_000, Some("tr_void_cov")).await;
         let voided = void_invoice(&env.pool, void_input(tenant, unpaid, "k-local-unconf"))
             .await
             .expect("an unpaid void needs no provider call");
         assert!(matches!(voided.status, crate::types::InvoiceStatus::Void));
         assert_eq!(
-            mock.call_count("/payments/psp_void_cov/refunds"),
+            mock.call_count("/v2/payments/tr_void_cov/refunds"),
             0,
             "an unpaid void must not touch the provider"
         );
@@ -3408,41 +3357,41 @@ mod coverage_adversarial {
         .fetch_one(&env.pool)
         .await
         .expect("local void audit");
-        assert_eq!(details["adyenRefunded"], serde_json::Value::Bool(false));
+        assert_eq!(details["mollieRefunded"], serde_json::Value::Bool(false));
         assert_eq!(
-            details["adyenPaymentPspReference"],
-            serde_json::json!("psp_void_cov"),
+            details["molliePaymentPspReference"],
+            serde_json::json!("tr_void_cov"),
             "the bound payment is recorded even when nothing was refunded"
         );
-        assert!(details["adyenRefundPspReference"].is_null());
+        assert!(details["mollieRefundPaymentId"].is_null());
 
-        // 2. PAID with a bound payment and Adyen UNCONFIGURED: the refund
+        // 2. PAID with a bound payment and Mollie UNCONFIGURED: the refund
         // cannot be issued, so the refusal is honest and the row stands.
         let unconfigured =
-            seed_invoice_status(env, tenant, "paid", 6_100, Some("psp_void_unconf")).await;
+            seed_invoice_status(env, tenant, "paid", 6_100, Some("tr_void_unconf")).await;
         let error = void_invoice(
             &env.pool,
-            void_input(tenant, unconfigured, "k-adyen-unconf"),
+            void_input(tenant, unconfigured, "k-mollie-unconf"),
         )
         .await
-        .expect_err("unconfigured Adyen refuses the refund");
+        .expect_err("unconfigured Mollie refuses the refund");
         match &error {
-            InvoiceVoidError::AdyenUnavailable {
-                adyen_psp_reference,
+            InvoiceVoidError::MollieUnavailable {
+                mollie_payment_id,
                 status,
                 ..
             } => {
-                assert_eq!(adyen_psp_reference, "psp_void_unconf");
+                assert_eq!(mollie_payment_id, "tr_void_unconf");
                 assert_eq!(status, "paid");
             }
-            other => panic!("expected AdyenUnavailable, got {other:?}"),
+            other => panic!("expected MollieUnavailable, got {other:?}"),
         }
         let status: String = sqlx::query_scalar("SELECT status::text FROM invoices WHERE id = $1")
             .bind(unconfigured)
             .fetch_one(&env.pool)
             .await
             .expect("status");
-        assert_eq!(status, "paid", "the local row never moves without Adyen");
+        assert_eq!(status, "paid", "the local row never moves without Mollie");
         let audit_rows: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM audit_logs
              WHERE action = 'billing.invoice_voided' AND resource_id = $1",
@@ -3453,28 +3402,28 @@ mod coverage_adversarial {
         .expect("audit count");
         assert_eq!(audit_rows, 0, "a refused void writes no audit event");
 
-        // 3. PAID + Adyen CONFIGURED (local mock accepting the refund):
-        // both sides move. The provider call is the refund contract —
-        // X-API-Key, deterministic Idempotency-Key, JSON body with the
-        // merchant account, minor-unit amount and `invoice:{id}` reference.
-        std::env::set_var("ADYEN_API_KEY", "adyen-test-key-fixture");
-        std::env::set_var("ADYEN_API_BASE_URL", &base);
-        std::env::set_var("ADYEN_MERCHANT_ACCOUNT", "ApexMailTestECOM");
+        // 3. PAID + Mollie CONFIGURED (local mock accepting the refund):
+        // both sides move. The provider call is Mollie's refund contract —
+        // Bearer auth, deterministic Idempotency-Key, decimal amount and a
+        // human description. The refund id is persisted in `mollie_refunds`.
+        std::env::set_var("MOLLIE_API_KEY", "mollie-test-key-fixture");
+        std::env::set_var("MOLLIE_API_BASE_URL", format!("{base}/v2"));
+        std::env::set_var("MOLLIE_PROFILE_ID", "pfl_test");
 
-        let paid = seed_invoice_status(env, tenant, "paid", 6_200, Some("psp_void_paid")).await;
-        let voided = void_invoice(&env.pool, void_input(tenant, paid, "k-adyen-ok"))
+        let paid = seed_invoice_status(env, tenant, "paid", 6_200, Some("tr_void_paid")).await;
+        let voided = void_invoice(&env.pool, void_input(tenant, paid, "k-mollie-ok"))
             .await
             .expect("voids both sides");
         assert!(matches!(voided.status, crate::types::InvoiceStatus::Void));
 
         let call = mock
-            .last_call("/payments/psp_void_paid/refunds")
-            .expect("Adyen refund called");
+            .last_call("/v2/payments/tr_void_paid/refunds")
+            .expect("Mollie refund called");
         assert_eq!(call.method, "POST");
         assert_eq!(
-            call.headers.get("x-api-key").map(String::as_str),
-            Some("adyen-test-key-fixture"),
-            "auth is the API key header, never a bearer token"
+            call.headers.get("authorization").map(String::as_str),
+            Some("Bearer mollie-test-key-fixture"),
+            "auth is the secret key as a Bearer token"
         );
         assert_eq!(
             call.headers.get("idempotency-key").map(String::as_str),
@@ -3483,19 +3432,17 @@ mod coverage_adversarial {
         );
         let body: serde_json::Value = serde_json::from_str(&call.body).expect("refund body JSON");
         assert_eq!(
-            body["merchantAccount"],
-            serde_json::json!("ApexMailTestECOM")
+            body["amount"],
+            serde_json::json!({"currency": "EUR", "value": "62.00"}),
+            "Mollie amounts travel as decimal strings, never minor units"
         );
-        assert_eq!(body["amount"]["currency"], serde_json::json!("EUR"));
-        assert_eq!(
-            body["amount"]["value"],
-            serde_json::json!(6_200),
-            "the amount travels in minor units (cents)"
-        );
-        assert_eq!(
-            body["reference"],
-            serde_json::json!(format!("invoice:{paid}")),
-            "the merchant reference binds the refund to OUR invoice row"
+        assert!(
+            body["description"]
+                .as_str()
+                .unwrap_or_default()
+                .contains(&format!("invoice:{paid}")),
+            "the refund description names our invoice: {}",
+            body["description"]
         );
 
         let details: serde_json::Value = sqlx::query_scalar(
@@ -3506,28 +3453,38 @@ mod coverage_adversarial {
         .fetch_one(&env.pool)
         .await
         .expect("paid void audit");
-        assert_eq!(details["adyenRefunded"], serde_json::Value::Bool(true));
+        assert_eq!(details["mollieRefunded"], serde_json::Value::Bool(true));
         assert_eq!(
-            details["adyenRefundPspReference"],
-            serde_json::json!("psp_void_refund"),
-            "the accepted refund's pspReference is recorded"
+            details["mollieRefundPaymentId"],
+            serde_json::json!("re_void_refund"),
+            "the accepted refund's id is recorded"
         );
+        let mapping: (String, i64, String) = sqlx::query_as(
+            "SELECT payment_id, amount_cents, currency FROM mollie_refunds WHERE id = $1",
+        )
+        .bind("re_void_refund")
+        .fetch_one(&env.pool)
+        .await
+        .expect("refund mapping persisted");
+        assert_eq!(mapping.0, "tr_void_paid");
+        assert_eq!(mapping.1, 6_200);
+        assert_eq!(mapping.2, "EUR");
 
-        // 4. Adyen REFUSES the refund (e.g. provider-side state): honest
+        // 4. Mollie REFUSES the refund (e.g. provider-side state): honest
         // error, local row untouched.
         let refused =
-            seed_invoice_status(env, tenant, "paid", 6_300, Some("psp_void_refused")).await;
+            seed_invoice_status(env, tenant, "paid", 6_300, Some("tr_void_refused")).await;
         mock.route(
-            "/payments/psp_void_refused/refunds",
+            "/v2/payments/tr_void_refused/refunds",
             400,
-            r#"{"errorCode":"refund.failed","message":"refund already requested"}"#,
+            r#"{"detail":"The refund could not be processed","status":400}"#,
         );
-        let error = void_invoice(&env.pool, void_input(tenant, refused, "k-adyen-refused"))
+        let error = void_invoice(&env.pool, void_input(tenant, refused, "k-mollie-refused"))
             .await
-            .expect_err("Adyen refusal propagates");
+            .expect_err("Mollie refusal propagates");
         assert!(
-            matches!(&error, InvoiceVoidError::AdyenFailed { message }
-                if message.contains("refund already requested")),
+            matches!(&error, InvoiceVoidError::MollieFailed { message }
+                if message.contains("The refund could not be processed")),
             "{error:?}"
         );
         let status: String = sqlx::query_scalar("SELECT status::text FROM invoices WHERE id = $1")
@@ -3535,7 +3492,7 @@ mod coverage_adversarial {
             .fetch_one(&env.pool)
             .await
             .expect("status");
-        assert_eq!(status, "paid", "a Adyen refusal leaves the row paid");
+        assert_eq!(status, "paid", "a Mollie refusal leaves the row paid");
         let audit_rows: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM audit_logs
              WHERE action = 'billing.invoice_voided' AND resource_id = $1",
@@ -3548,14 +3505,14 @@ mod coverage_adversarial {
 
         match &previous {
             (Some(key), Some(base_url), Some(merchant)) => {
-                std::env::set_var("ADYEN_API_KEY", key);
-                std::env::set_var("ADYEN_API_BASE_URL", base_url);
-                std::env::set_var("ADYEN_MERCHANT_ACCOUNT", merchant);
+                std::env::set_var("MOLLIE_API_KEY", key);
+                std::env::set_var("MOLLIE_API_BASE_URL", base_url);
+                std::env::set_var("MOLLIE_PROFILE_ID", merchant);
             }
             _ => {
-                std::env::remove_var("ADYEN_API_KEY");
-                std::env::remove_var("ADYEN_API_BASE_URL");
-                std::env::remove_var("ADYEN_MERCHANT_ACCOUNT");
+                std::env::remove_var("MOLLIE_API_KEY");
+                std::env::remove_var("MOLLIE_API_BASE_URL");
+                std::env::remove_var("MOLLIE_PROFILE_ID");
             }
         }
         drop(guard);

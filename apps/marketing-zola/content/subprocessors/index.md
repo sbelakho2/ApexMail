@@ -4,7 +4,7 @@ description = "ApexMail subprocessor register — third-party vendors processing
 template = "prose.html"
 
 [extra]
-last_updated = "2026-10-15"
+last_updated = "2026-10-24"
 +++
 <!-- GENERATED FILE — do not edit by hand: `python3 tools/generate_subprocessors.py` renders this page from the
      deployment configuration (compose + env). `--check` fails the validate stage on drift. -->
@@ -23,7 +23,11 @@ The following third-party entities process customer personal data on behalf of A
 |---|---|---|---|---|---|---|---|---|---|
 | Hetzner Online GmbH | Hetzner | Cloud hosting (compute, storage, networking) | Core service data in the default shared deployment | Germany | Germany | Germany | Intra-EEA processing; GDPR Chapter V transfer rules do not apply | Yes. Hetzner EU locations: Falkenstein/Nuremberg (fsn1/nbg1, DE) and Helsinki (hel1, FI); the active default is fsn1 |
 | Amazon Web Services, Inc. | AWS SES | Email-delivery transport when enabled (EMAIL_TRANSPORT_TYPE=ses) | Email content and recipient addresses in transit | Ireland | Ireland | USA | EU Standard Contractual Clauses (AWS DPA) | No — only when the active deployment uses the SES transport. Active only while EMAIL_TRANSPORT_TYPE=ses; dedicated IP transfers ride ApexMail's own Hetzner MTAs. |
-| Adyen N.V. | Adyen | Payment processing, subscription management, invoicing | Payment card details (tokenized — ApexMail never receives full card numbers), billing address, transaction metadata | Netherlands | Netherlands | Netherlands | Contracting entity is EU-established (Adyen N.V., Amsterdam); card scheme networks process globally under the Adyen Data Processing Agreement; PCI DSS Level 1 certified | Yes — required for paid plans |
+| Mollie B.V. | Mollie | Payment processing, subscription management, invoicing | Payment card details (tokenized — ApexMail never receives full card numbers), billing address, transaction metadata | Netherlands | Netherlands | Netherlands | Contracting entity is EU-established (Mollie B.V., Amsterdam); card scheme networks process globally under the Mollie Data Processing Agreement; PCI DSS Level 1 certified | Yes — required for paid plans |
+
+### Payment processor
+
+Mollie B.V. is a payment institution supervised by De Nederlandsche Bank (DNB), with its registered office at Keizersgracht 126, 1015 CW Amsterdam, The Netherlands. Payment data is processed in the Netherlands (EU); card-scheme networks may process it globally under Mollie's Data Processing Agreement.
 
 ### Self-Hosted Infrastructure (not third-party subprocessors)
 
@@ -47,5 +51,6 @@ If you object to a new subprocessor on reasonable data protection grounds, conta
 
 | Date | Change | Description |
 |---|---|---|
-| 2026-07-29 | Initial publication | Subprocessor register published with Hetzner (infrastructure), AWS (S3/SES, when enabled), Google (OAuth), GitHub (OAuth) and Adyen (payments). ClickHouse and Redis are self-hosted software, not subprocessors (see above). |
-| 2026-10-15 | Register generated from deployment configuration | The register is now rendered by tools/generate_subprocessors.py from the compose + env deployment configuration, with a validate-stage gate that fails on drift and a zero-US check (sovereign_chain_zero_us) over the active set. Adyen's location column now names the contracting entity (Adyen N.V., Amsterdam) instead of the card-network processing footprint. |
+| 2026-07-29 | Initial publication | Subprocessor register published with Hetzner (infrastructure), AWS (S3/SES, when enabled), Google (OAuth), GitHub (OAuth) and Mollie (payments). ClickHouse and Redis are self-hosted software, not subprocessors (see above). |
+| 2026-10-15 | Register generated from deployment configuration | The register is now rendered by tools/generate_subprocessors.py from the compose + env deployment configuration, with a validate-stage gate that fails on drift and a zero-US check (sovereign_chain_zero_us) over the active set. Mollie's location column now names the contracting entity (Mollie B.V., Amsterdam) instead of the card-network processing footprint. |
+| 2026-10-24 | Mollie legal identity stated in full | The register now states Mollie B.V.'s registered office (Keizersgracht 126, 1015 CW Amsterdam, The Netherlands) and its supervision by De Nederlandsche Bank (DNB) as a payment institution. Payment processing is in the Netherlands (EU); card-scheme networks may process data globally under Mollie's Data Processing Agreement. |

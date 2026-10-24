@@ -338,6 +338,11 @@ validate_repo_gates() {
         # structural layout utilities; the marketing copy of the authority
         # stays byte-identical; the compiled artifacts are cssgen products.
         # All three are REQUIRED: a violation fails the run.
+        # The payment processor is Mollie: no old processor name, wire
+        # vocabulary or env namespace may return outside immutable history
+        # (migrations 001-268, dated audits, trained tokenizer vocabularies).
+        ci_check "legacy processor" python3 tools/check_legacy_processor.py
+        ci_check "legacy processor self-test" python3 tools/check_legacy_processor.py --self-test
         ci_check "ARK design law" python3 tools/check_ark_law.py
         ci_check "ARK authority mirror" python3 tools/check_ark_mirror.py
         ci_check "ARK console artifact (cssgen --check)" bash -c 'cd services/mail-server && cargo run -q -p ui-foundation --bin cssgen -- --ark crates/ui-foundation/assets/ark.css --include crates/ui-foundation/assets/globals.input.css --content "crates/ui-foundation/src/**/*.rs" --content "crates/api-server/src/**/*.rs" --content "crates/ui-foundation/assets/globals.input.css" --out crates/ui-foundation/assets/globals.css --check'
@@ -467,26 +472,30 @@ validate_repo_gates() {
             python3 tools/generate_subprocessors.py --check
             python3 tools/generate_subprocessors.py --self-test
         '
-        # Processor-fact gate (external audit 15 Oct, H2): the Adyen switch
-        # carried Stripe's facts (US primary / India support / US storage) into
-        # the translated subprocessor pages, the DPA, the privacy policy, the
-        # data-locations page and the compliance mirrors. The register
-        # generator only owns the English public page + mirror, so this gate
-        # holds EVERY legal surface (all four languages) to the canonical
-        # fact: Adyen N.V., Netherlands (EU). --self-test proves the checker
-        # rejects the exact shipped regression and a missing EU fact.
-        ci_check "processor legal facts (Adyen = NL/EU, no Stripe facts)" bash -c '
+        # Processor-fact gate (external audit 15 Oct, H2): the payment switch
+        # carried another processor's facts (US primary / India support / US
+        # storage) into the translated subprocessor pages, the DPA, the privacy
+        # policy, the data-locations page and the compliance mirrors. The
+        # register generator only owns the English public page + mirror, so
+        # this gate holds EVERY legal surface (all four languages) to the
+        # canonical facts: Mollie B.V., Keizersgracht 126, 1015 CW Amsterdam,
+        # supervised by De Nederlandsche Bank, processing in the Netherlands
+        # (EU). --self-test proves the checker rejects an old processor, a
+        # missing EU fact, a stale address and a missing supervisor fact.
+        ci_check "processor legal facts (Mollie = NL/EU, Amsterdam, DNB)" bash -c '
             set -eu
             python3 tools/check_processor_facts.py
             python3 tools/check_processor_facts.py --self-test
         '
-        # Production checkout wiring (external audit 15 Oct, H3): the checkout
-        # client needs ADYEN_API_KEY / merchant account / live base URL, but
-        # api-server received none of them and the example env kept Stripe's
-        # sk_live_/whsec_ placeholders — paid checkout could never run in
-        # production. This gate pins the compose wiring + the env contract;
-        # --self-test proves it rejects each regression direction.
-        ci_check "production Adyen checkout wiring" bash -c '
+        # Production payment wiring (external audit 15 Oct, H3): the client
+        # needs MOLLIE_API_KEY / MOLLIE_PROFILE_ID / MOLLIE_API_BASE_URL /
+        # MOLLIE_WEBHOOK_URL, but api-server received none of them and the
+        # example env kept non-Mollie placeholders — paid checkout could never
+        # run in production. This gate pins the compose wiring, the env
+        # contract, the /webhooks/mollie route and the absence of the old
+        # provider's variables; --self-test proves it rejects each regression
+        # direction.
+        ci_check "production Mollie payment wiring" bash -c '
             set -eu
             python3 tools/check_prod_billing_wiring.py
             python3 tools/check_prod_billing_wiring.py --self-test

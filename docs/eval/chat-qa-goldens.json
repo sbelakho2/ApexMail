@@ -479,7 +479,7 @@
       "must_contain": [],
       "must_not_contain": [],
       "docs_contains": [
-        "adyen"
+        "mollie"
       ]
     },
     {

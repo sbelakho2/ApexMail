@@ -445,13 +445,14 @@ pub fn build_app(state: AppState) -> Router {
         // No-JS cookie consent endpoint (marketing banner links here).
         // Same public rate-limit stack = the light per-IP bucketing.
         .merge(routes::web::consent_router())
-        // Adyen webhook ingest — previously mounted ONLY by the
+        // Mollie webhook ingest — previously mounted ONLY by the
         // billing-service binary, which has no container in any deployed
-        // topology, so signature-valid webhook deliveries 404'd and cycle
-        // close never saw provider events (dogfood finding A, 2026-10-05).
-        // The route is unauthenticated by design: the handler verifies the
-        // Adyen HMAC signature and is idempotent per event id.
-        .merge(adyen_webhook_router(&state))
+        // topology, so provider deliveries 404'd and cycle close never saw
+        // them (dogfood finding A, 2026-10-05). The route is unauthenticated
+        // by design: Mollie sends no signature, so the handler authenticates
+        // by fetching the named object with the API key and is idempotent per
+        // content-addressed event id.
+        .merge(mollie_webhook_router(&state))
         // Data-backed SSR detail pages (/domains/{id}, /campaigns/{id}).
         // Browser pages: the handlers resolve the session and redirect
         // anonymous visitors to /login?next=… (same contract as the SSR
@@ -2603,6 +2604,18 @@ pub(crate) mod test_support {
 
     pub(crate) fn test_config() -> Config {
         crate::app::tests::test_config_impl()
+    }
+
+    /// Serialises every test that mutates the process-global Mollie
+    /// environment (`MOLLIE_API_KEY`, `MOLLIE_API_BASE_URL`, …). `cargo test`
+    /// runs the lib suite in one process, so the webhook tests in `app` and
+    /// the checkout tests in `routes::billing` share this lock; without it a
+    /// fake provider endpoint could leak between them.
+    pub(crate) static MOLLIE_ENV_MUTEX: tokio::sync::Mutex<()> =
+        tokio::sync::Mutex::const_new(());
+
+    pub(crate) async fn lock_mollie_env() -> tokio::sync::MutexGuard<'static, ()> {
+        MOLLIE_ENV_MUTEX.lock().await
     }
 
     /// A real AppState over a caller-provided pool (per-test fixture DBs),
@@ -7554,50 +7567,78 @@ mod tests {
         );
     }
 
-    /// The Adyen ingest wire shape: a `notificationItems` envelope whose
-    /// `NotificationRequestItem.additionalData.hmacSignature` carries a
-    /// garbage HMAC (Adyen's HMAC lives in the body — the pre-cutover
-    /// `…-hmac-signature` header with a `t=…,v1=…` value has no Adyen
-    /// analog and is never sent).
-    fn adyen_notification_with_garbage_hmac() -> String {
-        serde_json::json!({
-            "notificationItems": [{
-                "NotificationRequestItem": {
-                    "pspReference": "8815393379066089",
-                    "originalReference": "",
-                    "merchantReference": "mount-probe",
-                    "eventCode": "AUTHORISATION",
-                    "success": "false",
-                    "paymentMethod": "visa",
-                    "amount": { "currency": "EUR", "value": 1000 },
-                    "eventDate": "2026-10-14T12:00:00+02:00",
-                    "additionalData": { "hmacSignature": "deadbeef" }
+    /// Mollie posts `application/x-www-form-urlencoded` with exactly one
+    /// parameter, `id=tr_…` (payment) or `id=re_…` (refund). There is no
+    /// signature, status or event type in the body: the handler proves the
+    /// event by fetching the object with `MOLLIE_API_KEY`.
+    fn mollie_webhook_form(id: &str) -> String {
+        format!("id={id}")
+    }
+
+    /// RAII restore for the process-global Mollie credential variables, so a
+    /// webhook test cannot leak its fake provider endpoint into checkout
+    /// tests running in the same binary.
+    struct MollieEnv {
+        saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    impl MollieEnv {
+        fn set(values: &[(&'static str, Option<&str>)]) -> Self {
+            let saved = values
+                .iter()
+                .map(|(key, value)| {
+                    let previous = std::env::var_os(key);
+                    match value {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
+                    (*key, previous)
+                })
+                .collect();
+            Self { saved }
+        }
+    }
+
+    impl Drop for MollieEnv {
+        fn drop(&mut self) {
+            for (key, previous) in self.saved.drain(..) {
+                match previous {
+                    Some(previous) => std::env::set_var(key, previous),
+                    None => std::env::remove_var(key),
                 }
-            }]
-        })
-        .to_string()
+            }
+        }
     }
 
     #[tokio::test]
-    async fn adyen_webhook_ingest_mounts_when_secret_configured() {
-        // Dogfood finding A (2026-10-05): /webhooks/adyen was mounted only
+    async fn mollie_webhook_ingest_mounts_and_fetch_verifies() {
+        // Dogfood finding A (2026-10-05): /webhooks/mollie was mounted only
         // by the billing-service binary, which has no container in any
         // deployed topology — every provider delivery 404'd. The route is
-        // now ALWAYS mounted: with a secret a garbage body HMAC is refused
-        // as a client error (never accepted); without a secret the handler
-        // answers a retryable 503 (Adyen keeps replaying across the
-        // misconfiguration window) and NEVER 404. nextest runs one process
-        // per test, so the env pin is isolated.
-        std::env::set_var("ADYEN_HMAC_KEY", "0f1e2d3c4b5a69788796a5b4c3d2e1f0");
+        // now ALWAYS mounted. There is no signature to reject: with a key the
+        // handler authenticates by fetching the object, so an unreachable
+        // provider is a RETRYABLE 503 (Mollie replays), never a 404 and never
+        // an unauthenticated acknowledgement. Without a key the fetch cannot
+        // prove anything, which is the same retryable 503.
+        let _guard = super::test_support::lock_mollie_env().await;
+        let _env = MollieEnv::set(&[
+            ("MOLLIE_API_KEY", Some("test_webhook_key")),
+            // An unreachable provider base: the mount and the fetch-verify
+            // path both run without leaving the machine.
+            ("MOLLIE_API_BASE_URL", Some("http://127.0.0.1:1")),
+        ]);
         let app = test_app().await;
         let resp = app
             .clone()
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/webhooks/adyen")
-                    .header("content-type", "application/json")
-                    .body(Body::from(adyen_notification_with_garbage_hmac()))
+                    .uri("/webhooks/mollie")
+                    .header(
+                        "content-type",
+                        "application/x-www-form-urlencoded",
+                    )
+                    .body(Body::from(mollie_webhook_form("tr_unknownDelivery01")))
                     .unwrap(),
             )
             .await
@@ -7605,24 +7646,51 @@ mod tests {
         assert_ne!(
             resp.status(),
             StatusCode::NOT_FOUND,
-            "ingest route must be mounted when ADYEN_HMAC_KEY is set"
+            "ingest route must be mounted when MOLLIE_API_KEY is set"
         );
-        assert!(
-            resp.status().is_client_error(),
-            "a garbage body HMAC must be signature-refused as a client error (never [accepted]), got {}",
-            resp.status()
+        assert_eq!(
+            resp.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "an unreachable provider makes verification retryable, not accepted"
         );
 
-        // Unconfigured secret: still mounted, retryable 503 — never 404.
-        std::env::remove_var("ADYEN_HMAC_KEY");
+        // A body that does not name a Mollie object is a client error and
+        // never reaches the provider.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/webhooks/mollie")
+                    .header(
+                        "content-type",
+                        "application/x-www-form-urlencoded",
+                    )
+                    .body(Body::from(mollie_webhook_form("not-a-mollie-id")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "an id outside Mollie's `tr_…`/`re_…` namespace is refused before any fetch"
+        );
+
+        // Unconfigured key: still mounted, retryable 503 — never 404.
+        drop(_env);
+        let _unconfigured = MollieEnv::set(&[("MOLLIE_API_KEY", None)]);
         let app_unconfigured = test_app().await;
         let resp = app_unconfigured
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/webhooks/adyen")
-                    .header("content-type", "application/json")
-                    .body(Body::from(adyen_notification_with_garbage_hmac()))
+                    .uri("/webhooks/mollie")
+                    .header(
+                        "content-type",
+                        "application/x-www-form-urlencoded",
+                    )
+                    .body(Body::from(mollie_webhook_form("tr_unknownDelivery01")))
                     .unwrap(),
             )
             .await
@@ -7630,12 +7698,12 @@ mod tests {
         assert_ne!(
             resp.status(),
             StatusCode::NOT_FOUND,
-            "ingest route must be mounted even without a secret"
+            "ingest route must be mounted even without a key"
         );
         assert_eq!(
             resp.status(),
             StatusCode::SERVICE_UNAVAILABLE,
-            "an unconfigured secret is server misconfiguration: retryable 503"
+            "an unconfigured key is server misconfiguration: retryable 503"
         );
     }
 
@@ -9085,21 +9153,22 @@ mod adversarial_helper_tests {
     }
 }
 
-/// The Adyen webhook ingest, ALWAYS mounted on the public rate-limited
-/// stack. The handler authenticates purely by Adyen's HMAC signature (no
-/// session/API-key applies to provider callbacks) and is idempotent per
-/// event id, so replays and Adyen's at-least-once redelivery are safe.
-/// A deployment without `ADYEN_HMAC_KEY` gets a retryable 503 from
-/// the handler — never a 404 (which would silently drop provider events
-/// and make the route's existence unverifiable).
-fn adyen_webhook_router(state: &AppState) -> Router<AppState> {
+/// The Mollie webhook ingest, ALWAYS mounted on the public rate-limited
+/// stack. Mollie posts only an object id, so the handler authenticates by
+/// fetching it with `MOLLIE_API_KEY` (no session/API-key applies to provider
+/// callbacks) and is idempotent per content-addressed event id, so replays and
+/// Mollie's at-least-once redelivery are safe. A deployment without
+/// `MOLLIE_API_KEY` gets a retryable 503 from the handler — never a 404
+/// (which would silently drop provider events and make the route's existence
+/// unverifiable).
+fn mollie_webhook_router(state: &AppState) -> Router<AppState> {
     let billing_state = billing_service::AppState::new(
         state.db.clone(),
         state.redis.clone(),
         billing_service::config::BillingConfig {
-            adyen_hmac_key: std::env::var("ADYEN_HMAC_KEY").unwrap_or_default(),
+            mollie_api_key: std::env::var("MOLLIE_API_KEY").unwrap_or_default(),
             ..Default::default()
         },
     );
-    billing_service::adyen_webhooks::router().with_state(billing_state)
+    billing_service::mollie_webhooks::router().with_state(billing_state)
 }

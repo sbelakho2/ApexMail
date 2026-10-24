@@ -58,7 +58,7 @@ the `marketing` static site (built from `apps/marketing-zola`, served by nginx).
 | Compliance Service | 3011 | Rust/Axum | GDPR console, compliance overview, audit tooling |
 | AI Service | 3012 | Rust/Axum | AI assistant/chat surface |
 | Sales Autopilot | 3010 | Rust/Axum | Lead generation, sales pipeline automation (internal only) |
-| Billing Service | 4100 (internal) | Rust/Axum | Adyen billing, invoices, overage sweep (internal only) |
+| Billing Service | 4100 (internal) | Rust/Axum | Mollie billing, invoices, overage sweep (internal only) |
 | PDF Renderer | 3004 | Rust | PDF report/export rendering |
 | MTA | 25, 465, 587 (+2525/2526 in prod) | Rust-native SMTP | SMTP inbound + submission (RFC 6409), bounce/FBL receivers on 2525/2526 |
 | IMAP Server | 993 | Rust | IMAP/IMAPS mailbox access |

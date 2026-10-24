@@ -5,10 +5,13 @@ The audit's three launch blockers, made executable:
   * H1 — a paid customer can cancel from the product and the next renewal is
     no longer charged (the old endpoints told the caller to use a billing
     portal that does not exist).
-  * H2 — Adyen's legal facts (Adyen N.V., Netherlands/EU) on every legal
-    surface in all four languages; no Stripe-era US/India claims.
-  * H3 — the production compose + env can actually run an Adyen checkout
-    (api-server holds the key/merchant/base URL; placeholders are not Stripe's).
+  * H2 — Mollie's legal facts (Mollie B.V., Keizersgracht 126, 1015 CW
+    Amsterdam; supervised by De Nederlandsche Bank; processing in the
+    Netherlands/EU) on every legal surface in all four languages; no stale
+    US/India claims.
+  * H3 — the production compose + env can actually run a Mollie payment
+    (api-server holds the key/profile/base URL/webhook URL; placeholders are
+    Mollie-shaped).
 
 The static arms call the same tools the validate stage runs, so CI and
 dogfooding can never disagree about the facts.
@@ -24,7 +27,7 @@ from ..assertions import Checks
 from ..config import REPO_ROOT
 from ..registry import probe
 
-# Stripe-era phrases the audit found on the legal pages (localized variants).
+# Stale US/India location phrases that must not describe Mollie (localized variants).
 FORBIDDEN_LEGAL_PHRASES = (
     "us (primary)",
     "usa (primär)",
@@ -59,7 +62,7 @@ def _load_tool(name: str):
     "p.marketing.processor_facts",
     "marketing",
     severity="P0",
-    description="Adyen is described as the Dutch entity on every legal surface, all languages (audit 15 Oct H2)",
+    description="Mollie is described as the Dutch entity on every legal surface, all languages (audit 15 Oct H2)",
 )
 def processor_facts(ctx):
     checks = Checks("p.marketing.processor_facts", "marketing-legal-facts")
@@ -70,12 +73,18 @@ def processor_facts(ctx):
         if not path.exists():
             violations.append(f"missing {surface}")
             continue
-        violations.extend(tool.check_text(path.read_text(encoding="utf-8")))
+        violations.extend(
+            tool.check_text(
+                path.read_text(encoding="utf-8"),
+                require_location=surface in tool.LOCATION_SURFACES,
+                require_full_facts=surface in tool.FULL_FACT_SURFACES,
+            )
+        )
     checks.add(
-        "every legal surface carries the canonical Adyen fact (NL/EU, no US/India)",
+        "every legal surface carries the canonical Mollie fact (NL/EU, no US/India)",
         not violations,
         observed=f"violations={violations[:4]}",
-        expected="Adyen N.V., Netherlands (EU) on subprocessors/DPA/privacy/data-locations in all languages",
+        expected="Mollie B.V., Netherlands (EU) on subprocessors/DPA/privacy/data-locations in all languages",
         severity="P0",
         surface="repo:legal-processor-facts",
     )
@@ -91,19 +100,19 @@ def processor_facts(ctx):
                 phrase in body for phrase in FORBIDDEN_LEGAL_PHRASES
             )
             checks.add(
-                f"rendered {path} contains no Stripe-era Adyen location",
+                f"rendered {path} contains no stale US/India Mollie location",
                 clean,
                 observed=f"status={resp.status} len={len(resp.text or '')}",
-                expected="200 and no US/India Adyen claims",
+                expected="200 and no US/India Mollie claims",
                 severity="P0" if prefix == "" else "P1",
                 surface=f"ssr:marketing:GET {path}",
             )
-            if resp.status == 200 and "adyen" in body:
+            if resp.status == 200 and "mollie" in body:
                 checks.add(
-                    f"rendered {path} states the EU entity for Adyen",
+                    f"rendered {path} states the EU entity for Mollie",
                     any(token in body for token in EU_FACT),
                     observed="EU fact present" if any(t in body for t in EU_FACT) else "EU fact absent",
-                    expected="Netherlands/Amsterdam on the Adyen row",
+                    expected="Netherlands/Amsterdam on the Mollie row",
                     severity="P1",
                     surface=f"ssr:marketing:GET {path}",
                 )
@@ -114,7 +123,7 @@ def processor_facts(ctx):
     "p.infra.prod_billing_wiring",
     "infra",
     severity="P0",
-    description="Production compose/env can run an Adyen checkout (audit 15 Oct H3)",
+    description="Production compose/env can run a Mollie payment (audit 15 Oct H3)",
 )
 def prod_billing_wiring(ctx):
     checks = Checks("p.infra.prod_billing_wiring", "infra-prod-billing")
@@ -123,10 +132,10 @@ def prod_billing_wiring(ctx):
     env = (REPO_ROOT / ".env.production.example").read_text(encoding="utf-8")
     problems = tool.check_compose(compose) + tool.check_env(env)
     checks.add(
-        "api-server + billing-service + production env carry the Adyen checkout wiring",
+        "api-server + billing-service + production env carry the Mollie payment wiring",
         not problems,
         observed=f"problems={problems[:4]}",
-        expected="ADYEN_API_KEY_FILE / ADYEN_MERCHANT_ACCOUNT / ADYEN_API_BASE_URL on api-server; no Stripe placeholders",
+        expected="MOLLIE_API_KEY / MOLLIE_PROFILE_ID / MOLLIE_API_BASE_URL / MOLLIE_WEBHOOK_URL on api-server and billing-service; Mollie-shaped placeholders; no old-provider variable",
         severity="P0",
         surface="repo:prod-billing-wiring",
     )
@@ -144,7 +153,7 @@ def cancellation_self_service(ctx):
     owner = ctx.identity("owner_a")
     tenant = owner.tenant_id or ""
 
-    # The old contract told every caller to use a non-existent Adyen portal
+    # The old contract told every caller to use a non-existent Mollie portal
     # (409 BILLING_PORTAL_REQUIRED). That response must be gone in every mode.
     response = owner.session.post(
         "/v1/billing/cancel",
@@ -176,7 +185,7 @@ def cancellation_self_service(ctx):
     escaped = tenant.replace("'", "''")
     preexisting = ctx.db.rows(
         f"SELECT id, status, cancel_at_period_end, canceled_at::text "
-        f"FROM adyen_subscriptions WHERE tenant_id = '{escaped}' "
+        f"FROM mollie_subscriptions WHERE tenant_id = '{escaped}' "
         f"ORDER BY created_at DESC LIMIT 1"
     )
     created_id = None
@@ -187,9 +196,9 @@ def cancellation_self_service(ctx):
             # read), so seed a minimal active row.
             created_id = f"dgv2_{uuid.uuid4().simple()}"
             ctx.db._run(
-                "INSERT INTO adyen_subscriptions "
-                "(tenant_id, adyen_subscription_id, plan, status, billing_cycle_start, "
-                " billing_cycle_end, adyen_shopper_reference) VALUES "
+                "INSERT INTO mollie_subscriptions "
+                "(tenant_id, mollie_subscription_id, plan, status, billing_cycle_start, "
+                " billing_cycle_end, mollie_customer_id) VALUES "
                 f"('{escaped}', '{created_id}', 'growth', 'active', NOW(), "
                 f"NOW() + INTERVAL '30 days', '{escaped}')"
             )
@@ -198,7 +207,7 @@ def cancellation_self_service(ctx):
             subscription_id = preexisting[0][0]
             sid = subscription_id.replace("'", "''")
             ctx.db._run(
-                "UPDATE adyen_subscriptions SET status='active', cancel_at_period_end=false, "
+                "UPDATE mollie_subscriptions SET status='active', cancel_at_period_end=false, "
                 f"canceled_at=NULL WHERE id='{sid}'"
             )
 
@@ -209,7 +218,7 @@ def cancellation_self_service(ctx):
         )
         state = ctx.db.rows(
             "SELECT status, cancel_at_period_end, canceled_at::text "
-            f"FROM adyen_subscriptions WHERE id='{sid}'"
+            f"FROM mollie_subscriptions WHERE id='{sid}'"
         )
         row = state[0] if state else None
         checks.add(
@@ -233,7 +242,7 @@ def cancellation_self_service(ctx):
         )
         replay_state = ctx.db.rows(
             "SELECT cancel_at_period_end, canceled_at::text "
-            f"FROM adyen_subscriptions WHERE id='{sid}'"
+            f"FROM mollie_subscriptions WHERE id='{sid}'"
         )
         checks.add(
             "a cancellation replay is idempotent",
@@ -249,8 +258,8 @@ def cancellation_self_service(ctx):
     finally:
         if created_id is not None:
             ctx.db._run(
-                "DELETE FROM adyen_subscriptions "
-                f"WHERE adyen_subscription_id = '{created_id}'"
+                "DELETE FROM mollie_subscriptions "
+                f"WHERE mollie_subscription_id = '{created_id}'"
             )
         elif preexisting:
             old = preexisting[0]
@@ -259,7 +268,7 @@ def cancellation_self_service(ctx):
             old_period_end = "true" if str(old[2]).lower() in ("t", "true") else "false"
             old_canceled = "NULL" if old[3] is None else "'" + old[3].replace("'", "''") + "'"
             ctx.db._run(
-                "UPDATE adyen_subscriptions SET "
+                "UPDATE mollie_subscriptions SET "
                 f"status='{old_status}', cancel_at_period_end={old_period_end}, "
                 f"canceled_at={old_canceled} WHERE id='{old_id}'"
             )

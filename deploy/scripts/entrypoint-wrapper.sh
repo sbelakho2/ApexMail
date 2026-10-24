@@ -91,8 +91,8 @@ export_from_file IMPERSONATION_SECRET     || true
 export_from_file CSRF_SECRET              || true
 export_from_file DKIM_PRIVATE_KEY_ENCRYPTION_KEY || true
 export_from_file KIWI_SECRET_KEY          || true
-export_from_file ADYEN_API_KEY        || true
-export_from_file ADYEN_HMAC_KEY    || true
+export_from_file MOLLIE_API_KEY           || true
+export_from_file MOLLIE_PROFILE_ID        || true
 export_from_file DB_PASSWORD              || true
 export_from_file REDIS_PASSWORD           || true
 export_from_file CLICKHOUSE_PASSWORD      || true
