@@ -1,120 +1,102 @@
 {# ── Private Cloud Hero ────────────────────────────────────────── #}
-{# Converted from private-cloud/PrivateCloudHero.tsx              #}
+{# ARK hero system: left-aligned copy (kicker, title, lead, fact rows,
+   actions) + the signed-record evidence panel. Architecture page mode:
+   the geometry and recolouring live entirely in ark.css. The checkmark
+   and service icon SVGs are gone; the reference-architecture diagram is
+   an illustrative panel and renders as ARK evidence. #}
 
-<section class="apex-mkt-hero relative overflow-hidden pt-32 lg:pt-40 pb-20">
-  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-    <div class="grid lg:grid-cols-2 gap-16 items-center">
+<section class="apex-mkt-hero">
+  <div class="apex-mkt-container">
+    <div class="apex-mkt-hero__layout">
       {# Left: Copy #}
-      <div>
-        <div class="inline-flex items-center gap-2 px-4 py-2 mb-6 apex-em apex-section-head">
-          <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="0"/><path d="M3 9h18"/><path d="M9 21V9"/></svg>
-          {% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["hero_badge"] %}{{ i18n_data[l]["private_cloud"]["hero_badge"] }}{% else %}Enterprise Infrastructure{% endif %}
-        </div>
-        <h1 class="mb-6 apex-page-title">
+      <div class="apex-mkt-hero__copy">
+        <span class="apex-mkt-kicker">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["hero_badge"] %}{{ i18n_data[l]["private_cloud"]["hero_badge"] }}{% else %}Enterprise Infrastructure{% endif %}</span>
+
+        <h1 class="apex-mkt-hero__title break-words">
           {% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["hero_title_1"] %}{{ i18n_data[l]["private_cloud"]["hero_title_1"] }}{% else %}Your Email.{% endif %}<br />
-          <span class="">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["hero_title_2"] %}{{ i18n_data[l]["private_cloud"]["hero_title_2"] }}{% else %}Your Cloud.{% endif %}</span>
+          <span>{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["hero_title_2"] %}{{ i18n_data[l]["private_cloud"]["hero_title_2"] }}{% else %}Your Cloud.{% endif %}</span>
         </h1>
-        <p class="mb-8">
+
+        <p class="apex-mkt-hero__sub">
           {% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["hero_subtitle"] %}{{ i18n_data[l]["private_cloud"]["hero_subtitle"] }}{% else %}Enterprise includes private deployment lifecycle management for single-tenant, dedicated, hybrid, and on-premise models. We track region, isolation, health, dedicated IPs, and BYOIP verification from design through launch.{% endif %}
         </p>
 
-        <div class="space-y-4">
-          <div class="flex items-start gap-3">
-            <div class="w-6 h-6 flex items-center justify-center shrink-0 mt-0.5">
-              <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-            </div>
-            <div>
-              <div class="apex-em">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["hero_benefit_1_title"] %}{{ i18n_data[l]["private_cloud"]["hero_benefit_1_title"] }}{% else %}Single-Tenant Isolation{% endif %}</div>
-              <div class="">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["hero_benefit_1_desc"] %}{{ i18n_data[l]["private_cloud"]["hero_benefit_1_desc"] }}{% else %}Dedicated tenancy options scoped for your risk profile{% endif %}</div>
-            </div>
-          </div>
-          <div class="flex items-start gap-3">
-            <div class="w-6 h-6 flex items-center justify-center shrink-0 mt-0.5">
-              <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-            </div>
-            <div>
-              <div class="apex-em">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["hero_benefit_2_title"] %}{{ i18n_data[l]["private_cloud"]["hero_benefit_2_title"] }}{% else %}Deployment Lifecycle{% endif %}</div>
-              <div class="">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["hero_benefit_2_desc"] %}{{ i18n_data[l]["private_cloud"]["hero_benefit_2_desc"] }}{% else %}Region, sizing, health checks, and status tracked before launch{% endif %}</div>
-            </div>
-          </div>
-          <div class="flex items-start gap-3">
-            <div class="w-6 h-6 flex items-center justify-center shrink-0 mt-0.5">
-              <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-            </div>
-            <div>
-              <div class="apex-em">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["hero_benefit_3_title"] %}{{ i18n_data[l]["private_cloud"]["hero_benefit_3_title"] }}{% else %}BYOIP &amp; Dedicated IPs{% endif %}</div>
-              <div class="">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["hero_benefit_3_desc"] %}{{ i18n_data[l]["private_cloud"]["hero_benefit_3_desc"] }}{% else %}Dedicated sending IPs with CIDR verification and reputation tracking{% endif %}</div>
-            </div>
-          </div>
+        <ul class="list-none space-y-3 mb-10">
+          <li><span class="apex-em">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["hero_benefit_1_title"] %}{{ i18n_data[l]["private_cloud"]["hero_benefit_1_title"] }}{% else %}Single-Tenant Isolation{% endif %}</span> — {% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["hero_benefit_1_desc"] %}{{ i18n_data[l]["private_cloud"]["hero_benefit_1_desc"] }}{% else %}Dedicated tenancy options scoped for your risk profile{% endif %}</li>
+          <li><span class="apex-em">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["hero_benefit_2_title"] %}{{ i18n_data[l]["private_cloud"]["hero_benefit_2_title"] }}{% else %}Deployment Lifecycle{% endif %}</span> — {% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["hero_benefit_2_desc"] %}{{ i18n_data[l]["private_cloud"]["hero_benefit_2_desc"] }}{% else %}Region, sizing, health checks, and status tracked before launch{% endif %}</li>
+          <li><span class="apex-em">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["hero_benefit_3_title"] %}{{ i18n_data[l]["private_cloud"]["hero_benefit_3_title"] }}{% else %}BYOIP &amp; Dedicated IPs{% endif %}</span> — {% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["hero_benefit_3_desc"] %}{{ i18n_data[l]["private_cloud"]["hero_benefit_3_desc"] }}{% else %}Dedicated sending IPs with CIDR verification and reputation tracking{% endif %}</li>
+        </ul>
+
+        <div class="apex-mkt-hero__actions">
+          <a href="{{ lp }}/contact/sales/?type=private-cloud" class="apex-mkt-cta--primary">
+            {% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["hero_cta"] %}{{ i18n_data[l]["private_cloud"]["hero_cta"] }}{% else %}Book Architecture Review{% endif %}
+          </a>
+          <a href="{{ lp }}/contact/" class="apex-btn">
+            {% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["hero_contact"] %}{{ i18n_data[l]["private_cloud"]["hero_contact"] }}{% else %}Contact Sales{% endif %}
+          </a>
         </div>
       </div>
 
-      {# Right: VPC Architecture Diagram #}
-      <div class="relative">
-        <div class="border p-6">
-          <div class="mb-4 apex-em">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["architecture_label"] %}{{ i18n_data[l]["private_cloud"]["architecture_label"] }}{% else %}Reference Deployment Architecture (illustrative){% endif %}</div>
+      {# Right: VPC Architecture Diagram — the illustrative reference
+         panel renders as ARK evidence (head, seal, hatched rule, body).
+         The strip below is an illustrative reference architecture, not a
+         provisioned deployment: the shown range is an RFC 5737 example
+         range, not a live ApexMail allocation. #}
+      <div class="apex-mkt-hero__evidence">
+        <div class="apex-evidence apex-evidence--mkt">
+          <div class="apex-evidence__head"><span>{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["architecture_label"] %}{{ i18n_data[l]["private_cloud"]["architecture_label"] }}{% else %}Reference Deployment Architecture (illustrative){% endif %}</span><span class="apex-evidence__seal">ILLUSTRATIVE</span></div>
+          <div class="apex-evidence__hatch" aria-hidden="true"></div>
+          <div class="apex-evidence__body">
+            {# Region label #}
+            <div class="border-2 border-dashed p-4 relative">
+              <span class="absolute -top-3 left-4 px-2 apex-em">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["region_label"] %}{{ i18n_data[l]["private_cloud"]["region_label"] }}{% else %}Customer-selected cloud region{% endif %}</span>
 
-          {# Region label #}
-          <div class="border-2 border-dashed p-4 relative">
-            <span class="absolute -top-3 left-4 px-2 apex-em">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["region_label"] %}{{ i18n_data[l]["private_cloud"]["region_label"] }}{% else %}Customer-selected cloud region{% endif %}</span>
-
-            {# Private Subnet #}
-            <div class="border p-4 mb-3">
-              <div class="mb-3 apex-em">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["private_subnet"] %}{{ i18n_data[l]["private_cloud"]["private_subnet"] }}{% else %}Private Subnet{% endif %}</div>
-              <div class="grid grid-cols-3 gap-2">
-                {# Diagram labels are localized via private_cloud.svc_* keys
-                   (English fallbacks; keys reported to R4). #}
-                {% set svc_mta = "MTA Cluster" %}
-                {% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["svc_mta"] %}{% set svc_mta = i18n_data[l]["private_cloud"]["svc_mta"] %}{% endif %}
-                {% set svc_queue = "Queue Workers" %}
-                {% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["svc_queue"] %}{% set svc_queue = i18n_data[l]["private_cloud"]["svc_queue"] %}{% endif %}
-                {% set svc_analytics = "Analytics DB" %}
-                {% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["svc_analytics"] %}{% set svc_analytics = i18n_data[l]["private_cloud"]["svc_analytics"] %}{% endif %}
-                {% set private_services = [svc_mta, svc_queue, svc_analytics] %}
-                {% for svc in private_services %}
-                <div class="border p-3">
-                  <div class="w-8 h-8 flex items-center justify-center mx-auto mb-2">
-                    <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="8" x="2" y="2" rx="0" ry="0"/><rect width="20" height="8" x="2" y="14" rx="0" ry="0"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/></svg>
+              {# Private Subnet #}
+              <div class="border p-4 mb-3">
+                <div class="mb-3 apex-em">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["private_subnet"] %}{{ i18n_data[l]["private_cloud"]["private_subnet"] }}{% else %}Private Subnet{% endif %}</div>
+                <div class="grid grid-cols-3 gap-2">
+                  {# Diagram labels are localized via private_cloud.svc_* keys
+                     (English fallbacks; keys reported to R4). #}
+                  {% set svc_mta = "MTA Cluster" %}
+                  {% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["svc_mta"] %}{% set svc_mta = i18n_data[l]["private_cloud"]["svc_mta"] %}{% endif %}
+                  {% set svc_queue = "Queue Workers" %}
+                  {% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["svc_queue"] %}{% set svc_queue = i18n_data[l]["private_cloud"]["svc_queue"] %}{% endif %}
+                  {% set svc_analytics = "Analytics DB" %}
+                  {% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["svc_analytics"] %}{% set svc_analytics = i18n_data[l]["private_cloud"]["svc_analytics"] %}{% endif %}
+                  {% set private_services = [svc_mta, svc_queue, svc_analytics] %}
+                  {% for svc in private_services %}
+                  <div class="border p-3">
+                    <div class="apex-em">{{ svc }}</div>
                   </div>
-                  <div class="apex-em">{{ svc }}</div>
+                  {% endfor %}
                 </div>
-                {% endfor %}
+              </div>
+
+              {# Public Subnet #}
+              <div class="border p-4">
+                <div class="mb-3 apex-em">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["public_subnet"] %}{{ i18n_data[l]["private_cloud"]["public_subnet"] }}{% else %}Public Subnet{% endif %}</div>
+                <div class="grid grid-cols-3 gap-2">
+                  {% set svc_api = "API Gateway" %}
+                  {% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["svc_api"] %}{% set svc_api = i18n_data[l]["private_cloud"]["svc_api"] %}{% endif %}
+                  {% set svc_lb = "Load Balancer" %}
+                  {% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["svc_lb"] %}{% set svc_lb = i18n_data[l]["private_cloud"]["svc_lb"] %}{% endif %}
+                  {% set svc_dns = "DNS Resolver" %}
+                  {% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["svc_dns"] %}{% set svc_dns = i18n_data[l]["private_cloud"]["svc_dns"] %}{% endif %}
+                  {% set public_services = [svc_api, svc_lb, svc_dns] %}
+                  {% for svc in public_services %}
+                  <div class="border p-3">
+                    <div class="apex-em">{{ svc }}</div>
+                  </div>
+                  {% endfor %}
+                </div>
               </div>
             </div>
 
-            {# Public Subnet #}
-            <div class="border p-4">
-              <div class="mb-3 apex-em">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["public_subnet"] %}{{ i18n_data[l]["private_cloud"]["public_subnet"] }}{% else %}Public Subnet{% endif %}</div>
-              <div class="grid grid-cols-3 gap-2">
-                {% set svc_api = "API Gateway" %}
-                {% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["svc_api"] %}{% set svc_api = i18n_data[l]["private_cloud"]["svc_api"] %}{% endif %}
-                {% set svc_lb = "Load Balancer" %}
-                {% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["svc_lb"] %}{% set svc_lb = i18n_data[l]["private_cloud"]["svc_lb"] %}{% endif %}
-                {% set svc_dns = "DNS Resolver" %}
-                {% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["svc_dns"] %}{% set svc_dns = i18n_data[l]["private_cloud"]["svc_dns"] %}{% endif %}
-                {% set public_services = [svc_api, svc_lb, svc_dns] %}
-                {% for svc in public_services %}
-                <div class="border p-3">
-                  <div class="w-8 h-8 flex items-center justify-center mx-auto mb-2">
-                    <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
-                  </div>
-                  <div class="apex-em">{{ svc }}</div>
-                </div>
-                {% endfor %}
-              </div>
-            </div>
-          </div>
-
-          {# The strip above is an illustrative reference architecture, not a
-             provisioned deployment: the shown range is an RFC 5737 example
-             range, not a live ApexMail allocation. #}
-          {# Dedicated IPs #}
-          <div class="mt-4 flex items-center justify-between p-3 border">
-            <div class="flex items-center gap-2">
-              <div class="w-2 h-2" aria-hidden="true"></div>
+            {# Dedicated IPs #}
+            <div class="mt-4 flex items-center justify-between p-3 border">
               <span class="apex-em">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["dedicated_ip_pool"] %}{{ i18n_data[l]["private_cloud"]["dedicated_ip_pool"] }}{% else %}Dedicated IP Pool{% endif %}</span>
+              <span>203.0.113.0/24 (example range)</span>
             </div>
-            <span class="">203.0.113.0/24 (example range)</span>
           </div>
         </div>
       </div>

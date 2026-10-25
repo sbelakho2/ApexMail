@@ -1,50 +1,37 @@
 {# ── Compliance Hero ──────────────────────────────────────────── #}
-{# Converted from compliance/ComplianceHero.tsx                  #}
+{# ARK hero system: left-aligned copy (kicker, title, lead, fact rows,
+   actions) + the signed-record evidence panel. Trust page mode: the
+   geometry, label colour and recolouring live entirely in ark.css. #}
 
-<section class="relative min-h-screen flex items-center pt-32 pb-20 overflow-hidden">
-  <div class="relative max-w-7xl mx-auto px-6 sm:px-6 lg:px-8 py-12 lg:py-20">
-    <div class="grid lg:grid-cols-2 gap-12 lg:gap-16 items-center">
-      {# Left Column #}
-      <div class="">
-        <div class="inline-flex items-center gap-2 px-3 py-1 border mb-8 apex-em">
-          <span class="w-6 h-6 flex items-center justify-center">
-            <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-          </span>
-          {% if i18n_data and i18n_data[l] and i18n_data[l]["compliance"] and i18n_data[l]["compliance"]["hero_badge"] %}{{ i18n_data[l]["compliance"]["hero_badge"] }}{% else %}Compliance workflows{% endif %}
-        </div>
+<section class="apex-mkt-hero">
+  <div class="apex-mkt-container">
+    <div class="apex-mkt-hero__layout">
+      {# Copy side #}
+      <div class="apex-mkt-hero__copy">
+        <span class="apex-mkt-kicker">{% if i18n_data and i18n_data[l] and i18n_data[l]["compliance"] and i18n_data[l]["compliance"]["hero_badge"] %}{{ i18n_data[l]["compliance"]["hero_badge"] }}{% else %}Compliance workflows{% endif %}</span>
 
-        <h1 class="mb-6 break-words apex-page-title">
+        <h1 class="apex-mkt-hero__title break-words">
           {% if i18n_data and i18n_data[l] and i18n_data[l]["compliance"] and i18n_data[l]["compliance"]["hero_title"] %}{{ i18n_data[l]["compliance"]["hero_title"] }}{% else %}Compliance workflows built into <br />
           <span class="">your email operations.</span>{% endif %}
         </h1>
 
-        <p class="mb-10 max-w-lg">
+        <p class="apex-mkt-hero__sub">
           {% if i18n_data and i18n_data[l] and i18n_data[l]["compliance"] and i18n_data[l]["compliance"]["hero_subtitle"] %}{{ i18n_data[l]["compliance"]["hero_subtitle"] }}{% else %}Treat compliance as a current, documented operating concern. ApexMail includes
           GDPR-oriented workflow APIs, audit-capable plans, and security-review material
           for Enterprise evaluation. HIPAA availability is not currently offered.{% endif %}
         </p>
 
-        <ul class="space-y-4 mb-10">
-          <li class="flex items-start gap-3">
-            <svg class="w-5 h-5 mt-0.5 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-            <span class="apex-em">Lawful-basis records per processing purpose (consent, contract, legal obligation, legitimate interests) with evidence references</span>
-          </li>
-          <li class="flex items-start gap-3">
-            <svg class="w-5 h-5 mt-0.5 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-            <span class="apex-em">Security-questionnaire requests assessed case by case from current review material — no standardized SIG, CAIQ, or HECVAT pack is a product entitlement</span>
-          </li>
-          <li class="flex items-start gap-3">
-            <svg class="w-5 h-5 mt-0.5 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-            <span class="apex-em">Right-to-be-Forgotten erasure workflow with audit events</span>
-          </li>
+        <ul class="list-none space-y-3 mb-10">
+          <li><span class="apex-em">Lawful-basis records per processing purpose (consent, contract, legal obligation, legitimate interests) with evidence references</span></li>
+          <li><span class="apex-em">Security-questionnaire requests assessed case by case from current review material — no standardized SIG, CAIQ, or HECVAT pack is a product entitlement</span></li>
+          <li><span class="apex-em">Right-to-be-Forgotten erasure workflow with audit events</span></li>
         </ul>
 
-        <div class="flex flex-wrap gap-4">
-          <a href="{{ config.extra.app_url }}/signup" class="inline-flex items-center justify-center px-6 py-3 apex-btn apex-btn--primary">
+        <div class="apex-mkt-hero__actions">
+          <a href="{{ config.extra.app_url }}/signup" class="apex-mkt-cta--primary">
             {% if i18n_data and i18n_data[l] and i18n_data[l]["cta"] and i18n_data[l]["cta"]["cta_button"] %}{{ i18n_data[l]["cta"]["cta_button"] }}{% else %}Start Free{% endif %}
-            <svg class="w-4 h-4 ml-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
           </a>
-          <a href="{{ lp }}/contact/" class="inline-flex items-center justify-center px-6 py-3 apex-btn">
+          <a href="{{ lp }}/contact/" class="apex-btn">
             Compliance Review
           </a>
         </div>
@@ -57,26 +44,21 @@
         </p>
       </div>
 
-      {# Right Column — Compliance Controls #}
-      <div class="relative">
-        <div class="p-6 sm:p-8 border">
-          <h2 class="mb-8 apex-h2">Compliance Workflows</h2>
-          {% set badges = ["GDPR DSR", "Audit logs", "DPA review", "Current documentation"] %}
-          <div class="grid grid-cols-2 lg:grid-cols-3 gap-4">
-            {% for badge in badges %}
-            <div class="min-h-[8rem] border flex flex-col items-center justify-center p-4">
-              <div class="w-10 h-10 flex items-center justify-center mb-3 border">
-                <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-              </div>
-              <span class="max-w-full break-words apex-em">{{ badge }}</span>
-            </div>
-            {% endfor %}
-          </div>
-          <div class="mt-10 p-4 border">
-            <div class="flex items-center gap-3 apex-em">
-              <span class="w-2 h-2" aria-hidden="true"></span>
+      {# Evidence side — the signed-record block (illustrative panel). #}
+      <div class="apex-mkt-hero__evidence">
+        <div class="apex-evidence apex-evidence--mkt">
+          <div class="apex-evidence__head"><span>{% if i18n_data and i18n_data[l] and i18n_data[l]["compliance"] and i18n_data[l]["compliance"]["hero_badge"] %}{{ i18n_data[l]["compliance"]["hero_badge"] }}{% else %}Compliance workflows{% endif %}</span><span class="apex-evidence__seal">CURRENT REVIEW MATERIAL</span></div>
+          <div class="apex-evidence__hatch" aria-hidden="true"></div>
+          <div class="apex-evidence__body">
+            <ol class="apex-ledger--indexed list-none" role="list">
+              <li><span class="apex-index">01</span><span class="apex-em">GDPR DSR</span></li>
+              <li><span class="apex-index">02</span><span class="apex-em">Audit logs</span></li>
+              <li><span class="apex-index">03</span><span class="apex-em">DPA review</span></li>
+              <li><span class="apex-index">04</span><span class="apex-em">Current documentation</span></li>
+            </ol>
+            <p class="mt-6">
               Current security-review information for qualified Enterprise evaluation
-            </div>
+            </p>
           </div>
         </div>
       </div>

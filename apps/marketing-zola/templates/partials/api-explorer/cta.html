@@ -1,36 +1,36 @@
 {# ── API Explorer CTA ──────────────────────────────────────────── #}
 {# ARK rework (lane T): icons deleted, buttons map to the apex-btn #}
 {# grammar, the eyebrow badge became a plain section label.        #}
+{# Tool page: paper section + container; the signup is the one
+   commercial action and wears the crimson mkt CTA. #}
 
-<section class="py-20 lg:py-32 relative">
-  <div class="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 relative">
-    <div class="border p-8 lg:p-12">
-      <p class="mb-6 apex-meta">Get started</p>
+<section class="apex-mkt-section">
+  <div class="apex-mkt-container">
+    <p class="mb-6 apex-meta">Get started</p>
 
-      <h2 class="mb-4 apex-h2">
-        Go from Playground to Production
-      </h2>
-      <p class="mb-10 max-w-2xl mx-auto apex-em">
-        Sign up free: 3,000 emails per month plus a one-time 30,000-email launch allowance for your first 30 days.
-        Same API, same reliability, your own API keys.
-      </p>
+    <h2 class="mb-4 apex-h2">
+      Go from Playground to Production
+    </h2>
+    <p class="mb-10 max-w-2xl apex-em">
+      Sign up free: 3,000 emails per month plus a one-time 30,000-email launch allowance for your first 30 days.
+      Same API, same reliability, your own API keys.
+    </p>
 
-      <div class="flex flex-col sm:flex-row gap-4 justify-center mb-12">
-        <a href="{{ config.extra.app_url }}/signup" class="apex-btn apex-btn--primary">
-          Start Free
-        </a>
-        <a href="/docs/" class="apex-btn">
-          Read Documentation
-        </a>
-      </div>
+    <div class="flex flex-col sm:flex-row gap-4 mb-12">
+      <a href="{{ config.extra.app_url }}/signup" class="apex-mkt-cta--primary">
+        Start Free
+      </a>
+      <a href="/docs/" class="apex-btn">
+        Read Documentation
+      </a>
+    </div>
 
-      <div class="pt-10 border-t">
-        <div class="mb-6 apex-meta">Available SDKs</div>
-        <div class="flex flex-wrap justify-center gap-3">
-          {% for sdk in ["Python", "Ruby", "Go", "PHP", "Java"] %}
-          <span class="px-3 py-1.5 border apex-em">{{ sdk }}</span>
-          {% endfor %}
-        </div>
+    <div class="pt-10 border-t">
+      <div class="mb-6 apex-meta">Available SDKs</div>
+      <div class="flex flex-wrap gap-3">
+        {% for sdk in ["Python", "Ruby", "Go", "PHP", "Java"] %}
+        <span class="px-3 py-1.5 border apex-em">{{ sdk }}</span>
+        {% endfor %}
       </div>
     </div>
   </div>

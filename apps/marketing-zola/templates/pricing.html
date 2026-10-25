@@ -18,11 +18,13 @@
 
 {# In-page jump strip for the three decision anchors. Each target carries
    scroll-mt so the sticky header never covers the heading it jumps to. #}
-<nav aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['pricing_jump'] %}{{ i18n_data[l]['a11y']['pricing_jump'] }}{% else %}Pricing sections{% endif %}" class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-8">
-  <div class="flex flex-wrap gap-2 justify-center">
-    <a href="#plans" class="apex-btn apex-btn--sm">{% if i18n_data and i18n_data[l] and i18n_data[l]["pricing"] and i18n_data[l]["pricing"]["plan"] %}{{ i18n_data[l]["pricing"]["plan"] }}{% else %}Plans{% endif %}</a>
-    <a href="#apexmail-calculator" class="apex-btn apex-btn--sm">{% if i18n_data and i18n_data[l] and i18n_data[l]["calculator"] and i18n_data[l]["calculator"]["hero_title"] %}{{ i18n_data[l]["calculator"]["hero_title"] }}{% else %}Calculator{% endif %}</a>
-    <a href="#pricing-faq" class="apex-btn apex-btn--sm">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["faq"] %}{{ i18n_data[l]["footer"]["faq"] }}{% else %}FAQ{% endif %}</a>
+<nav aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['pricing_jump'] %}{{ i18n_data[l]['a11y']['pricing_jump'] }}{% else %}Pricing sections{% endif %}">
+  <div class="apex-mkt-container">
+    <div class="apex-mkt-jumpnav">
+      <a href="#plans">{% if i18n_data and i18n_data[l] and i18n_data[l]["pricing"] and i18n_data[l]["pricing"]["plan"] %}{{ i18n_data[l]["pricing"]["plan"] }}{% else %}Plans{% endif %}</a>
+      <a href="#apexmail-calculator">{% if i18n_data and i18n_data[l] and i18n_data[l]["calculator"] and i18n_data[l]["calculator"]["hero_title"] %}{{ i18n_data[l]["calculator"]["hero_title"] }}{% else %}Calculator{% endif %}</a>
+      <a href="#pricing-faq">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["faq"] %}{{ i18n_data[l]["footer"]["faq"] }}{% else %}FAQ{% endif %}</a>
+    </div>
   </div>
 </nav>
 {% include "partials/pricing/plans.html" %}

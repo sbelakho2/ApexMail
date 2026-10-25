@@ -5,28 +5,31 @@
    The rows are static markup: the data never varies per render — the section
    is labelled as a worked EXAMPLE and the action strip is illustrative, not a
    live control surface. #}
-<section id="message-timeline" class="scroll-mt-20 border-b" aria-label="Message timeline example">
-  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-14 lg:py-20">
+{# ARK alignment: dense tool section + container; the trace keeps its
+   structure (timeline rows, context panel, illustrative action strip);
+   inline width styles are gone — tabular-nums carries the numerals. #}
+<section id="message-timeline" class="apex-mkt-section apex-mkt-section--dense scroll-mt-20" aria-label="Message timeline example">
+  <div class="apex-mkt-container">
     <div class="flex flex-wrap items-baseline justify-between gap-3 mb-6">
       <h2 class="apex-h2">One message, end to end <span class="align-middle ml-2 apex-em apex-section-head">example trace</span></h2>
-      <p class="">msg_2f9a, transactional, yourcompany.com &rarr; customer@example.com</p>
+      <p>msg_2f9a, transactional, yourcompany.com &rarr; customer@example.com</p>
     </div>
 
     <div class="grid lg:grid-cols-[1fr_320px] gap-6 items-start">
       <div class="border overflow-hidden">
-        <ol class="" role="list">
-          <li class="flex items-start gap-4 px-5 py-3.5"><span class="tabular-nums pt-0.5 shrink-0" style="letter-spacing:0">14:32:01.042</span><div class="min-w-0"><p class="apex-em">request accepted</p><p class="mt-0.5 break-words">req_84fb&hellip;, idempotency hit: no</p></div></li>
-          <li class="flex items-start gap-4 px-5 py-3.5"><span class="tabular-nums pt-0.5 shrink-0" style="letter-spacing:0">14:32:01.048</span><div class="min-w-0"><p class="apex-em">sender validated</p><p class="mt-0.5 break-words">yourcompany.com, DKIM selector apx1</p></div></li>
-          <li class="flex items-start gap-4 px-5 py-3.5"><span class="tabular-nums pt-0.5 shrink-0" style="letter-spacing:0">14:32:01.053</span><div class="min-w-0"><p class="apex-em">message classified</p><p class="mt-0.5 break-words">transactional, priority high</p></div></li>
-          <li class="flex items-start gap-4 px-5 py-3.5"><span class="tabular-nums pt-0.5 shrink-0" style="letter-spacing:0">14:32:01.060</span><div class="min-w-0"><p class="apex-em">queued</p><p class="mt-0.5 break-words">pool tx-shared-04</p></div></li>
-          <li class="flex items-start gap-4 px-5 py-3.5"><span class="tabular-nums pt-0.5 shrink-0" style="letter-spacing:0">14:32:01.191</span><div class="min-w-0"><p class="apex-em">DKIM signed</p><p class="mt-0.5 break-words">rsa2048, selector apx1</p></div></li>
-          <li class="flex items-start gap-4 px-5 py-3.5"><span class="tabular-nums pt-0.5 shrink-0" style="letter-spacing:0">14:32:01.228</span><div class="min-w-0"><p class="apex-em">attempt 1</p><p class="mt-0.5 break-words">gmail-smtp-in.l.google.com, TLS 1.3</p></div></li>
-          <li class="flex items-start gap-4 px-5 py-3.5"><span class="tabular-nums pt-0.5 shrink-0" style="letter-spacing:0">14:32:02.011</span><div class="min-w-0"><p class="apex-em">deferred</p><p class="mt-0.5 break-words">421 4.7.0 temporary rate limit</p></div></li>
-          <li class="flex items-start gap-4 px-5 py-3.5"><span class="tabular-nums pt-0.5 shrink-0" style="letter-spacing:0">14:37:02.011</span><div class="min-w-0"><p class="apex-em">retry scheduled</p><p class="mt-0.5 break-words">backoff ladder step 2</p></div></li>
-          <li class="flex items-start gap-4 px-5 py-3.5"><span class="tabular-nums pt-0.5 shrink-0" style="letter-spacing:0">14:37:02.704</span><div class="min-w-0"><p class="apex-em">attempt 2</p><p class="mt-0.5 break-words">gmail-smtp-in.l.google.com</p></div></li>
-          <li class="flex items-start gap-4 px-5 py-3.5"><span class="tabular-nums pt-0.5 shrink-0" style="letter-spacing:0">14:37:03.019</span><div class="min-w-0"><p class="apex-em">recipient MX accepted</p><p class="mt-0.5 break-words">250 2.0.0</p></div></li>
-          <li class="flex items-start gap-4 px-5 py-3.5"><span class="tabular-nums pt-0.5 shrink-0" style="letter-spacing:0">14:37:03.045</span><div class="min-w-0"><p class="apex-em">event emitted</p><p class="mt-0.5 break-words">message.delivered</p></div></li>
-          <li class="flex items-start gap-4 px-5 py-3.5"><span class="tabular-nums pt-0.5 shrink-0" style="letter-spacing:0">14:37:03.184</span><div class="min-w-0"><p class="apex-em">webhook delivered</p><p class="mt-0.5 break-words">200, 139 ms</p></div></li>
+        <ol role="list">
+          <li class="flex items-start gap-4 px-5 py-3.5"><span class="tabular-nums pt-0.5 shrink-0">14:32:01.042</span><div class="min-w-0"><p class="apex-em">request accepted</p><p class="mt-0.5 break-words">req_84fb&hellip;, idempotency hit: no</p></div></li>
+          <li class="flex items-start gap-4 px-5 py-3.5"><span class="tabular-nums pt-0.5 shrink-0">14:32:01.048</span><div class="min-w-0"><p class="apex-em">sender validated</p><p class="mt-0.5 break-words">yourcompany.com, DKIM selector apx1</p></div></li>
+          <li class="flex items-start gap-4 px-5 py-3.5"><span class="tabular-nums pt-0.5 shrink-0">14:32:01.053</span><div class="min-w-0"><p class="apex-em">message classified</p><p class="mt-0.5 break-words">transactional, priority high</p></div></li>
+          <li class="flex items-start gap-4 px-5 py-3.5"><span class="tabular-nums pt-0.5 shrink-0">14:32:01.060</span><div class="min-w-0"><p class="apex-em">queued</p><p class="mt-0.5 break-words">pool tx-shared-04</p></div></li>
+          <li class="flex items-start gap-4 px-5 py-3.5"><span class="tabular-nums pt-0.5 shrink-0">14:32:01.191</span><div class="min-w-0"><p class="apex-em">DKIM signed</p><p class="mt-0.5 break-words">rsa2048, selector apx1</p></div></li>
+          <li class="flex items-start gap-4 px-5 py-3.5"><span class="tabular-nums pt-0.5 shrink-0">14:32:01.228</span><div class="min-w-0"><p class="apex-em">attempt 1</p><p class="mt-0.5 break-words">gmail-smtp-in.l.google.com, TLS 1.3</p></div></li>
+          <li class="flex items-start gap-4 px-5 py-3.5"><span class="tabular-nums pt-0.5 shrink-0">14:32:02.011</span><div class="min-w-0"><p class="apex-em">deferred</p><p class="mt-0.5 break-words">421 4.7.0 temporary rate limit</p></div></li>
+          <li class="flex items-start gap-4 px-5 py-3.5"><span class="tabular-nums pt-0.5 shrink-0">14:37:02.011</span><div class="min-w-0"><p class="apex-em">retry scheduled</p><p class="mt-0.5 break-words">backoff ladder step 2</p></div></li>
+          <li class="flex items-start gap-4 px-5 py-3.5"><span class="tabular-nums pt-0.5 shrink-0">14:37:02.704</span><div class="min-w-0"><p class="apex-em">attempt 2</p><p class="mt-0.5 break-words">gmail-smtp-in.l.google.com</p></div></li>
+          <li class="flex items-start gap-4 px-5 py-3.5"><span class="tabular-nums pt-0.5 shrink-0">14:37:03.019</span><div class="min-w-0"><p class="apex-em">recipient MX accepted</p><p class="mt-0.5 break-words">250 2.0.0</p></div></li>
+          <li class="flex items-start gap-4 px-5 py-3.5"><span class="tabular-nums pt-0.5 shrink-0">14:37:03.045</span><div class="min-w-0"><p class="apex-em">event emitted</p><p class="mt-0.5 break-words">message.delivered</p></div></li>
+          <li class="flex items-start gap-4 px-5 py-3.5"><span class="tabular-nums pt-0.5 shrink-0">14:37:03.184</span><div class="min-w-0"><p class="apex-em">webhook delivered</p><p class="mt-0.5 break-words">200, 139 ms</p></div></li>
         </ol>
         <div class="border-t px-5 py-3 flex flex-wrap items-center gap-x-5 gap-y-2">
           <span class="basis-full apex-em apex-section-head">Illustrative actions (not active in this static trace)</span>
@@ -43,22 +46,22 @@
       <aside class="border p-5">
         <p class="apex-meta mb-4">message context</p>
         <dl class="space-y-2.5">
-          <div class="flex items-baseline justify-between gap-3"><dt class="">Message ID</dt><dd class="tabular-nums" style="letter-spacing:0">msg_2f9a</dd></div>
-          <div class="flex items-baseline justify-between gap-3"><dt class="">Request ID</dt><dd class="tabular-nums" style="letter-spacing:0">req_84fb&hellip;</dd></div>
-          <div class="flex items-baseline justify-between gap-3"><dt class="">Stream</dt><dd class="">transactional</dd></div>
-          <div class="flex items-baseline justify-between gap-3"><dt class="">Sending domain</dt><dd class="">yourcompany.com</dd></div>
-          <div class="flex items-baseline justify-between gap-3"><dt class="">Recipient provider</dt><dd class="">gmail.com</dd></div>
-          <div class="flex items-baseline justify-between gap-3"><dt class="">Sending IP</dt><dd class="tabular-nums" style="letter-spacing:0">95.216.226.51</dd></div>
-          <div class="flex items-baseline justify-between gap-3"><dt class="">Pool</dt><dd class="">tx-shared-04</dd></div>
-          <div class="flex items-baseline justify-between gap-3"><dt class="">DKIM selector</dt><dd class="">apx1</dd></div>
-          <div class="flex items-baseline justify-between gap-3"><dt class="">SPF</dt><dd class="">pass</dd></div>
-          <div class="flex items-baseline justify-between gap-3"><dt class="">DKIM</dt><dd class="">pass</dd></div>
-          <div class="flex items-baseline justify-between gap-3"><dt class="">DMARC</dt><dd class="">pass</dd></div>
-          <div class="flex items-baseline justify-between gap-3"><dt class="">TLS</dt><dd class="tabular-nums" style="letter-spacing:0">1.3</dd></div>
-          <div class="flex items-baseline justify-between gap-3"><dt class="">Total attempts</dt><dd class="tabular-nums" style="letter-spacing:0">2</dd></div>
-          <div class="flex items-baseline justify-between gap-3"><dt class="">Queue duration</dt><dd class="tabular-nums" style="letter-spacing:0">372 ms</dd></div>
-          <div class="flex items-baseline justify-between gap-3"><dt class="">Time to MX acceptance</dt><dd class="tabular-nums" style="letter-spacing:0">5m 2s (301.98 s)</dd></div>
-          <div class="flex items-baseline justify-between gap-3"><dt class="">Webhook state</dt><dd class="">delivered, 200</dd></div>
+          <div class="flex items-baseline justify-between gap-3"><dt>Message ID</dt><dd class="tabular-nums">msg_2f9a</dd></div>
+          <div class="flex items-baseline justify-between gap-3"><dt>Request ID</dt><dd class="tabular-nums">req_84fb&hellip;</dd></div>
+          <div class="flex items-baseline justify-between gap-3"><dt>Stream</dt><dd>transactional</dd></div>
+          <div class="flex items-baseline justify-between gap-3"><dt>Sending domain</dt><dd>yourcompany.com</dd></div>
+          <div class="flex items-baseline justify-between gap-3"><dt>Recipient provider</dt><dd>gmail.com</dd></div>
+          <div class="flex items-baseline justify-between gap-3"><dt>Sending IP</dt><dd class="tabular-nums">95.216.226.51</dd></div>
+          <div class="flex items-baseline justify-between gap-3"><dt>Pool</dt><dd>tx-shared-04</dd></div>
+          <div class="flex items-baseline justify-between gap-3"><dt>DKIM selector</dt><dd>apx1</dd></div>
+          <div class="flex items-baseline justify-between gap-3"><dt>SPF</dt><dd>pass</dd></div>
+          <div class="flex items-baseline justify-between gap-3"><dt>DKIM</dt><dd>pass</dd></div>
+          <div class="flex items-baseline justify-between gap-3"><dt>DMARC</dt><dd>pass</dd></div>
+          <div class="flex items-baseline justify-between gap-3"><dt>TLS</dt><dd class="tabular-nums">1.3</dd></div>
+          <div class="flex items-baseline justify-between gap-3"><dt>Total attempts</dt><dd class="tabular-nums">2</dd></div>
+          <div class="flex items-baseline justify-between gap-3"><dt>Queue duration</dt><dd class="tabular-nums">372 ms</dd></div>
+          <div class="flex items-baseline justify-between gap-3"><dt>Time to MX acceptance</dt><dd class="tabular-nums">5m 2s (301.98 s)</dd></div>
+          <div class="flex items-baseline justify-between gap-3"><dt>Webhook state</dt><dd>delivered, 200</dd></div>
         </dl>
       </aside>
     </div>

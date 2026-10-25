@@ -1,46 +1,46 @@
 {# ── Forensic CTA ─────────────────────────────────────────────── #}
 {# Converted from forensic/ForensicCTA.tsx                       #}
+{# Tool page: paper section + container; the signup is the commercial
+   action and wears the crimson mkt CTA. The bordered box is gone. #}
 
-<section class="py-20 lg:py-32 relative">
-  <div class="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 relative">
-    <div class="border p-8 lg:p-12">
-      <div class="mb-6 apex-meta">
-        Never Debug Blind Again
+<section class="apex-mkt-section">
+  <div class="apex-mkt-container">
+    <div class="mb-6 apex-meta">
+      Never Debug Blind Again
+    </div>
+
+    <h2 class="mb-4 apex-h2">
+      Stop Guessing. Start Knowing.
+    </h2>
+    <p class="mb-10 max-w-2xl apex-em">
+      Every email you send with ApexMail includes delivery event tracking.
+      Monitor delivery status, opens, clicks, and bounces through analytics and webhooks.
+      The timeline on this page is a static example; the API Explorer runs real requests against an isolated sandbox.
+    </p>
+
+    <div class="flex flex-col sm:flex-row gap-4 mb-12">
+      <a href="{{ config.extra.app_url }}/signup" class="apex-mkt-cta--primary">
+        Start Free
+      </a>
+      {# Precise sandbox naming: the Explorer executes real sandbox requests;
+         the timeline above is a static example, not a live session. #}
+      <a href="/api-explorer/" class="apex-btn">
+        Run a request in the sandbox
+      </a>
+    </div>
+
+    <div class="grid md:grid-cols-3 gap-8 pt-10 border-t">
+      <div>
+        <div class="tabular-nums mb-1 apex-em">Events</div>
+        <div class="apex-em">Event streaming</div>
       </div>
-
-      <h2 class="mb-4 apex-h2">
-        Stop Guessing. Start Knowing.
-      </h2>
-      <p class="mb-10 max-w-2xl mx-auto apex-em">
-        Every email you send with ApexMail includes delivery event tracking.
-        Monitor delivery status, opens, clicks, and bounces through analytics and webhooks.
-        The timeline on this page is a static example; the API Explorer runs real requests against an isolated sandbox.
-      </p>
-
-      <div class="flex flex-col sm:flex-row gap-4 justify-center mb-12">
-        <a href="{{ config.extra.app_url }}/signup" class="apex-btn apex-btn--primary">
-          Start Free
-        </a>
-        {# Precise sandbox naming: the Explorer executes real sandbox requests;
-           the timeline above is a static example, not a live session. #}
-        <a href="/api-explorer/" class="apex-btn">
-          Run a request in the sandbox
-        </a>
+      <div>
+        <div class="tabular-nums mb-1 apex-em">Webhooks</div>
+        <div class="apex-em">Signed notifications</div>
       </div>
-
-      <div class="grid md:grid-cols-3 gap-8 pt-10 border-t">
-        <div>
-          <div class="tabular-nums mb-1 apex-em">Events</div>
-          <div class="apex-em">Event streaming</div>
-        </div>
-        <div>
-          <div class="tabular-nums mb-1 apex-em">Webhooks</div>
-          <div class="apex-em">Signed notifications</div>
-        </div>
-        <div>
-          <div class="tabular-nums mb-1 apex-em">ClickHouse</div>
-          <div class="apex-em">Analytics engine</div>
-        </div>
+      <div>
+        <div class="tabular-nums mb-1 apex-em">ClickHouse</div>
+        <div class="apex-em">Analytics engine</div>
       </div>
     </div>
   </div>

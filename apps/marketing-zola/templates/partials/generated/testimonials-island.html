@@ -14,8 +14,8 @@
 {# All cards visible in horizontal scroll container.               #}
 {# Uses CSS scroll-snap for smooth swiping on mobile/desktop.     #}
 
-<section class="py-20 lg:py-32 relative overflow-hidden" role="region" aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]["a11y"] and i18n_data[l]["a11y"]["platform_capabilities"] %}{{ i18n_data[l]["a11y"]["platform_capabilities"] }}{% else %}Platform capabilities{% endif %}">
-  <div class="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+<section class="apex-mkt-section" role="region" aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]["a11y"] and i18n_data[l]["a11y"]["platform_capabilities"] %}{{ i18n_data[l]["a11y"]["platform_capabilities"] }}{% else %}Platform capabilities{% endif %}">
+  <div class="apex-mkt-container">
     <div class="mb-12">
       <h2 class="apex-h2 mb-4">
         <span class="">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_testimonials"] and i18n_data[l]["home_testimonials"]["heading_1"] %}{{ i18n_data[l]["home_testimonials"]["heading_1"] }}{% else %}Built for{% endif %}</span>

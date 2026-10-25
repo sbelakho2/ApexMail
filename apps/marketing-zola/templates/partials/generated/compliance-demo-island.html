@@ -2,141 +2,137 @@
 {# Shows audit trail, RTBF workflow, and the processing-basis ledger as static #}
 {# content. The interactive search/filter from JS is replaced     #}
 {# with a pre-rendered sample view.                                #}
+{# ARK alignment: trust-mode paper section + container; icon SVGs
+   deleted; the tables keep apex-table with their own rules and
+   keyboard-reachable scroll regions; every honesty label is kept
+   byte-for-byte. #}
 
-<section class="py-20 lg:py-32 relative" id="compliance-demo">
-  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+<section class="apex-mkt-section" id="compliance-demo">
+  <div class="apex-mkt-container">
     <div class="mb-16">
-      <div class="inline-flex items-center gap-2 px-3 py-1.5 border mb-6 apex-em">
-        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-        Built-In Compliance
-      </div>
+      <span class="apex-section-label">Built-In Compliance</span>
       <h2 class="mb-6 apex-h2">Enterprise Compliance Workflows</h2>
-      <p class="max-w-2xl mx-auto">Track audit events, manage DSR requests, and record processing bases through the compliance workflow APIs and audit-capable plans.</p>
+      <p class="max-w-2xl">Track audit events, manage DSR requests, and record processing bases through the compliance workflow APIs and audit-capable plans.</p>
       <p class="mt-4 inline-block border px-3 py-1.5 apex-em">Illustrative sample — not account evidence or a generated review pack</p>
     </div>
 
     {# ── Questionnaire Automation ──────────────────────────── #}
     <div class="mb-16">
-      <h3 class="mb-6 flex items-center gap-2 apex-h3">
-        <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="16" y2="17"/></svg>
-        Questionnaire Automation
-      </h3>
+      <h3 class="mb-6 apex-h3">Questionnaire Automation</h3>
       <p class="mb-4">Illustrative mapping only. Questionnaire answers and any security-review material are reviewed case by case from current documentation; no standardized SIG, CAIQ, or HECVAT pack is a product entitlement.</p>
-      <div class="border overflow-hidden">
-        <div class="overflow-x-auto">
-          <table class="w-full apex-table">
-            <thead>
-              <tr class="border-b">
-                <th class="px-6 py-3">Framework</th>
-                <th class="px-6 py-3">Generated Output</th>
-                <th class="px-6 py-3">Evidence Sources</th>
-                <th class="px-6 py-3">Audit Artifact</th>
-              </tr>
-            </thead>
-            <tbody class="">
-              <tr>
-                <td class="px-6 py-3 apex-em">SIG</td>
-                <td class="px-6 py-3">Normalized answer pack</td>
-                <td class="px-6 py-3">Security control mapping, current documentation, and incident information</td>
-                <td class="px-6 py-3"><span class="inline-flex items-center px-2 py-0.5 apex-em">SHA-256 hash</span></td>
-              </tr>
-              <tr>
-                <td class="px-6 py-3 apex-em">CAIQ</td>
-                <td class="px-6 py-3">Cloud-control mapped answers</td>
-                <td class="px-6 py-3">Access, encryption, logging, subprocessors</td>
-                <td class="px-6 py-3"><span class="inline-flex items-center px-2 py-0.5 apex-em">Evidence manifest</span></td>
-              </tr>
-              <tr>
-                <td class="px-6 py-3 apex-em">HECVAT</td>
-                <td class="px-6 py-3">Higher-ed security review pack</td>
-                <td class="px-6 py-3">Privacy, consent, continuity, and current service-status information</td>
-                <td class="px-6 py-3"><span class="inline-flex items-center px-2 py-0.5 apex-em">Markdown report</span></td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
+      <div class="overflow-x-auto" role="region" tabindex="0" aria-label="Illustrative questionnaire automation mapping table — scroll horizontally to see every column">
+        <table class="w-full apex-table">
+          <caption class="sr-only">Illustrative questionnaire automation mapping.</caption>
+          <thead>
+            <tr>
+              <th scope="col">Framework</th>
+              <th scope="col">Generated Output</th>
+              <th scope="col">Evidence Sources</th>
+              <th scope="col">Audit Artifact</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <th scope="row" class="apex-em">SIG</th>
+              <td>Normalized answer pack</td>
+              <td>Security control mapping, current documentation, and incident information</td>
+              <td><span class="apex-em">SHA-256 hash</span></td>
+            </tr>
+            <tr>
+              <th scope="row" class="apex-em">CAIQ</th>
+              <td>Cloud-control mapped answers</td>
+              <td>Access, encryption, logging, subprocessors</td>
+              <td><span class="apex-em">Evidence manifest</span></td>
+            </tr>
+            <tr>
+              <th scope="row" class="apex-em">HECVAT</th>
+              <td>Higher-ed security review pack</td>
+              <td>Privacy, consent, continuity, and current service-status information</td>
+              <td><span class="apex-em">Markdown report</span></td>
+            </tr>
+          </tbody>
+        </table>
       </div>
     </div>
 
     {# ── Audit Trail ──────────────────────────── #}
     <div class="mb-16">
-      <h3 class="mb-6 flex items-center gap-2 apex-h3">
-        <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
-        Audit Trail
-      </h3>
+      <h3 class="mb-6 apex-h3">Audit Trail</h3>
       <p class="mb-4">Sample rows shown with placeholder tenants and addresses.</p>
-      <div class="border overflow-hidden">
-        <div class="overflow-x-auto">
-          <table class="w-full apex-table">
-            <thead>
-              <tr class="border-b">
-                <th class="px-6 py-3">Timestamp</th>
-                <th class="px-6 py-3">Actor</th>
-                <th class="px-6 py-3">Action</th>
-                <th class="px-6 py-3">Resource</th>
-                <th class="px-6 py-3">IP Address</th>
-              </tr>
-            </thead>
-            <tbody class="">
-              <tr>
-                <td class="px-6 py-3 tabular-nums">2025-01-15 14:23:01 UTC</td>
-                <td class="px-6 py-3 apex-em">admin@acme.com</td>
-                <td class="px-6 py-3"><span class="inline-flex items-center px-2 py-0.5 apex-em">api_key.create</span></td>
-                <td class="px-6 py-3">key_prod_****7f2a</td>
-                <td class="px-6 py-3 tabular-nums">203.0.113.42</td>
-              </tr>
-              <tr>
-                <td class="px-6 py-3 tabular-nums">2025-01-15 14:18:33 UTC</td>
-                <td class="px-6 py-3 apex-em">ops@acme.com</td>
-                <td class="px-6 py-3"><span class="inline-flex items-center px-2 py-0.5 apex-em">domain.verify</span></td>
-                <td class="px-6 py-3">mail.acme.com</td>
-                <td class="px-6 py-3 tabular-nums">198.51.100.8</td>
-              </tr>
-              <tr>
-                <td class="px-6 py-3 tabular-nums">2025-01-15 13:55:12 UTC</td>
-                <td class="px-6 py-3 apex-em">dpo@acme.com</td>
-                <td class="px-6 py-3"><span class="inline-flex items-center px-2 py-0.5 apex-em">rtbf.execute</span></td>
-                <td class="px-6 py-3">user_****3e9f</td>
-                <td class="px-6 py-3 tabular-nums">192.0.2.17</td>
-              </tr>
-              <tr>
-                <td class="px-6 py-3 tabular-nums">2025-01-15 13:41:07 UTC</td>
-                <td class="px-6 py-3 apex-em">system</td>
-                <td class="px-6 py-3"><span class="inline-flex items-center px-2 py-0.5 apex-em">webhook.deliver</span></td>
-                <td class="px-6 py-3">wh_****a1b2</td>
-                <td class="px-6 py-3 tabular-nums">—</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
+      <div class="overflow-x-auto" role="region" tabindex="0" aria-label="Illustrative audit trail sample table — scroll horizontally to see every column">
+        <table class="w-full apex-table">
+          <caption class="sr-only">Illustrative audit trail sample rows.</caption>
+          <thead>
+            <tr>
+              <th scope="col">Timestamp</th>
+              <th scope="col">Actor</th>
+              <th scope="col">Action</th>
+              <th scope="col">Resource</th>
+              <th scope="col">IP Address</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td class="tabular-nums">2025-01-15 14:23:01 UTC</td>
+              <td class="apex-em">admin@acme.com</td>
+              <td><span class="apex-em">api_key.create</span></td>
+              <td>key_prod_****7f2a</td>
+              <td class="tabular-nums">203.0.113.42</td>
+            </tr>
+            <tr>
+              <td class="tabular-nums">2025-01-15 14:18:33 UTC</td>
+              <td class="apex-em">ops@acme.com</td>
+              <td><span class="apex-em">domain.verify</span></td>
+              <td>mail.acme.com</td>
+              <td class="tabular-nums">198.51.100.8</td>
+            </tr>
+            <tr>
+              <td class="tabular-nums">2025-01-15 13:55:12 UTC</td>
+              <td class="apex-em">dpo@acme.com</td>
+              <td><span class="apex-em">rtbf.execute</span></td>
+              <td>user_****3e9f</td>
+              <td class="tabular-nums">192.0.2.17</td>
+            </tr>
+            <tr>
+              <td class="tabular-nums">2025-01-15 13:41:07 UTC</td>
+              <td class="apex-em">system</td>
+              <td><span class="apex-em">webhook.deliver</span></td>
+              <td>wh_****a1b2</td>
+              <td class="tabular-nums">—</td>
+            </tr>
+          </tbody>
+        </table>
       </div>
     </div>
 
     {# ── RTBF (Right to Be Forgotten) ─────────── #}
     <div class="mb-16">
-      <h3 class="mb-6 flex items-center gap-2 apex-h3">
-        <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>
-        Right to Be Forgotten (RTBF)
-      </h3>
-      <div class="border p-8">
-        <div class="grid md:grid-cols-4 gap-6">
-          <div class="">
-            <div class="w-10 h-10 flex items-center justify-center mx-auto mb-3 apex-em">1</div>
+      <h3 class="mb-6 apex-h3">Right to Be Forgotten (RTBF)</h3>
+      <div class="apex-ledger--indexed">
+        <div>
+          <span class="apex-index">01</span>
+          <div>
             <div class="apex-em">Request</div>
             <p class="mt-1">Data subject submits erasure request via API or dashboard</p>
           </div>
-          <div class="">
-            <div class="w-10 h-10 flex items-center justify-center mx-auto mb-3 apex-em">2</div>
+        </div>
+        <div>
+          <span class="apex-index">02</span>
+          <div>
             <div class="apex-em">Verify</div>
             <p class="mt-1">Identity verification and scope confirmation</p>
           </div>
-          <div class="">
-            <div class="w-10 h-10 flex items-center justify-center mx-auto mb-3 apex-em">3</div>
+        </div>
+        <div>
+          <span class="apex-index">03</span>
+          <div>
             <div class="apex-em">Execute</div>
             <p class="mt-1">Execute scoped erasure across configured data stores</p>
           </div>
-          <div class="">
-            <div class="w-10 h-10 flex items-center justify-center mx-auto mb-3 apex-em">4</div>
+        </div>
+        <div>
+          <span class="apex-index">04</span>
+          <div>
             <div class="apex-em">Record</div>
             <p class="mt-1">Log completion evidence for compliance review</p>
           </div>
@@ -146,47 +142,43 @@
 
     {# ── Processing Basis Ledger (review §44): per-purpose lawful-basis records #}
     <div>
-      <h3 class="mb-6 flex items-center gap-2 apex-h3">
-        <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-        Processing Basis Ledger
-      </h3>
-      <div class="border overflow-hidden">
-        <div class="overflow-x-auto">
-          <table class="w-full apex-table">
-            <thead>
-              <tr class="border-b">
-                <th class="px-6 py-3">Subject</th>
-                <th class="px-6 py-3">Purpose</th>
-                <th class="px-6 py-3">Lawful basis</th>
-                <th class="px-6 py-3">Evidence</th>
-                <th class="px-6 py-3">Recorded</th>
-              </tr>
-            </thead>
-            <tbody class="">
-              <tr>
-                <td class="px-6 py-3 apex-em">user_****3e9f</td>
-                <td class="px-6 py-3">Account security notification</td>
-                <td class="px-6 py-3 apex-em">Contract</td>
-                <td class="px-6 py-3">account registration</td>
-                <td class="px-6 py-3 tabular-nums">2024-06-01</td>
-              </tr>
-              <tr>
-                <td class="px-6 py-3 apex-em">user_****a1b2</td>
-                <td class="px-6 py-3">Newsletter</td>
-                <td class="px-6 py-3 apex-em">Consent (revoked)</td>
-                <td class="px-6 py-3">signup-form-17</td>
-                <td class="px-6 py-3 tabular-nums">2024-03-15</td>
-              </tr>
-              <tr>
-                <td class="px-6 py-3 apex-em">user_****7f2a</td>
-                <td class="px-6 py-3">Service updates</td>
-                <td class="px-6 py-3 apex-em">Legitimate interests</td>
-                <td class="px-6 py-3">terms acceptance v3</td>
-                <td class="px-6 py-3 tabular-nums">2024-09-20</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
+      <h3 class="mb-6 apex-h3">Processing Basis Ledger</h3>
+      <div class="overflow-x-auto" role="region" tabindex="0" aria-label="Illustrative processing basis ledger — scroll horizontally to see every column">
+        <table class="w-full apex-table">
+          <caption class="sr-only">Illustrative per-purpose lawful-basis records.</caption>
+          <thead>
+            <tr>
+              <th scope="col">Subject</th>
+              <th scope="col">Purpose</th>
+              <th scope="col">Lawful basis</th>
+              <th scope="col">Evidence</th>
+              <th scope="col">Recorded</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td class="apex-em">user_****3e9f</td>
+              <td>Account security notification</td>
+              <td class="apex-em">Contract</td>
+              <td>account registration</td>
+              <td class="tabular-nums">2024-06-01</td>
+            </tr>
+            <tr>
+              <td class="apex-em">user_****a1b2</td>
+              <td>Newsletter</td>
+              <td class="apex-em">Consent (revoked)</td>
+              <td>signup-form-17</td>
+              <td class="tabular-nums">2024-03-15</td>
+            </tr>
+            <tr>
+              <td class="apex-em">user_****7f2a</td>
+              <td>Service updates</td>
+              <td class="apex-em">Legitimate interests</td>
+              <td>terms acceptance v3</td>
+              <td class="tabular-nums">2024-09-20</td>
+            </tr>
+          </tbody>
+        </table>
       </div>
     </div>
   </div>

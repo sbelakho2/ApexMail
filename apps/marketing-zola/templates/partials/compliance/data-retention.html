@@ -2,57 +2,50 @@
 {# Anchored section: the privacy policy links to /compliance/#data-retention #}
 {# (all locales). Static, zero-JS; mirrors the canonical retention table.   #}
 
-<section id="data-retention" class="py-20 lg:py-32 border-t">
-  <div class="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8">
-    <div class="">
-      <div class="inline-flex items-center gap-2 px-3 py-1.5 border mb-6 apex-em">
-        <svg class="w-4 h-4" role="img" aria-label="Data retention policy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-        Data Retention Policy
-      </div>
-      <h2 class="mb-6 break-words apex-h2">
-        How long we keep your data
-      </h2>
-      <p class="mb-10">
-        We retain personal data only as long as necessary for the purposes it
-        was collected. Retention windows per data category are summarized
-        below; Enterprise contracts can extend event and email-content
-        retention as described in your agreement.
-      </p>
-    </div>
+<section id="data-retention" class="apex-mkt-section apex-mkt-section--dense scroll-mt-20">
+  <div class="apex-mkt-container">
+    <span class="apex-section-label">Data Retention Policy</span>
+    <h2 class="break-words apex-h2">
+      How long we keep your data
+    </h2>
+    <p class="apex-lead">
+      We retain personal data only as long as necessary for the purposes it
+      was collected. Retention windows per data category are summarized
+      below; Enterprise contracts can extend event and email-content
+      retention as described in your agreement.
+    </p>
 
-    <div class="overflow-x-auto border">
-      <table class="w-full border-collapse min-w-[600px] apex-table">
-        <caption class="sr-only">ApexMail data retention periods by data category.</caption>
-        <thead class="">
-          <tr>
-            <th scope="col" class="py-4 px-6 border-b border-r">Data Category</th>
-            <th scope="col" class="py-4 px-6 border-b">Retention Period</th>
-          </tr>
-        </thead>
-        <tbody class="">
-          <tr class="">
-            <th scope="row" class="py-4 px-6 border-b border-r">Account data</th>
-            <td class="py-4 px-6 border-b break-words">Duration of contract + 30 days</td>
-          </tr>
-          <tr class="">
-            <th scope="row" class="py-4 px-6 border-b border-r">Billing records</th>
-            <td class="py-4 px-6 border-b break-words">7 years (Estonian accounting law)</td>
-          </tr>
-          <tr class="">
-            <th scope="row" class="py-4 px-6 border-b border-r">Email content</th>
-            <td class="py-4 px-6 border-b break-words">7 days by default (plan-dependent, up to 730 days for Enterprise)</td>
-          </tr>
-          <tr class="">
-            <th scope="row" class="py-4 px-6 border-b border-r">Event logs</th>
-            <td class="py-4 px-6 border-b break-words">30 days by default (7 days on the Free plan); plan-dependent, up to 730 days for Enterprise</td>
-          </tr>
-          <tr class="">
-            <th scope="row" class="py-4 px-6 border-b border-r">Support tickets</th>
-            <td class="py-4 px-6 break-words">2 years after resolution</td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
+    <table class="apex-table">
+      <caption class="sr-only">ApexMail data retention periods by data category.</caption>
+      <thead>
+        <tr>
+          <th scope="col">Data Category</th>
+          <th scope="col">Retention Period</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <th scope="row">Account data</th>
+          <td class="break-words">Duration of contract + 30 days</td>
+        </tr>
+        <tr>
+          <th scope="row">Billing records</th>
+          <td class="break-words">7 years (Estonian accounting law)</td>
+        </tr>
+        <tr>
+          <th scope="row">Email content</th>
+          <td class="break-words">7 days by default (plan-dependent, up to 730 days for Enterprise)</td>
+        </tr>
+        <tr>
+          <th scope="row">Event logs</th>
+          <td class="break-words">30 days by default (7 days on the Free plan); plan-dependent, up to 730 days for Enterprise</td>
+        </tr>
+        <tr>
+          <th scope="row">Support tickets</th>
+          <td class="break-words">2 years after resolution</td>
+        </tr>
+      </tbody>
+    </table>
 
     <p class="mt-6">
       Retention is enforced by automated job schedules; deletions are recorded

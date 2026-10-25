@@ -31,8 +31,9 @@
   "Paid-plan changes start from the billing settings in the console. A plan changes only once its Mollie payment settles and ApexMail has fetched and verified it through the API; the webhook carries only the payment id. Enterprise annual contracts follow the signed order form and service terms."
 ] %}
 
-<section id="pricing-faq" class="scroll-mt-20 py-20 lg:py-32">
-  <div class="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8">
+<section id="pricing-faq" class="scroll-mt-20 apex-mkt-section">
+  <div class="apex-mkt-container">
+    <div class="max-w-3xl">
     <div class="mb-16">
       <h2 class="apex-h2">
         {% if i18n_data and i18n_data[l] and i18n_data[l]["pricing_faq"] and i18n_data[l]["pricing_faq"]["title"] %}{{ i18n_data[l]["pricing_faq"]["title"] }}{% else %}Frequently Asked Questions{% endif %}
@@ -58,6 +59,7 @@
       </details>
       {% endfor %}
 
+    </div>
     </div>
   </div>
 </section>

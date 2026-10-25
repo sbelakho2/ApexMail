@@ -10,6 +10,10 @@
 {# scroll region is keyboard reachable (tabindex="0" + role +    #}
 {# aria-label) and the methodology/sources blocks live OUTSIDE   #}
 {# the constrained scroller so they wrap and print normally.     #}
+{# ARK comparison primitive: the scroll wrapper is .apex-comparison #}
+{# (it owns the border); the ApexMail column carries the pale    #}
+{# crimson wash + 3px top edge via __ours/--head — no winner or  #}
+{# loser colours anywhere.                                       #}
 
 {% set competitor_name = page.extra.competitor_name | default(value="the alternative") %}
 {# NOTE: the winner badges (macros::winner_badge) are deliberately NOT
@@ -17,11 +21,11 @@
    instead of superiority labels. The macro remains a supported export and
    now takes localized tie/unavailable labels for any future caller. #}
 
-<section id="comparison" class="scroll-mt-20 py-20 lg:py-32">
-  <div class="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8">
+<section id="comparison" class="apex-mkt-section scroll-mt-20">
+  <div class="apex-mkt-container">
     {% if page.extra.comparison_sections %}
     <div
-      class="border overflow-x-auto"
+      class="apex-comparison overflow-x-auto"
       role="region"
       tabindex="0"
       aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['comparison_scroll'] %}{{ i18n_data[l]['a11y']['comparison_scroll'] }}{% else %}Comparison table — scroll horizontally to see every column{% endif %}"
@@ -30,26 +34,21 @@
         <caption class="sr-only">{% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['comparison_caption'] %}{{ i18n_data[l]['a11y']['comparison_caption'] }}{% else %}Feature comparison between ApexMail and {{ competitor_name }}.{% endif %}</caption>
         <thead>
           <tr class="border-b">
-            <th scope="col" class="px-6 py-4">{% if i18n_data and i18n_data[l] and i18n_data[l]['compare'] and i18n_data[l]['compare']['feature'] %}{{ i18n_data[l]['compare']['feature'] }}{% else %}Feature{% endif %}</th>
-            <th scope="col" class="px-6 py-4">
-              <span class="inline-flex items-center justify-center gap-2">
-                <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9H4.5a2.5 2.5 0 0 1 0-5C7 4 9 8 12 8s5-4 7.5-4a2.5 2.5 0 0 1 0 5H18"/><path d="M18 15h1.5a2.5 2.5 0 0 0 0-5H18"/><path d="M6 15H4.5a2.5 2.5 0 0 0 0 5H6"/><path d="M18 15h1.5a2.5 2.5 0 0 1 0 5H18"/><line x1="6" y1="9" x2="6" y2="15"/><line x1="18" y1="9" x2="18" y2="15"/><line x1="6" y1="15" x2="18" y2="15"/><line x1="6" y1="9" x2="18" y2="9"/></svg>
-                ApexMail
-              </span>
-            </th>
-            <th scope="col" class="px-6 py-4">{{ competitor_name }}</th>
+            <th scope="col">{% if i18n_data and i18n_data[l] and i18n_data[l]['compare'] and i18n_data[l]['compare']['feature'] %}{{ i18n_data[l]['compare']['feature'] }}{% else %}Feature{% endif %}</th>
+            <th scope="col" class="apex-comparison__ours--head">ApexMail</th>
+            <th scope="col">{{ competitor_name }}</th>
           </tr>
         </thead>
-        <tbody class="">
+        <tbody>
           {% for section in page.extra.comparison_sections %}
           <tr>
-            <th scope="colgroup" colspan="3" class="px-6 py-3 border-b">{{ section.title }}</th>
+            <th scope="colgroup" colspan="3">{{ section.title }}</th>
           </tr>
           {% for row in section.rows %}
           <tr class="border-b">
-            <th scope="row" class="px-6 py-4 align-middle min-w-0 break-words">{{ row.feature }}</th>
-            <td class="px-6 py-4 align-middle min-w-0 break-words">{{ row.apex | safe }}</td>
-            <td class="px-6 py-4 align-middle min-w-0 break-words">{{ row.comp | safe }}</td>
+            <th scope="row" class="apex-comparison__criterion align-middle min-w-0 break-words">{{ row.feature }}</th>
+            <td class="apex-comparison__ours align-middle min-w-0 break-words">{{ row.apex | safe }}</td>
+            <td class="align-middle min-w-0 break-words">{{ row.comp | safe }}</td>
           </tr>
           {% endfor %}
           {% endfor %}
@@ -58,7 +57,7 @@
     </div>
     {% else %}
     <div
-      class="border overflow-x-auto"
+      class="apex-comparison overflow-x-auto"
       role="region"
       tabindex="0"
       aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['comparison_scroll'] %}{{ i18n_data[l]['a11y']['comparison_scroll'] }}{% else %}Comparison table — scroll horizontally to see every column{% endif %}"

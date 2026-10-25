@@ -6,8 +6,9 @@
 {# does a normal form submission and the Rust server does all the    #}
 {# math.                                                              #}
 
-<section class="apex-mkt-section" id="calculator">
-  <div class="max-w-5xl mx-auto">
+<section class="apex-mkt-section apex-mkt-section--ink" id="calculator">
+  <div class="apex-mkt-container">
+    <div class="max-w-5xl">
     <div class="apex-section-head">
       <h2 class="apex-h2">
         {% if i18n_data and i18n_data[l] and i18n_data[l]["home_pricing_island"] and i18n_data[l]["home_pricing_island"]["pricing_island_heading_1"] %}{{ i18n_data[l]["home_pricing_island"]["pricing_island_heading_1"] }}{% else %}Pricing that scales with you{% endif %}
@@ -85,7 +86,7 @@
 
           {# submit — the Rust backend does the rest #}
           <div class="sm:col-span-2 lg:col-span-3 flex flex-col items-start gap-3 pt-4">
-            <button type="submit" class="apex-btn apex-btn--primary">
+            <button type="submit" class="apex-mkt-cta--primary">
               {% if i18n_data and i18n_data[l] and i18n_data[l]["calculator"] and i18n_data[l]["calculator"]["compute"] %}{{ i18n_data[l]["calculator"]["compute"] }}{% else %}Compute my price{% endif %}
             </button>
             <p class="apex-help">

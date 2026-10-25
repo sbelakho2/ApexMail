@@ -1,15 +1,15 @@
 {# ── Deployment Options (CSS radio tabs, zero JS) ────────────── #}
 {# Uses radio inputs + :checked CSS selector to show/hide panels. #}
+{# ARK architecture rhythm: stage 02 of the deployment flow; wrapper
+   aligned with the page section/container pattern; decorative icon
+   SVGs removed; component lists render as indexed ledger rows. #}
 
-<section id="deployment-options" class="scroll-mt-20 py-20 lg:py-32 relative">
-  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+<section id="deployment-options" class="apex-mkt-section scroll-mt-20">
+  <div class="apex-mkt-container">
     <div class="mb-16">
-      <div class="inline-flex items-center gap-2 px-3 py-1.5 border mb-6 apex-em">
-        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="8" x="2" y="2" rx="0" ry="0"/><rect width="20" height="8" x="2" y="14" rx="0" ry="0"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/></svg>
-        Deployment Options
-      </div>
+      <span class="apex-section-label"><span class="apex-index">02</span> Deployment models</span>
       <h2 class="mb-6 apex-h2">Deployment Options</h2>
-      <p class="max-w-2xl mx-auto">Start on shared cloud, then review dedicated and custom deployment models when your security and compliance requirements call for them.</p>
+      <p class="apex-lead">Start on shared cloud, then review dedicated and custom deployment models when your security and compliance requirements call for them.</p>
     </div>
 
     {# A real fieldset/legend groups the radio tab set for assistive tech; the
@@ -26,19 +26,15 @@
     {# Tab buttons #}
     <div class="apex-tabs flex flex-wrap justify-center gap-2 mb-10">
       <label for="deploy-shared" class="flex items-center gap-2 px-6 py-3 border apex-em apex-label">
-        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></svg>
         Shared Cloud
       </label>
       <label for="deploy-dedicated" class="flex items-center gap-2 px-6 py-3 border apex-em apex-label">
-        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 8V4a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v4M4 8v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8M4 8h16M9 12h6"/></svg>
         Dedicated
       </label>
       <label for="deploy-private" class="flex items-center gap-2 px-6 py-3 border apex-em apex-label">
-        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="11" width="18" height="11" rx="0" ry="0"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
         Private Cloud
       </label>
       <label for="deploy-byoc" class="flex items-center gap-2 px-6 py-3 border apex-em apex-label">
-        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
         BYOC
       </label>
     </div>
@@ -59,23 +55,11 @@
           </div>
           <div>
             <div class="mb-6 apex-em">Included Components</div>
-            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div class="flex items-center gap-3">
-                <svg class="w-5 h-5 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-                <span>Shared SMTP &amp; API</span>
-              </div>
-              <div class="flex items-center gap-3">
-                <svg class="w-5 h-5 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-                <span>EEA shared infrastructure</span>
-              </div>
-              <div class="flex items-center gap-3">
-                <svg class="w-5 h-5 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-                <span>DKIM/SPF/DMARC</span>
-              </div>
-              <div class="flex items-center gap-3">
-                <svg class="w-5 h-5 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-                <span>Webhooks &amp; analytics</span>
-              </div>
+            <div class="apex-ledger--indexed">
+              <div><span class="apex-index">01</span><div><span>Shared SMTP &amp; API</span></div></div>
+              <div><span class="apex-index">02</span><div><span>EEA shared infrastructure</span></div></div>
+              <div><span class="apex-index">03</span><div><span>DKIM/SPF/DMARC</span></div></div>
+              <div><span class="apex-index">04</span><div><span>Webhooks &amp; analytics</span></div></div>
             </div>
           </div>
         </div>
@@ -95,23 +79,11 @@
           </div>
           <div>
             <div class="mb-6 apex-em">Included Components</div>
-            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div class="flex items-center gap-3">
-                <svg class="w-5 h-5 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-                <span>Dedicated IPs</span>
-              </div>
-              <div class="flex items-center gap-3">
-                <svg class="w-5 h-5 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-                <span>Isolated queues</span>
-              </div>
-              <div class="flex items-center gap-3">
-                <svg class="w-5 h-5 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-                <span>Custom DKIM signing</span>
-              </div>
-              <div class="flex items-center gap-3">
-                <svg class="w-5 h-5 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-                <span>Priority support</span>
-              </div>
+            <div class="apex-ledger--indexed">
+              <div><span class="apex-index">01</span><div><span>Dedicated IPs</span></div></div>
+              <div><span class="apex-index">02</span><div><span>Isolated queues</span></div></div>
+              <div><span class="apex-index">03</span><div><span>Custom DKIM signing</span></div></div>
+              <div><span class="apex-index">04</span><div><span>Priority support</span></div></div>
             </div>
           </div>
         </div>
@@ -131,23 +103,11 @@
           </div>
           <div>
             <div class="mb-6 apex-em">Included Components</div>
-            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div class="flex items-center gap-3">
-                <svg class="w-5 h-5 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-                <span>Scoped isolation model</span>
-              </div>
-              <div class="flex items-center gap-3">
-                <svg class="w-5 h-5 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-                <span>Encryption at rest</span>
-              </div>
-              <div class="flex items-center gap-3">
-                <svg class="w-5 h-5 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-                <span>Current compliance review</span>
-              </div>
-              <div class="flex items-center gap-3">
-                <svg class="w-5 h-5 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-                <span>Dedicated account team</span>
-              </div>
+            <div class="apex-ledger--indexed">
+              <div><span class="apex-index">01</span><div><span>Scoped isolation model</span></div></div>
+              <div><span class="apex-index">02</span><div><span>Encryption at rest</span></div></div>
+              <div><span class="apex-index">03</span><div><span>Current compliance review</span></div></div>
+              <div><span class="apex-index">04</span><div><span>Dedicated account team</span></div></div>
             </div>
           </div>
         </div>
@@ -167,23 +127,11 @@
           </div>
           <div>
             <div class="mb-6 apex-em">Included Components</div>
-            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div class="flex items-center gap-3">
-                <svg class="w-5 h-5 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-                <span>Helm charts</span>
-              </div>
-              <div class="flex items-center gap-3">
-                <svg class="w-5 h-5 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-                <span>Restricted-network review</span>
-              </div>
-              <div class="flex items-center gap-3">
-                <svg class="w-5 h-5 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-                <span>KMS integration review</span>
-              </div>
-              <div class="flex items-center gap-3">
-                <svg class="w-5 h-5 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-                <span>Named escalation path</span>
-              </div>
+            <div class="apex-ledger--indexed">
+              <div><span class="apex-index">01</span><div><span>Helm charts</span></div></div>
+              <div><span class="apex-index">02</span><div><span>Restricted-network review</span></div></div>
+              <div><span class="apex-index">03</span><div><span>KMS integration review</span></div></div>
+              <div><span class="apex-index">04</span><div><span>Named escalation path</span></div></div>
             </div>
           </div>
         </div>

@@ -1,26 +1,25 @@
 {# ── Status Subscribe ─────────────────────────────────────────── #}
 {# Converted from status/StatusSubscribe.tsx                      #}
+{# ARK alignment: dense tool section + container. The status vhost
+   serves NO /subscribe/email and NO /feed (verified 404, 2026-09-10,
+   deploy/tests/broken-links.sh finding) — the old CTAs promised channels
+   that do not exist. Link what is real: the live status page and the
+   public status JSON. #}
 
-<section class="py-12 border-t">
-  <div class="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8">
+<section class="apex-mkt-section apex-mkt-section--dense">
+  <div class="apex-mkt-container">
     <div class="flex flex-col sm:flex-row items-center justify-between gap-6">
       <div>
         <h3 class="mb-1 apex-h3">Check service status</h3>
-        <p class="">
+        <p>
           These links open the live status page and its JSON feed. They do not subscribe you to notifications.
         </p>
       </div>
-      {# The status vhost serves NO /subscribe/email and NO /feed (verified
-         404, 2026-09-10, deploy/tests/broken-links.sh finding) — the old
-         CTAs promised channels that do not exist. Link what is real: the
-         live status page and the public status JSON. #}
       <div class="flex flex-col sm:flex-row gap-3 w-full sm:w-auto">
-        <a href="{{ config.extra.status_url }}/status" class="inline-flex items-center gap-2 px-6 py-3 apex-btn">
-          <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+        <a href="{{ config.extra.status_url }}/status" class="apex-btn">
           Live Status
         </a>
-        <a href="{{ config.extra.status_api_url }}" class="inline-flex items-center gap-2 px-6 py-3 apex-btn">
-          <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11a9 9 0 0 1 9 9"/><path d="M4 4a16 16 0 0 1 16 16"/><circle cx="5" cy="19" r="1"/></svg>
+        <a href="{{ config.extra.status_api_url }}" class="apex-btn">
           Status JSON
         </a>
       </div>

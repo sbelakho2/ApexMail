@@ -4,32 +4,35 @@
 {#   page.extra.competitor_description                           #}
 {# Localized shared UI via data/i18n.json keys (compare.*) with  #}
 {# inline English fallbacks — see the report for the new keys.   #}
+{# ARK hero system: left-aligned copy (kicker, title, lead,      #}
+{# actions); the geometry and the 3px bottom edge live in ark.css. #}
 {% set competitor_name = page.extra.competitor_name | default(value="this provider") %}
 
-<section class="relative pt-32 pb-20 overflow-hidden border-b">
+<section class="apex-mkt-hero">
+  <div class="apex-mkt-container">
+    <div class="apex-mkt-hero__layout">
+      <div class="apex-mkt-hero__copy">
+        <span class="apex-mkt-kicker">
+          {% if i18n_data and i18n_data[l] and i18n_data[l]["compare"] and i18n_data[l]["compare"]["hero_badge"] %}{{ i18n_data[l]["compare"]["hero_badge"] }}{% else %}Feature Comparison{% endif %}
+        </span>
 
-  <div class="relative max-w-5xl mx-auto px-4 sm:px-6 lg:px-8">
-    <div class="">
-      <p class="mb-6 apex-meta">
-        {% if i18n_data and i18n_data[l] and i18n_data[l]["compare"] and i18n_data[l]["compare"]["hero_badge"] %}{{ i18n_data[l]["compare"]["hero_badge"] }}{% else %}Feature Comparison{% endif %}
-      </p>
+        <h1 class="apex-mkt-hero__title break-words">
+          <span>ApexMail</span>
+          <span class="mx-2 sm:mx-4">vs</span>
+          <span>{{ competitor_name }}</span>
+        </h1>
 
-      <h1 class="mb-6 apex-page-title">
-        <span class="">ApexMail</span>
-        <span class="mx-2 sm:mx-4">vs</span>
-        <span class="">{{ competitor_name }}</span>
-      </h1>
+        <p class="apex-mkt-hero__sub">
+          {% if i18n_data and i18n_data[l] and i18n_data[l]["compare"] and i18n_data[l]["compare"]["hero_lead"] %}{{ i18n_data[l]["compare"]["hero_lead"] }} {{ competitor_name }}.{% else %}See how ApexMail compares to {{ competitor_name }}.{% endif %}
+          {{ page.extra.competitor_description | default(value="Built for developers who need reliable transactional email.") }}
+        </p>
 
-      <p class="mb-10 max-w-2xl mx-auto">
-        {% if i18n_data and i18n_data[l] and i18n_data[l]["compare"] and i18n_data[l]["compare"]["hero_lead"] %}{{ i18n_data[l]["compare"]["hero_lead"] }} {{ competitor_name }}.{% else %}See how ApexMail compares to {{ competitor_name }}.{% endif %}
-        {{ page.extra.competitor_description | default(value="Built for developers who need reliable transactional email.") }}
-      </p>
-
-      <div class="flex flex-wrap justify-center gap-4">
-        <a href="{{ config.extra.app_url }}/signup" class="apex-btn apex-btn--primary">
-          {% if i18n_data and i18n_data[l] and i18n_data[l]["compare"] and i18n_data[l]["compare"]["hero_cta"] %}{{ i18n_data[l]["compare"]["hero_cta"] }}{% else %}Try ApexMail Free{% endif %}
-        </a>
-        <a href="#comparison" class="apex-btn">{% if i18n_data and i18n_data[l] and i18n_data[l]["compare"] and i18n_data[l]["compare"]["hero_cta_secondary"] %}{{ i18n_data[l]["compare"]["hero_cta_secondary"] }}{% else %}See Full Comparison{% endif %}</a>
+        <div class="apex-mkt-hero__actions">
+          <a href="{{ config.extra.app_url }}/signup" class="apex-mkt-cta--primary">
+            {% if i18n_data and i18n_data[l] and i18n_data[l]["compare"] and i18n_data[l]["compare"]["hero_cta"] %}{{ i18n_data[l]["compare"]["hero_cta"] }}{% else %}Try ApexMail Free{% endif %}
+          </a>
+          <a href="#comparison" class="apex-btn">{% if i18n_data and i18n_data[l] and i18n_data[l]["compare"] and i18n_data[l]["compare"]["hero_cta_secondary"] %}{{ i18n_data[l]["compare"]["hero_cta_secondary"] }}{% else %}See Full Comparison{% endif %}</a>
+        </div>
       </div>
     </div>
   </div>

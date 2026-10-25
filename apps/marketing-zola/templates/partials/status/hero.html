@@ -2,64 +2,65 @@
 {# Converted from status/StatusHero.tsx                           #}
 {# The static export links to the live status surface instead of #}
 {# asserting component health at build time.                     #}
+{# ARK hero system: tool page mode tightens the padding via the body
+   class; the tracked-service list renders as ARK evidence with the
+   static-export honesty note kept verbatim. No fake status dots. #}
 
-<section class="relative overflow-hidden pt-32 lg:pt-40 pb-20">
-  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-    <div class="mb-16">
-      <div class="inline-flex items-center gap-2 px-4 py-2 mb-6 apex-em">
-        {% if i18n_data and i18n_data[l] and i18n_data[l]["status"] and i18n_data[l]["status"]["title"] %}{{ i18n_data[l]["status"]["title"] }}{% else %}System Status{% endif %}
-      </div>
-      <h1 class="mb-6 apex-page-title">
-        ApexMail<br />
-        <span class="">{% if i18n_data and i18n_data[l] and i18n_data[l]["status"] and i18n_data[l]["status"]["hero_title"] %}{{ i18n_data[l]["status"]["hero_title"] }}{% else %}System Status{% endif %}</span>
-      </h1>
-      <p class="max-w-2xl mx-auto">
-        {% if i18n_data and i18n_data[l] and i18n_data[l]["status"] and i18n_data[l]["status"]["hero_subtitle"] %}{{ i18n_data[l]["status"]["hero_subtitle"] }}{% else %}Live incident updates, component health, and maintenance notices are maintained on the dedicated ApexMail status surface.{% endif %}
-      </p>
-    </div>
-
-    {# ── Live Status Display ─────────────────────────────── #}
-    <div id="status-island" class="">
-      {# Static status display #}
-      <div class="max-w-3xl mx-auto">
-        <div class="flex flex-col items-center justify-center gap-4 p-6 border mb-8">
-          <span class="apex-em">View live ApexMail status</span>
-          <a href="{{ config.extra.status_url }}" class="inline-flex items-center justify-center apex-btn apex-btn--primary">
+<section class="apex-mkt-hero">
+  <div class="apex-mkt-container">
+    <div class="apex-mkt-hero__layout">
+      <div class="apex-mkt-hero__copy">
+        <span class="apex-mkt-kicker">{% if i18n_data and i18n_data[l] and i18n_data[l]["status"] and i18n_data[l]["status"]["title"] %}{{ i18n_data[l]["status"]["title"] }}{% else %}System Status{% endif %}</span>
+        <h1 class="apex-mkt-hero__title break-words">
+          ApexMail<br />
+          <span>{% if i18n_data and i18n_data[l] and i18n_data[l]["status"] and i18n_data[l]["status"]["hero_title"] %}{{ i18n_data[l]["status"]["hero_title"] }}{% else %}System Status{% endif %}</span>
+        </h1>
+        <p class="apex-mkt-hero__sub">
+          {% if i18n_data and i18n_data[l] and i18n_data[l]["status"] and i18n_data[l]["status"]["hero_subtitle"] %}{{ i18n_data[l]["status"]["hero_subtitle"] }}{% else %}Live incident updates, component health, and maintenance notices are maintained on the dedicated ApexMail status surface.{% endif %}
+        </p>
+        <div class="apex-mkt-hero__actions">
+          <a href="{{ config.extra.status_url }}" class="apex-btn">
             Open Status Page
           </a>
         </div>
+      </div>
 
+      {# ── Live Status Display ─────────────────────────────── #}
+      <div id="status-island" class="apex-mkt-hero__evidence">
         {# One neutral handoff replaces the stacked amber warning panels: the
            static export names what it tracks and points at the live host. #}
-        <div class="p-5 border mb-6">
-          <p class="apex-em">
-            {% if i18n_data and i18n_data[l] and i18n_data[l]["status"] and i18n_data[l]["status"]["description"] %}{{ i18n_data[l]["status"]["description"] }}{% else %}This is a static export. It lists the services ApexMail tracks for monitoring — it does not assert
-            component health. Live health, incidents and maintenance notices are on{% endif %}
-            <a href="{{ config.extra.status_url }}" class="apex-link">status.apexmail.ee</a>.
-          </p>
-        </div>
+        <div class="apex-evidence apex-evidence--mkt">
+          <div class="apex-evidence__head">
+            <span>Services tracked for monitoring</span>
+            <span class="apex-evidence__seal">STATIC EXPORT</span>
+          </div>
+          <div class="apex-evidence__hatch" aria-hidden="true"></div>
+          <div class="apex-evidence__body">
+            <p>
+              {% if i18n_data and i18n_data[l] and i18n_data[l]["status"] and i18n_data[l]["status"]["description"] %}{{ i18n_data[l]["status"]["description"] }}{% else %}This is a static export. It lists the services ApexMail tracks for monitoring — it does not assert
+              component health. Live health, incidents and maintenance notices are on{% endif %}
+              <a href="{{ config.extra.status_url }}" class="apex-link">status.apexmail.ee</a>.
+            </p>
 
-        {# The declared monitored-service list is rendered (it used to be set
-           in the template and never shown, while the copy claimed it was). #}
-        <div class="p-6 border">
-          <h2 class="mb-4 apex-section-head">Services tracked for monitoring</h2>
-          {% set services = [
-            "Email API",
-            "SMTP Relay",
-            "Webhook Delivery",
-            "Web Dashboard",
-            "Analytics Pipeline",
-            "DNS & Authentication",
-            "Template Engine",
-            "Compliance Engine"
-          ] %}
-          <ul class="flex flex-wrap gap-2" role="list">
-            {% for service in services %}
-            <li class="border px-3 py-1.5 apex-em">{{ service }}</li>
-            {% endfor %}
-          </ul>
+            {# The declared monitored-service list is rendered (it used to be set
+               in the template and never shown, while the copy claimed it was). #}
+            <ul class="list-none space-y-2 mt-6" role="list">
+              {% set services = [
+                "Email API",
+                "SMTP Relay",
+                "Webhook Delivery",
+                "Web Dashboard",
+                "Analytics Pipeline",
+                "DNS & Authentication",
+                "Template Engine",
+                "Compliance Engine"
+              ] %}
+              {% for service in services %}
+              <li class="apex-em">{{ service }}</li>
+              {% endfor %}
+            </ul>
+          </div>
         </div>
-
       </div>
     </div>
   </div>

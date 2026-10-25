@@ -1,37 +1,31 @@
 {# ── Calculator Hero ───────────────────────────────────────────── #}
 {# Converted from calculator/CalculatorHero.tsx                   #}
+{# ARK hero system: left-aligned copy; tool page mode tightens the
+   padding via the body class. The icon SVGs are gone; the trust chips
+   render as plain rows. The honesty note about static competitor
+   figures is kept verbatim. #}
 
-<section class="relative min-h-[40vh] flex items-center pt-32 pb-20">
-  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 relative">
-    <div class="max-w-3xl mx-auto">
-      <div class="inline-flex items-center gap-2 px-3 py-1 border mb-6 apex-em">
-        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="2" width="16" height="20" rx="0"/><line x1="8" y1="6" x2="16" y2="6"/><line x1="16" y1="14" x2="16" y2="18"/><line x1="8" y1="10" x2="8" y2="10.01"/><line x1="12" y1="10" x2="12" y2="10.01"/><line x1="16" y1="10" x2="16" y2="10.01"/><line x1="8" y1="14" x2="8" y2="14.01"/><line x1="12" y1="14" x2="12" y2="14.01"/><line x1="8" y1="18" x2="8" y2="18.01"/><line x1="12" y1="18" x2="12" y2="18.01"/></svg>
-        <span>Pricing Calculator</span>
-      </div>
+<section class="apex-mkt-hero">
+  <div class="apex-mkt-container">
+    <div class="apex-mkt-hero__layout">
+      <div class="apex-mkt-hero__copy">
+        <span class="apex-mkt-kicker">Pricing Calculator</span>
 
-      <h1 class="mb-6 apex-page-title">
-        Compare Your <span class="">Volume Cost</span>
-      </h1>
+        <h1 class="apex-mkt-hero__title break-words">
+          Compare Your <span>Volume Cost</span>
+        </h1>
 
-      <p class="mb-10 apex-em">
-        The calculator computes the ApexMail estimate for your volume from the live billing plan tables,
-        rendered on the response page. Competitor figures further down are static, dated list-rate
-        examples — they are not live quotes and are not calculated from your input.
-      </p>
+        <p class="apex-mkt-hero__sub">
+          The calculator computes the ApexMail estimate for your volume from the live billing plan tables,
+          rendered on the response page. Competitor figures further down are static, dated list-rate
+          examples — they are not live quotes and are not calculated from your input.
+        </p>
 
-      <div class="flex flex-wrap justify-center gap-6">
-        <div class="flex items-center gap-2 apex-em">
-          <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
-          <span>Transparent pricing</span>
-        </div>
-        <div class="flex items-center gap-2 apex-em">
-          <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 18 13.5 8.5 8.5 13.5 1 6"/><polyline points="17 18 23 18 23 12"/></svg>
-          <span>Published overages</span>
-        </div>
-        <div class="flex items-center gap-2 apex-em">
-          <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="2" width="16" height="20" rx="0"/><line x1="8" y1="6" x2="16" y2="6"/></svg>
-          <span>Plan limits shown</span>
-        </div>
+        <ul class="list-none space-y-3">
+          <li><span class="apex-em">Transparent pricing</span></li>
+          <li><span class="apex-em">Published overages</span></li>
+          <li><span class="apex-em">Plan limits shown</span></li>
+        </ul>
       </div>
     </div>
   </div>

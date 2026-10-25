@@ -1,51 +1,49 @@
 {# ── Compliance CTA ───────────────────────────────────────────── #}
 {# ARK rework (lane T): icons deleted, the trust-signal card grid #}
 {# became a ledger table, the rhetorical heading states the offer.#}
+{# Trust page mode: this is a paper section — the trust mode refuses
+   crimson poster fields, so no --brand section is used here. #}
 
-<section class="py-20 lg:py-32 relative">
-  <div class="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 relative">
-    <div class="border p-8 md:p-12">
-      <h2 class="mb-6 apex-h2">
-        {% if i18n_data and i18n_data[l] and i18n_data[l]["compliance"] and i18n_data[l]["compliance"]["cta_title"] %}{{ i18n_data[l]["compliance"]["cta_title"] }}{% else %}Compliance you can show an auditor{% endif %}
-      </h2>
-      <p class="mb-8 max-w-2xl mx-auto">
-        {% if i18n_data and i18n_data[l] and i18n_data[l]["compliance"] and i18n_data[l]["compliance"]["cta_subtitle"] %}{{ i18n_data[l]["compliance"]["cta_subtitle"] }}{% else %}ApexMail provides email infrastructure with GDPR-oriented workflows, audit-capable plans, and a factual security-review process. HIPAA availability is not currently offered.{% endif %}
-      </p>
+<section class="apex-mkt-section apex-mkt-section--paper">
+  <div class="apex-mkt-container">
+    <h2 class="break-words apex-h2">
+      {% if i18n_data and i18n_data[l] and i18n_data[l]["compliance"] and i18n_data[l]["compliance"]["cta_title"] %}{{ i18n_data[l]["compliance"]["cta_title"] }}{% else %}Compliance you can show an auditor{% endif %}
+    </h2>
+    <p class="apex-lead">
+      {% if i18n_data and i18n_data[l] and i18n_data[l]["compliance"] and i18n_data[l]["compliance"]["cta_subtitle"] %}{{ i18n_data[l]["compliance"]["cta_subtitle"] }}{% else %}ApexMail provides email infrastructure with GDPR-oriented workflows, audit-capable plans, and a factual security-review process. HIPAA availability is not currently offered.{% endif %}
+    </p>
 
-      <div class="flex flex-col sm:flex-row gap-4 justify-center mb-12">
-        <a href="{{ config.extra.app_url }}/signup" class="apex-btn apex-btn--primary">
-          {% if i18n_data and i18n_data[l] and i18n_data[l]["cta"] and i18n_data[l]["cta"]["cta_button"] %}{{ i18n_data[l]["cta"]["cta_button"] }}{% else %}Start Free{% endif %}
-        </a>
-        <a href="{{ lp }}/contact/security/?topic=compliance-review" class="apex-btn">
-          {% if i18n_data and i18n_data[l] and i18n_data[l]["compliance"] and i18n_data[l]["compliance"]["cta_contact"] %}{{ i18n_data[l]["compliance"]["cta_contact"] }}{% else %}Talk to Compliance Team{% endif %}
-        </a>
-      </div>
-
-      {# Trust signals as a ledger, not an icon card grid. #}
-      <div class="pt-8 border-t">
-        <table class="apex-table">
-          <caption class="sr-only">Compliance posture.</caption>
-          <tbody>
-            <tr>
-              <th scope="row">Security controls</th>
-              <td>Plan-gated features</td>
-            </tr>
-            <tr>
-              <th scope="row">GDPR DSR</th>
-              <td>Workflow APIs</td>
-            </tr>
-            <tr>
-              <th scope="row">HIPAA availability</th>
-              <td>Not currently offered</td>
-            </tr>
-            <tr>
-              <th scope="row">SIG / CAIQ / HECVAT</th>
-              <td>Reviewed on request</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
+    <div class="flex flex-col sm:flex-row gap-4 mb-12">
+      <a href="{{ config.extra.app_url }}/signup" class="apex-mkt-cta--primary">
+        {% if i18n_data and i18n_data[l] and i18n_data[l]["cta"] and i18n_data[l]["cta"]["cta_button"] %}{{ i18n_data[l]["cta"]["cta_button"] }}{% else %}Start Free{% endif %}
+      </a>
+      <a href="{{ lp }}/contact/security/?topic=compliance-review" class="apex-btn">
+        {% if i18n_data and i18n_data[l] and i18n_data[l]["compliance"] and i18n_data[l]["compliance"]["cta_contact"] %}{{ i18n_data[l]["compliance"]["cta_contact"] }}{% else %}Talk to Compliance Team{% endif %}
+      </a>
     </div>
+
+    {# Trust signals as a ledger, not an icon card grid. #}
+    <table class="apex-table">
+      <caption class="sr-only">Compliance posture.</caption>
+      <tbody>
+        <tr>
+          <th scope="row">Security controls</th>
+          <td>Plan-gated features</td>
+        </tr>
+        <tr>
+          <th scope="row">GDPR DSR</th>
+          <td>Workflow APIs</td>
+        </tr>
+        <tr>
+          <th scope="row">HIPAA availability</th>
+          <td>Not currently offered</td>
+        </tr>
+        <tr>
+          <th scope="row">SIG / CAIQ / HECVAT</th>
+          <td>Reviewed on request</td>
+        </tr>
+      </tbody>
+    </table>
 
     <p class="mt-8 apex-em">
       Current security documentation and applicable questionnaire material can be reviewed during an Enterprise evaluation.

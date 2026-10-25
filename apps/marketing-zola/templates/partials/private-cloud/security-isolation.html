@@ -1,116 +1,118 @@
 {# ── Security Isolation ────────────────────────────────────────── #}
-{# Converted from private-cloud/SecurityIsolation.tsx             #}
+{# ARK architecture rhythm: stage 03 — the ink evidence event. The six
+   capability cards became an indexed ledger (no icon SVGs); the shared
+   vs private comparison stays an apex-table with its own rules. The ink
+   recipe recolors every descendant state — no template colour classes. #}
 
-<section id="security-isolation" class="scroll-mt-20 py-20 lg:py-32 relative">
-  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+<section id="security-isolation" class="apex-mkt-section apex-mkt-section--ink scroll-mt-20">
+  <div class="apex-mkt-container">
     <div class="mb-16">
+      <span class="apex-section-label"><span class="apex-index">03</span> Isolation</span>
       <h2 class="mb-4 apex-h2">
-        Dedicated <span class="">Security Isolation</span>
+        Dedicated <span>Security Isolation</span>
       </h2>
-      <p class="max-w-2xl mx-auto">
+      <p class="apex-lead">
         Dedicated deployment options can isolate email infrastructure,
         encryption boundaries, and monitoring paths based on a scoped architecture review.
       </p>
     </div>
 
-    <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-6 mb-20">
-      <div class="border p-6">
-        <div class="w-12 h-12 flex items-center justify-center mb-4">
-          <svg class="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+    <div class="apex-ledger--indexed mb-20">
+      <div>
+        <span class="apex-index">01</span>
+        <div>
+          <h3 class="apex-h3">Network Isolation</h3>
+          <p>Dedicated VPC, private subnet, NACL, and security group patterns can be included when required by the deployment design.</p>
         </div>
-        <h3 class="mb-2 apex-h3">Network Isolation</h3>
-        <p class="">Dedicated VPC, private subnet, NACL, and security group patterns can be included when required by the deployment design.</p>
       </div>
-      <div class="border p-6">
-        <div class="w-12 h-12 flex items-center justify-center mb-4">
-          <svg class="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="0" ry="0"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+      <div>
+        <span class="apex-index">02</span>
+        <div>
+          <h3 class="apex-h3">Encryption at Rest</h3>
+          <p>AES-256 encryption for stored data, with customer-managed key options reviewed for dedicated deployments.</p>
         </div>
-        <h3 class="mb-2 apex-h3">Encryption at Rest</h3>
-        <p class="">AES-256 encryption for stored data, with customer-managed key options reviewed for dedicated deployments.</p>
       </div>
-      <div class="border p-6">
-        <div class="w-12 h-12 flex items-center justify-center mb-4">
-          <svg class="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+      <div>
+        <span class="apex-index">03</span>
+        <div>
+          <h3 class="apex-h3">Encryption in Transit</h3>
+          <p>TLS 1.2+ enforced, TLS 1.3 preferred on all connections. Opportunistic DANE and MTA-STS for outbound delivery.</p>
         </div>
-        <h3 class="mb-2 apex-h3">Encryption in Transit</h3>
-        <p class="">TLS 1.2+ enforced, TLS 1.3 preferred on all connections. Opportunistic DANE and MTA-STS for outbound delivery.</p>
       </div>
-      <div class="border p-6">
-        <div class="w-12 h-12 flex items-center justify-center mb-4">
-          <svg class="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+      <div>
+        <span class="apex-index">04</span>
+        <div>
+          <h3 class="apex-h3">Access Control</h3>
+          <p>SSO/SAML integration, role-based access, IP allowlisting, and mandatory 2FA for all admin operations.</p>
         </div>
-        <h3 class="mb-2 apex-h3">Access Control</h3>
-        <p class="">SSO/SAML integration, role-based access, IP allowlisting, and mandatory 2FA for all admin operations.</p>
       </div>
-      <div class="border p-6">
-        <div class="w-12 h-12 flex items-center justify-center mb-4">
-          <svg class="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/><line x1="16" x2="8" y1="13" y2="13"/><line x1="16" x2="8" y1="17" y2="17"/><line x1="10" x2="8" y1="9" y2="9"/></svg>
+      <div>
+        <span class="apex-index">05</span>
+        <div>
+          <h3 class="apex-h3">Audit Logging</h3>
+          <p>Audit logs for API, configuration, and admin events with export workflows for security review.</p>
         </div>
-        <h3 class="mb-2 apex-h3">Audit Logging</h3>
-        <p class="">Audit logs for API, configuration, and admin events with export workflows for security review.</p>
       </div>
-      <div class="border p-6">
-        <div class="w-12 h-12 flex items-center justify-center mb-4">
-          <svg class="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+      <div>
+        <span class="apex-index">06</span>
+        <div>
+          <h3 class="apex-h3">Compliance Controls</h3>
+          <p>GDPR-oriented workflows and audit-capable plans are available. HIPAA availability is not currently offered.</p>
         </div>
-        <h3 class="mb-2 apex-h3">Compliance Controls</h3>
-        <p class="">GDPR-oriented workflows and audit-capable plans are available. HIPAA availability is not currently offered.</p>
       </div>
     </div>
 
     {# Shared vs Private Cloud Comparison #}
     <div class="max-w-4xl mx-auto">
       <h3 class="mb-8 apex-h3">Shared Cloud vs Private Cloud</h3>
-      <div class="border overflow-hidden">
-        <div class="overflow-x-auto">
-          <table class="w-full apex-table">
-            <caption class="sr-only">Shared cloud vs private cloud deployment comparison.</caption>
-            <thead>
-              <tr class="border-b">
-                <th scope="col" class="py-3 px-6">Feature</th>
-                <th scope="col" class="py-3 px-6">Shared Cloud (plan-scoped)</th>
-                <th scope="col" class="py-3 px-6">Private Cloud (contracted)</th>
-              </tr>
-            </thead>
-            <tbody class="">
-              <tr class="">
-                <th scope="row" class="py-3 px-6">Infrastructure</th>
-                <td class="py-3 px-6">Multi-tenant</td>
-                <td class="py-3 px-6 apex-em">Single-tenant</td>
-              </tr>
-              <tr class="">
-                <th scope="row" class="py-3 px-6">IP Addresses</th>
-                <td class="py-3 px-6">Shared pool</td>
-                <td class="py-3 px-6 apex-em">Dedicated pool</td>
-              </tr>
-              <tr class="">
-                <th scope="row" class="py-3 px-6">Data Location</th>
-                <td class="py-3 px-6">Provider region</td>
-                <td class="py-3 px-6 apex-em">Scoped region</td>
-              </tr>
-              <tr class="">
-                <th scope="row" class="py-3 px-6">Encryption Keys</th>
-                <td class="py-3 px-6">Provider-managed</td>
-                <td class="py-3 px-6 apex-em">Customer-managed option</td>
-              </tr>
-              <tr class="">
-                <th scope="row" class="py-3 px-6">Network Access</th>
-                <td class="py-3 px-6">Public endpoints</td>
-                <td class="py-3 px-6 apex-em">Private network options</td>
-              </tr>
-              <tr class="">
-                <th scope="row" class="py-3 px-6">Compliance</th>
-                <td class="py-3 px-6">GDPR</td>
-                <td class="py-3 px-6 apex-em">Contractual GDPR and operational review</td>
-              </tr>
-              <tr class="">
-                <th scope="row" class="py-3 px-6">SLA</th>
-                <td class="py-3 px-6">99.9% target on Business and Enterprise Cloud; no SLA guarantee below that</td>
-                <td class="py-3 px-6 apex-em">Custom SLA available under contract (Dedicated Tenant / BYOC)</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
+      <div class="overflow-x-auto" role="region" tabindex="0" aria-label="Shared cloud versus private cloud deployment comparison">
+        <table class="w-full apex-table">
+          <caption class="sr-only">Shared cloud vs private cloud deployment comparison.</caption>
+          <thead>
+            <tr>
+              <th scope="col">Feature</th>
+              <th scope="col">Shared Cloud (plan-scoped)</th>
+              <th scope="col">Private Cloud (contracted)</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <th scope="row">Infrastructure</th>
+              <td>Multi-tenant</td>
+              <td class="apex-em">Single-tenant</td>
+            </tr>
+            <tr>
+              <th scope="row">IP Addresses</th>
+              <td>Shared pool</td>
+              <td class="apex-em">Dedicated pool</td>
+            </tr>
+            <tr>
+              <th scope="row">Data Location</th>
+              <td>Provider region</td>
+              <td class="apex-em">Scoped region</td>
+            </tr>
+            <tr>
+              <th scope="row">Encryption Keys</th>
+              <td>Provider-managed</td>
+              <td class="apex-em">Customer-managed option</td>
+            </tr>
+            <tr>
+              <th scope="row">Network Access</th>
+              <td>Public endpoints</td>
+              <td class="apex-em">Private network options</td>
+            </tr>
+            <tr>
+              <th scope="row">Compliance</th>
+              <td>GDPR</td>
+              <td class="apex-em">Contractual GDPR and operational review</td>
+            </tr>
+            <tr>
+              <th scope="row">SLA</th>
+              <td>99.9% target on Business and Enterprise Cloud; no SLA guarantee below that</td>
+              <td class="apex-em">Custom SLA available under contract (Dedicated Tenant / BYOC)</td>
+            </tr>
+          </tbody>
+        </table>
       </div>
     </div>
   </div>

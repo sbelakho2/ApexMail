@@ -6,8 +6,8 @@
 {# currently being read (aria-current="page").                   #}
 {% set competitor_name = page.extra.competitor_name | default(value="the alternative") %}
 
-<section id="decision-guide" class="scroll-mt-20 py-20 lg:py-32 border-t">
-  <div class="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8">
+<section id="decision-guide" class="apex-mkt-section scroll-mt-20">
+  <div class="apex-mkt-container">
     <div class="border p-10 lg:p-16">
       <div class="mb-16">
         <p class="mb-6 apex-meta">{% if i18n_data and i18n_data[l] and i18n_data[l]["compare"] and i18n_data[l]["compare"]["decision_label"] %}{{ i18n_data[l]["compare"]["decision_label"] }}{% else %}Decision guide{% endif %}</p>
@@ -39,7 +39,7 @@
 
       <div class="">
         <div class="flex flex-col sm:flex-row justify-center gap-4 mb-10">
-          <a href="{{ config.extra.app_url }}/signup" class="apex-btn apex-btn--primary">
+          <a href="{{ config.extra.app_url }}/signup" class="apex-mkt-cta--primary">
             {% if i18n_data and i18n_data[l] and i18n_data[l]["cta"] and i18n_data[l]["cta"]["cta_button"] %}{{ i18n_data[l]["cta"]["cta_button"] }}{% else %}Start free{% endif %}
           </a>
           <a href="{{ lp }}/pricing/" class="apex-btn">{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["pricing"] %}{{ i18n_data[l]["header"]["pricing"] }}{% else %}View pricing{% endif %}</a>

@@ -1,10 +1,10 @@
-{# ── Pricing CTA — ARK round: sales/help is the PRIMARY action. ── #}
+{# ── Pricing CTA — ARK round: the final conversion moment. ── #}
 {# The calculator link uses the LOCAL anchor (#apexmail-calculator #}
 {# on this page) instead of restarting the estimate journey on a  #}
 {# separate page. #}
 
-<section class="apex-mkt-section">
-  <div class="max-w-4xl mx-auto">
+<section class="apex-mkt-section apex-mkt-section--brand">
+  <div class="apex-mkt-container">
     <h2 class="apex-h2">
       {% if i18n_data and i18n_data[l] and i18n_data[l]["pricing"] and i18n_data[l]["pricing"]["questions_title"] %}{{ i18n_data[l]["pricing"]["questions_title"] }}{% else %}Talk to our team{% endif %}
     </h2>
@@ -13,15 +13,16 @@
     </p>
 
     <div class="mt-8 flex flex-col sm:flex-row gap-4">
-      {# Sales/help is primary here — the reader arrived with questions, not
-         a plan decision. #}
-      <a href="{{ lp }}/contact/sales/?source=pricing_cta_bottom&variant=sales" data-conversion-experiment="pricing_cta_bottom_2026q2" data-conversion-variant="sales" class="apex-btn apex-btn--primary">
+      {# Sales/help answers the reader's question; Start Free is the
+         commercial primary on the crimson field (auto-inverted by the
+         brand recipe). #}
+      <a href="{{ lp }}/contact/sales/?source=pricing_cta_bottom&variant=sales" data-conversion-experiment="pricing_cta_bottom_2026q2" data-conversion-variant="sales" class="apex-btn">
         {% if i18n_data and i18n_data[l] and i18n_data[l]["pricing"] and i18n_data[l]["pricing"]["talk_to_sales"] %}{{ i18n_data[l]["pricing"]["talk_to_sales"] }}{% else %}Talk to Sales{% endif %}
       </a>
       <a href="#apexmail-calculator" class="apex-btn">
         {% if i18n_data and i18n_data[l] and i18n_data[l]["pricing"] and i18n_data[l]["pricing"]["calculator_hint"] %}{{ i18n_data[l]["pricing"]["calculator_hint"] }}{% else %}Use the calculator above{% endif %}
       </a>
-      <a href="{{ config.extra.app_url }}/signup?source=pricing_cta_bottom&variant=free" data-conversion-experiment="pricing_cta_bottom_2026q2" data-conversion-variant="free_signup" class="apex-btn">
+      <a href="{{ config.extra.app_url }}/signup?source=pricing_cta_bottom&variant=free" data-conversion-experiment="pricing_cta_bottom_2026q2" data-conversion-variant="free_signup" class="apex-btn apex-btn--primary">
         {% if i18n_data and i18n_data[l] and i18n_data[l]["cta"] and i18n_data[l]["cta"]["cta_button"] %}{{ i18n_data[l]["cta"]["cta_button"] }}{% else %}Start Free{% endif %}
       </a>
     </div>

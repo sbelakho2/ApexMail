@@ -1,5 +1,9 @@
 {# Latency comparison — illustrative deployment scenarios with CSS-only animation #}
-{# Scenario copy is localized via private_cloud.latency_* keys (English
+{# ARK architecture rhythm: stage 01 of the deployment flow. The scenario
+   rows keep their relative-bar structure (illustrative; bar widths are
+   structural w-* tokens, no inline widths, no colour utilities — paint
+   is the authority's business). The unpaintable legend swatches are gone.
+   Scenario copy is localized via private_cloud.latency_* keys (English
    fallbacks; keys reported to R4). #}
 {% set lat_vpc_tag = "Same VPC" %}
 {% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["latency_vpc_tag"] %}{% set lat_vpc_tag = i18n_data[l]["private_cloud"]["latency_vpc_tag"] %}{% endif %}
@@ -19,21 +23,18 @@
 {% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["latency_saas_desc"] %}{% set lat_saas_desc = i18n_data[l]["private_cloud"]["latency_saas_desc"] %}{% endif %}
 
 
-<section class="py-20 lg:py-32 relative">
-  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+<section class="apex-mkt-section apex-mkt-section--dense">
+  <div class="apex-mkt-container">
     <div class="mb-12">
-      <div class="inline-flex items-center gap-2 px-3 py-1 border mb-4 apex-em">
-        <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6l4 2m6-2a10 10 0 11-20 0 10 10 0 0120 0z"/></svg>
-        Deployment Scenarios
-      </div>
+      <span class="apex-section-label"><span class="apex-index">01</span> Deployment scenarios</span>
       <h2 class="mb-4 apex-h2">
         Reduced Network Latency
       </h2>
-      <p class="max-w-2xl mx-auto apex-em">
+      <p class="apex-lead">
         When your application and email infrastructure share the same network,
         the API path stays close to your workload and is easier to measure.
       </p>
-      <p class="max-w-xl mx-auto mt-3">
+      <p class="mt-3 apex-meta">
         Illustrative deployment scenarios — bar lengths are not measured proportional results. Actual latency depends on your network topology and region.
       </p>
     </div>
@@ -52,8 +53,8 @@
               <p class="mt-0.5">{{ lat_vpc_desc }}</p>
             </div>
           </div>
-          <div class="h-3 overflow-hidden">
-            <div class="h-full w-[2%]"></div>
+          <div class="apex-bar">
+            <div class="apex-bar__fill w-[2%]"></div>
           </div>
         </div>
 
@@ -68,8 +69,8 @@
               <p class="mt-0.5">{{ lat_region_desc }}</p>
             </div>
           </div>
-          <div class="h-3 overflow-hidden">
-            <div class="h-full" style="width: 8%;"></div>
+          <div class="apex-bar">
+            <div class="apex-bar__fill w-[8%]"></div>
           </div>
         </div>
 
@@ -84,8 +85,8 @@
               <p class="mt-0.5">{{ lat_shared_desc }}</p>
             </div>
           </div>
-          <div class="h-3 overflow-hidden">
-            <div class="h-full" style="width: 65%;"></div>
+          <div class="apex-bar">
+            <div class="apex-bar__fill w-[65%]"></div>
           </div>
         </div>
 
@@ -100,58 +101,27 @@
               <p class="mt-0.5">{{ lat_saas_desc }}</p>
             </div>
           </div>
-          <div class="h-3 overflow-hidden">
-            <div class="h-full" style="width: 100%;"></div>
+          <div class="apex-bar">
+            <div class="apex-bar__fill w-full"></div>
           </div>
         </div>
 
       </div>
-
-      {# Legend #}
-      {# Legend swatches match the bars above one-to-one (same colors, same
-         scenario order). #}
-      <div class="flex flex-wrap justify-center gap-6 mt-10 pt-10 border-t">
-        <div class="flex items-center gap-2">
-          <div class="w-3 h-3" aria-hidden="true"></div>
-          <span class="apex-em">Private Cloud — same VPC</span>
-        </div>
-        <div class="flex items-center gap-2">
-          <div class="w-3 h-3" aria-hidden="true"></div>
-          <span class="apex-em">Private Cloud — same region</span>
-        </div>
-        <div class="flex items-center gap-2">
-          <div class="w-3 h-3" aria-hidden="true"></div>
-          <span class="apex-em">Shared Cloud — cross-region API</span>
-        </div>
-        <div class="flex items-center gap-2">
-          <div class="w-3 h-3" aria-hidden="true"></div>
-          <span class="apex-em">Third-party SaaS — external HTTPS API</span>
-        </div>
-      </div>
     </div>
 
-    {# Key Points #}
-    <div class="grid md:grid-cols-3 gap-6 mt-12">
-      <div class="border p-8">
-        <div class="w-10 h-10 flex items-center justify-center mx-auto mb-4 border">
-          <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
-        </div>
-        <div class="mb-2 apex-em">VPC-Collocated</div>
-        <div class="apex-em">App and API within the same private network — no public internet hops</div>
+    {# Key Points — the icon card grid became an indexed ledger. #}
+    <div class="apex-ledger--indexed mt-12">
+      <div>
+        <span class="apex-index">01</span>
+        <div><span class="apex-em">VPC-Collocated</span> App and API within the same private network — no public internet hops</div>
       </div>
-      <div class="border p-8">
-        <div class="w-10 h-10 flex items-center justify-center mx-auto mb-4 border">
-          <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2h1a2 2 0 012-2v-1a2 2 0 012-2h1.945M12 2a10 10 0 100 20 10 10 0 000-20z"/></svg>
-        </div>
-        <div class="mb-2 apex-em">Zero Egress</div>
-        <div class="apex-em">Traffic stays within your VPC, reducing cost and exposure</div>
+      <div>
+        <span class="apex-index">02</span>
+        <div><span class="apex-em">Zero Egress</span> Traffic stays within your VPC, reducing cost and exposure</div>
       </div>
-      <div class="border p-8">
-        <div class="w-10 h-10 flex items-center justify-center mx-auto mb-4 border">
-          <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6l4 2m6-2a10 10 0 11-20 0 10 10 0 0120 0z"/></svg>
-        </div>
-        <div class="mb-2 apex-em">Predictable P99</div>
-        <div class="apex-em">No shared-tenant jitter; latency scales with your own infrastructure</div>
+      <div>
+        <span class="apex-index">03</span>
+        <div><span class="apex-em">Predictable P99</span> No shared-tenant jitter; latency scales with your own infrastructure</div>
       </div>
     </div>
   </div>

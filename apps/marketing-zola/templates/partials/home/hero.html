@@ -4,48 +4,87 @@
    company (Bel Consulting OÜ, Tallinn), the EU data centres (Germany and
    Finland) and the EEA storage default. The honest Global-vs-EU-only scope
    (the Global default delivers through AWS SES in its EU region) stays on
-   /eu-sovereign/ and in the sovereignty section directly below. #}
-<section aria-label="Introduction" class="apex-mkt-hero">
-  <h1 class="apex-mkt-hero__title">
-    Every message carries a signed receipt.
-  </h1>
-  <p class="apex-mkt-hero__sub">
-    ApexMail is transactional email operated by Bel Consulting OÜ in Tallinn,
-    Estonia, on data centres in Germany and Finland. Core service data is
-    stored in the EEA by default, and every accepted message carries an
-    Ed25519-signed routing receipt you can verify yourself.
-  </p>
-  <div class="flex flex-col sm:flex-row flex-wrap gap-3">
-    <a href="{{ config.extra.app_url }}/signup" class="apex-btn apex-btn--primary">
-      {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_cta_primary"] %}{{ i18n_data[l]["home"]["hero_cta_primary"] }}{% else %}Start free{% endif %}
-    </a>
-    <a href="/api-explorer/" class="apex-btn--link">
-      {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_cta_secondary"] %}{{ i18n_data[l]["home"]["hero_cta_secondary"] }}{% else %}Run a live API request{% endif %}
-    </a>
-  </div>
+   /eu-sovereign/ and in the sovereignty section directly below.
 
-  {# ── Fact row: the real figures (data/pricing.json is the commercial
-     authority; the launch allowance is the one-time first-30-days grant,
-     not a recurring quota). ── #}
-  {% set pricing_teaser = load_data(path="data/pricing.json", format="json") %}
-  {% set hero_free = pricing_teaser.plans[0] %}
-  {% set launch_allowance = pricing_teaser.free_launch_allowance %}
-  <div class="apex-factrow" aria-label="Platform facts">
-    <div>
-      <div class="apex-factrow__n">{{ hero_free.included_volume_display }}</div>
-      <div class="apex-factrow__l">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["teaser_emails_per_month"] %}{{ i18n_data[l]["home"]["teaser_emails_per_month"] }}{% else %}emails per month, free plan{% endif %}</div>
+   The evidence block lists the REAL canonical routing-receipt payload
+   fields — the exact bytes the Ed25519 signature covers — as published on
+   /eu-sovereign/ and implemented in
+   services/mail-server/crates/mail-common/src/routing_receipt.rs
+   (canonical_payload / RECEIPT_PAYLOAD_VERSION). Field NAMES only: no
+   sample values are fabricated here. `actual_source_ip` is present only
+   when the transport reported one (its absence is itself signed). #}
+<section aria-label="Introduction" class="apex-mkt-hero">
+  <div class="apex-mkt-container">
+    <div class="apex-mkt-hero__layout">
+      <div class="apex-mkt-hero__copy">
+        <span class="apex-mkt-kicker">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_kicker"] %}{{ i18n_data[l]["home"]["hero_kicker"] }}{% else %}EU transactional email infrastructure{% endif %}</span>
+        <h1 class="apex-mkt-hero__title">
+          Every message carries a signed receipt.
+        </h1>
+        <p class="apex-mkt-hero__sub">
+          ApexMail is transactional email operated by Bel Consulting OÜ in Tallinn,
+          Estonia, on data centres in Germany and Finland. Core service data is
+          stored in the EEA by default, and every accepted message carries an
+          Ed25519-signed routing receipt you can verify yourself.
+        </p>
+        <div class="apex-mkt-hero__actions">
+          <a href="{{ config.extra.app_url }}/signup" class="apex-mkt-cta--primary">
+            {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_cta_primary"] %}{{ i18n_data[l]["home"]["hero_cta_primary"] }}{% else %}Start free{% endif %}
+          </a>
+          <a href="/api-explorer/" class="apex-btn--link">
+            {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_cta_secondary"] %}{{ i18n_data[l]["home"]["hero_cta_secondary"] }}{% else %}Run a live API request{% endif %}
+          </a>
+        </div>
+      </div>
+      <div class="apex-mkt-hero__evidence">
+        <div class="apex-evidence apex-evidence--mkt">
+          <div class="apex-evidence__head">
+            <span>{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_evidence_head"] %}{{ i18n_data[l]["home"]["hero_evidence_head"] }}{% else %}Routing receipt{% endif %}</span>
+            <span class="apex-evidence__seal" aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]["a11y"] and i18n_data[l]["a11y"]["evidence_seal"] %}{{ i18n_data[l]["a11y"]["evidence_seal"] }}{% else %}Signed and verified{% endif %}">SIGNED / VERIFIED</span>
+          </div>
+          <div class="apex-evidence__hatch" aria-hidden="true"></div>
+          <div class="apex-evidence__body">
+            {# The canonical signed payload, field names only — what the
+               Ed25519 signature actually covers (Ed25519, RFC 8032).
+               actual_source_ip appears only when the transport reported a
+               source IP; the absence itself is part of the signed statement. #}
+            <div class="apex-mono">
+              apexmail-routing-receipt/v1<br />
+              message_id<br />
+              tenant_id<br />
+              transport<br />
+              accepted_at<br />
+              actual_source_ip
+            </div>
+            <p class="apex-meta mt-2">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_evidence_note"] %}{{ i18n_data[l]["home"]["hero_evidence_note"] }}{% else %}Illustrative format. Verify real receipts with the published public key.{% endif %}</p>
+          </div>
+        </div>
+      </div>
     </div>
-    <div>
-      <div class="apex-factrow__n">{{ launch_allowance.emails_display }}</div>
-      <div class="apex-factrow__l">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["teaser_launch_allowance"] %}{{ i18n_data[l]["home"]["teaser_launch_allowance"] }}{% else %}one-time launch allowance, first {{ launch_allowance.window_days }} days{% endif %}</div>
-    </div>
-    <div>
-      <div class="apex-factrow__n">EEA</div>
-      <div class="apex-factrow__l">storage default, Germany and Finland</div>
-    </div>
-    <div>
-      <div class="apex-factrow__n">Signed</div>
-      <div class="apex-factrow__l">receipt on every accepted message</div>
+
+    {# ── Fact row: the real figures (data/pricing.json is the commercial
+       authority; the launch allowance is the one-time first-30-days grant,
+       not a recurring quota). ── #}
+    {% set pricing_teaser = load_data(path="data/pricing.json", format="json") %}
+    {% set hero_free = pricing_teaser.plans[0] %}
+    {% set launch_allowance = pricing_teaser.free_launch_allowance %}
+    <div class="apex-factrow" aria-label="Platform facts">
+      <div>
+        <div class="apex-factrow__n">{{ hero_free.included_volume_display }}</div>
+        <div class="apex-factrow__l">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["teaser_emails_per_month"] %}{{ i18n_data[l]["home"]["teaser_emails_per_month"] }}{% else %}emails per month, free plan{% endif %}</div>
+      </div>
+      <div>
+        <div class="apex-factrow__n">{{ launch_allowance.emails_display }}</div>
+        <div class="apex-factrow__l">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["teaser_launch_allowance"] %}{{ i18n_data[l]["home"]["teaser_launch_allowance"] }}{% else %}one-time launch allowance, first {{ launch_allowance.window_days }} days{% endif %}</div>
+      </div>
+      <div>
+        <div class="apex-factrow__n">EEA</div>
+        <div class="apex-factrow__l">storage default, Germany and Finland</div>
+      </div>
+      <div>
+        <div class="apex-factrow__n">Signed</div>
+        <div class="apex-factrow__l">receipt on every accepted message</div>
+      </div>
     </div>
   </div>
 </section>

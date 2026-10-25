@@ -1,35 +1,35 @@
-{# ── Feature CTA ──────────────────────────────────────────────── #}
-{# Converted from features/FeatureCTA.tsx                        #}
+{# ── Feature CTA — ARK marketing revision (law 11/12) ─────────── #}
+{# The one crimson field on the features page. The bordered box, the
+   centered layout and the &bull; separator are gone; the brand recipe
+   inverts the primary button and rules the secondary automatically. #}
 
-<section class="py-20 lg:py-32 relative">
-  <div class="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 relative">
-    <div class="border p-8 lg:p-12">
-      <div class="mb-6 apex-meta">
-        <span>{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["cta_badge"] %}{{ i18n_data[l]["features"]["cta_badge"] }}{% else %}Start in 5 Minutes{% endif %}</span>
-      </div>
+<section class="apex-mkt-section apex-mkt-section--brand" aria-label="Get started">
+  <div class="apex-mkt-container">
+    <span class="apex-mkt-kicker">
+      {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["cta_badge"] %}{{ i18n_data[l]["features"]["cta_badge"] }}{% else %}Start in 5 Minutes{% endif %}
+    </span>
 
-      <h2 class="mb-6 apex-h2">
-        {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["cta_heading"] %}{{ i18n_data[l]["features"]["cta_heading"] }}{% else %}Ready to send?{% endif %}
-      </h2>
+    <h2 class="apex-h2">
+      {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["cta_heading"] %}{{ i18n_data[l]["features"]["cta_heading"] }}{% else %}Ready to send?{% endif %}
+    </h2>
 
-      <p class="mb-10 max-w-2xl mx-auto">
-        {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["cta_subtitle"] %}{{ i18n_data[l]["features"]["cta_subtitle"] }}{% else %}ApexMail provides reliable transactional email with built-in compliance. Start free with 3,000 emails per month.{% endif %}
-      </p>
+    <p class="apex-lead max-w-2xl">
+      {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["cta_subtitle"] %}{{ i18n_data[l]["features"]["cta_subtitle"] }}{% else %}ApexMail provides reliable transactional email with built-in compliance. Start free with 3,000 emails per month.{% endif %}
+    </p>
 
-      {# The apex-btn grammar carries geometry, focus ring, sizing and
-         emphasis for every CTA on the site. #}
-      <div class="flex flex-col sm:flex-row gap-4 justify-center">
-        <a href="{{ config.extra.app_url }}/signup" class="apex-btn apex-btn--primary">
-          {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["cta_button"] %}{{ i18n_data[l]["features"]["cta_button"] }}{% else %}Start Free{% endif %}
-        </a>
-        <a href="{{ lp }}/contact/" class="apex-btn">
-          {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["cta_talk"] %}{{ i18n_data[l]["features"]["cta_talk"] }}{% else %}Talk to Sales{% endif %}
-        </a>
-      </div>
-
-      <p class="mt-8 apex-em">
-        {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["cta_note"] %}{{ i18n_data[l]["features"]["cta_note"] }}{% else %}No credit card required &bull; Free tier: 3,000 emails/month{% endif %}
-      </p>
+    {# The apex-btn grammar carries geometry, focus ring, sizing and
+       emphasis for every CTA on the site; the brand recipe recolors it. #}
+    <div class="flex flex-col sm:flex-row gap-4">
+      <a href="{{ config.extra.app_url }}/signup" class="apex-btn apex-btn--primary">
+        {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["cta_button"] %}{{ i18n_data[l]["features"]["cta_button"] }}{% else %}Start Free{% endif %}
+      </a>
+      <a href="{{ lp }}/contact/" class="apex-btn">
+        {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["cta_talk"] %}{{ i18n_data[l]["features"]["cta_talk"] }}{% else %}Talk to Sales{% endif %}
+      </a>
     </div>
+
+    <p class="mt-8 apex-meta">
+      {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["cta_note"] %}{{ i18n_data[l]["features"]["cta_note"] }}{% else %}No credit card required. Free tier: 3,000 emails/month{% endif %}
+    </p>
   </div>
 </section>

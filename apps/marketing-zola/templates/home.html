@@ -15,8 +15,9 @@
    /explorer/grade endpoint, which delegates to the REAL email-grader
    engine (live SPF/DKIM/DMARC/MX/blocklist DNS checks) and renders the
    full graded result page. Zero JavaScript. #}
-<section class="apex-mkt-section" aria-label="Email Deliverability Grader">
-  <span class="apex-section-label">Email deliverability grader</span>
+<section class="apex-mkt-section apex-mkt-section--soft" aria-label="Email Deliverability Grader">
+  <div class="apex-mkt-container">
+  <span class="apex-mkt-kicker">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["email_grader_eyebrow"] %}{{ i18n_data[l]["home"]["email_grader_eyebrow"] }}{% else %}Email deliverability grader{% endif %}</span>
   <h2 class="apex-h2">
     {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["email_grader_heading"] %}{{ i18n_data[l]["home"]["email_grader_heading"] }}{% else %}Email Deliverability Grader{% endif %}
   </h2>
@@ -31,13 +32,14 @@
       <input id="grade-domain" type="text" name="domain" placeholder="yourcompany.com" required
              autocomplete="off" autocapitalize="none" spellcheck="false" class="apex-input">
     </div>
-    <button type="submit" class="apex-btn apex-btn--primary">
+    <button type="submit" class="apex-mkt-cta--primary">
       {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["email_grader_submit"] %}{{ i18n_data[l]["home"]["email_grader_submit"] }}{% else %}Grade my domain{% endif %}
     </button>
   </form>
   <p class="apex-meta mt-2">
     {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["email_grader_note"] %}{{ i18n_data[l]["home"]["email_grader_note"] }}{% else %}Live DNS checks: SPF, DKIM, DMARC, MX{% endif %}
   </p>
+  </div>
 </section>
 
 {# ── Pricing teaser: three plans inline, link to the full page ──
@@ -52,6 +54,7 @@
 {% set teaser_business = pricing_teaser.plans[4] %}
 {% set launch_allowance = pricing_teaser.free_launch_allowance %}
 <section class="apex-mkt-section" aria-label="Pricing">
+  <div class="apex-mkt-container">
   <div class="apex-section-head">
     <h2 class="apex-h2">
       {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["pricing_teaser_heading"] %}{{ i18n_data[l]["home"]["pricing_teaser_heading"] }}{% else %}Simple pricing{% endif %}
@@ -91,6 +94,7 @@
         </tr>
       </tbody>
     </table>
+  </div>
   </div>
 </section>
 

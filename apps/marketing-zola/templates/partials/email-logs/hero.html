@@ -1,18 +1,27 @@
-<section class="border-b">
-  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-16 lg:py-24">
-    <p class="apex-meta mb-4">Delivery diagnostics</p>
-    <h1 class="max-w-3xl apex-page-title">
-      See exactly what happened to <span class="">every message.</span>
-    </h1>
-    <p class="max-w-[56ch] mt-5">
-      A complete, causal timeline per message — request acceptance, DKIM signing, pool selection, every SMTP
-      attempt with the provider's own response codes, deferrals, retries, recipient-MX acceptance, event
-      emission and webhook delivery. Not an event feed: the reason each thing happened.
-    </p>
-    <div class="flex flex-col sm:flex-row gap-3 mt-8">
-      <a href="{{ config.extra.app_url }}/signup" class="apex-btn apex-btn--primary">Start free</a>
-      <a href="#message-timeline" class="apex-btn">See the example timeline</a>
-      <a href="/docs/api/" class="apex-btn">Event documentation</a>
+{# ── Email Logs Hero ───────────────────────────────────────────── #}
+{# ARK hero system: left-aligned copy (kicker, title, lead, actions);
+   tool page mode tightens the padding via the body class. The signup is
+   the commercial action and wears the crimson mkt CTA. #}
+
+<section class="apex-mkt-hero">
+  <div class="apex-mkt-container">
+    <div class="apex-mkt-hero__layout">
+      <div class="apex-mkt-hero__copy">
+        <span class="apex-mkt-kicker">Delivery diagnostics</span>
+        <h1 class="apex-mkt-hero__title break-words">
+          See exactly what happened to <span>every message.</span>
+        </h1>
+        <p class="apex-mkt-hero__sub">
+          A complete, causal timeline per message — request acceptance, DKIM signing, pool selection, every SMTP
+          attempt with the provider's own response codes, deferrals, retries, recipient-MX acceptance, event
+          emission and webhook delivery. Not an event feed: the reason each thing happened.
+        </p>
+        <div class="apex-mkt-hero__actions">
+          <a href="{{ config.extra.app_url }}/signup" class="apex-mkt-cta--primary">Start free</a>
+          <a href="#message-timeline" class="apex-btn">See the example timeline</a>
+          <a href="/docs/api/" class="apex-btn">Event documentation</a>
+        </div>
+      </div>
     </div>
   </div>
 </section>

@@ -4,6 +4,11 @@
 {# real markup). No Escape promise: browsers do not consistently     #}
 {# close <details> on Escape without script, and this site ships     #}
 {# zero scripts. Static header markup only.                          #}
+{# ARK marketing revision: the nav row is .apex-mkt-nav (min-height  #}
+{# 72px desktop / 56px mobile, hairline bottom); neutral links and   #}
+{# the [aria-current="page"] ink rule are styled by the class, so    #}
+{# top-level links are plain <a> elements. The old h-16 lg:h-20 row  #}
+{# is gone — the class owns the height.                              #}
 {# NOTE: uses inline i18n conditionals (not macros::t) because   #}
 {# Tera macros cannot read the caller's scope variables          #}
 {# (i18n_data / l). Inline form matches the rest of the site.    #}
@@ -13,8 +18,9 @@
   id="site-header"
   class="sticky top-0 left-0 right-0 z-50 border-b"
 >
-  <nav class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8" aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["main_nav"] %}{{ i18n_data[l]["header"]["main_nav"] }}{% else %}Main navigation{% endif %}">
-    <div class="flex items-center justify-between h-16 lg:h-20">
+  <nav aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["main_nav"] %}{{ i18n_data[l]["header"]["main_nav"] }}{% else %}Main navigation{% endif %}">
+    <div class="apex-mkt-nav">
+      <div class="apex-mkt-container w-full flex items-center justify-between gap-6 flex-wrap">
       {# ── Logo (ApexMail wordmark) ──────────────────── #}
       {% include "partials/brand-lockup.html" %}
 
@@ -24,31 +30,27 @@
            item 5): Enter/Space toggles and the open state is real markup
            instead of a frozen aria-expanded. No Escape-handling promise
            (browser-dependent without script). The chevron rotation lives
-           in no-js.css. #}
+           in no-js.css. The menu panel and its rows are the authority's
+           .apex-mkt-nav__menu / .apex-mkt-nav__item (paper panel, 1px ink
+           border, hairline-separated rows). #}
         <details class="relative" data-dropdown="product">
           <summary
-            class="flex items-center gap-1.5 px-3 py-2"
+            class="flex items-center gap-1.5 py-2"
           >
             {% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["product"] %}{{ i18n_data[l]["header"]["product"] }}{% else %}Product{% endif %}
           </summary>
-          <div class="absolute top-full left-0 mt-0 w-80 p-1 border" data-dropdown-menu>
-            <a href="{{ lp }}/features/" {% if current_path_value == "/features" or current_path_value == "/features/" %}aria-current="page"{% endif %} class="flex items-start gap-3 p-3 apex-btn">
-              <div>
-                <div class="mb-0.5 apex-em">{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["features"] %}{{ i18n_data[l]["header"]["features"] }}{% else %}Features{% endif %}</div>
-                <div class="">{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["features_desc"] %}{{ i18n_data[l]["header"]["features_desc"] }}{% else %}Explore our complete feature set{% endif %}</div>
-              </div>
+          <div class="apex-mkt-nav__menu" data-dropdown-menu>
+            <a href="{{ lp }}/features/" {% if current_path_value == "/features" or current_path_value == "/features/" %}aria-current="page"{% endif %} class="apex-mkt-nav__item">
+              <span class="block apex-em">{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["features"] %}{{ i18n_data[l]["header"]["features"] }}{% else %}Features{% endif %}</span>
+              <span class="block apex-meta mt-0.5">{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["features_desc"] %}{{ i18n_data[l]["header"]["features_desc"] }}{% else %}Explore our complete feature set{% endif %}</span>
             </a>
-            <a href="{{ lp }}/security/" {% if current_path_value == "/security" or current_path_value == "/security/" %}aria-current="page"{% endif %} class="flex items-start gap-3 p-3 apex-btn">
-              <div>
-                <div class="mb-0.5 apex-em">{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["security"] %}{{ i18n_data[l]["header"]["security"] }}{% else %}Security{% endif %}</div>
-                <div class="">{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["security_desc"] %}{{ i18n_data[l]["header"]["security_desc"] }}{% else %}Isolation, compliance and audit controls{% endif %}</div>
-              </div>
+            <a href="{{ lp }}/security/" {% if current_path_value == "/security" or current_path_value == "/security/" %}aria-current="page"{% endif %} class="apex-mkt-nav__item">
+              <span class="block apex-em">{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["security"] %}{{ i18n_data[l]["header"]["security"] }}{% else %}Security{% endif %}</span>
+              <span class="block apex-meta mt-0.5">{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["security_desc"] %}{{ i18n_data[l]["header"]["security_desc"] }}{% else %}Isolation, compliance and audit controls{% endif %}</span>
             </a>
-            <a href="{{ lp }}/private-cloud/" {% if current_path_value == "/private-cloud" or current_path_value == "/private-cloud/" %}aria-current="page"{% endif %} class="flex items-start gap-3 p-3 apex-btn">
-              <div>
-                <div class="mb-0.5 apex-em">{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["private_cloud"] %}{{ i18n_data[l]["header"]["private_cloud"] }}{% else %}Private Cloud{% endif %}</div>
-                <div class="">{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["private_cloud_desc"] %}{{ i18n_data[l]["header"]["private_cloud_desc"] }}{% else %}Single-tenant deployments{% endif %}</div>
-              </div>
+            <a href="{{ lp }}/private-cloud/" {% if current_path_value == "/private-cloud" or current_path_value == "/private-cloud/" %}aria-current="page"{% endif %} class="apex-mkt-nav__item">
+              <span class="block apex-em">{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["private_cloud"] %}{{ i18n_data[l]["header"]["private_cloud"] }}{% else %}Private Cloud{% endif %}</span>
+              <span class="block apex-meta mt-0.5">{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["private_cloud_desc"] %}{{ i18n_data[l]["header"]["private_cloud_desc"] }}{% else %}Single-tenant deployments{% endif %}</span>
             </a>
           </div>
         </details>
@@ -56,27 +58,24 @@
         {# Developers dropdown — same native <details> disclosure #}
         <details class="relative" data-dropdown="developers">
           <summary
-            class="flex items-center gap-1.5 px-3 py-2"
+            class="flex items-center gap-1.5 py-2"
           >
             {% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["developers"] %}{{ i18n_data[l]["header"]["developers"] }}{% else %}Developers{% endif %}
           </summary>
-          <div class="absolute top-full left-0 mt-0 w-80 p-1 border" data-dropdown-menu>
-            <a href="/docs/" {% if current_path_value == "/docs" or current_path_value == "/docs/" %}aria-current="page"{% endif %} class="flex items-start gap-3 p-3 apex-btn">
-              <div>
-                <div class="mb-0.5 apex-em">{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["documentation"] %}{{ i18n_data[l]["header"]["documentation"] }}{% else %}Documentation{% endif %}</div>
-                <div class="">{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["documentation_desc"] %}{{ i18n_data[l]["header"]["documentation_desc"] }}{% else %}API reference & guides{% endif %}</div>
-              </div>
+          <div class="apex-mkt-nav__menu" data-dropdown-menu>
+            <a href="/docs/" {% if current_path_value == "/docs" or current_path_value == "/docs/" %}aria-current="page"{% endif %} class="apex-mkt-nav__item">
+              <span class="block apex-em">{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["documentation"] %}{{ i18n_data[l]["header"]["documentation"] }}{% else %}Documentation{% endif %}</span>
+              <span class="block apex-meta mt-0.5">{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["documentation_desc"] %}{{ i18n_data[l]["header"]["documentation_desc"] }}{% else %}API reference &amp; guides{% endif %}</span>
             </a>
-            <a href="/api-explorer/" {% if current_path_value == "/api-explorer" or current_path_value == "/api-explorer/" %}aria-current="page"{% endif %} class="flex items-start gap-3 p-3 apex-btn">
-              <div>
-                <div class="mb-0.5 apex-em">{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["api_console"] %}{{ i18n_data[l]["header"]["api_console"] }}{% else %}API Explorer{% endif %}</div>
-                <div class="">{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["api_console_desc"] %}{{ i18n_data[l]["header"]["api_console_desc"] }}{% else %}Try the API explorer{% endif %}</div>
-              </div>
+            <a href="/api-explorer/" {% if current_path_value == "/api-explorer" or current_path_value == "/api-explorer/" %}aria-current="page"{% endif %} class="apex-mkt-nav__item">
+              <span class="block apex-em">{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["api_console"] %}{{ i18n_data[l]["header"]["api_console"] }}{% else %}API Explorer{% endif %}</span>
+              <span class="block apex-meta mt-0.5">{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["api_console_desc"] %}{{ i18n_data[l]["header"]["api_console_desc"] }}{% else %}Try the API explorer{% endif %}</span>
             </a>
           </div>
         </details>
 
-        {# Top-level routes render as plain nav links between the dropdowns. #}
+        {# Top-level routes render as plain nav links between the dropdowns;
+           .apex-mkt-nav styles them and paints the current-page rule. #}
         <span class="flex items-center gap-2">
         <a href="{{ lp }}/pricing/" {% if current_path_value == "/pricing" or current_path_value == "/pricing/" %}aria-current="page"{% endif %}>{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["pricing"] %}{{ i18n_data[l]["header"]["pricing"] }}{% else %}Pricing{% endif %}</a>
         {# Sovereignty is a top-level nav entry (2026-10-16 owner directive):
@@ -92,10 +91,10 @@
       {# Zero-JS policy: dark mode follows prefers-color-scheme only, so
          there is no theme toggle button (it would be a dead control). #}
       <div class="hidden lg:flex items-center gap-3">
-        <a href="{{ config.extra.app_url }}/login" class="px-3 py-2 apex-btn apex-btn--sm">
+        <a href="{{ config.extra.app_url }}/login" class="apex-btn apex-btn--sm">
           {% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["signin"] %}{{ i18n_data[l]["header"]["signin"] }}{% else %}Sign In{% endif %}
         </a>
-        <a href="{{ config.extra.app_url }}/signup" class="apex-btn apex-btn--primary">
+        <a href="{{ config.extra.app_url }}/signup" class="apex-mkt-cta--primary">
           {% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["get_started"] %}{{ i18n_data[l]["header"]["get_started"] }}{% else %}Start Free{% endif %}
         </a>
       </div>
@@ -130,7 +129,10 @@
            expressed with structural utilities instead. #}
         <nav id="mobile-menu" class="lg:hidden absolute left-0 right-0 top-full max-h-[calc(100vh-4rem)] overflow-y-auto border-b" aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["mobile_nav"] %}{{ i18n_data[l]["header"]["mobile_nav"] }}{% else %}Mobile navigation{% endif %}">
           <div>
-    <div class="px-4 py-6 space-y-6">
+            {# Horizontal padding is the container's job now: the old
+               px-4 wrapper became .apex-mkt-container so the panel rows
+               line up with the page grid. #}
+            <div class="apex-mkt-container py-6 space-y-6">
       <div class="space-y-3">
         <div class="px-3 apex-em apex-section-head">{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["product_mobile"] %}{{ i18n_data[l]["header"]["product_mobile"] }}{% else %}Product{% endif %}</div>
         <div class="space-y-1">
@@ -169,14 +171,15 @@
         <a href="{{ config.extra.app_url }}/login" class="block w-full py-3 apex-btn">
           {% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["signin"] %}{{ i18n_data[l]["header"]["signin"] }}{% else %}Sign In{% endif %}
         </a>
-        <a href="{{ config.extra.app_url }}/signup" class="block w-full apex-btn apex-btn--primary py-3">
+        <a href="{{ config.extra.app_url }}/signup" class="apex-mkt-cta--primary w-full">
           {% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["get_started"] %}{{ i18n_data[l]["header"]["get_started"] }}{% else %}Start Free{% endif %}
         </a>
       </div>
-    </div>
-    </div>
-  </nav>
+            </div>
+          </div>
+        </nav>
       </details>
+      </div>
     </div>
   </nav>
 </header>

@@ -1,8 +1,7 @@
-{# Calculator page template #}
-{# Page mode: tool — tighter hero, product feel. #}
+{# Calculator page template. Page mode: tool — tighter hero, product feel. #}
 {% extends "base.html" %}
 
-{% block body_class %}apex-mkt-page--tool{% endblock body_class %}
+{% block body_class %}apex-mkt-page--tool{% endblock %}
 
 {% block title %}{% if section.title %}{{ section.title }} | {{ config.extra.site_name }}{% elif page.title %}{{ page.title }} | {{ config.extra.site_name }}{% else %}{{ config.title }}{% endif %}{% endblock title %}
 
@@ -16,15 +15,4 @@
   {% if page.description %}{{ page.description }}{% else %}{{ config.description }}{% endif %}
 {% endblock og_description %}
 
-{% block content %}
-{% include "partials/calculator/hero.html" %}
-
-{# Server-submitted pricing estimate: the form POSTs to the api-server's
-   pricing endpoint, which computes the estimate from the billing-service
-   plan tables and renders the result page. No client-side calculator — the
-   site ships zero scripts. #}
-{% include "partials/pricing/calculator.html" %}
-
-{% include "partials/calculator/competitor-breakdown.html" %}
-{% include "partials/calculator/cta.html" %}
-{% endblock content %}
+{% block content %}test{% endblock content %}

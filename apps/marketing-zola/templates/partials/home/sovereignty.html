@@ -2,9 +2,14 @@
    Sits directly under the hero: four evidence-linked points rendered as a
    ruled ledger, plus the honest Global-vs-EU-only scope note (the Global
    default delivers through AWS SES in its EU region; EU-only routing
-   removes that transport). Every point keeps its evidence link. ── #}
-<section id="sovereignty" class="apex-mkt-section" aria-label="Sovereignty">
-  <span class="apex-section-label">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_sovereignty"] and i18n_data[l]["home_sovereignty"]["eyebrow"] %}{{ i18n_data[l]["home_sovereignty"]["eyebrow"] }}{% else %}Sovereignty{% endif %}</span>
+   removes that transport). Every point keeps its evidence link.
+
+   This is the page's ONE ink interruption: .apex-mkt-section--ink and the
+   recipe recolors headings, the lead, links, the table and the notice —
+   no color classes are written here. ── #}
+<section id="sovereignty" class="apex-mkt-section apex-mkt-section--ink" aria-label="Sovereignty">
+  <div class="apex-mkt-container">
+  <span class="apex-mkt-kicker">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_sovereignty"] and i18n_data[l]["home_sovereignty"]["eyebrow"] %}{{ i18n_data[l]["home_sovereignty"]["eyebrow"] }}{% else %}Sovereignty{% endif %}</span>
   <h2 class="apex-h2">
     {% if i18n_data and i18n_data[l] and i18n_data[l]["home_sovereignty"] and i18n_data[l]["home_sovereignty"]["heading_1"] %}{{ i18n_data[l]["home_sovereignty"]["heading_1"] }}{% else %}European by construction.{% endif %}
   </h2>
@@ -58,4 +63,5 @@
   <p class="mt-6">
     <a href="{{ lp }}/eu-sovereign/">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_sovereignty"] and i18n_data[l]["home_sovereignty"]["see_all"] %}{{ i18n_data[l]["home_sovereignty"]["see_all"] }}{% else %}Read the sovereignty case{% endif %}</a>
   </p>
+  </div>
 </section>

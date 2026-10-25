@@ -45,22 +45,33 @@
   {% endif %}
 
   {% if section.pages or section.subsections %}
+  {# The index cards render as ruled ledger rows (index number + title +
+     description) at the reading width; each row is one link. #}
   <div class="mx-auto max-w-3xl px-6 py-12">
-    {% for page in section.pages %}
-    <a href="{{ page.permalink }}" class="block mb-4 p-6 apex-btn">
-      <h2 class="apex-h2">{{ page.title }}</h2>
-      {% if page.description %}<p class="mt-2">{{ page.description }}</p>{% endif %}
-    </a>
-    {% endfor %}
-    {# Real subsections (folders with _index.md) render in the same list so
-       nested indexes stay discoverable. #}
-    {% for sub in section.subsections %}
-    {% set subsec = get_section(path=sub) %}
-    <a href="{{ subsec.permalink }}" class="block mb-4 p-6 apex-btn">
-      <h2 class="apex-h2">{{ subsec.title }}</h2>
-      {% if subsec.description %}<p class="mt-2">{{ subsec.description }}</p>{% endif %}
-    </a>
-    {% endfor %}
+    <div class="apex-ledger--indexed">
+      {% for page in section.pages %}
+      <a href="{{ page.permalink }}">
+        <span class="apex-index">{% if loop.index < 10 %}0{{ loop.index }}{% else %}{{ loop.index }}{% endif %}</span>
+        <div>
+          <h2 class="apex-h2">{{ page.title }}</h2>
+          {% if page.description %}<span class="mt-2 block">{{ page.description }}</span>{% endif %}
+        </div>
+      </a>
+      {% endfor %}
+      {# Real subsections (folders with _index.md) render in the same list so
+         nested indexes stay discoverable. #}
+      {% set ledger_offset = section.pages | length %}
+      {% for sub in section.subsections %}
+      {% set subsec = get_section(path=sub) %}
+      <a href="{{ subsec.permalink }}">
+        <span class="apex-index">{% set sub_no = ledger_offset + loop.index %}{% if sub_no < 10 %}0{{ sub_no }}{% else %}{{ sub_no }}{% endif %}</span>
+        <div>
+          <h2 class="apex-h2">{{ subsec.title }}</h2>
+          {% if subsec.description %}<span class="mt-2 block">{{ subsec.description }}</span>{% endif %}
+        </div>
+      </a>
+      {% endfor %}
+    </div>
   </div>
   {% else %}
   {# Empty-index state: name what this section is and give real destinations

@@ -8,8 +8,9 @@
 
 {%- set pricing_data = load_data(path="data/pricing.json", format="json") -%}
 
-<section class="scroll-mt-20 apex-mkt-section" id="apexmail-calculator" aria-labelledby="calculator-heading" data-pricing='{{ pricing_data | json_encode | escape }}'>
-  <div class="max-w-4xl mx-auto">
+<section class="scroll-mt-20 apex-mkt-section apex-mkt-section--ink" id="apexmail-calculator" aria-labelledby="calculator-heading" data-pricing='{{ pricing_data | json_encode | escape }}'>
+  <div class="apex-mkt-container">
+  <div class="max-w-4xl">
 
     <div class="apex-section-head">
       <h2 id="calculator-heading" class="apex-h2">
@@ -103,7 +104,7 @@
 
         {# ── Submit: the estimate renders on the response page ── #}
         <div class="mt-8 pt-6 border-t flex flex-col sm:flex-row items-start gap-4">
-          <button type="submit" class="apex-btn apex-btn--primary">Calculate</button>
+          <button type="submit" class="apex-mkt-cta--primary">Calculate</button>
           <p class="apex-help">Press Calculate — your estimate renders instantly on the next page using the billing service's live plan tables.</p>
         </div>
         </form>

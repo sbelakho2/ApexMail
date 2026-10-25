@@ -4,31 +4,36 @@
    sandbox tenant). The old hero claimed a "static explorer" with "no
    live server requests" — a direct contradiction of the lanes below
    it. Copy now states exactly what runs and what cannot escape. #}
+{# ARK hero system: tool page mode tightens the hero padding via the
+   body class; the "How the sandbox works" panel renders as ARK
+   evidence and the sandbox boundary rows as ruled rows. #}
 
-<section class="relative overflow-hidden pt-28 pb-14 sm:pt-32">
-  <div class="absolute inset-0"></div>
-  <div class="relative w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-    <div class="grid gap-8 lg:grid-cols-[1.1fr_0.9fr] lg:items-end">
-      <div class="max-w-3xl">
-        <div class="inline-flex items-center gap-2 px-3 py-1 border apex-em apex-section-head">
-          API Workbench
-        </div>
-        <h1 class="mt-5 apex-page-title">
+<section class="apex-mkt-hero">
+  <div class="apex-mkt-container">
+    <div class="apex-mkt-hero__layout">
+      <div class="apex-mkt-hero__copy">
+        <span class="apex-mkt-kicker">API Workbench</span>
+        <h1 class="apex-mkt-hero__title break-words">
            Run Real API Requests
         </h1>
-        <p class="mt-4">
+        <p class="apex-mkt-hero__sub">
            Tune the payload, press send, and the request executes against an isolated
            ApexMail sandbox with a real API key — real validation, real queuing,
            real delivery attempts, and the verbatim response.
         </p>
       </div>
 
-      <div class="border p-5">
-        <p class="apex-em">How the sandbox works</p>
-        <div class="mt-4 space-y-3">
-          <p class="border px-4 py-3">Requests run against an isolated ApexMail sandbox — the same handlers, queue and worker as production.</p>
-          <p class="border px-4 py-3">Sandbox messages cannot be delivered to real recipients: every recipient must end in <span class="">@example.com</span> (RFC 2606 reserved).</p>
-          <p class="border px-4 py-3">Responses are the real status codes, latency and JSON bodies — not simulations.</p>
+      <div class="apex-mkt-hero__evidence">
+        <div class="apex-evidence apex-evidence--mkt">
+          <div class="apex-evidence__head"><span>How the sandbox works</span><span class="apex-evidence__seal">LIVE SANDBOX</span></div>
+          <div class="apex-evidence__hatch" aria-hidden="true"></div>
+          <div class="apex-evidence__body">
+            <div class="space-y-3">
+              <p>Requests run against an isolated ApexMail sandbox — the same handlers, queue and worker as production.</p>
+              <p>Sandbox messages cannot be delivered to real recipients: every recipient must end in <span class="apex-em">@example.com</span> (RFC 2606 reserved).</p>
+              <p>Responses are the real status codes, latency and JSON bodies — not simulations.</p>
+            </div>
+          </div>
         </div>
       </div>
     </div>

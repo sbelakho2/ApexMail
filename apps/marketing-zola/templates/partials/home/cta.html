@@ -1,6 +1,11 @@
 {# CTA section — ARK round (lane T). Facts as stacked rows, no icon bullets,
-   no rhetorical heading. #}
-<section class="apex-mkt-section" aria-label="Get started">
+   no rhetorical heading. This is the page's ONE crimson field:
+   .apex-mkt-section--brand and the recipe recolor the heading, lead,
+   feature rows and the trust meta to paper, invert .apex-btn--primary to
+   paper-on-crimson and rule the plain .apex-btn white — no color classes
+   are written here. #}
+<section class="apex-mkt-section apex-mkt-section--brand" aria-label="Get started">
+  <div class="apex-mkt-container">
   <h2 class="apex-h2">
     {% if i18n_data and i18n_data[l] and i18n_data[l]["cta"] and i18n_data[l]["cta"]["heading_1"] %}{{ i18n_data[l]["cta"]["heading_1"] }}{% else %}Create your account and send{% endif %}
   </h2>
@@ -28,4 +33,5 @@
     {% if i18n_data and i18n_data[l] and i18n_data[l]["cta"] and i18n_data[l]["cta"]["trust_gdpr"] %}{{ i18n_data[l]["cta"]["trust_gdpr"] }}{% else %}GDPR-Aligned{% endif %},
     {% if i18n_data and i18n_data[l] and i18n_data[l]["cta"] and i18n_data[l]["cta"]["trust_support"] %}{{ i18n_data[l]["cta"]["trust_support"] }}{% else %}Priority Support (Business; Dedicated on Enterprise Cloud){% endif %}
   </p>
+  </div>
 </section>

@@ -6,6 +6,11 @@
 {# authority); competitor figures are published LIST RATES from   #}
 {# the dated review captured on the /compare/* pages — they are   #}
 {# not live quotes and do not change with the entered volume.     #}
+{# ARK alignment: dense tool section + container; the table keeps
+   apex-table with its own rules (hand-rolled cell utilities and the
+   bordered chrome box are gone) and a keyboard-reachable scroll
+   region. The check/cross icons became words in the cells, so the
+   marker legend is folded into the cell text. #}
 {% set pricing_data = load_data(path="data/pricing.json", format="json") %}
 {% set cb_free = pricing_data.plans[0] %}
 {% set cb_developer = pricing_data.plans[1] %}
@@ -15,158 +20,113 @@
 {% set cb_enterprise = pricing_data.plans[5] %}
 {% set cb_launch = pricing_data.free_launch_allowance %}
 
-<section class="py-20 lg:py-32 relative">
-  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+<section class="apex-mkt-section apex-mkt-section--dense">
+  <div class="apex-mkt-container">
     <div class="mb-16">
       <h2 class="mb-4 apex-h2">
         Feature-by-Feature Comparison
       </h2>
-      <p class="max-w-2xl mx-auto">
+      <p class="max-w-2xl">
         Price is only part of the decision. This table compares platform capabilities alongside the numbers, so the trade-offs are visible before you commit.
         Competitor figures are published list rates from the dated review on our <a href="{{ lp }}/compare/" class="apex-link">comparison pages</a> (last reviewed 2026-10-04, converted at 1 USD = €0.92) — illustrative, not live quotes.
       </p>
     </div>
 
-    <div class="border overflow-hidden">
-      <div class="overflow-x-auto">
-        <table class="w-full table-fixed apex-table">
-          <caption class="sr-only">Feature comparison between ApexMail, SendGrid, and Mailchimp.</caption>
-          <thead>
-            <tr class="border-b">
-              <th scope="col" class="py-3 px-2 sm:px-4">Feature</th>
-              <th scope="col" class="py-3 px-2 sm:px-3">ApexMail</th>
-              <th scope="col" class="py-3 px-2 sm:px-3">SendGrid</th>
-              <th scope="col" class="py-3 px-2 sm:px-3">Mailchimp</th>
-            </tr>
-          </thead>
-          <tbody class="">
-            {# Row: Free tier #}
-            <tr class="">
-              <td class="py-3 px-2 sm:px-4 break-words apex-em">Free tier</td>
-              <td class="py-3 px-2 sm:px-3">
-                <span class="break-words apex-em">{{ cb_free.included_volume_display }}/mo + {{ cb_launch.emails_display }} launch</span>
-              </td>
-              <td class="py-3 px-2 sm:px-3"><span class="apex-em">100/day</span></td>
-              <td class="py-3 px-2 sm:px-3"><span class="apex-em">500 contacts</span></td>
-            </tr>
-            {# Row: Price per 100K emails #}
-            <tr class="">
-              <td class="py-3 px-2 sm:px-4 break-words apex-em">Price per 100K emails</td>
-              <td class="py-3 px-2 sm:px-3">
-                <span class="break-words apex-em">{{ cb_developer.monthly_price_display }}/mo plus €{{ cb_developer.overage_per_1k }} per 1,000 overage; Pro {{ cb_pro.monthly_price_display }}/mo includes {{ cb_pro.included_volume_display }}</span>
-              </td>
-              <td class="py-3 px-2 sm:px-3"><span class="apex-em">€82.75 (US$89.95) — Pro plan</span></td>
-              <td class="py-3 px-2 sm:px-3"><span class="apex-em">Not publicly itemized</span></td>
-            </tr>
-            {# Row: Dedicated IPs #}
-            <tr class="">
-              <td class="py-3 px-2 sm:px-4 break-words apex-em">Dedicated IPs</td>
-              <td class="py-3 px-2 sm:px-3">
-                <span class="break-words apex-em">€49/mo first, €69/mo each additional (Pro+); included: Growth {{ cb_growth.included_ips }}, Business {{ cb_business.included_ips }}, Enterprise Cloud up to {{ cb_enterprise.included_ips }}</span>
-              </td>
-              <td class="py-3 px-2 sm:px-3"><span class="apex-em">On request (no public price)</span></td>
-              <td class="py-3 px-2 sm:px-3"><span class="apex-em">Not publicly itemized</span></td>
-            </tr>
-            {# Row: Templates included #}
-            <tr class="">
-              <td class="py-3 px-2 sm:px-4 break-words apex-em">Templates included</td>
-              <td class="py-3 px-2 sm:px-3">
-                <svg role="img" aria-label="Included" class="w-5 h-5 mx-auto" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-              </td>
-              <td class="py-3 px-2 sm:px-3"><svg role="img" aria-label="Included" class="w-5 h-5 mx-auto" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg></td>
-              <td class="py-3 px-2 sm:px-3"><svg role="img" aria-label="Included" class="w-5 h-5 mx-auto" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg></td>
-            </tr>
-            {# Row: Send-time optimization #}
-            <tr class="">
-              <td class="py-3 px-2 sm:px-4 break-words apex-em">Send-time optimization</td>
-              <td class="py-3 px-2 sm:px-3">
-                <span class="apex-em">Deliverability insights</span>
-              </td>
-              <td class="py-3 px-2 sm:px-3"><span role="img" aria-label="Not included" class="mx-auto block w-1.5 h-1.5"></span></td>
-              <td class="py-3 px-2 sm:px-3"><span role="img" aria-label="Not included" class="mx-auto block w-1.5 h-1.5"></span></td>
-            </tr>
-            {# Row: Analytics #}
-            <tr class="">
-              <td class="py-3 px-2 sm:px-4 break-words apex-em">Analytics</td>
-              <td class="py-3 px-2 sm:px-3">
-                <svg role="img" aria-label="Included" class="w-5 h-5 mx-auto" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-              </td>
-              <td class="py-3 px-2 sm:px-3"><svg role="img" aria-label="Included" class="w-5 h-5 mx-auto" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg></td>
-              <td class="py-3 px-2 sm:px-3"><svg role="img" aria-label="Included" class="w-5 h-5 mx-auto" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg></td>
-            </tr>
-            {# Row: Webhooks #}
-            <tr class="">
-              <td class="py-3 px-2 sm:px-4 break-words apex-em">Webhooks</td>
-              <td class="py-3 px-2 sm:px-3">
-                <svg role="img" aria-label="Included" class="w-5 h-5 mx-auto" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-              </td>
-              <td class="py-3 px-2 sm:px-3"><svg role="img" aria-label="Included" class="w-5 h-5 mx-auto" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg></td>
-              <td class="py-3 px-2 sm:px-3"><span class="apex-em">Paid plans</span></td>
-            </tr>
-            {# Row: GDPR tools #}
-            <tr class="">
-              <td class="py-3 px-2 sm:px-4 break-words apex-em">GDPR tools</td>
-              <td class="py-3 px-2 sm:px-3">
-                <svg role="img" aria-label="Included" class="w-5 h-5 mx-auto" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-              </td>
-              <td class="py-3 px-2 sm:px-3">
-                <span class="flex items-center justify-center gap-1.5 apex-em">
-                  <svg role="img" aria-label="Limited or paid add-on" class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-                  <span class="">Manual</span>
-                </span>
-              </td>
-              <td class="py-3 px-2 sm:px-3"><svg role="img" aria-label="Included" class="w-5 h-5 mx-auto" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg></td>
-            </tr>
-            {# Row: Private cloud option #}
-            <tr class="">
-              <td class="py-3 px-2 sm:px-4 break-words apex-em">Private cloud option</td>
-              <td class="py-3 px-2 sm:px-3">
-                <span class="apex-em">Enterprise plan</span>
-              </td>
-              <td class="py-3 px-2 sm:px-3"><span role="img" aria-label="Not included" class="mx-auto block w-1.5 h-1.5"></span></td>
-              <td class="py-3 px-2 sm:px-3"><span role="img" aria-label="Not included" class="mx-auto block w-1.5 h-1.5"></span></td>
-            </tr>
-            {# Row: Support #}
-            <tr class="">
-              <td class="py-3 px-2 sm:px-4 break-words apex-em">Support</td>
-              <td class="py-3 px-2 sm:px-3">
-                <span class="break-words apex-em">Email (Developer&ndash;Growth) / Priority (Business) / Dedicated (Enterprise Cloud)</span>
-              </td>
-              <td class="py-3 px-2 sm:px-3"><span class="apex-em">Email only</span></td>
-              <td class="py-3 px-2 sm:px-3"><span class="apex-em">Email only</span></td>
-            </tr>
-            {# Row: Uptime SLA #}
-            <tr class="">
-              <td class="py-3 px-2 sm:px-4 break-words apex-em">Uptime SLA</td>
-              <td class="py-3 px-2 sm:px-3">
-                <span class="apex-em">99.9% (Business and Enterprise)</span>
-              </td>
-              <td class="py-3 px-2 sm:px-3"><span class="apex-em">Vendor terms</span></td>
-              <td class="py-3 px-2 sm:px-3">
-                <span class="flex items-center justify-center gap-1.5 apex-em">
-                  <svg role="img" aria-label="Limited or paid add-on" class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-                  <span class="">None</span>
-                </span>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
-
-    <div class="flex flex-wrap justify-center gap-8 mt-8">
-      <div class="flex items-center gap-2 apex-em">
-        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-        <span>Included</span>
-      </div>
-      <div class="flex items-center gap-2 apex-em">
-        <div class="w-1.5 h-1.5"></div>
-        <span>Not included</span>
-      </div>
-      <div class="flex items-center gap-2 apex-em">
-        <svg role="img" aria-label="Limited or paid add-on" class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-        <span>Limited or Paid add-on</span>
-      </div>
+    <div class="overflow-x-auto" role="region" tabindex="0" aria-label="Feature comparison between ApexMail, SendGrid, and Mailchimp — scroll horizontally to see every column">
+      <table class="w-full table-fixed apex-table">
+        <caption class="sr-only">Feature comparison between ApexMail, SendGrid, and Mailchimp.</caption>
+        <thead>
+          <tr>
+            <th scope="col">Feature</th>
+            <th scope="col">ApexMail</th>
+            <th scope="col">SendGrid</th>
+            <th scope="col">Mailchimp</th>
+          </tr>
+        </thead>
+        <tbody>
+          {# Row: Free tier #}
+          <tr>
+            <th scope="row" class="break-words apex-em">Free tier</th>
+            <td><span class="break-words apex-em">{{ cb_free.included_volume_display }}/mo + {{ cb_launch.emails_display }} launch</span></td>
+            <td><span class="apex-em">100/day</span></td>
+            <td><span class="apex-em">500 contacts</span></td>
+          </tr>
+          {# Row: Price per 100K emails #}
+          <tr>
+            <th scope="row" class="break-words apex-em">Price per 100K emails</th>
+            <td>
+              <span class="break-words apex-em">{{ cb_developer.monthly_price_display }}/mo plus €{{ cb_developer.overage_per_1k }} per 1,000 overage; Pro {{ cb_pro.monthly_price_display }}/mo includes {{ cb_pro.included_volume_display }}</span>
+            </td>
+            <td><span class="apex-em">€82.75 (US$89.95) — Pro plan</span></td>
+            <td><span class="apex-em">Not publicly itemized</span></td>
+          </tr>
+          {# Row: Dedicated IPs #}
+          <tr>
+            <th scope="row" class="break-words apex-em">Dedicated IPs</th>
+            <td>
+              <span class="break-words apex-em">€49/mo first, €69/mo each additional (Pro+); included: Growth {{ cb_growth.included_ips }}, Business {{ cb_business.included_ips }}, Enterprise Cloud up to {{ cb_enterprise.included_ips }}</span>
+            </td>
+            <td><span class="apex-em">On request (no public price)</span></td>
+            <td><span class="apex-em">Not publicly itemized</span></td>
+          </tr>
+          {# Row: Templates included #}
+          <tr>
+            <th scope="row" class="break-words apex-em">Templates included</th>
+            <td><span class="apex-em">Included</span></td>
+            <td><span class="apex-em">Included</span></td>
+            <td><span class="apex-em">Included</span></td>
+          </tr>
+          {# Row: Send-time optimization #}
+          <tr>
+            <th scope="row" class="break-words apex-em">Send-time optimization</th>
+            <td><span class="apex-em">Deliverability insights</span></td>
+            <td><span class="apex-em">Not included</span></td>
+            <td><span class="apex-em">Not included</span></td>
+          </tr>
+          {# Row: Analytics #}
+          <tr>
+            <th scope="row" class="break-words apex-em">Analytics</th>
+            <td><span class="apex-em">Included</span></td>
+            <td><span class="apex-em">Included</span></td>
+            <td><span class="apex-em">Included</span></td>
+          </tr>
+          {# Row: Webhooks #}
+          <tr>
+            <th scope="row" class="break-words apex-em">Webhooks</th>
+            <td><span class="apex-em">Included</span></td>
+            <td><span class="apex-em">Included</span></td>
+            <td><span class="apex-em">Paid plans</span></td>
+          </tr>
+          {# Row: GDPR tools #}
+          <tr>
+            <th scope="row" class="break-words apex-em">GDPR tools</th>
+            <td><span class="apex-em">Included</span></td>
+            <td><span class="apex-em">Manual (limited or paid add-on)</span></td>
+            <td><span class="apex-em">Included</span></td>
+          </tr>
+          {# Row: Private cloud option #}
+          <tr>
+            <th scope="row" class="break-words apex-em">Private cloud option</th>
+            <td><span class="apex-em">Enterprise plan</span></td>
+            <td><span class="apex-em">Not included</span></td>
+            <td><span class="apex-em">Not included</span></td>
+          </tr>
+          {# Row: Support #}
+          <tr>
+            <th scope="row" class="break-words apex-em">Support</th>
+            <td><span class="break-words apex-em">Email (Developer&ndash;Growth) / Priority (Business) / Dedicated (Enterprise Cloud)</span></td>
+            <td><span class="apex-em">Email only</span></td>
+            <td><span class="apex-em">Email only</span></td>
+          </tr>
+          {# Row: Uptime SLA #}
+          <tr>
+            <th scope="row" class="break-words apex-em">Uptime SLA</th>
+            <td><span class="apex-em">99.9% target (Business and Enterprise)</span></td>
+            <td><span class="apex-em">Vendor terms</span></td>
+            <td><span class="apex-em">None</span></td>
+          </tr>
+        </tbody>
+      </table>
     </div>
   </div>
 </section>

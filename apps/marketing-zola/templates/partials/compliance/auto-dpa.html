@@ -3,77 +3,56 @@
 {# Static disclosure markup with no runtime interactivity       #}
 {#       needed, buttons become links / static UI.                #}
 
-<section class="py-20 lg:py-32 relative">
-  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-    <div class="grid lg:grid-cols-2 gap-12 lg:gap-16 items-center">
+<section class="apex-mkt-section">
+  <div class="apex-mkt-container">
+    <div class="grid lg:grid-cols-2 gap-12 lg:gap-16 items-start">
       {# Left — Copy #}
-      <div class="">
-        <div class="inline-flex items-center gap-2 px-3 py-1.5 border mb-6 apex-em">
-          <svg class="w-4 h-4" role="img" aria-label="Data processing agreement document" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
-          Auto-DPA
-        </div>
-        <h2 class="mb-6 break-words apex-h2">
+      <div>
+        <span class="apex-section-label">Auto-DPA</span>
+        <h2 class="break-words apex-h2">
           DPA workflow
         </h2>
-        <p class="mb-8">
+        <p class="apex-lead">
           Prepare DPA workflows with maintained clauses, jurisdiction context,
           processing activities, and a signature request path for legal review.
         </p>
 
-        <ul class="space-y-4 mb-8">
-          {% set dpa_items = [
-            "Customized to your jurisdiction and processing activities",
-            "Includes declared processing activities",
-            "Standard Contractual Clauses (SCCs) included",
-            "Versioned and timestamped for audit trails",
-            "Document package available for legal review"
-          ] %}
+        {% set dpa_items = [
+          "Customized to your jurisdiction and processing activities",
+          "Includes declared processing activities",
+          "Standard Contractual Clauses (SCCs) included",
+          "Versioned and timestamped for audit trails",
+          "Document package available for legal review"
+        ] %}
+        <ol class="apex-ledger--indexed list-none" role="list">
           {% for item in dpa_items %}
-          <li class="flex items-start gap-3">
-            <svg class="w-5 h-5 flex-shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-            {{ item }}
-          </li>
+          <li><span class="apex-index">{% if loop.index < 10 %}0{% endif %}{{ loop.index }}</span><span class="apex-em">{{ item }}</span></li>
           {% endfor %}
-        </ul>
+        </ol>
       </div>
 
-      {# Right — Visual #}
-      <div class="">
-        <div class="border p-6 sm:p-8">
-          <div class="p-6 mb-6 border">
-            <div class="flex items-center gap-4 mb-6">
-              <div class="w-10 h-10 flex items-center justify-center border">
-                <svg class="w-5 h-5" role="img" aria-label="Generated DPA preview" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
-              </div>
-              <div>
-                <div class="mb-0.5 apex-em">Data Processing Agreement</div>
-                <div class="">Illustrative preview — layout only, not a generated document</div>
-              </div>
-            </div>
-            <div class="space-y-3 mb-6">
-              <div class="h-1.5 w-full"></div>
-              <div class="h-1.5 w-5/6"></div>
-              <div class="h-1.5 w-4/5"></div>
-            </div>
-            <div class="mt-6 pt-6 border-t">
-              <div class="mb-3 apex-em">Included Clauses:</div>
-              <div class="flex flex-wrap gap-2">
-                {% for clause in ["GDPR Art. 28", "SCCs", "Sub-processors", "Security Measures"] %}
-                <span class="px-2 py-1 border apex-em">{{ clause }}</span>
-                {% endfor %}
-              </div>
-            </div>
-          </div>
+      {# Right — Evidence panel (illustrative) #}
+      <div>
+        <div class="apex-evidence apex-evidence--mkt">
+          <div class="apex-evidence__head"><span>Data Processing Agreement</span><span class="apex-evidence__seal">ILLUSTRATIVE</span></div>
+          <div class="apex-evidence__hatch" aria-hidden="true"></div>
+          <div class="apex-evidence__body">
+            <ol class="apex-ledger--indexed list-none" role="list">
+              <li><span class="apex-index">01</span><span class="apex-em">GDPR Art. 28</span></li>
+              <li><span class="apex-index">02</span><span class="apex-em">SCCs</span></li>
+              <li><span class="apex-index">03</span><span class="apex-em">Sub-processors</span></li>
+              <li><span class="apex-index">04</span><span class="apex-em">Security Measures</span></li>
+            </ol>
 
-          <p class="mb-4">The panel above is an illustrative layout preview, not agreement text. DPA execution and signature requests are handled through legal review.</p>
-          <div class="flex flex-col sm:flex-row gap-4">
-            <a href="{{ lp }}/dpa/" aria-label="View ApexMail DPA" class="flex-1 py-3 px-4 flex items-center justify-center apex-btn">
-              <svg class="w-4 h-4 mr-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-              View DPA
-            </a>
-            <a href="mailto:legal@apexmail.ee?subject=ApexMail%20DPA%20signature%20request" aria-label="Request DPA signature" class="flex-1 py-3 px-4 apex-btn">
-              Request Signature
-            </a>
+            <p class="mt-6">The panel above is an illustrative layout preview, not agreement text. DPA execution and signature requests are handled through legal review.</p>
+            <div class="flex flex-col sm:flex-row gap-4 mt-6">
+              <a href="{{ lp }}/dpa/" aria-label="View ApexMail DPA" class="apex-btn">
+                View DPA
+              </a>
+              <a href="mailto:legal@apexmail.ee?subject=ApexMail%20DPA%20signature%20request" aria-label="Request DPA signature" class="apex-btn">
+                Request Signature
+              </a>
+            </div>
           </div>
         </div>
       </div>

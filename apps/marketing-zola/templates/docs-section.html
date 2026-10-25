@@ -10,7 +10,7 @@
 
 {% block content %}
   <section class="border-b pt-24 pb-12 lg:pt-28 lg:pb-16">
-    <div class="mx-auto max-w-7xl px-6">
+    <div class="apex-mkt-container">
       <div class="max-w-3xl">
         <p class="apex-em">Developer documentation</p>
         <h1 class="mt-4 apex-page-title">Documentation</h1>
@@ -18,27 +18,38 @@
       </div>
 
       {# First-send onboarding leads the documentation hub: the fastest path
-         for a new integration is a real send, not a reference crawl. #}
-      <a href="/quickstart/" class="mt-8 flex flex-col sm:flex-row sm:items-center gap-4 p-5 apex-btn">
-        <div class="flex-1">
-          <p class="apex-em">{% if i18n_data and i18n_data[l] and i18n_data[l]['docs'] and i18n_data[l]['docs']['first_send_title'] %}{{ i18n_data[l]['docs']['first_send_title'] }}{% else %}Send your first email{% endif %}</p>
-          <p class="mt-1">{% if i18n_data and i18n_data[l] and i18n_data[l]['docs'] and i18n_data[l]['docs']['first_send_desc'] %}{{ i18n_data[l]['docs']['first_send_desc'] }}{% else %}Verify a domain, copy a request, and watch it move from accepted to delivered in the quickstart.{% endif %}</p>
-        </div>
-        <span class="shrink-0 apex-em">{% if i18n_data and i18n_data[l] and i18n_data[l]['docs'] and i18n_data[l]['docs']['first_send_cta'] %}{{ i18n_data[l]['docs']['first_send_cta'] }}{% else %}Start the quickstart →{% endif %}</span>
-      </a>
-
-      <div class="mt-8 grid gap-3 md:grid-cols-3">
-        <a href="/api-explorer/" class="p-5 apex-btn">
-          <p class="apex-em">API Explorer</p>
-          <p class="mt-2">Run real requests against the isolated live sandbox.</p>
+         for a new integration is a real send, not a reference crawl. The
+         link-cards render as ruled ledger rows (index number + title +
+         description); no icon SVGs. #}
+      <div class="mt-8 apex-ledger--indexed">
+        <a href="/quickstart/">
+          <span class="apex-index">01</span>
+          <span class="block">
+            <span class="apex-em block">{% if i18n_data and i18n_data[l] and i18n_data[l]['docs'] and i18n_data[l]['docs']['first_send_title'] %}{{ i18n_data[l]['docs']['first_send_title'] }}{% else %}Send your first email{% endif %}</span>
+            <span class="mt-1 block">{% if i18n_data and i18n_data[l] and i18n_data[l]['docs'] and i18n_data[l]['docs']['first_send_desc'] %}{{ i18n_data[l]['docs']['first_send_desc'] }}{% else %}Verify a domain, copy a request, and watch it move from accepted to delivered in the quickstart.{% endif %}</span>
+            <span class="mt-2 block apex-em">{% if i18n_data and i18n_data[l] and i18n_data[l]['docs'] and i18n_data[l]['docs']['first_send_cta'] %}{{ i18n_data[l]['docs']['first_send_cta'] }}{% else %}Start the quickstart →{% endif %}</span>
+          </span>
         </a>
-        <a href="{{ lp }}/compliance/" class="p-5 apex-btn">
-          <p class="apex-em">Compliance</p>
-          <p class="mt-2">Review controls for regulated deployments and private cloud rollouts.</p>
+        <a href="/api-explorer/">
+          <span class="apex-index">02</span>
+          <span class="block">
+            <span class="apex-em block">API Explorer</span>
+            <span class="mt-1 block">Run real requests against the isolated live sandbox.</span>
+          </span>
         </a>
-        <a href="{{ lp }}/status/" class="p-5 apex-btn">
-          <p class="apex-em">Status</p>
-          <p class="mt-2">Check service health and rollout readiness before launch.</p>
+        <a href="{{ lp }}/compliance/">
+          <span class="apex-index">03</span>
+          <span class="block">
+            <span class="apex-em block">Compliance</span>
+            <span class="mt-1 block">Review controls for regulated deployments and private cloud rollouts.</span>
+          </span>
+        </a>
+        <a href="{{ lp }}/status/">
+          <span class="apex-index">04</span>
+          <span class="block">
+            <span class="apex-em block">Status</span>
+            <span class="mt-1 block">Check service health and rollout readiness before launch.</span>
+          </span>
         </a>
       </div>
     </div>
@@ -46,26 +57,33 @@
 
   {% if section.pages or section.subsections %}
   <section class="py-12 lg:py-16">
-    <div class="mx-auto max-w-7xl px-6">
+    <div class="apex-mkt-container">
       <div class="mb-6">
         <h2 class="apex-h2">Guides</h2>
         <p class="mt-2 max-w-[60ch]">Core request flow, analytics, SDK, webhook, and operations references.</p>
       </div>
-      <div class="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+      <div class="apex-ledger--indexed">
         {% for page in section.pages %}
-        <a href="{{ page.permalink }}" class="block p-6 apex-btn">
-          <h3 class="apex-h3">{{ page.title }}</h3>
-          {% if page.description %}<p class="mt-3">{{ page.description }}</p>{% endif %}
+        <a href="{{ page.permalink }}">
+          <span class="apex-index">{% if loop.index < 10 %}0{{ loop.index }}{% else %}{{ loop.index }}{% endif %}</span>
+          <div>
+            <h3 class="apex-h3">{{ page.title }}</h3>
+            {% if page.description %}<span class="mt-3 block">{{ page.description }}</span>{% endif %}
+          </div>
         </a>
         {% endfor %}
         {# Real sections (API Reference) live in subsections now that the
-           folder is a true Zola section — list them in the same grid so the
+           folder is a true Zola section — list them in the same ledger so the
            page remains discoverable exactly as before. #}
+        {% set ledger_offset = section.pages | length %}
         {% for sub in section.subsections %}
         {% set subsec = get_section(path=sub) %}
-        <a href="{{ subsec.permalink }}" class="block p-6 apex-btn">
-          <h3 class="apex-h3">{{ subsec.title }}</h3>
-          {% if subsec.description %}<p class="mt-3">{{ subsec.description }}</p>{% endif %}
+        <a href="{{ subsec.permalink }}">
+          <span class="apex-index">{% set guide_no = ledger_offset + loop.index %}{% if guide_no < 10 %}0{{ guide_no }}{% else %}{{ guide_no }}{% endif %}</span>
+          <div>
+            <h3 class="apex-h3">{{ subsec.title }}</h3>
+            {% if subsec.description %}<span class="mt-3 block">{{ subsec.description }}</span>{% endif %}
+          </div>
         </a>
         {% endfor %}
       </div>
@@ -76,7 +94,7 @@
      reader moving — API reference, quickstart and support must still be
      reachable instead of an empty grid. #}
   <section class="py-12 lg:py-16">
-    <div class="mx-auto max-w-7xl px-6">
+    <div class="apex-mkt-container">
       <div class="border p-6">
         <h2 class="apex-h2">{% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['no_guides'] %}{{ i18n_data[l]['a11y']['no_guides'] }}{% else %}Guides are being prepared.{% endif %}</h2>
         <p class="mt-2">{% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['no_guides_body'] %}{{ i18n_data[l]['a11y']['no_guides_body'] }}{% else %}No guides are published in this index yet. The API reference, the quickstart, and support are available now.{% endif %}</p>

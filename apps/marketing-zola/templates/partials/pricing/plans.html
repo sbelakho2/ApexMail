@@ -28,7 +28,8 @@
 {% set plan_name = "Growth" %}{% set plan_price = "€229" %}
 {% set plan_name = "Business" %}{% set plan_price = "€699" %}
 
-  <div id="plans" class="scroll-mt-20 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+  <div id="plans" class="apex-mkt-section scroll-mt-20">
+    <div class="apex-mkt-container">
     <div class="apex-section-head">
       <h2 class="apex-h2">Plans</h2>
       <span class="apex-section-aside">Operational controls: audit logs, GDPR workflows, SAML SSO, contract review</span>
@@ -36,7 +37,7 @@
     <p class="apex-meta">Prices per workspace and month. Included volume resets monthly; overage applies per 1,000 emails above the plan volume. Every new account also receives a one-time {{ launch.emails_display }}-email launch allowance for its first {{ launch.window_days }} days.</p>
 
     <div class="apex-table-wrap mt-6">
-      <table class="apex-table">
+      <table class="apex-table apex-decision-table">
         <caption class="sr-only">ApexMail subscription plans: price, volume, overage, dedicated IPs, users and support per plan.</caption>
         <thead>
           <tr>
@@ -54,75 +55,82 @@
         <tbody>
           <tr>
             <th scope="row" class="apex-key">{{ p_free.name }}</th>
-            <td class="apex-num">{{ p_free.monthly_price_display }}</td>
-            <td class="apex-num">€0</td>
-            <td class="apex-num">{{ p_free.included_volume_display }}</td>
-            <td class="apex-num">—</td>
-            <td class="apex-num">{{ p_free.included_ips }}</td>
-            <td class="apex-num">{{ p_free.included_users }}</td>
-            <td>{{ p_free.support | capitalize }}</td>
+            <td class="apex-num apex-decision-table__price" data-label="Monthly">{{ p_free.monthly_price_display }}</td>
+            <td class="apex-num" data-label="Annual, per month">€0</td>
+            <td class="apex-num" data-label="Included volume">{{ p_free.included_volume_display }}</td>
+            <td class="apex-num" data-label="Overage per 1,000">—</td>
+            <td class="apex-num" data-label="Dedicated IPs">{{ p_free.included_ips }}</td>
+            <td class="apex-num" data-label="Users">{{ p_free.included_users }}</td>
+            <td data-label="Support">{{ p_free.support | capitalize }}</td>
             <td><a href="{{ config.extra.app_url }}/signup" class="apex-btn apex-btn--sm">Start Free</a></td>
           </tr>
           <tr>
             <th scope="row" class="apex-key">{{ p_developer.name }}</th>
-            <td class="apex-num">{{ p_developer.monthly_price_display }}</td>
-            <td class="apex-num">€16.67</td>
-            <td class="apex-num">{{ p_developer.included_volume_display }}</td>
-            <td class="apex-num">€0.80</td>
-            <td class="apex-num">{{ p_developer.included_ips }}</td>
-            <td class="apex-num">{{ p_developer.included_users }}</td>
-            <td>{{ p_developer.support | capitalize }}</td>
+            <td class="apex-num apex-decision-table__price" data-label="Monthly">{{ p_developer.monthly_price_display }}</td>
+            <td class="apex-num" data-label="Annual, per month">€16.67</td>
+            <td class="apex-num" data-label="Included volume">{{ p_developer.included_volume_display }}</td>
+            <td class="apex-num" data-label="Overage per 1,000">€0.80</td>
+            <td class="apex-num" data-label="Dedicated IPs">{{ p_developer.included_ips }}</td>
+            <td class="apex-num" data-label="Users">{{ p_developer.included_users }}</td>
+            <td data-label="Support">{{ p_developer.support | capitalize }}</td>
             <td><a href="{{ config.extra.app_url }}/signup?plan=starter" class="apex-btn apex-btn--sm">Start Developer</a></td>
           </tr>
           <tr>
             <th scope="row" class="apex-key">{{ p_pro.name }}</th>
-            <td class="apex-num">{{ p_pro.monthly_price_display }}</td>
-            <td class="apex-num">€74.17</td>
-            <td class="apex-num">{{ p_pro.included_volume_display }}</td>
-            <td class="apex-num">€0.60</td>
-            <td class="apex-num">Add-on</td>
-            <td class="apex-num">{{ p_pro.included_users }}</td>
-            <td>{{ p_pro.support | capitalize }}</td>
+            <td class="apex-num apex-decision-table__price" data-label="Monthly">{{ p_pro.monthly_price_display }}</td>
+            <td class="apex-num" data-label="Annual, per month">€74.17</td>
+            <td class="apex-num" data-label="Included volume">{{ p_pro.included_volume_display }}</td>
+            <td class="apex-num" data-label="Overage per 1,000">€0.60</td>
+            <td class="apex-num" data-label="Dedicated IPs">Add-on</td>
+            <td class="apex-num" data-label="Users">{{ p_pro.included_users }}</td>
+            <td data-label="Support">{{ p_pro.support | capitalize }}</td>
             <td><a href="{{ config.extra.app_url }}/signup?plan=pro" class="apex-btn apex-btn--sm">Start Pro</a></td>
           </tr>
-          <tr>
-            <th scope="row" class="apex-key">{{ p_growth.name }}</th>
-            <td class="apex-num">{{ p_growth.monthly_price_display }}</td>
-            <td class="apex-num">€190.83</td>
-            <td class="apex-num">{{ p_growth.included_volume_display }}</td>
-            <td class="apex-num">€0.35</td>
-            <td class="apex-num">{{ p_growth.included_ips }} included</td>
-            <td class="apex-num">{{ p_growth.included_users }}</td>
-            <td>{{ p_growth.support | capitalize }}</td>
-            <td><a href="{{ config.extra.app_url }}/signup?plan=growth" class="apex-btn apex-btn--sm">Start Growth</a></td>
+          <tr class="apex-decision-table__row--recommended">
+            <th scope="row" class="apex-key">{{ p_growth.name }}<span class="apex-decision-table__badge">{% if i18n_data and i18n_data[l] and i18n_data[l]["pricing"] and i18n_data[l]["pricing"]["recommended_label"] %}{{ i18n_data[l]["pricing"]["recommended_label"] }}{% else %}Recommended for production{% endif %}</span></th>
+            <td class="apex-num apex-decision-table__price" data-label="Monthly">{{ p_growth.monthly_price_display }}</td>
+            <td class="apex-num" data-label="Annual, per month">€190.83</td>
+            <td class="apex-num" data-label="Included volume">{{ p_growth.included_volume_display }}</td>
+            <td class="apex-num" data-label="Overage per 1,000">€0.35</td>
+            <td class="apex-num" data-label="Dedicated IPs">{{ p_growth.included_ips }} included</td>
+            <td class="apex-num" data-label="Users">{{ p_growth.included_users }}</td>
+            <td data-label="Support">{{ p_growth.support | capitalize }}</td>
+            <td><a href="{{ config.extra.app_url }}/signup?plan=growth" class="apex-mkt-cta--primary">Start Growth</a></td>
           </tr>
           <tr>
             <th scope="row" class="apex-key">{{ p_business.name }}</th>
-            <td class="apex-num">{{ p_business.monthly_price_display }}</td>
-            <td class="apex-num">€582.50</td>
-            <td class="apex-num">{{ p_business.included_volume_display }}</td>
-            <td class="apex-num">€0.35</td>
-            <td class="apex-num">{{ p_business.included_ips }} included</td>
-            <td class="apex-num">{{ p_business.included_users }}</td>
-            <td>{{ p_business.support | capitalize }}</td>
+            <td class="apex-num apex-decision-table__price" data-label="Monthly">{{ p_business.monthly_price_display }}</td>
+            <td class="apex-num" data-label="Annual, per month">€582.50</td>
+            <td class="apex-num" data-label="Included volume">{{ p_business.included_volume_display }}</td>
+            <td class="apex-num" data-label="Overage per 1,000">€0.35</td>
+            <td class="apex-num" data-label="Dedicated IPs">{{ p_business.included_ips }} included</td>
+            <td class="apex-num" data-label="Users">{{ p_business.included_users }}</td>
+            <td data-label="Support">{{ p_business.support | capitalize }}</td>
             <td><a href="{{ config.extra.app_url }}/signup?plan=scale" class="apex-btn apex-btn--sm">Start Business</a></td>
           </tr>
           <tr>
-            <th scope="row" class="apex-key">{{ p_enterprise.name }}</th>
-            <td class="apex-num">from €1,750</td>
-            <td class="apex-num">€1,458.33</td>
-            <td class="apex-num">{{ p_enterprise.included_volume_display }}</td>
-            <td class="apex-num">€0.35</td>
-            <td class="apex-num">up to {{ p_enterprise.included_ips }} included</td>
-            <td class="apex-num">Unlimited</td>
-            <td>{{ p_enterprise.support | capitalize }}</td>
+            <th scope="row" class="apex-key">{{ p_enterprise.name }}<span class="apex-decision-table__badge">{% if i18n_data and i18n_data[l] and i18n_data[l]["pricing"] and i18n_data[l]["pricing"]["contract_label"] %}{{ i18n_data[l]["pricing"]["contract_label"] }}{% else %}Contract{% endif %}</span></th>
+            <td class="apex-num apex-decision-table__price" data-label="Monthly">from €1,750</td>
+            <td class="apex-num" data-label="Annual, per month">€1,458.33</td>
+            <td class="apex-num" data-label="Included volume">{{ p_enterprise.included_volume_display }}</td>
+            <td class="apex-num" data-label="Overage per 1,000">€0.35</td>
+            <td class="apex-num" data-label="Dedicated IPs">up to {{ p_enterprise.included_ips }} included</td>
+            <td class="apex-num" data-label="Users">Unlimited</td>
+            <td data-label="Support">{{ p_enterprise.support | capitalize }}</td>
             <td><a href="{{ lp }}/contact/sales/" class="apex-btn apex-btn--sm">Contact sales</a></td>
           </tr>
         </tbody>
       </table>
     </div>
+
+    <p class="apex-footnote mt-6">Annual subscriptions are billed at {{ pricing_data.annual_billing_months }}&times; the monthly price (about {{ pricing_data.annual_savings_percent }}% less than twelve monthly payments); the Annual column shows that yearly total divided by twelve. Enterprise Cloud requires an annual contract; a second Business dedicated IP is assigned where traffic justifies it. All totals exclude VAT.</p>
+    </div>
+  </div>
+
+  <section class="apex-mkt-section apex-mkt-section--dense">
+    <div class="apex-mkt-container">
     {# ── Contract lines and paid add-ons (the owner's catalogue) ── #}
-    <div class="apex-section-head mt-12">
+    <div class="apex-section-head">
       <h2 class="apex-h2">Contract lines and add-ons</h2>
       <span class="apex-section-aside">Quoted on contract, priced per workspace</span>
     </div>
@@ -156,10 +164,8 @@
       </table>
     </div>
 
-    <p class="apex-footnote">Annual subscriptions are billed at {{ pricing_data.annual_billing_months }}&times; the monthly price (about {{ pricing_data.annual_savings_percent }}% less than twelve monthly payments); the Annual column shows that yearly total divided by twelve. Enterprise Cloud requires an annual contract; a second Business dedicated IP is assigned where traffic justifies it. All totals exclude VAT.</p>
-
     {# ── Enterprise infrastructure: the deployment ledger ── #}
-    <div class="apex-section-head mt-16">
+    <div class="apex-section-head mt-12">
       <h2 class="apex-h2">Enterprise infrastructure</h2>
       <span class="apex-section-aside">Deployment models beyond the shared cloud</span>
     </div>
@@ -199,7 +205,7 @@
     </div>
 
     {# ── Contract and platform lines (owner pricing plan) ── #}
-    <div class="apex-section-head mt-16">
+    <div class="apex-section-head mt-12">
       <h2 class="apex-h2">Contract and platform lines</h2>
       <span class="apex-section-aside">Annual-contract and approved-setup lines</span>
     </div>
@@ -265,7 +271,7 @@
     <p class="mt-6 max-w-3xl">Pay-as-you-go usage pricing is available for approved billing accounts: no subscription commitment, volume-priced email and API usage. <a href="{{ lp }}/contact/sales/">Talk to sales</a> for configuration.</p>
 
     {# ── Product proof (factual, plan-scoped) ──────────────────────── #}
-    <div class="apex-section-head mt-16">
+    <div class="apex-section-head mt-12">
       <h2 class="apex-h2">What the tiers package</h2>
     </div>
     <div class="apex-table-wrap mt-6">
@@ -299,5 +305,5 @@
       <a href="{{ lp }}/compliance/">View compliance documentation</a>
       <a href="{{ lp }}/private-cloud/">Review private deployment options</a>
     </p>
-
-  </div>
+    </div>
+  </section>

@@ -4,45 +4,45 @@
 {# Free-tier facts derive from data/pricing.json; SDK availability #}
 {# matches docs/sdks (five first-party client libraries in         #}
 {# development, not yet published to public registries).           #}
+{# Tool page: paper section + container; the signup is the commercial
+   action and wears the crimson mkt CTA. #}
 {% set pricing_data = load_data(path="data/pricing.json", format="json") %}
 {% set cta_free = pricing_data.plans[0] %}
 {% set cta_launch = pricing_data.free_launch_allowance %}
 
-<section class="py-20 lg:py-32 relative">
-  <div class="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 relative">
-    <div class="border p-8 lg:p-12">
-      <p class="mb-6 apex-meta">Start saving today</p>
+<section class="apex-mkt-section">
+  <div class="apex-mkt-container">
+    <p class="mb-6 apex-meta">Start saving today</p>
 
-      <h2 class="mb-4 apex-h2">
-        Estimate your monthly email spend
-      </h2>
-      <p class="mb-10 max-w-2xl mx-auto">
-        Start free with {{ cta_free.included_volume_display }} emails per month plus a one-time {{ cta_launch.emails_display }}-email launch allowance for your first {{ cta_launch.window_days }} days &mdash; no credit card required.
-        Scale up with transparent, predictable pricing.
-      </p>
+    <h2 class="mb-4 apex-h2">
+      Estimate your monthly email spend
+    </h2>
+    <p class="mb-10 max-w-2xl">
+      Start free with {{ cta_free.included_volume_display }} emails per month plus a one-time {{ cta_launch.emails_display }}-email launch allowance for your first {{ cta_launch.window_days }} days &mdash; no credit card required.
+      Scale up with transparent, predictable pricing.
+    </p>
 
-      <div class="flex flex-col sm:flex-row gap-4 justify-center mb-12">
-        <a href="{{ config.extra.app_url }}/signup" class="apex-btn apex-btn--primary">
-          Start Free
-        </a>
-        <a href="{{ lp }}/contact/sales/" class="apex-btn">
-          Talk to Sales
-        </a>
+    <div class="flex flex-col sm:flex-row gap-4 mb-12">
+      <a href="{{ config.extra.app_url }}/signup" class="apex-mkt-cta--primary">
+        Start Free
+      </a>
+      <a href="{{ lp }}/contact/sales/" class="apex-btn">
+        Talk to Sales
+      </a>
+    </div>
+
+    <div class="grid grid-cols-1 sm:grid-cols-3 gap-6 pt-10 border-t">
+      <div>
+        <div class="tabular-nums mb-1 apex-em">{{ cta_free.included_volume_display }}</div>
+        <div class="apex-meta">Free emails/month</div>
       </div>
-
-      <div class="grid grid-cols-1 sm:grid-cols-3 gap-6 pt-10 border-t">
-        <div>
-          <div class="tabular-nums mb-1 apex-em">{{ cta_free.included_volume_display }}</div>
-          <div class="apex-meta">Free emails/month</div>
-        </div>
-        <div>
-          <div class="tabular-nums mb-1 apex-em">€{{ cta_free.setup_fee }}</div>
-          <div class="apex-meta">Setup fees</div>
-        </div>
-        <div>
-          <div class="tabular-nums mb-1 apex-em">5</div>
-          <div class="apex-meta">Client libraries <a href="/docs/sdks/" class="apex-link">in development</a></div>
-        </div>
+      <div>
+        <div class="tabular-nums mb-1 apex-em">€{{ cta_free.setup_fee }}</div>
+        <div class="apex-meta">Setup fees</div>
+      </div>
+      <div>
+        <div class="tabular-nums mb-1 apex-em">5</div>
+        <div class="apex-meta">Client libraries <a href="/docs/sdks/" class="apex-link">in development</a></div>
       </div>
     </div>
 

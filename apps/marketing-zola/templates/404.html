@@ -15,11 +15,15 @@
 {% endblock robots %}
 
 {% block content %}
-<section class="relative overflow-hidden">
-  <div class="absolute inset-0"></div>
-  <div class="relative mx-auto flex min-h-[70vh] max-w-5xl flex-col justify-center px-4 py-20 sm:px-6 lg:px-8">
+{# ARK marketing revision: the old bespoke hero band (absolute backdrop,
+   bespoke max-w-5xl padding stack) is now the standard .apex-mkt-hero
+   band with its .apex-mkt-container; the "404" marker is the kicker and
+   the actions stay the ARK button grammar (filled primary + ruled
+   default). #}
+<section class="apex-mkt-hero" aria-label="Page not found">
+  <div class="apex-mkt-container">
     <div class="max-w-2xl">
-      <p class="mb-4 apex-em">404</p>
+      <p class="apex-mkt-kicker">404</p>
       <h1 class="apex-page-title">
         {% if i18n_data and i18n_data[l] and i18n_data[l]["not_found"] and i18n_data[l]["not_found"]["heading"] %}{{ i18n_data[l]["not_found"]["heading"] }}{% else %}This page is gone, but the platform is still here.{% endif %}
       </h1>

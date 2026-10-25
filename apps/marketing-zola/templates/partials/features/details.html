@@ -1,48 +1,43 @@
-{# ── Feature Details ──────────────────────────────────────────── #}
-{# Converted from features/FeatureDetails.tsx                    #}
+{# ── Feature Details — ARK marketing revision (law 11/12) ─────── #}
+{# The fake terminal chrome (traffic-light dots), the checkmark SVGs
+   and the arrow SVGs are gone. Code windows render as ARK evidence
+   blocks; benefit lists render as indexed ledger rows. Every i18n key,
+   fallback and honesty comment is preserved verbatim. #}
 
-<section class="py-20 lg:py-32">
-  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-    <div class="mb-20">
+<section class="apex-mkt-section" aria-label="Feature details">
+  <div class="apex-mkt-container">
+    <div class="mb-12">
       <h2 class="mb-4 apex-h2">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["details_heading"] %}{{ i18n_data[l]["features"]["details_heading"] }}{% else %}Deep Dive Into Key Features{% endif %}</h2>
-      <p class="max-w-2xl mx-auto">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["details_subtitle"] %}{{ i18n_data[l]["features"]["details_subtitle"] }}{% else %}See how ApexMail makes complex email infrastructure simple.{% endif %}</p>
+      <p class="apex-lead">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["details_subtitle"] %}{{ i18n_data[l]["features"]["details_subtitle"] }}{% else %}See how ApexMail makes complex email infrastructure simple.{% endif %}</p>
     </div>
 
-    <div class="space-y-32">
-      {# ── Developer-First API ── #}
-      <div class="grid lg:grid-cols-2 gap-12 lg:gap-16 items-center">
-        <div>
-          <span class="mb-2 block apex-em">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["detail_api_label"] %}{{ i18n_data[l]["features"]["detail_api_label"] }}{% else %}Build in Minutes{% endif %}</span>
-          <h3 class="mb-4 apex-h3">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["detail_api_title"] %}{{ i18n_data[l]["features"]["detail_api_title"] }}{% else %}Developer-First API{% endif %}</h3>
-          <p class="mb-6">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["detail_api_desc"] %}{{ i18n_data[l]["features"]["detail_api_desc"] }}{% else %}Our RESTful API is designed for developers who value simplicity and power. The first-party SDKs are in active development and not yet published to public package registries (integrate against the HTTP API today), with comprehensive docs and clear request feedback.{% endif %}</p>
-          <ul class="space-y-3 mb-8">
-            {% set api_benefits_labels = ["detail_api_benefit_1", "detail_api_benefit_2", "detail_api_benefit_3", "detail_api_benefit_4", "detail_api_benefit_5"] %}
-            {% set api_benefits_defaults = ["Quickstart path for your first send", "Idempotency keys for safe retries", "Webhook signatures for security", "Batch sending up to 100 messages", "Delivery status updates"] %}
-            {% for label in api_benefits_labels %}
-            <li class="flex items-start gap-3">
-              <span class="w-5 h-5 flex items-center justify-center flex-shrink-0 mt-0.5">
-                <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-              </span>
-              <span class="">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"][label] %}{{ i18n_data[l]["features"][label] }}{% else %}{{ api_benefits_defaults[loop.index0] }}{% endif %}</span>
-            </li>
-            {% endfor %}
-          </ul>
-          <a href="/docs/api/" class="inline-flex items-center gap-2 apex-link">
-            {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["detail_api_cta"] %}{{ i18n_data[l]["features"]["detail_api_cta"] }}{% else %}Read API Docs{% endif %}
-            <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
-          </a>
+    {# ── Developer-First API ── #}
+    <div class="grid lg:grid-cols-2 gap-12 lg:gap-16 items-start pb-16 mb-16 border-b">
+      <div>
+        <span class="apex-mkt-kicker">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["detail_api_label"] %}{{ i18n_data[l]["features"]["detail_api_label"] }}{% else %}Build in Minutes{% endif %}</span>
+        <h3 class="mb-4 apex-h3">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["detail_api_title"] %}{{ i18n_data[l]["features"]["detail_api_title"] }}{% else %}Developer-First API{% endif %}</h3>
+        <p class="mb-6">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["detail_api_desc"] %}{{ i18n_data[l]["features"]["detail_api_desc"] }}{% else %}Our RESTful API is designed for developers who value simplicity and power. The first-party SDKs are in active development and not yet published to public package registries (integrate against the HTTP API today), with comprehensive docs and clear request feedback.{% endif %}</p>
+        <div class="apex-ledger--indexed mb-8">
+          {% set api_benefits_labels = ["detail_api_benefit_1", "detail_api_benefit_2", "detail_api_benefit_3", "detail_api_benefit_4", "detail_api_benefit_5"] %}
+          {% set api_benefits_defaults = ["Quickstart path for your first send", "Idempotency keys for safe retries", "Webhook signatures for security", "Batch sending up to 100 messages", "Delivery status updates"] %}
+          {% for label in api_benefits_labels %}
+          <div>
+            <span class="apex-index">{% if loop.index < 10 %}0{{ loop.index }}{% else %}{{ loop.index }}{% endif %}</span>
+            <div><span class="">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"][label] %}{{ i18n_data[l]["features"][label] }}{% else %}{{ api_benefits_defaults[loop.index0] }}{% endif %}</span></div>
+          </div>
+          {% endfor %}
         </div>
-        <div>
-          <div class="border overflow-hidden">
-            <div class="flex items-center gap-2 px-4 py-3 border-b">
-              <div class="flex gap-1.5">
-                <span class="w-2.5 h-2.5"></span>
-                <span class="w-2.5 h-2.5"></span>
-                <span class="w-2.5 h-2.5"></span>
-              </div>
-              <span class="ml-2 apex-em">example.py</span>
-            </div>
-            <pre class="p-4 overflow-x-auto max-w-full"><code>import requests
+        <a href="/docs/api/" class="apex-link">
+          {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["detail_api_cta"] %}{{ i18n_data[l]["features"]["detail_api_cta"] }}{% else %}Read API Docs{% endif %}
+        </a>
+      </div>
+      <div>
+        <div class="apex-evidence apex-evidence--mkt">
+          <div class="apex-evidence__head">
+            <span>example.py</span>
+            <span class="apex-evidence__seal">202 ACCEPTED</span>
+          </div>
+          <pre><code>import requests
 
 resp = requests.post(
     "https://api.apexmail.ee/v1/messages",
@@ -64,44 +59,37 @@ detail = requests.get(
 )
 detail.raise_for_status()
 print(detail.json()["data"]["status"])  # 'queued'</code></pre>
-          </div>
         </div>
       </div>
+    </div>
 
-      {# ── Built-In Compliance ── #}
-      <div class="grid lg:grid-cols-2 gap-12 lg:gap-16 items-center">
-        <div class="lg:order-2">
-          <span class="mb-2 block apex-em">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["detail_compliance_label"] %}{{ i18n_data[l]["features"]["detail_compliance_label"] }}{% else %}GDPR &amp; Compliance{% endif %}</span>
-          <h3 class="mb-4 apex-h3">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["detail_compliance_title"] %}{{ i18n_data[l]["features"]["detail_compliance_title"] }}{% else %}Built-In Compliance{% endif %}</h3>
-          <p class="mb-6">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["detail_compliance_desc"] %}{{ i18n_data[l]["features"]["detail_compliance_desc"] }}{% else %}Compliance workflows are built into the platform. Data subject requests, consent records, encrypted storage, and audit trails are available through APIs and enterprise operations.{% endif %}</p>
-          <ul class="space-y-3 mb-8">
-            {% set comp_benefits_labels = ["detail_compliance_benefit_1", "detail_compliance_benefit_2", "detail_compliance_benefit_3", "detail_compliance_benefit_4", "detail_compliance_benefit_5"] %}
-            {% set comp_benefits_defaults = ["GDPR data export and erasure workflows", "Consent tracking", "Current compliance documentation", "Residency requirements scoped during review", "Complete audit logs"] %}
-            {% for label in comp_benefits_labels %}
-            <li class="flex items-start gap-3">
-              <span class="w-5 h-5 flex items-center justify-center flex-shrink-0 mt-0.5">
-                <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-              </span>
-              <span class="">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"][label] %}{{ i18n_data[l]["features"][label] }}{% else %}{{ comp_benefits_defaults[loop.index0] }}{% endif %}</span>
-            </li>
-            {% endfor %}
-          </ul>
-          <a href="{{ lp }}/compliance/" class="inline-flex items-center gap-2 apex-link">
-            {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["detail_compliance_cta"] %}{{ i18n_data[l]["features"]["detail_compliance_cta"] }}{% else %}Learn About Compliance{% endif %}
-            <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
-          </a>
+    {# ── Built-In Compliance ── #}
+    <div class="grid lg:grid-cols-2 gap-12 lg:gap-16 items-start pb-16 mb-16 border-b">
+      <div class="lg:order-2">
+        <span class="apex-mkt-kicker">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["detail_compliance_label"] %}{{ i18n_data[l]["features"]["detail_compliance_label"] }}{% else %}GDPR &amp; Compliance{% endif %}</span>
+        <h3 class="mb-4 apex-h3">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["detail_compliance_title"] %}{{ i18n_data[l]["features"]["detail_compliance_title"] }}{% else %}Built-In Compliance{% endif %}</h3>
+        <p class="mb-6">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["detail_compliance_desc"] %}{{ i18n_data[l]["features"]["detail_compliance_desc"] }}{% else %}Compliance workflows are built into the platform. Data subject requests, consent records, encrypted storage, and audit trails are available through APIs and enterprise operations.{% endif %}</p>
+        <div class="apex-ledger--indexed mb-8">
+          {% set comp_benefits_labels = ["detail_compliance_benefit_1", "detail_compliance_benefit_2", "detail_compliance_benefit_3", "detail_compliance_benefit_4", "detail_compliance_benefit_5"] %}
+          {% set comp_benefits_defaults = ["GDPR data export and erasure workflows", "Consent tracking", "Current compliance documentation", "Residency requirements scoped during review", "Complete audit logs"] %}
+          {% for label in comp_benefits_labels %}
+          <div>
+            <span class="apex-index">{% if loop.index < 10 %}0{{ loop.index }}{% else %}{{ loop.index }}{% endif %}</span>
+            <div><span class="">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"][label] %}{{ i18n_data[l]["features"][label] }}{% else %}{{ comp_benefits_defaults[loop.index0] }}{% endif %}</span></div>
+          </div>
+          {% endfor %}
         </div>
-        <div class="lg:order-1">
-          <div class="border overflow-hidden">
-            <div class="flex items-center gap-2 px-4 py-3 border-b">
-              <div class="flex gap-1.5">
-                <span class="w-2.5 h-2.5"></span>
-                <span class="w-2.5 h-2.5"></span>
-                <span class="w-2.5 h-2.5"></span>
-              </div>
-              <span class="ml-2 apex-em">compliance.py</span>
-            </div>
-            <pre class="p-4 overflow-x-auto max-w-full"><code>import requests
+        <a href="{{ lp }}/compliance/" class="apex-link">
+          {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["detail_compliance_cta"] %}{{ i18n_data[l]["features"]["detail_compliance_cta"] }}{% else %}Learn About Compliance{% endif %}
+        </a>
+      </div>
+      <div class="lg:order-1">
+        <div class="apex-evidence apex-evidence--mkt">
+          <div class="apex-evidence__head">
+            <span>compliance.py</span>
+            <span class="apex-evidence__seal">AUDIT TRAIL</span>
+          </div>
+          <pre><code>import requests
 
 # Message-level tags are routing/analytics labels for your own reporting.
 # They are NOT consent records or lawful-basis evidence — consent and
@@ -123,44 +111,37 @@ resp.raise_for_status()  # 202 Accepted on success
 # Every message's event history (accepted → delivered → opened)
 # feeds the audit trail exposed to compliance workflows
 message_id = resp.json()["data"]["id"]</code></pre>
-          </div>
         </div>
       </div>
+    </div>
 
-      {# ── Deliverability Insights ── #}
-      <div class="grid lg:grid-cols-2 gap-12 lg:gap-16 items-center">
-        <div>
-          <span class="mb-2 block apex-em">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["detail_insights_label"] %}{{ i18n_data[l]["features"]["detail_insights_label"] }}{% else %}Delivery Intelligence{% endif %}</span>
-          <h3 class="mb-4 apex-h3">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["detail_insights_title"] %}{{ i18n_data[l]["features"]["detail_insights_title"] }}{% else %}Deliverability Insights{% endif %}</h3>
-          <p class="mb-6">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["detail_insights_desc"] %}{{ i18n_data[l]["features"]["detail_insights_desc"] }}{% else %}Use engagement timing analysis, inbox-placement results, and content diagnostics to improve campaigns without hiding decisions behind black-box automation.{% endif %}</p>
-          <ul class="space-y-3 mb-8">
-            {% set insight_benefits_labels = ["detail_insights_benefit_1", "detail_insights_benefit_2", "detail_insights_benefit_3", "detail_insights_benefit_4"] %}
-            {% set insight_benefits_defaults = ["Send-time recommendations for campaign planning", "Engagement trend analysis", "Inbox placement scoring and deliverability insights", "Re-engagement signals from event history"] %}
-            {% for label in insight_benefits_labels %}
-            <li class="flex items-start gap-3">
-              <span class="w-5 h-5 flex items-center justify-center flex-shrink-0 mt-0.5">
-                <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-              </span>
-              <span class="">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"][label] %}{{ i18n_data[l]["features"][label] }}{% else %}{{ insight_benefits_defaults[loop.index0] }}{% endif %}</span>
-            </li>
-            {% endfor %}
-          </ul>
-          <a href="/docs/analytics/" class="inline-flex items-center gap-2 apex-link">
-            {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["detail_insights_cta"] %}{{ i18n_data[l]["features"]["detail_insights_cta"] }}{% else %}View Analytics Docs{% endif %}
-            <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
-          </a>
+    {# ── Deliverability Insights ── #}
+    <div class="grid lg:grid-cols-2 gap-12 lg:gap-16 items-start">
+      <div>
+        <span class="apex-mkt-kicker">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["detail_insights_label"] %}{{ i18n_data[l]["features"]["detail_insights_label"] }}{% else %}Delivery Intelligence{% endif %}</span>
+        <h3 class="mb-4 apex-h3">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["detail_insights_title"] %}{{ i18n_data[l]["features"]["detail_insights_title"] }}{% else %}Deliverability Insights{% endif %}</h3>
+        <p class="mb-6">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["detail_insights_desc"] %}{{ i18n_data[l]["features"]["detail_insights_desc"] }}{% else %}Use engagement timing analysis, inbox-placement results, and content diagnostics to improve campaigns without hiding decisions behind black-box automation.{% endif %}</p>
+        <div class="apex-ledger--indexed mb-8">
+          {% set insight_benefits_labels = ["detail_insights_benefit_1", "detail_insights_benefit_2", "detail_insights_benefit_3", "detail_insights_benefit_4"] %}
+          {% set insight_benefits_defaults = ["Send-time recommendations for campaign planning", "Engagement trend analysis", "Inbox placement scoring and deliverability insights", "Re-engagement signals from event history"] %}
+          {% for label in insight_benefits_labels %}
+          <div>
+            <span class="apex-index">{% if loop.index < 10 %}0{{ loop.index }}{% else %}{{ loop.index }}{% endif %}</span>
+            <div><span class="">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"][label] %}{{ i18n_data[l]["features"][label] }}{% else %}{{ insight_benefits_defaults[loop.index0] }}{% endif %}</span></div>
+          </div>
+          {% endfor %}
         </div>
-        <div>
-          <div class="border overflow-hidden">
-            <div class="flex items-center gap-2 px-4 py-3 border-b">
-              <div class="flex gap-1.5">
-                <span class="w-2.5 h-2.5"></span>
-                <span class="w-2.5 h-2.5"></span>
-                <span class="w-2.5 h-2.5"></span>
-              </div>
-              <span class="ml-2 apex-em">events.py</span>
-            </div>
-            <pre class="p-4 overflow-x-auto max-w-full"><code>import requests
+        <a href="/docs/analytics/" class="apex-link">
+          {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["detail_insights_cta"] %}{{ i18n_data[l]["features"]["detail_insights_cta"] }}{% else %}View Analytics Docs{% endif %}
+        </a>
+      </div>
+      <div>
+        <div class="apex-evidence apex-evidence--mkt">
+          <div class="apex-evidence__head">
+            <span>events.py</span>
+            <span class="apex-evidence__seal">EVENT HISTORY</span>
+          </div>
+          <pre><code>import requests
 
 # Every message carries its full event history
 events = requests.get(
@@ -173,7 +154,6 @@ for event in events:
 # message.accepted 2026-09-09T10:41:02Z
 # message.delivered 2026-09-09T10:41:04Z
 # message.opened 2026-09-09T11:02:47Z</code></pre>
-          </div>
         </div>
       </div>
     </div>
