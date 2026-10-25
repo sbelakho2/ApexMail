@@ -321,7 +321,8 @@
       "stat_uptime": "Uptime-SLA (Business- und Enterprise-Tarife)",
       "stat_uptime_link": "Service-Credits",
       "stat_latency_value": "P95 ≤ 500ms",
-      "stat_latency_link": "Messmethodik"
+      "stat_latency_link": "Messmethodik",
+      "proof_kicker": "Betriebsfakten"
     },
     "pricing": {
       "save_annual": "Sparen Sie rund 16,7 % bei jährlicher Abrechnung (10 Monatszahlungen statt 12) in allen Self-Service-Tarifen",
@@ -403,7 +404,9 @@
       "talk_to_sales": "Vertrieb kontaktieren",
       "calculator_hint": "Verwenden Sie den Rechner oben",
       "per_month": "pro Monat",
-      "eu_only_details": "So funktioniert EU-only-Routing"
+      "eu_only_details": "So funktioniert EU-only-Routing",
+      "recommended_label": "Für Produktion empfohlen",
+      "contract_label": "Vertrag"
     },
     "home": {
       "hero_badge": "Jetzt mit Private-Cloud-Bereitstellungen",
@@ -448,7 +451,10 @@
       "teaser_emails": "E-Mails",
       "teaser_retention_suffix": " Tage Aufbewahrung",
       "teaser_choose_plan": "Wählen Sie",
-      "hero_example_label": "Beispiel-Trace"
+      "hero_example_label": "Beispiel-Trace",
+      "hero_kicker": "EU-Infrastruktur für transaktionale E-Mails",
+      "hero_evidence_head": "Routing-Beleg",
+      "hero_evidence_note": "Illustratives Format. Echte Belege lassen sich mit dem veröffentlichten öffentlichen Schlüssel prüfen."
     },
     "home_features": {
       "eyebrow": "Funktionsumfang",
@@ -513,7 +519,8 @@
       "home_link": "ApexMail Startseite",
       "cookie_consent": "Cookie-Hinweis",
       "latency_region": "Relativer Latenzvergleich nach Bereitstellungsszenario",
-      "platform_capabilities": "Plattformfunktionen"
+      "platform_capabilities": "Plattformfunktionen",
+      "evidence_seal": "Signiert und verifiziert"
     },
     "private_cloud": {
       "hero_badge": "Bereitstellungsoptionen",
@@ -1082,7 +1089,8 @@
       "stat_uptime": "SLA de disponibilité (forfaits Business et Enterprise)",
       "stat_uptime_link": "Crédits de service",
       "stat_latency_value": "P95 ≤ 500ms",
-      "stat_latency_link": "Méthodologie de mesure"
+      "stat_latency_link": "Méthodologie de mesure",
+      "proof_kicker": "Faits opérationnels"
     },
     "pricing": {
       "save_annual": "Économisez environ 16,7 % avec la facturation annuelle (10 paiements mensuels au lieu de 12) sur tous les forfaits en libre-service",
@@ -1164,7 +1172,9 @@
       "talk_to_sales": "Parler aux ventes",
       "calculator_hint": "Utilisez le calculateur ci-dessus",
       "per_month": "par mois",
-      "eu_only_details": "Comment fonctionne le routage EU-only"
+      "eu_only_details": "Comment fonctionne le routage EU-only",
+      "recommended_label": "Recommandé pour la production",
+      "contract_label": "Contrat"
     },
     "home": {
       "hero_badge": "Maintenant avec déploiements Cloud Privé",
@@ -1209,7 +1219,10 @@
       "teaser_emails": "emails",
       "teaser_retention_suffix": " jours de conservation",
       "teaser_choose_plan": "Choisissez",
-      "hero_example_label": "Trace d'exemple"
+      "hero_example_label": "Trace d'exemple",
+      "hero_kicker": "Infrastructure e-mail transactionnelle de l’UE",
+      "hero_evidence_head": "Reçu de routage",
+      "hero_evidence_note": "Format illustratif. Les reçus réels se vérifient avec la clé publique publiée."
     },
     "a11y": {
       "back_to_top": "Retour en haut",
@@ -1218,7 +1231,8 @@
       "home_link": "Accueil ApexMail",
       "cookie_consent": "Avis cookies",
       "latency_region": "Comparaison relative de la latence par scénario de déploiement",
-      "platform_capabilities": "Capacités de la plateforme"
+      "platform_capabilities": "Capacités de la plateforme",
+      "evidence_seal": "Signé et vérifié"
     },
     "api_console": {
       "hero_title": "Explorateur API",
@@ -1843,7 +1857,8 @@
       "stat_uptime": "SLA de disponibilidad (planes Business y Enterprise)",
       "stat_uptime_link": "Créditos por incumplimiento",
       "stat_latency_value": "P95 ≤ 500ms",
-      "stat_latency_link": "Metodología de medición"
+      "stat_latency_link": "Metodología de medición",
+      "proof_kicker": "Hechos operativos"
     },
     "pricing": {
       "save_annual": "Ahorre un 16,7 % aproximado con facturación anual (10 pagos mensuales en lugar de 12) en todos los planes de autoservicio",
@@ -1925,7 +1940,9 @@
       "talk_to_sales": "Hablar con ventas",
       "calculator_hint": "Use la calculadora de arriba",
       "per_month": "al mes",
-      "eu_only_details": "Cómo funciona el enrutamiento EU-only"
+      "eu_only_details": "Cómo funciona el enrutamiento EU-only",
+      "recommended_label": "Recomendado para producción",
+      "contract_label": "Contrato"
     },
     "home": {
       "hero_badge": "Ahora con implementaciones de Nube Privada",
@@ -1970,7 +1987,10 @@
       "teaser_emails": "emails",
       "teaser_retention_suffix": " días de retención",
       "teaser_choose_plan": "Elija",
-      "hero_example_label": "Traza de ejemplo"
+      "hero_example_label": "Traza de ejemplo",
+      "hero_kicker": "Infraestructura de correo electrónico transaccional de la UE",
+      "hero_evidence_head": "Recibo de enrutamiento",
+      "hero_evidence_note": "Formato ilustrativo. Los recibos reales se verifican con la clave pública publicada."
     },
     "a11y": {
       "back_to_top": "Volver arriba",
@@ -1979,7 +1999,8 @@
       "home_link": "Inicio de ApexMail",
       "cookie_consent": "Aviso de cookies",
       "latency_region": "Comparación relativa de latencia por escenario de implementación",
-      "platform_capabilities": "Capacidades de la plataforma"
+      "platform_capabilities": "Capacidades de la plataforma",
+      "evidence_seal": "Firmado y verificado"
     },
     "api_console": {
       "hero_title": "Explorador API",

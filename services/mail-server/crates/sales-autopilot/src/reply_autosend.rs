@@ -157,8 +157,8 @@ pub const COMPLAINT_OR_OPTOUT_COUNT_SQL: &str = r#"
 /// unattended send leaves the platform without saying how it was produced and
 /// how to reach a human.
 pub const AUTO_SEND_AI_DISCLOSURE: &str = "This message was drafted automatically by \
-     ApexMail's AI assistant and checked against ApexMail's knowledge base before sending. \
-     Reply to reach a human at support@apexmail.ee.";
+     the ApexMail AI assistant and checked against the ApexMail knowledge base before \
+     sending. Reply to reach a human at support@apexmail.ee.";
 
 /// The auto-send audit action (api-server writes it inside the send
 /// transaction).
@@ -1210,7 +1210,8 @@ pub async fn evaluate_for_send(
         // OWNER-APPROVED policy pack covering this tenant AND the action kind
         // (with budget left) is the AUTHORITY. Fail-closed: no pack, wrong
         // action coverage or exhausted caps refuse here.
-        let verdict = crate::policy_packs::evaluate(&mut *conn, tenant_id, "reply_autosend").await?;
+        let verdict =
+            crate::policy_packs::evaluate(&mut *conn, tenant_id, "reply_autosend").await?;
         if !verdict.allowed {
             reasons.extend(verdict.reasons);
         }
@@ -1478,10 +1479,10 @@ mod gate_db_tests {
             "DELETE FROM audit_logs WHERE action = 'control_plane.ai_draft.auto_sent' \
              AND details->>'tenantId' = $1",
         )
-            .bind(&tenant)
-            .execute(&pool)
-            .await
-            .expect("cleanup audits");
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("cleanup audits");
         sqlx::query("DELETE FROM sales_policy_packs WHERE tenant_id = $1")
             .bind(&tenant)
             .execute(&pool)
@@ -1728,8 +1729,31 @@ mod gate_db_tests {
         enable(&mut conn, &tenant, class, &owner_actor, 10, 30)
             .await
             .expect("enable");
+        // Ring 4 (invariant I22): the covering owner-approved pack this send
+        // needs. The recheck below flips OTHER rings; the pack stays valid so
+        // each assert names exactly the ring under test.
+        sqlx::query(
+            "INSERT INTO tenants (id, name, plan, status) VALUES ($1, $2, 'free', 'active') \
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(&tenant)
+        .bind(format!("I22 {tenant}"))
+        .execute(&pool)
+        .await
+        .expect("seed tenant for the pack");
+        crate::policy_packs::approve(
+            &pool,
+            &tenant,
+            "gate-pack",
+            &["reply_autosend".to_string()],
+            1_000,
+            10_000,
+            "gate-owner",
+        )
+        .await
+        .expect("approve pack");
 
-        // All three rings satisfied: allowed.
+        // All four rings satisfied: allowed.
         let verdict = evaluate_for_send(&mut conn, &tenant, class)
             .await
             .expect("evaluate");

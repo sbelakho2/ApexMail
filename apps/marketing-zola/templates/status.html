@@ -1,6 +1,9 @@
 {# Status page template. No meta refresh: the export is static — a 60s self-refresh would reload identical bytes while implying live data; live status lives on status.apexmail.ee (linked from the page and footer). #}
 {% extends "base.html" %}
 
+{# Page mode: tool — tighter hero, product feel. #}
+{% block body_class %}apex-mkt-page--tool{% endblock body_class %}
+
 {% block title %}{% if section.title %}{{ section.title }} | {{ config.extra.site_name }}{% elif page.title %}{{ page.title }} | {{ config.extra.site_name }}{% else %}{{ config.title }}{% endif %}{% endblock title %}
 
 {% block description %}{% if section.description %}{{ section.description }}{% elif page.description %}{{ page.description }}{% else %}{{ config.description }}{% endif %}{% endblock description %}

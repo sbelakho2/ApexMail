@@ -160,8 +160,21 @@ def collect(expect: dict, invariants: dict, crates: set[str], lanes_text: str) -
         iid = entry.get("id", "?")
         if not entry.get("test_anchors"):
             problems.append(f"{iid}: no test anchor named")
-        # 2026-10-25 HEAD-audit repair: an anchor must name something that can
-        # actually RUN (a file/crate carrying tests, or a gate that self-tests).
+        status = (entry.get("status") or "enforced").strip()
+        if status not in {"enforced", "planned"}:
+            problems.append(f"{iid}: status must be 'enforced' or 'planned', got {status!r}")
+            continue
+        if not entry.get("gates"):
+            problems.append(f"{iid}: no gate named")
+        plan = (entry.get("plan_test_today") or "").strip()
+        if status == "planned":
+            # Honest asymmetry (2026-10-25 HEAD audit): a planned invariant may
+            # name no test TODAY, but it must SAY it is planned — it must never
+            # present itself as enforced, and its plan must name the gap.
+            if not plan:
+                problems.append(f"{iid}: status=planned needs a plan_test_today naming the gap")
+            continue
+        # Enforced: the anchor must name something that can actually RUN.
         # "The path exists" was an inventory check, not evidence.
         for anchor in entry.get("test_anchors", []):
             if not anchor_exercisable(anchor):
@@ -169,13 +182,10 @@ def collect(expect: dict, invariants: dict, crates: set[str], lanes_text: str) -
                     f"{iid}: test anchor {anchor!r} has no executable test in it — "
                     "name a file/crate that carries #[test]/#[tokio::test]/def test_/--self-test"
                 )
-        if not entry.get("gates"):
-            problems.append(f"{iid}: no gate named")
-        plan = (entry.get("plan_test_today") or "").strip()
         if not plan or plan.startswith("None"):
             problems.append(
-                f"{iid}: plan_test_today is {plan!r} — an invariant with no test today "
-                "must not claim enforcement (write the test or mark the invariant aspirational)"
+                f"{iid}: plan_test_today is {plan!r} — an ENFORCED invariant with no test "
+                "today must not claim enforcement (write the test or set status = 'planned')"
             )
     return problems
 

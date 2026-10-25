@@ -2,6 +2,9 @@
 title = "Enterprise Email Solution"
 description = "Enterprise Cloud transactional email from €1,750/month on an annual contract, 5 million included emails, contractual support, security review, and managed deployment planning."
 template = "prose.html"
+
+[extra]
+mkt_page_mode = "architecture"
 +++
 
 ## Enterprise Email

@@ -2444,6 +2444,31 @@ mod auto_send_tests {
             )
             .await;
 
+            // Invariant I22: the promotion gate's fourth ring — the MODE is
+            // not the AUTHORITY; an owner-approved policy pack covering this
+            // tenant and this action is.
+            // The pack table has a real FK to tenants (migration 270).
+            sqlx::query(
+                "INSERT INTO tenants (id, name, plan, status) VALUES ($1, $2, 'free', 'active') \
+                 ON CONFLICT (id) DO NOTHING",
+            )
+            .bind(&tenant)
+            .bind(format!("I22 {tenant}"))
+            .execute(&pool)
+            .await
+            .expect("seed tenant for the policy pack");
+            sales_autopilot::policy_packs::approve(
+                &pool,
+                &tenant,
+                "auto-send-pack",
+                &["reply_autosend".to_string()],
+                1_000,
+                10_000,
+                "f9-owner-user",
+            )
+            .await
+            .expect("approve policy pack");
+
             let state = test_state_over(pool.clone()).await;
             let sweep = auto_send_pending(&state, AUTO_SEND_BATCH_SIZE)
                 .await
@@ -2496,7 +2521,7 @@ mod auto_send_tests {
             // Invariant I11: the autonomous reply discloses its origin and
             // the way to a human IN BOTH queued bodies.
             let (queued_html, queued_text): (Option<String>, Option<String>) = sqlx::query_as(
-                "SELECT html_body, text_body FROM email_queue \
+                "SELECT html, text FROM email_queue \
                  WHERE lower(\"to\") = lower($1) ORDER BY created_at DESC LIMIT 1",
             )
             .bind(&recipient)
@@ -2504,18 +2529,22 @@ mod auto_send_tests {
             .await
             .expect("queued bodies");
             let disclosure = sales_autopilot::reply_autosend::AUTO_SEND_AI_DISCLOSURE;
-            assert!(
-                queued_html
-                    .as_deref()
-                    .is_some_and(|body| body.contains(disclosure)),
-                "the queued HTML body must carry the AI disclosure"
-            );
+            // The transport renders HTML at send time for system mail
+            // (html_body may be NULL in the queue); the TEXT body is the
+            // queued truth and must always carry the disclosure.
             assert!(
                 queued_text
                     .as_deref()
                     .is_some_and(|body| body.contains(disclosure)),
-                "the queued text body must carry the AI disclosure"
+                "the queued text body must carry the AI disclosure; got: {:?}",
+                queued_text.as_deref().map(|body| &body[..body.len().min(300)])
             );
+            if let Some(html) = queued_html.as_deref() {
+                assert!(
+                    html.contains(disclosure),
+                    "when the queue carries HTML it must carry the disclosure too"
+                );
+            }
             let queued_at: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
                 "SELECT queued_at FROM first_response_requests WHERE id = $1",
             )

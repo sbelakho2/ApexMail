@@ -57,27 +57,27 @@ Source of truth: `docs/development/capability-registry.json` (ladder: implemente
 | rate-limiter-crate-library | implemented | — |
 | ai-reply-classification | runtime-wired | WORKER_REPLY_CLASSIFIER_AI_ENABLED |
 | arc-sealing | runtime-wired | — |
-| attachment-sandboxing | runtime-wired | MTA_ATTACHMENT_SCAN_ENABLED |
 | console-assistant | runtime-wired | — |
-| data-loss-prevention | runtime-wired | WORKER_DLP_ENABLED |
 | ddos-middleware | runtime-wired | — |
 | email-draft-agent | runtime-wired | AI_EMAIL_AGENT_ENABLED |
 | eu-only-routing | runtime-wired | — |
 | fingerprint-library | runtime-wired | — |
 | first-response | runtime-wired | — |
 | inbound-reply-mirroring | runtime-wired | — |
-| intrusion-detection-prevention | runtime-wired | MTA_IDS_ENABLED |
 | mta-event-webhooks | runtime-wired | — |
 | objection-handling | runtime-wired | — |
 | screen-share-demos | runtime-wired | — |
 | smtp-starttls | runtime-wired | — |
-| spam-phishing-filtering | runtime-wired | MTA_SPAM_FILTER_ENABLED |
 | threat-intelligence-feeds | runtime-wired | THREAT_INTEL_FEED_URLS |
-| web-application-firewall | runtime-wired | — |
 | account-takeover-protection | deployed | ATO_PROTECTION_ENABLED |
 | high-availability-failover-service | deployed | — |
 | tenant-isolation-enforcement | deployed | — |
+| attachment-sandboxing | monitored | MTA_ATTACHMENT_SCAN_ENABLED |
+| data-loss-prevention | monitored | WORKER_DLP_ENABLED |
+| intrusion-detection-prevention | monitored | MTA_IDS_ENABLED |
 | monitoring-alerting | monitored | — |
+| spam-phishing-filtering | monitored | MTA_SPAM_FILTER_ENABLED |
+| web-application-firewall | monitored | — |
 | application-tenant-isolation | advertised | — |
 | audit-logging | advertised | — |
 | backup-restore | advertised | — |
@@ -99,7 +99,7 @@ Source of truth: `docs/development/capability-registry.json` (ladder: implemente
 
 ## 4b. Schema migrations
 
-`services/mail-server/migrations/`: **241 `*.sql` files**, latest `269_mollie_billing_renames.sql` (regenerated as the `ls | tail`).
+`services/mail-server/migrations/`: **242 `*.sql` files**, latest `270_sales_policy_packs.sql` (regenerated as the `ls | tail`).
 
 `tools/migrations/`: 35 `*.sql` files.
 

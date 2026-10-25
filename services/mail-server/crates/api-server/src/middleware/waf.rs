@@ -83,7 +83,8 @@ pub async fn waf_middleware(
         }
         WafDecision::Block(status) => {
             if state.config.waf_enforce {
-                metrics::counter!("apexmail_waf_decisions_total", "result" => "blocked").increment(1);
+                metrics::counter!("apexmail_waf_decisions_total", "result" => "blocked")
+                    .increment(1);
                 log_threat("WAF block", &threat);
                 blocked_response(status, &threat, req.uri().path(), req.headers())
             } else {

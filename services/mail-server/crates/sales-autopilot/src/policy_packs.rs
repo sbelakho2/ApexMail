@@ -7,7 +7,7 @@
 //! expired pack, an action the pack does not enumerate, or an exhausted cap
 //! all refuse with a typed reason.
 
-use chrono::{Datelike, DateTime, Utc};
+use chrono::{DateTime, Datelike, Utc};
 use sqlx::PgPool;
 
 use crate::types::SalesError;
@@ -44,7 +44,10 @@ pub struct PackVerdict {
 
 /// Load THE active pack for a tenant (the partial unique index guarantees at
 /// most one). `None` = no covering pack.
-pub async fn load_active_pack<'e, E>(db: E, tenant_id: &str) -> Result<Option<PolicyPack>, SalesError>
+pub async fn load_active_pack<'e, E>(
+    db: E,
+    tenant_id: &str,
+) -> Result<Option<PolicyPack>, SalesError>
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
@@ -214,8 +217,7 @@ pub async fn approve(
     }
     if approved_by.trim().is_empty() {
         return Err(SalesError::InvalidInput(
-            "owner_approved_by is required — an anonymous approval is not an approval"
-                .to_string(),
+            "owner_approved_by is required — an anonymous approval is not an approval".to_string(),
         ));
     }
     let mut tx = db
@@ -289,7 +291,12 @@ mod tests {
     #[test]
     fn known_actions_match_the_migration_check() {
         // Migration 270's CHECK allowlist — keep both sides in lockstep.
-        let expected = ["reply_autosend", "sequence_send", "calendar_book", "research"];
+        let expected = [
+            "reply_autosend",
+            "sequence_send",
+            "calendar_book",
+            "research",
+        ];
         assert_eq!(KNOWN_ACTIONS, expected);
     }
 

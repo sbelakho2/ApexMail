@@ -5,6 +5,9 @@
    delivery. The timeline below mirrors the console's message-detail view. #}
 {% extends "base.html" %}
 
+{# Page mode: tool — tighter hero, product feel. #}
+{% block body_class %}apex-mkt-page--tool{% endblock body_class %}
+
 {% block title %}Delivery Diagnostics — see exactly what happened to every message | {{ config.extra.site_name }}{% endblock title %}
 
 {# Diagnostic-specific description and social metadata (the page previously

@@ -345,6 +345,10 @@ validate_repo_gates() {
         ci_check "legacy processor self-test" python3 tools/check_legacy_processor.py --self-test
         ci_check "ARK design law" python3 tools/check_ark_law.py
         ci_check "ARK authority mirror" python3 tools/check_ark_mirror.py
+        ci_check "CI tools expose a self-test (invariant I19 inventory)" \
+            python3 tools/check_tool_selftests.py --inventory
+        ci_check "tool selftest detector self-test (I19)" \
+            python3 tools/check_tool_selftests.py --self-test
         ci_check "ARK PDF design authority" python3 tools/check_pdf_ark.py
         ci_check "ARK PDF design authority (self-test)" python3 tools/check_pdf_ark.py --self-test
         ci_check "ARK console artifact (cssgen --check)" bash -c 'cd services/mail-server && cargo run -q -p ui-foundation --bin cssgen -- --ark crates/ui-foundation/assets/ark.css --include crates/ui-foundation/assets/globals.input.css --content "crates/ui-foundation/src/**/*.rs" --content "crates/api-server/src/**/*.rs" --content "crates/ui-foundation/assets/globals.input.css" --out crates/ui-foundation/assets/globals.css --check'

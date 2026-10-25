@@ -2637,9 +2637,12 @@ pub async fn group_recipients_by_tenant(
 ) -> Result<std::collections::BTreeMap<String, Vec<String>>, sqlx::Error> {
     let mut by_domain: std::collections::HashMap<String, Option<String>> =
         std::collections::HashMap::new();
-    let mut out: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+    let mut out: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
     for rcpt in rcpt_to {
-        let Some(domain) = recipient_domain(rcpt).map(str::to_string) else { continue };
+        let Some(domain) = recipient_domain(rcpt).map(str::to_string) else {
+            continue;
+        };
         let tenant = match by_domain.get(&domain) {
             Some(cached) => cached.clone(),
             None => {
@@ -2682,7 +2685,11 @@ pub async fn queue_inbound_events_for_tenants(
             "timestamp": chrono::Utc::now().to_rfc3339(),
         });
         super::util::queue_tenant_webhook_event(
-            pool, tenant, "message.inbound", message_id, &payload,
+            pool,
+            tenant,
+            "message.inbound",
+            message_id,
+            &payload,
         )
         .await;
     }
@@ -2697,7 +2704,11 @@ pub async fn queue_inbound_events_for_tenants(
             "timestamp": chrono::Utc::now().to_rfc3339(),
         });
         super::util::queue_tenant_webhook_event(
-            pool, tenant, "message.inbound", message_id, &payload,
+            pool,
+            tenant,
+            "message.inbound",
+            message_id,
+            &payload,
         )
         .await;
     }

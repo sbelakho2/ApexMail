@@ -62,6 +62,15 @@ REQUIRED_PAIRS: list[tuple[str, str, str, float, str]] = [
     ("dark", "warning-500", "card", 4.5, "caution amber on dark cards"),
     ("dark", "warning-600", "card", 4.5, "caution amber text on dark cards"),
     ("dark", "background", "foreground", 4.5, "ink label on the paper-filled dark button"),
+    # ARK marketing-system pairs (law 11): the crimson brand role, the ink
+    # section recipe and the brand wash — the pairs the landing pages render.
+    ("light", "mkt-brand-text", "background", 4.5, "crimson kickers/indexes on paper"),
+    ("light", "mkt-brand-text", "secondary", 4.5, "crimson kickers on limestone sections"),
+    ("light", "background", "mkt-brand", 4.5, "white label on the crimson CTA/brand field"),
+    ("light", "mkt-brand-ink", "mkt-brand-wash", 4.5, "brand text on the pale crimson wash"),
+    ("light", "mkt-ink", "mkt-paper", 4.5, "ink label on the paper-filled inverted control"),
+    ("dark", "mkt-brand-text", "background", 4.5, "lightened crimson kickers on the dark canvas"),
+    ("dark", "mkt-brand-ink", "mkt-brand-wash", 4.5, "brand text on the dark crimson wash"),
 ]
 
 WHITE = (255, 255, 255)

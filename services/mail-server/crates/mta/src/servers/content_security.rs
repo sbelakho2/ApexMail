@@ -172,7 +172,8 @@ pub(crate) fn run_spam_scan(
                 tenant_id = %tenant,
                 "spam filter engine failed; failing OPEN to tag-only (X-Spam-Verdict: UNKNOWN)"
             );
-            metrics::counter!("mta_content_security_spam_total", "result" => "engine_failed").increment(1);
+            metrics::counter!("mta_content_security_spam_total", "result" => "engine_failed")
+                .increment(1);
             return SpamScanOutcome::Tag {
                 headers: vec!["X-Spam-Verdict: UNKNOWN".to_string()],
             };
@@ -182,7 +183,8 @@ pub(crate) fn run_spam_scan(
                 tenant_id = %tenant,
                 "spam filter engine PANICKED; failing OPEN to tag-only (X-Spam-Verdict: UNKNOWN)"
             );
-            metrics::counter!("mta_content_security_spam_total", "result" => "engine_failed").increment(1);
+            metrics::counter!("mta_content_security_spam_total", "result" => "engine_failed")
+                .increment(1);
             return SpamScanOutcome::Tag {
                 headers: vec!["X-Spam-Verdict: UNKNOWN".to_string()],
             };
@@ -398,7 +400,8 @@ pub(crate) fn run_attachment_scan(
         let flagged = scan.decision == "REJECT" || scan.decision == "QUARANTINE";
         if scan.decision == "REJECT" && config.action == AttachmentScanAction::Reject {
             outcome.reject = true;
-            metrics::counter!("mta_content_security_sandbox_actions_total", "action" => "rejected").increment(1);
+            metrics::counter!("mta_content_security_sandbox_actions_total", "action" => "rejected")
+                .increment(1);
         }
         if flagged && config.action == AttachmentScanAction::Strip && decoded.is_some() {
             stripped_parts.push(PartReplacement {
@@ -1001,7 +1004,8 @@ pub(crate) fn ids_inspect_payload(
             // coverage: justified — panic containment for the engine call;
             // IdsEngine::inspect has no injected failure seam and no known
             // panicking input, so the arm exists for the fail-open contract.
-            metrics::counter!("mta_content_security_ids_total", "result" => "engine_failed").increment(1);
+            metrics::counter!("mta_content_security_ids_total", "result" => "engine_failed")
+                .increment(1);
             tracing::warn!(
                 "IDS engine PANICKED during payload scan; failing OPEN (verdict treated as pass)"
             );
@@ -2128,15 +2132,15 @@ mod tests {
     // ── Corpora: enforcement with measured false-positive bounds
     // (2026-10-25 capability-truth wave). These samples are the enforcement
     // corpus: the
-// BENIGN half must never reach a REJECT classification at the production
-// default threshold (that is the false-positive bound an enforcement default
-// rests on), and the ATTACK half must all classify REJECT (that is the
-// detection claim the managed default makes).
+    // BENIGN half must never reach a REJECT classification at the production
+    // default threshold (that is the false-positive bound an enforcement default
+    // rests on), and the ATTACK half must all classify REJECT (that is the
+    // detection claim the managed default makes).
 
-/// Ordinary business mail — the benign corpus. Deliberately varied: invoices,
-/// auth mail, scheduling, support, developer notifications, plain greetings.
-mod benign_corpus {
-    pub const MESSAGES: &[&str] = &[
+    /// Ordinary business mail — the benign corpus. Deliberately varied: invoices,
+    /// auth mail, scheduling, support, developer notifications, plain greetings.
+    mod benign_corpus {
+        pub const MESSAGES: &[&str] = &[
         "Hi Anna, the signed contract is attached. Let me know if anything looks off. — Tom",
         "Your invoice #20261 for the September subscription is now available in the billing portal. Total: 89.00 EUR.",
         "Password reset requested. Use this link within 30 minutes: https://app.example.com/reset?token=9f8e7d6c. If you did not request this, ignore this email.",
@@ -2150,15 +2154,15 @@ mod benign_corpus {
         "Reminder: your SSL certificate for api.example.com expires in 14 days. Renewal instructions: https://console.example.com/certificates",
         "Lunch tomorrow? The ramen place near the office finally reopened.",
     ];
-}
+    }
 
-/// Phishing / spam attack corpus — each sample must reach REJECT at the
-/// production default threshold (10.0 composite) with reject_at_data=true.
-mod attack_corpus {
-    /// (label, body). Bodies are REALISTIC attack mail: stacked phishing
-    /// phrases, multiple URLs (shorteners/lookalike TLDs), shouting — the
-    /// shape actual refuse-mode decisions must catch.
-    pub const MESSAGES: &[(&str, &str)] = &[
+    /// Phishing / spam attack corpus — each sample must reach REJECT at the
+    /// production default threshold (10.0 composite) with reject_at_data=true.
+    mod attack_corpus {
+        /// (label, body). Bodies are REALISTIC attack mail: stacked phishing
+        /// phrases, multiple URLs (shorteners/lookalike TLDs), shouting — the
+        /// shape actual refuse-mode decisions must catch.
+        pub const MESSAGES: &[(&str, &str)] = &[
         ("account-takeover phish",
          "URGENT SECURITY ALERT: your account has been suspended due to suspicious activity. \
           You must verify your account immediately by clicking http://bit.ly/secure-verify-now \
@@ -2191,162 +2195,172 @@ mod attack_corpus {
           login and verify."),
     ];
 
-    /// The AUTH failure triple real attack mail carries (and our pipeline
-    /// computes from SPF/DKIM/DMARC) — the header analyzer scores it.
-    pub const AUTH_RESULTS: &str = "spf=fail; dkim=fail; dmarc=fail";
-}
+        /// The AUTH failure triple real attack mail carries (and our pipeline
+        /// computes from SPF/DKIM/DMARC) — the header analyzer scores it.
+        pub const AUTH_RESULTS: &str = "spf=fail; dkim=fail; dmarc=fail";
+    }
 
-#[test]
-fn benign_corpus_never_reaches_reject_at_the_production_threshold() {
-    let analyzer = LiveSpamAnalyzer::new(10.0);
-    for message in benign_corpus::MESSAGES {
-        let verdict = analyzer
-            .analyze(message, &[], None, "corpus-tenant")
-            .expect("live analyzer never fails open on plain text");
-        assert_ne!(
+    #[test]
+    fn benign_corpus_never_reaches_reject_at_the_production_threshold() {
+        let analyzer = LiveSpamAnalyzer::new(10.0);
+        for message in benign_corpus::MESSAGES {
+            let verdict = analyzer
+                .analyze(message, &[], None, "corpus-tenant")
+                .expect("live analyzer never fails open on plain text");
+            assert_ne!(
             verdict.classification,
             SpamClass::Reject,
             "benign message would be REFUSED by the managed default (false positive): {message}"
         );
+        }
     }
-}
 
-#[test]
-fn attack_corpus_all_classifies_reject_at_the_production_threshold() {
-    let analyzer = LiveSpamAnalyzer::new(10.0);
-    for (label, message) in attack_corpus::MESSAGES {
-        let verdict = analyzer
-            .analyze(message, &[], Some(attack_corpus::AUTH_RESULTS), "corpus-tenant")
-            .expect("live analyzer never fails open on plain text");
-        assert!(
-            matches!(
-                verdict.classification,
-                SpamClass::Reject | SpamClass::Spam
-            ),
-            "attack sample {label} escaped classification (score {:.2}): {message}",
-            verdict.score
-        );
+    #[test]
+    fn attack_corpus_all_classifies_reject_at_the_production_threshold() {
+        let analyzer = LiveSpamAnalyzer::new(10.0);
+        for (label, message) in attack_corpus::MESSAGES {
+            let verdict = analyzer
+                .analyze(
+                    message,
+                    &[],
+                    Some(attack_corpus::AUTH_RESULTS),
+                    "corpus-tenant",
+                )
+                .expect("live analyzer never fails open on plain text");
+            assert!(
+                matches!(verdict.classification, SpamClass::Reject | SpamClass::Spam),
+                "attack sample {label} escaped classification (score {:.2}): {message}",
+                verdict.score
+            );
+        }
     }
-}
 
-#[test]
-fn spam_data_time_action_always_matches_the_classification() {
-    // The enforcement contract is exact: the DATA-time action is a pure
-    // function of the engine classification (Reject ⇒ 550 refusal; anything
-    // else ⇒ tag-and-deliver). A drift between the classifier and the gate
-    // would silently reject ham or deliver refuse-class spam.
-    let analyzer = LiveSpamAnalyzer::new(10.0);
-    let config = spam_config(true, true, 10.0);
+    #[test]
+    fn spam_data_time_action_always_matches_the_classification() {
+        // The enforcement contract is exact: the DATA-time action is a pure
+        // function of the engine classification (Reject ⇒ 550 refusal; anything
+        // else ⇒ tag-and-deliver). A drift between the classifier and the gate
+        // would silently reject ham or deliver refuse-class spam.
+        let analyzer = LiveSpamAnalyzer::new(10.0);
+        let config = spam_config(true, true, 10.0);
 
-    for (_, message) in attack_corpus::MESSAGES {
-        let raw = format!(
+        for (_, message) in attack_corpus::MESSAGES {
+            let raw = format!(
             "From: winner@lotto-winner-intl.biz\r\nSubject: URGENT ACTION REQUIRED\r\n\r\n{message}"
         )
-        .into_bytes();
-        match run_spam_scan(
-            &analyzer,
-            &config,
-            &raw,
-            Some(attack_corpus::AUTH_RESULTS),
-            Some("corpus-tenant"),
-        ) {
-            SpamScanOutcome::Reject { .. } => {}
-            SpamScanOutcome::Tag { headers } => {
-                // Tag ⇒ the gate's own verdict header must NOT be REJECT
-                // (a refuse-class verdict may never ride a delivered mail).
-                assert!(
-                    headers
-                        .iter()
-                        .all(|header| !header.contains("X-Spam-Verdict: REJECT")),
-                    "REJECT verdict tagged instead of refused: {message} -> {headers:?}"
-                );
-                assert!(
-                    headers.iter().any(|header| header.contains("X-Spam-Verdict: SPAM")
-                        || header.contains("X-Spam-Verdict: HAM")),
-                    "a tagged attack sample carries no usable verdict: {headers:?}"
-                );
+            .into_bytes();
+            match run_spam_scan(
+                &analyzer,
+                &config,
+                &raw,
+                Some(attack_corpus::AUTH_RESULTS),
+                Some("corpus-tenant"),
+            ) {
+                SpamScanOutcome::Reject { .. } => {}
+                SpamScanOutcome::Tag { headers } => {
+                    // Tag ⇒ the gate's own verdict header must NOT be REJECT
+                    // (a refuse-class verdict may never ride a delivered mail).
+                    assert!(
+                        headers
+                            .iter()
+                            .all(|header| !header.contains("X-Spam-Verdict: REJECT")),
+                        "REJECT verdict tagged instead of refused: {message} -> {headers:?}"
+                    );
+                    assert!(
+                        headers
+                            .iter()
+                            .any(|header| header.contains("X-Spam-Verdict: SPAM")
+                                || header.contains("X-Spam-Verdict: HAM")),
+                        "a tagged attack sample carries no usable verdict: {headers:?}"
+                    );
+                }
+                other => panic!("unexpected scan outcome for {message}: {other:?}"),
             }
-            other => panic!("unexpected scan outcome for {message}: {other:?}"),
+        }
+
+        for message in benign_corpus::MESSAGES {
+            let raw = format!("From: colleague@invalid.invalid\r\nSubject: hi\r\n\r\n{message}")
+                .into_bytes();
+            match run_spam_scan(&analyzer, &config, &raw, None, Some("corpus-tenant")) {
+                SpamScanOutcome::Reject { reason } => {
+                    panic!("benign message refused (false positive): {reason}")
+                }
+                SpamScanOutcome::Tag { headers } => {
+                    assert!(
+                        headers
+                            .iter()
+                            .any(|header| header.contains("X-Spam-Verdict: HAM")),
+                        "benign mail must classify HAM: {message} -> {headers:?}"
+                    );
+                }
+                other => panic!("unexpected scan outcome for benign mail: {other:?}"),
+            }
         }
     }
 
-    for message in benign_corpus::MESSAGES {
-        let raw = format!(
-            "From: colleague@invalid.invalid\r\nSubject: hi\r\n\r\n{message}"
-        )
-        .into_bytes();
-        match run_spam_scan(&analyzer, &config, &raw, None, Some("corpus-tenant")) {
-            SpamScanOutcome::Reject { reason } => {
-                panic!("benign message refused (false positive): {reason}")
-            }
-            SpamScanOutcome::Tag { headers } => {
-                assert!(
-                    headers.iter().any(|header| header.contains("X-Spam-Verdict: HAM")),
-                    "benign mail must classify HAM: {message} -> {headers:?}"
-                );
-            }
-            other => panic!("unexpected scan outcome for benign mail: {other:?}"),
+    #[test]
+    fn ids_corpus_refuses_drop_class_exploits_and_passes_benign_mail() {
+        // The refuse contract is verdict-shaped: Drop/Reject verdicts refuse in
+        // refuse mode; Alert verdicts are RECORDED (header) and delivered. The
+        // corpus covers both arms plus the benign set.
+        let drop_class: [&[u8]; 2] = [
+            // NOP-sled shellcode (sid 2000002, Drop) — proven DATA-phase trigger.
+            b"Subject: shellcode\r\n\r\nAAAA\x90\x90\x90\x90\x90\x90\x90\x90BBBB\r\n",
+            b"Subject: payload\r\n\r\n\x90\x90\x90\x90\x90\x90\x90\x90\r\n",
+        ];
+        for attack in drop_class {
+            let outcome = ids_inspect_payload(
+                &ids_runtime(true),
+                "203.0.113.9".parse().unwrap(),
+                25,
+                attack,
+            );
+            assert!(
+                outcome.refuse,
+                "IDS refuse mode must refuse the drop-class payload"
+            );
+        }
+        // Alert-class recon commands: recorded, never silently dropped, and NOT
+        // refused (the refuse contract is Drop/Reject only).
+        let alert_class: [&[u8]; 2] = [b"VRFY admin\r\n", b"EXPN root\r\n"];
+        for attack in alert_class {
+            let outcome = ids_inspect_payload(
+                &ids_runtime(true),
+                "203.0.113.9".parse().unwrap(),
+                25,
+                attack,
+            );
+            assert!(
+                !outcome.refuse,
+                "an Alert verdict must not refuse in DATA scan: {}",
+                String::from_utf8_lossy(attack)
+            );
+            assert!(
+                outcome.header.is_some(),
+                "the alert must be recorded on the message: {}",
+                String::from_utf8_lossy(attack)
+            );
+        }
+        // Benign corpus: ordinary message bodies never trip the engine.
+        let benign: [&[u8]; 4] = [
+            b"Subject: hello\r\n\r\nHi, the invoice for September is attached.",
+            b"Subject: meeting\r\n\r\nTomorrow 10:00, Room 4. Agenda attached.",
+            b"Subject: code\r\n\r\nYour verification code is 482913.",
+            b"Subject: report\r\n\r\nThe Q3 draft is in the shared drive.",
+        ];
+        for mail in benign {
+            let outcome =
+                ids_inspect_payload(&ids_runtime(true), "203.0.113.9".parse().unwrap(), 25, mail);
+            assert!(
+                !outcome.refuse,
+                "benign mail refused by IDS (false positive): {}",
+                String::from_utf8_lossy(mail)
+            );
+            assert!(
+                outcome.header.is_none(),
+                "benign mail must not carry an IDS header: {:?}",
+                outcome.header
+            );
         }
     }
 }
-
-#[test]
-fn ids_corpus_refuses_drop_class_exploits_and_passes_benign_mail() {
-    // The refuse contract is verdict-shaped: Drop/Reject verdicts refuse in
-    // refuse mode; Alert verdicts are RECORDED (header) and delivered. The
-    // corpus covers both arms plus the benign set.
-    let drop_class: [&[u8]; 2] = [
-        // NOP-sled shellcode (sid 2000002, Drop) — proven DATA-phase trigger.
-        b"Subject: shellcode\r\n\r\nAAAA\x90\x90\x90\x90\x90\x90\x90\x90BBBB\r\n",
-        b"Subject: payload\r\n\r\n\x90\x90\x90\x90\x90\x90\x90\x90\r\n",
-    ];
-    for attack in drop_class {
-        let outcome =
-            ids_inspect_payload(&ids_runtime(true), "203.0.113.9".parse().unwrap(), 25, attack);
-        assert!(
-            outcome.refuse,
-            "IDS refuse mode must refuse the drop-class payload"
-        );
-    }
-    // Alert-class recon commands: recorded, never silently dropped, and NOT
-    // refused (the refuse contract is Drop/Reject only).
-    let alert_class: [&[u8]; 2] = [
-        b"VRFY admin\r\n",
-        b"EXPN root\r\n",
-    ];
-    for attack in alert_class {
-        let outcome =
-            ids_inspect_payload(&ids_runtime(true), "203.0.113.9".parse().unwrap(), 25, attack);
-        assert!(
-            !outcome.refuse,
-            "an Alert verdict must not refuse in DATA scan: {}",
-            String::from_utf8_lossy(attack)
-        );
-        assert!(
-            outcome.header.is_some(),
-            "the alert must be recorded on the message: {}",
-            String::from_utf8_lossy(attack)
-        );
-    }
-    // Benign corpus: ordinary message bodies never trip the engine.
-    let benign: [&[u8]; 4] = [
-        b"Subject: hello\r\n\r\nHi, the invoice for September is attached.",
-        b"Subject: meeting\r\n\r\nTomorrow 10:00, Room 4. Agenda attached.",
-        b"Subject: code\r\n\r\nYour verification code is 482913.",
-        b"Subject: report\r\n\r\nThe Q3 draft is in the shared drive.",
-    ];
-    for mail in benign {
-        let outcome =
-            ids_inspect_payload(&ids_runtime(true), "203.0.113.9".parse().unwrap(), 25, mail);
-        assert!(
-            !outcome.refuse,
-            "benign mail refused by IDS (false positive): {}",
-            String::from_utf8_lossy(mail)
-        );
-        assert!(
-            outcome.header.is_none(),
-            "benign mail must not carry an IDS header: {:?}",
-            outcome.header
-        );
-    }
-}}

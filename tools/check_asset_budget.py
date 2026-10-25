@@ -33,12 +33,17 @@ ASSETS = ROOT / "services/mail-server/crates/ui-foundation/assets"
 MARKETING_STATIC = ROOT / "apps/marketing-zola/static"
 
 # (path, max raw bytes, max gzip bytes)
+# Ceilings carry ~15% headroom over the measured bytes of the ARK
+# marketing-system revision (2026-10-25: law 11/12, the global section
+# roles/decision-table/comparison vocabulary). The previous ceilings
+# predate that system and were met almost exactly; growth beyond these
+# needs a design decision, not an accretion.
 BUDGETS: list[tuple[Path, int, int]] = [
-    (ASSETS / "ark.css", 70_000, 16_000),
-    (ASSETS / "globals.css", 95_000, 20_000),
+    (ASSETS / "ark.css", 98_000, 21_500),
+    (ASSETS / "globals.css", 120_000, 26_000),
     (ASSETS / "globals.input.css", 6_000, 2_500),
-    (MARKETING_STATIC / "css/ark.css", 70_000, 16_000),
-    (MARKETING_STATIC / "css/styles.css", 85_000, 19_000),
+    (MARKETING_STATIC / "css/ark.css", 98_000, 21_500),
+    (MARKETING_STATIC / "css/styles.css", 116_000, 25_000),
     (MARKETING_STATIC / "css/no-js.css", 9_000, 3_000),
     (MARKETING_STATIC / "50x.html", 6_000, 3_000),
 ]

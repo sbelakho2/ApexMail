@@ -5,6 +5,7 @@ template = "prose.html"
 
 [extra]
 last_updated = "2026-10-02"
+mkt_page_mode = "trust"
 +++
 
 ## Encryption

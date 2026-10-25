@@ -40,7 +40,7 @@ async fn cleanup(pool: &sqlx::PgPool, tenant_a: &str, tenant_b: &str) {
         "DELETE FROM tenants WHERE id = ANY($1)",
     ] {
         sqlx::query(statement)
-            .bind(&[tenant_a, tenant_b])
+            .bind([tenant_a, tenant_b])
             .execute(pool)
             .await
             .ok();
@@ -49,12 +49,10 @@ async fn cleanup(pool: &sqlx::PgPool, tenant_a: &str, tenant_b: &str) {
 
 #[tokio::test]
 async fn each_tenant_sees_only_its_own_recipients() {
-    let Some(pool) = migrator::test_support::fresh_canonical_pool(
-        "i27_recipient_isolation",
-        "group",
-    )
-    .await
-    .expect("configured TEST_DATABASE_URL must provision")
+    let Some(pool) =
+        migrator::test_support::fresh_canonical_pool("i27_recipient_isolation", "group")
+            .await
+            .expect("configured TEST_DATABASE_URL must provision")
     else {
         eprintln!("skipping: set TEST_DATABASE_URL to run the I27 isolation test");
         return;
@@ -92,8 +90,12 @@ async fn each_tenant_sees_only_its_own_recipients() {
     assert_eq!(grouped, expected, "per-tenant grouping must be exact");
     assert!(
         !grouped.values().any(|recipients| {
-            recipients.iter().any(|r| r.contains("bravo.example") && r.contains("alice"))
-                || recipients.iter().any(|r| r.contains("alpha.example") && r.contains("bob"))
+            recipients
+                .iter()
+                .any(|r| r.contains("bravo.example") && r.contains("alice"))
+                || recipients
+                    .iter()
+                    .any(|r| r.contains("alpha.example") && r.contains("bob"))
         }),
         "no tenant group may carry another tenant's address"
     );

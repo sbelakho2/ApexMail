@@ -1,6 +1,11 @@
 {# Prose page template — for legal/policy pages #}
 {% extends "base.html" %}
 
+{# Document mode by default: legal/policy pages are always documents.
+   A page may still opt into another mode via `[extra] mkt_page_mode` (the
+   trust pages, e.g. /security/ and /eu-sovereign/, do exactly that). #}
+{% block body_class %}{% if page.extra.mkt_page_mode %}apex-mkt-page--{{ page.extra.mkt_page_mode }}{% else %}apex-mkt-page--document{% endif %}{% endblock body_class %}
+
 {% block title %}{% if page.title %}{{ page.title }} | {{ config.extra.site_name }}{% else %}{{ config.title }}{% endif %}{% endblock title %}
 {% block description %}{% if page.description %}{{ page.description }}{% else %}{{ config.description }}{% endif %}{% endblock description %}
 {% block og_title %}{% if page.title %}{{ page.title }} | {{ config.extra.site_name }}{% else %}{{ config.title }}{% endif %}{% endblock og_title %}

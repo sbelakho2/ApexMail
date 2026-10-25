@@ -6,6 +6,7 @@ template = "prose.html"
 [extra]
 last_updated = "2026-10-16"
 og_image = "/images/og-image.png"
+mkt_page_mode = "trust"
 +++
 
 ## The promise, and the honest boundary

@@ -10,6 +10,11 @@
      4. Opt-out — a fully authored layout sets `extra.raw_layout = true` and
         receives the rendered body verbatim on top of base.html. #}
 
+{# Page mode hook: frontmatter `[extra] mkt_page_mode = "…"` selects the
+   marketing page mode (trust / tool / architecture / document). A page that
+   does not set a mode simply gets no body class. #}
+{% block body_class %}{% if page.extra.mkt_page_mode %}apex-mkt-page--{{ page.extra.mkt_page_mode }}{% endif %}{% endblock body_class %}
+
 {% block title %}
   {% if page.title %}{{ page.title }} | {{ config.extra.site_name }}{% else %}{{ config.title }}{% endif %}
 {% endblock title %}

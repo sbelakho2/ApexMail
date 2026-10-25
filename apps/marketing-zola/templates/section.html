@@ -8,6 +8,10 @@
      3. Empty-index state — a section with neither pages, subsections nor body
         content renders a useful destination list instead of an empty page. #}
 
+{# Page mode hook: frontmatter `[extra] mkt_page_mode = "…"` selects the
+   marketing page mode; an index that sets none gets no body class. #}
+{% block body_class %}{% if section.extra.mkt_page_mode %}apex-mkt-page--{{ section.extra.mkt_page_mode }}{% endif %}{% endblock body_class %}
+
 {% block title %}
   {% if section.title %}{{ section.title }} | {{ config.extra.site_name }}{% else %}{{ config.title }}{% endif %}
 {% endblock title %}

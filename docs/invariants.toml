@@ -42,8 +42,8 @@ gates = ["T4", "T6"]
 id = "I5"
 statement = "Every routed message has a receipt that verifies, and any change breaks it"
 code = ["receipts (migration 255)"]
-test_anchors = ["migrations"]
-plan_test_today = "Sign and verify tests"
+test_anchors = ["services/mail-server/crates/mail-common/src/routing_receipt.rs"]
+plan_test_today = "routing_receipt.rs: 9 tests — sign/verify round-trip plus tampered payload AND tampered signature both fail verification"
 gates = ["T4"]
 
 [[invariant]]
@@ -89,9 +89,9 @@ gates = ["T4"]
 [[invariant]]
 id = "I11"
 statement = "Every autonomous message carries the AI disclosure and an audit row, and cites canonical ids for price or legal claims"
-code = ["sales-autopilot"]
-test_anchors = ["sales-autopilot"]
-plan_test_today = "None"
+code = ["sales-autopilot reply_autosend.rs (AUTO_SEND_AI_DISCLOSURE)", "api-server ai_drafts.rs (auto-send writer)", "sales-autopilot sequence_worker.rs (sequence writer)"]
+test_anchors = ["services/mail-server/crates/api-server/src/routes/admin/ai_drafts.rs", "services/mail-server/crates/sales-autopilot/src/sequence_worker.rs"]
+plan_test_today = "low_class_with_the_gate_on_sends_without_approval asserts the disclosure in BOTH queued bodies plus the grounding/gate audit row; the sequence source gate requires AUTO_SEND_AI_DISCLOSURE in the send arm"
 gates = ["S19", "S15", "T17"]
 
 [[invariant]]
@@ -137,9 +137,10 @@ gates = ["T13"]
 [[invariant]]
 id = "I17"
 statement = "The latest backup restores within the recovery-time objective"
+status = "planned"
 code = ["ha", "backups"]
 test_anchors = ["ha"]
-plan_test_today = "None"
+plan_test_today = "planned: continuous WAL archiving + a measured restore/RTO drill are not built yet (single host, nightly-backup RPO)"
 gates = ["T13"]
 
 [[invariant]]
@@ -154,16 +155,18 @@ gates = ["T8", "T9"]
 id = "I19"
 statement = "Every gate fails on its known-bad fixture"
 code = ["tools/"]
-test_anchors = ["tools"]
-plan_test_today = "20 of 55 Python tools; 22 gates that CI runs have none"
+status = "planned"
+test_anchors = ["tools/check_tool_selftests.py"]
+plan_test_today = "planned: tools/check_tool_selftests.py --self-test proves the detector; --inventory reports 21 of 43 CI tools still owe a drift-injection self-test"
 gates = ["T10"]
 
 [[invariant]]
 id = "I20"
 statement = "Only a signed, lane-complete blessing deploys"
+status = "planned"
 code = ["ci/"]
 test_anchors = ["ci"]
-plan_test_today = "Stage-level, unsigned check"
+plan_test_today = "planned: the deploy blessing is a stage-level UNSIGNED check — the CI-signed, host-verified blessing (commit+config+lane digests, anti-replay) is not built"
 gates = ["T1"]
 
 [[invariant]]
@@ -178,8 +181,8 @@ gates = ["T4", "T13"]
 id = "I22"
 statement = "No autonomous action happens unless an active, owner-approved policy pack covers the account and the action"
 code = ["sales-autopilot dispatcher (S21)"]
-test_anchors = ["sales-autopilot"]
-plan_test_today = "None (packs not built)"
+test_anchors = ["services/mail-server/crates/sales-autopilot/src/reply_autosend.rs", "services/mail-server/crates/api-server/src/routes/admin/ai_drafts.rs"]
+plan_test_today = "migration 270 sales_policy_packs + policy_packs::evaluate wired as gate ring 4; gate_db_tests::autonomous_send_requires_an_active_owner_approved_policy_pack covers missing/wrong-action/expired/exhausted; the auto-send e2e test seeds the pack"
 gates = ["S21", "T14"]
 
 [[invariant]]
@@ -187,7 +190,7 @@ id = "I23"
 statement = "Hosting and dedicated-IP provisioning stay in Finland, and the public register says so"
 code = ["api-server ip_provider.rs; tools/generate_subprocessors.py"]
 test_anchors = ["tools/generate_subprocessors.py"]
-plan_test_today = "None"
+plan_test_today = "tools/generate_subprocessors.py --self-test: real config is zero-US, the us-east-1 fixture is REFUSED, a mutated committed register is detected"
 gates = ["V24", "T12"]
 
 [[invariant]]
@@ -217,7 +220,7 @@ gates = ["V1"]
 [[invariant]]
 id = "I27"
 statement = "A message addressed to several tenants is visible to each with only its own recipients"
-code = ["mta inbound.rs"]
-test_anchors = ["mta"]
-plan_test_today = "None"
+code = ["mta inbound.rs (group_recipients_by_tenant + queue_inbound_events_for_tenants)"]
+test_anchors = ["services/mail-server/crates/mta/tests/inbound_recipient_isolation.rs"]
+plan_test_today = "inbound_recipient_isolation.rs seeds two tenants + a cross-tenant envelope and asserts the grouping and BOTH queued webhook payloads carry only their own recipients"
 gates = ["V13"]

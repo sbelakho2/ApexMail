@@ -2390,9 +2390,9 @@ impl SequenceStepHandler {
         // Invariant I11: an autonomous send says how it was produced and how
         // to reach a human — appended to BOTH bodies (HTML and plain text).
         let disclosure = crate::reply_autosend::AUTO_SEND_AI_DISCLOSURE;
-        rendered.html = rendered.html.map(|body| {
-            format!("{body}\n<p style=\"font-size:12px;color:#666\">{disclosure}</p>")
-        });
+        rendered.html = rendered
+            .html
+            .map(|body| format!("{body}\n<p style=\"font-size:12px;color:#666\">{disclosure}</p>"));
         rendered.text = rendered.text.map(|body| format!("{body}\n\n{disclosure}"));
 
         // ── The Decision Packet ────────────────────────────────────────────
