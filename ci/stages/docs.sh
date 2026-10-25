@@ -55,6 +55,12 @@ stage_main() {
     docs_gate "$_truth_flag" "docs architecture truth (no K8s operations in production docs)" \
         python3 tools/check_docs_architecture_truth.py
 
+    # Generated-state drift is pinned by TWO lanes (validate.sh runs the
+    # same --check): a committed migration without regenerating the map must
+    # fail here too, not only in the validate stage.
+    docs_gate "${CI_REPO_MAP_CHECK:-required}" "repo-map up to date (docs lane)" \
+        python3 tools/generate_repo_map.py --check
+
     # The rule's own proof: drift-injection selftest (throwaway tree — never
     # touches docs/). Same severity as the gate it demonstrates.
     docs_gate "$_truth_flag" "docs architecture truth selftest (drift injection)" \

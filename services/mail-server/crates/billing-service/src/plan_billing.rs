@@ -27,6 +27,7 @@
 //! by the moment's authoritative check (payment id, subscription id, period).
 
 use chrono::{DateTime, Months, Utc};
+use sqlx::Connection as _;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -100,11 +101,100 @@ pub struct ActivationOutcome {
     pub already_active: bool,
 }
 
+/// The per-tenant writer lock for billing state transitions.
+///
+/// Provider calls do NOT participate in the Postgres transaction, so the
+/// serialization point must come BEFORE any provider mutation: two verified
+/// checkouts for the same tenant arriving together would otherwise both read
+/// the old subscription, both create a distinct Mollie `sub_…` (their
+/// idempotency keys differ by payment id) and both adopt it — leaving an
+/// orphan provider subscription the reconciliation sweep can never discover.
+/// The lock is a SESSION advisory lock held on one dedicated connection for
+/// the whole operation (provider I/O included); the inner transaction then
+/// runs on that same connection, so a transaction-level re-acquire of the
+/// same key is re-entrant and cannot self-deadlock.
+async fn run_under_tenant_billing_lock<T>(
+    pool: &PgPool,
+    key: String,
+    operation: &'static str,
+    f: impl for<'a> FnOnce(
+        &'a mut sqlx::PgConnection,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<T, String>> + Send + 'a>,
+    >,
+) -> Result<T, String> {
+    let mut conn = pool
+        .acquire()
+        .await
+        .map_err(|error| format!("{operation}: connection acquire failed: {error}"))?;
+    sqlx::query("SELECT pg_advisory_lock(hashtext($1))")
+        .bind(&key)
+        .execute(&mut *conn)
+        .await
+        .map_err(|error| format!("{operation}: tenant lock failed: {error}"))?;
+    let outcome = f(&mut conn).await;
+    // The lock lives on this pooled connection: if the unlock fails, the
+    // connection must NOT return to the pool (a later borrower would inherit
+    // the lock and deadlock the next activation). Close it instead.
+    if let Err(error) = sqlx::query("SELECT pg_advisory_unlock(hashtext($1))")
+        .bind(&key)
+        .execute(&mut *conn)
+        .await
+    {
+        tracing::error!(
+            lock = %key,
+            error = %error,
+            "tenant billing lock release failed — closing the pooled connection"
+        );
+        let _ = conn.close().await;
+    }
+    outcome
+}
+
+/// Raise a finance incident, deduplicated per (kind, provider id) while it is
+/// still open: an hourly sweep must not file the same finding twice.
+pub(crate) async fn raise_billing_incident(
+    db: &sqlx::PgPool,
+    kind: &'static str,
+    severity: &'static str,
+    tenant_id: Option<&str>,
+    provider_id: Option<&str>,
+    detail: serde_json::Value,
+) {
+    let query = sqlx::query(
+        "INSERT INTO finance_incidents (kind, severity, status, tenant_id, mollie_payment_id, detail, created_at) \
+         VALUES ($1, $2, 'open', $3, $4, $5, NOW()) \
+         ON CONFLICT (kind, mollie_payment_id) WHERE status = 'open' AND mollie_payment_id IS NOT NULL DO NOTHING",
+    )
+    .bind(kind)
+    .bind(severity)
+    .bind(tenant_id)
+    .bind(provider_id)
+    .bind(detail);
+    if let Err(error) = query.execute(db).await {
+        tracing::error!(kind = %kind, error = %error, "finance incident insert failed");
+    }
+}
+
 /// Activate a plan from a paid checkout payment.
 ///
 /// The caller has already verified the payment with the provider (the webhook
 /// fetched it). The metadata is OUR checkout metadata; the amount is the
 /// verified gross charge.
+///
+/// Ordering (the activation saga, serialized per tenant by the billing lock):
+/// 1. read the superseded subscriptions' facts (nothing is mutated yet),
+/// 2. create the NEW provider subscription (its idempotency key replays on
+///    retry instead of minting a second object),
+/// 3. adopt it locally in ONE transaction (row upsert, tenant plan, paid
+///    invoice, allocation, postings, audit) — the old subscription is still
+///    intact if any step fails, so the customer's billing never lapses,
+/// 4. only after the commit, retire the superseded provider subscriptions; a
+///    failed retirement raises an incident and the sweep's orphan detection
+///    cancels the straggler.
+///
+/// On an adoption failure the NEW provider subscription is canceled again, so
+/// no live provider object can outlive its local adoption.
 #[allow(clippy::too_many_arguments)]
 pub async fn activate_from_paid_checkout(
     pool: &PgPool,
@@ -130,6 +220,8 @@ pub async fn activate_from_paid_checkout(
     }
     let (Some(customer_id), Some(mandate_id)) = (customer_id, mandate_id) else {
         // The money moved but no reusable method exists: refund and report.
+        // Idempotent on the refund's idempotency key; no local state changes,
+        // so it needs no tenant serialization.
         refund_unusable_checkout(pool, payment_id, gross_cents, currency).await?;
         return Ok(ActivationOutcome {
             invoice_id: None,
@@ -138,13 +230,76 @@ pub async fn activate_from_paid_checkout(
         });
     };
 
+    let now = Utc::now();
+    let start = now;
+    let end = period_end(start, months)?;
+    let display_name = platform_catalog::plan_by_name(plan_name)
+        .map(|plan| plan.display_name.to_string())
+        .unwrap_or_else(|| plan_name.to_string());
+
+    // The locked closure owns its inputs (PgPool is an Arc clone; the small
+    // strings are cheap) so the boxed future borrows only the connection.
+    let inner_pool = pool.clone();
+    let payment_id = payment_id.to_string();
+    let tenant_id = tenant_id.to_string();
+    let plan_name = plan_name.to_string();
+    let interval = interval.to_string();
+    let currency = currency.to_string();
+    let customer_id = customer_id.to_string();
+    let mandate_id = mandate_id.to_string();
+    run_under_tenant_billing_lock(
+        pool,
+        format!("billing_plan_activation:{tenant_id}"),
+        "plan activation",
+        |conn| {
+            Box::pin(async move {
+                activate_locked(
+                    &inner_pool,
+                    conn,
+                    &payment_id,
+                    &tenant_id,
+                    &plan_name,
+                    &interval,
+                    &currency,
+                    gross_cents,
+                    &customer_id,
+                    &mandate_id,
+                    months,
+                    start,
+                    end,
+                    display_name,
+                )
+                .await
+            })
+        },
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn activate_locked(
+    pool: &PgPool,
+    conn: &mut sqlx::PgConnection,
+    payment_id: &str,
+    tenant_id: &str,
+    plan_name: &str,
+    interval: &str,
+    currency: &str,
+    gross_cents: i64,
+    customer_id: &str,
+    mandate_id: &str,
+    months: u32,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    display_name: String,
+) -> Result<ActivationOutcome, String> {
     // Already activated (webhook redelivery): the payment id is the natural
-    // idempotency key.
+    // idempotency key. Re-checked inside the transaction below.
     if let Some(existing) = sqlx::query_scalar::<_, Uuid>(
         "SELECT id FROM invoices WHERE mollie_payment_id = $1 LIMIT 1",
     )
     .bind(payment_id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *conn)
     .await
     .map_err(|error| format!("activation idempotency check failed: {error}"))?
     {
@@ -155,19 +310,11 @@ pub async fn activate_from_paid_checkout(
         });
     }
 
-    let now = Utc::now();
-    let start = now;
-    let end = period_end(start, months)?;
-    let display_name = platform_catalog::plan_by_name(plan_name)
-        .map(|plan| plan.display_name.to_string())
-        .unwrap_or_else(|| plan_name.to_string());
-
-    // Any previous provider subscription for this tenant is canceled BEFORE
-    // the new one is created: a plan change must never leave two live
-    // subscriptions charging the same customer. The ids — AND the plan facts
-    // the revenue analytics need to classify the change (upgrade/downgrade,
-    // expansion/contraction MRR) — are read while the rows are still live
-    // (the upsert below flips them to `canceled`).
+    // The superseded subscriptions are READ here (ids for the post-commit
+    // retirement, plan facts for the change analytics) but NOT mutated: the
+    // old recurring arrangement must survive until the replacement is durably
+    // adopted, or any later failure would leave the customer with NO live
+    // subscription at all. The upsert below flips these rows to `canceled`.
     type PreviousSubscription = (String, Option<String>, Option<String>, Option<String>);
     let previous: Vec<PreviousSubscription> = sqlx::query_as(
         "SELECT mollie_subscription_id, mollie_customer_id, plan, billing_interval \
@@ -177,24 +324,25 @@ pub async fn activate_from_paid_checkout(
          ORDER BY created_at DESC",
     )
     .bind(tenant_id)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await
     .map_err(|error| format!("previous subscription lookup failed: {error}"))?;
     let mut previous_plan: Option<String> = None;
     let mut previous_interval: Option<String> = None;
     let mut previous_mrr_cents: i64 = 0;
-    for (subscription_id, customer_id, plan, interval) in previous {
+    let mut superseded: Vec<(String, String)> = Vec::new();
+    for (subscription_id, previous_customer, plan, previous_iv) in previous {
         if previous_plan.is_none() {
             previous_mrr_cents = plan
                 .as_deref()
-                .zip(interval.as_deref())
+                .zip(previous_iv.as_deref())
                 .map(|(plan, interval)| catalog_monthly_mrr_cents(plan, interval))
                 .unwrap_or(0);
             previous_plan = plan;
-            previous_interval = interval;
+            previous_interval = previous_iv;
         }
-        if let Some(customer_id) = customer_id {
-            cancel_provider_subscription_object(&customer_id, &subscription_id).await?;
+        if let Some(previous_customer) = previous_customer.filter(|id| !id.trim().is_empty()) {
+            superseded.push((previous_customer, subscription_id));
         }
     }
     let new_mrr_cents = catalog_monthly_mrr_cents(plan_name, interval);
@@ -231,7 +379,7 @@ pub async fn activate_from_paid_checkout(
     // that charges a customer with no local plan/invoice is worse than a
     // failed webhook (which Mollie retries).
     let db_outcome: Result<ActivationOutcome, String> = async {
-        let mut tx = pool
+        let mut tx = conn
             .begin()
             .await
             .map_err(|error| format!("activation transaction failed: {error}"))?;
@@ -358,7 +506,7 @@ pub async fn activate_from_paid_checkout(
                 "previousMrrCents": previous_mrr_cents,
                 "newMrrCents": new_mrr_cents,
             }),
-            now,
+            Utc::now(),
         )
         .await
         .map_err(|error| format!("activation audit failed: {error}"))?;
@@ -374,6 +522,40 @@ pub async fn activate_from_paid_checkout(
         })
     }
     .await;
+
+    // The adoption is durable — NOW the superseded provider subscriptions
+    // may stop charging. A failed retirement is an incident (the customer
+    // would keep paying the old plan) and the sweep's orphan detection
+    // cancels the straggler on its next pass.
+    if db_outcome.is_ok() {
+        for (previous_customer, previous_subscription) in &superseded {
+            if let Err(error) =
+                cancel_provider_subscription_object(previous_customer, previous_subscription).await
+            {
+                tracing::error!(
+                    tenant_id = %tenant_id,
+                    subscription_id = %previous_subscription,
+                    error = %error,
+                    "superseded Mollie subscription could not be retired after adoption — \
+                     incident raised; the reconciliation sweep cancels it"
+                );
+                raise_billing_incident(
+                    pool,
+                    "mollie_superseded_subscription_cancel_failed",
+                    "high",
+                    Some(tenant_id),
+                    Some(previous_subscription),
+                    serde_json::json!({
+                        "tenantId": tenant_id,
+                        "subscriptionId": previous_subscription,
+                        "customerId": previous_customer,
+                        "error": error,
+                    }),
+                )
+                .await;
+            }
+        }
+    }
 
     if db_outcome.is_err() {
         if let Err(cancel_error) =
@@ -492,7 +674,56 @@ pub async fn renew_from_paid_subscription(
         .unwrap_or_else(|| plan_name.clone());
     let now = Utc::now();
 
-    let mut tx = pool
+    // Same per-tenant serialization as activation: two renewal deliveries
+    // racing must not double-advance the cycle or double-invoice the period.
+    let payment_id = payment_id.to_string();
+    let provider_subscription_id = provider_subscription_id.to_string();
+    let plan_name = plan_name.clone();
+    let tenant_id = tenant_id.clone();
+    let interval = interval.to_string();
+    let display_name = display_name.to_string();
+    let currency = currency.to_string();
+    run_under_tenant_billing_lock(
+        pool,
+        format!("billing_plan_activation:{tenant_id}"),
+        "renewal",
+        |conn| {
+            Box::pin(async move {
+                renew_locked(
+                    conn,
+                    &payment_id,
+                    &provider_subscription_id,
+                    &tenant_id,
+                    &plan_name,
+                    &interval,
+                    &display_name,
+                    &currency,
+                    gross_cents,
+                    months,
+                    now,
+                )
+                .await
+            })
+        },
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn renew_locked(
+    conn: &mut sqlx::PgConnection,
+    payment_id: &str,
+    provider_subscription_id: &str,
+    tenant_id: &str,
+    plan_name: &str,
+    interval: &str,
+    display_name: &str,
+    currency: &str,
+    gross_cents: i64,
+    months: u32,
+    now: DateTime<Utc>,
+) -> Result<Option<Uuid>, String> {
+    let mut tx = conn
         .begin()
         .await
         .map_err(|error| format!("renewal transaction failed: {error}"))?;
@@ -521,9 +752,9 @@ pub async fn renew_from_paid_subscription(
 
     let invoice = crate::invoices::create_paid_plan_invoice_in_tx(
         &mut tx,
-        &tenant_id,
-        &display_name,
-        &interval,
+        tenant_id,
+        display_name,
+        interval,
         gross_cents,
         currency,
         payment_id,
@@ -541,7 +772,7 @@ pub async fn renew_from_paid_subscription(
         ON CONFLICT (operation_id) DO NOTHING
         "#,
     )
-    .bind(&tenant_id)
+    .bind(tenant_id)
     .bind(invoice.id)
     .bind(&operation_id)
     .bind(gross_cents)
@@ -566,7 +797,7 @@ pub async fn renew_from_paid_subscription(
 
     append_audit_log(
         &mut tx,
-        &tenant_id,
+        tenant_id,
         "billing.subscription_renewed",
         "subscription",
         Some(provider_subscription_id),
@@ -754,11 +985,13 @@ pub async fn sweep_provider_subscription_state(pool: &PgPool) -> Result<u64, Str
             }
             continue;
         }
-        if provider.status == "active" {
-            continue;
-        }
-        // A provider amount that no longer matches the catalog is an incident,
-        // not a silent downgrade.
+        // An ACTIVE provider subscription charging an amount the catalog does
+        // not expect is exactly the subscription that must be checked: the
+        // check runs BEFORE the active early-return, is deduplicated per
+        // subscription while it stays open, and leaves entitlement untouched
+        // (the customer paid; downgrading silently would punish them for the
+        // provider-side change). The incident names the subscription so the
+        // operator can cancel and re-create it deliberately.
         if let (Some(plan), Some(interval), Some(amount)) = (
             plan.as_deref(),
             interval.as_deref(),
@@ -766,24 +999,101 @@ pub async fn sweep_provider_subscription_state(pool: &PgPool) -> Result<u64, Str
         ) {
             if let Some(expected) = catalog_amount_cents(plan, interval, &amount.currency) {
                 if expected != amount.cents {
-                    sqlx::query(
-                        "INSERT INTO finance_incidents (kind, severity, status, detail, created_at)
-                         VALUES ('mollie_subscription_amount_drift', 'high', 'open', $1, NOW())",
+                    raise_billing_incident(
+                        pool,
+                        "mollie_subscription_amount_drift",
+                        "high",
+                        Some(&tenant_id),
+                        Some(&subscription_id),
+                        serde_json::json!({
+                            "tenantId": tenant_id,
+                            "subscriptionId": subscription_id,
+                            "plan": plan,
+                            "interval": interval,
+                            "expectedCents": expected,
+                            "providerCents": amount.cents,
+                            "currency": amount.currency,
+                        }),
                     )
-                    .bind(serde_json::json!({
-                        "tenantId": tenant_id,
-                        "subscriptionId": subscription_id,
-                        "plan": plan,
-                        "interval": interval,
-                        "expectedCents": expected,
-                        "providerCents": amount.cents,
-                        "currency": amount.currency,
-                    }))
-                    .execute(pool)
-                    .await
-                    .ok();
+                    .await;
                 }
             }
+        }
+        if provider.status == "active" {
+            // The healthy case — and the ONLY place an orphan can hide: a
+            // live provider subscription for this customer that the local
+            // table does not reference (e.g. the losing side of a superseded
+            // activation whose retirement failed). Enumerate the customer's
+            // subscriptions and cancel every active/pending object that is
+            // not the locally active one.
+            match mollie.list_subscriptions(&customer_id).await {
+                Ok(provider_subscriptions) => {
+                    for stray in provider_subscriptions {
+                        if stray.id == subscription_id {
+                            continue;
+                        }
+                        if stray.status != "active" && stray.status != "pending" {
+                            continue;
+                        }
+                        match cancel_provider_subscription_object(&customer_id, &stray.id).await {
+                            Ok(()) => {
+                                reconciled += 1;
+                                tracing::warn!(
+                                    tenant_id = %tenant_id,
+                                    orphan = %stray.id,
+                                    "canceled an orphan Mollie subscription that was charging \
+                                     outside the local state"
+                                );
+                                raise_billing_incident(
+                                    pool,
+                                    "mollie_orphan_subscription_canceled",
+                                    "high",
+                                    Some(&tenant_id),
+                                    Some(&stray.id),
+                                    serde_json::json!({
+                                        "tenantId": tenant_id,
+                                        "orphanSubscriptionId": stray.id,
+                                        "localSubscriptionId": subscription_id,
+                                        "customerId": customer_id,
+                                    }),
+                                )
+                                .await;
+                            }
+                            Err(error) => {
+                                tracing::error!(
+                                    tenant_id = %tenant_id,
+                                    orphan = %stray.id,
+                                    error = %error,
+                                    "orphan Mollie subscription cancellation failed — incident raised"
+                                );
+                                raise_billing_incident(
+                                    pool,
+                                    "mollie_orphan_subscription_cancel_failed",
+                                    "critical",
+                                    Some(&tenant_id),
+                                    Some(&stray.id),
+                                    serde_json::json!({
+                                        "tenantId": tenant_id,
+                                        "orphanSubscriptionId": stray.id,
+                                        "localSubscriptionId": subscription_id,
+                                        "customerId": customer_id,
+                                        "error": error,
+                                    }),
+                                )
+                                .await;
+                            }
+                        }
+                    }
+                }
+                // A listing failure must not fail the whole sweep (existing
+                // behavior for fetch failures); the next pass retries.
+                Err(error) => tracing::warn!(
+                    subscription_id = %subscription_id,
+                    error = %error,
+                    "provider subscription listing failed; orphan detection skipped"
+                ),
+            }
+            continue;
         }
         // Only `active` grants the plan: downgrade this tenant if its plan
         // still comes from this subscription.

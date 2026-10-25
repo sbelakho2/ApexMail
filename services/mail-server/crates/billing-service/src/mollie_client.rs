@@ -614,6 +614,50 @@ impl MollieClient {
         Ok(subscription_from_json(customer_id, &document))
     }
 
+    /// List a customer's subscriptions (up to five pages of 100). The
+    /// reconciliation sweep uses this as the ORPHAN DETECTOR: a provider
+    /// subscription that is live at Mollie but absent from the local table
+    /// can only be found by enumerating the customer, never by reading
+    /// `mollie_subscriptions`.
+    pub async fn list_subscriptions(
+        &self,
+        customer_id: &str,
+    ) -> Result<Vec<Subscription>, MollieError> {
+        let mut out = Vec::new();
+        let mut from: Option<String> = None;
+        for _page in 0..5 {
+            let mut path = format!("customers/{customer_id}/subscriptions?limit=100");
+            if let Some(cursor) = &from {
+                path.push_str(&format!("&from={cursor}"));
+            }
+            let document = self.send(self.http.get(self.url(&path))).await?;
+            let page = document
+                .get("_embedded")
+                .and_then(|embedded| embedded.get("subscriptions"))
+                .and_then(|list| list.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let count = page.len();
+            for item in page {
+                out.push(subscription_from_json(customer_id, &item));
+            }
+            if count < 100 {
+                break;
+            }
+            from = document
+                .get("_links")
+                .and_then(|links| links.get("next"))
+                .and_then(|next| next.get("href"))
+                .and_then(|href| href.as_str())
+                .and_then(|href| href.rsplit("from=").next())
+                .map(str::to_string);
+            if from.is_none() {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
     pub async fn cancel_subscription(
         &self,
         customer_id: &str,

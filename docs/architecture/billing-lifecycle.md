@@ -88,8 +88,12 @@ resolved plan name.
   transaction.
 - `POST /switch-plan` is a retained compatibility endpoint that always returns
   `409 CHECKOUT_REQUIRED`; it cannot update tenant or subscription records.
-- A plan change does not prorate: a new verified checkout starts the new plan's
-  period at the catalog price and cancels the previous provider subscription.
+- A plan change does not prorate: a new verified checkout starts the new
+  plan's period at the catalog price, adopts the new Mollie subscription in
+  one transaction, and only then retires the previous provider subscription
+  (the retirement is retried by reconciliation and reported as an incident if
+  it fails). Activation is serialized per tenant before any provider
+  mutation, so concurrent checkouts can never leave two live subscriptions.
   Any ApexMail proration preview is informational only and never changes a
   subscription or tenant entitlement.
 

@@ -1115,14 +1115,35 @@ mod adversarial_tests {
         assert_eq!(first.timezone, "Europe/Tallinn");
         assert!(first.confidence > 0.5);
         assert!(first.reasoning.contains("opens analyzed"));
-        // The requested timezone is APPLIED to the answer. Tallinn is UTC+3 in
-        // October (EEST), so 09:00 UTC renders as 12:00 local — the previous
-        // implementation echoed "09:00" as the local time.
+        // The requested timezone is APPLIED to the answer — the previous
+        // implementation echoed "09:00" as the local time. The expectation is
+        // DERIVED from the zone (Tallinn is UTC+3 in summer, UTC+2 after the
+        // October DST transition), so the assertion cannot rot with the
+        // calendar; only a passthrough of the UTC hour can fail it.
+        let expected_local = {
+            use chrono::TimeZone as _;
+            let zone: chrono_tz::Tz = "Europe/Tallinn".parse().expect("zone");
+            let naive = chrono::Utc::now()
+                .date_naive()
+                .and_hms_opt(9, 0, 0)
+                .unwrap();
+            chrono::Utc
+                .from_local_datetime(&naive)
+                .single()
+                .expect("no DST gap at 09:00 UTC")
+                .with_timezone(&zone)
+                .format("%H:%M")
+                .to_string()
+        };
         assert_eq!(
-            first.local_time, "12:00",
+            first.local_time, expected_local,
             "09:00 UTC must render in the requested zone"
         );
-        assert!(first.reasoning.contains("12:00"));
+        assert!(
+            first.reasoning.contains(&expected_local),
+            "the reasoning quotes the local time: {}",
+            first.reasoning
+        );
 
         // A fixed-offset zone proves the conversion is real and deterministic
         // (Tokyo is UTC+9 year-round, no DST ambiguity).

@@ -149,7 +149,47 @@ page by page (13 pages): serif display titles, two-tone wordmark including the
 running header, one-line footer with clearance, repeated table headers,
 non-splitting blocks, consistent money/percent formatting — all pass.
 
-## The five audits
+## Activation saga hardening (2026-10-25 HEAD-audit response)
+
+The external HEAD audit found a launch-blocking race in the original
+activation ordering (read old → cancel old → create new → lock → commit): two
+verified checkouts for the same tenant arriving together could both create a
+distinct Mollie subscription (their idempotency keys differ by payment id) and
+both adopt it, leaving a provider orphan the local table can never discover —
+and the original order also killed the old working subscription before the
+replacement existed. The shipped fix:
+
+1. **Per-tenant serialization BEFORE any provider mutation** — a session
+   advisory lock (`billing_plan_activation:{tenant}`) held on one dedicated
+   connection for the whole operation; the transaction runs on that same
+   connection (re-entrant re-acquire, no self-deadlock), and a failed unlock
+   closes the connection instead of returning it to the pool.
+2. **Adopt-before-retire** — the superseded subscriptions are only READ
+   during activation; the new provider subscription is created first and
+   adopted in one transaction (row, tenant plan, paid invoice, allocation,
+   postings, audit), and the old subscriptions are DELETEd at Mollie only
+   after the commit. An adoption failure cancels the NEW object (compensation)
+   and leaves the old subscription untouched; a failed retirement raises a
+   `mollie_superseded_subscription_cancel_failed` incident.
+3. **Orphan detection** — the reconciliation sweep lists every subscription a
+   customer holds at Mollie (`GET /v2/customers/{cst}/subscriptions`) and
+   cancels + reports any live `sub_…` that the local table does not
+   reference, so even a historical orphan is closed on the next hourly pass.
+4. **Amount drift before the early return** — an ACTIVE subscription charging
+   an amount the catalog does not expect is now checked (the old code checked
+   only after the active skip); the incident is deduplicated per subscription
+   while it stays open, and entitlement is untouched (the operator decides).
+5. **Renewals serialize under the same tenant lock** — two renewal deliveries
+   racing cannot double-advance a cycle or double-invoice a period.
+
+Tests: `simultaneous_distinct_payment_activations_leave_one_live_subscription`
+(two concurrent activations, mock-minted distinct `sub_…` objects, exactly one
+live at the provider and it is the locally adopted one), plus
+`sweep_cancels_an_orphan_provider_subscription_and_raises_an_incident` and
+`active_subscription_amount_drift_is_reported_and_deduplicated`. The live
+19-check wire audit still passes end to end.
+
+## The five audits## The five audits
 
 ### Audit 1 — references (text, schema, env, wire vocabulary)
 

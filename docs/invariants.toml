@@ -208,10 +208,10 @@ gates = ["V23", "T11"]
 
 [[invariant]]
 id = "I26"
-statement = "Every stored-card charge carries shopperInteraction: ContAuth, and the live URL carries the merchant prefix"
-code = ["billing-service maintenance.rs", "overage.rs; tools/check_prod_billing_wiring.py"]
-test_anchors = ["tools/check_prod_billing_wiring.py"]
-plan_test_today = "The gate requires the wrong URL"
+statement = "Every stored-mandate charge is a Mollie POST /v2/payments with sequenceType: recurring against the tenant's cst_ customer and mdt_ mandate, an exact decimal amount and a deterministic Idempotency-Key, against the live base URL https://api.mollie.com/v2; the webhook ledger binds the resulting recurring token to the tenant"
+code = ["billing-service maintenance.rs (mollie_charge_stored_payment_method)", "overage.rs", "mollie_webhooks.rs (RECURRING_CONTRACT binding)", "tools/check_prod_billing_wiring.py"]
+test_anchors = ["services/mail-server/crates/billing-service/src/maintenance.rs", "services/mail-server/crates/billing-service/src/mollie_webhooks.rs", "tools/check_prod_billing_wiring.py"]
+plan_test_today = "The charge-body test pins sequenceType=recurring, the customer/mandate/amount fields and the Idempotency-Key; the webhook tests pin the recurring-token binding; the wiring gate pins the live base URL and webhook path"
 gates = ["V1"]
 
 [[invariant]]

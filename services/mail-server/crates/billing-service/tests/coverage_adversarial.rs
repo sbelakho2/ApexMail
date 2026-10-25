@@ -3569,13 +3569,26 @@ const MOLLIE_ACCEPTED: &str = "OK";
 
 type MockResponses = Arc<std::sync::Mutex<std::collections::HashMap<String, (u16, String)>>>;
 
-struct MockMollie {
+/// Provider-side object ledger: subscriptions the mock MINTED (distinct ids
+/// per create call) and ids DELETEd — so tests can assert provider-side
+/// facts (one live subscription after a racing activation, an orphan
+/// actually canceled) instead of only local rows.
+#[derive(Default)]
+struct MockState {
     responses: MockResponses,
+    created: std::sync::Mutex<Vec<String>>,
+    deleted: std::sync::Mutex<std::collections::HashSet<String>>,
+    counter: std::sync::atomic::AtomicU64,
+}
+
+struct MockMollie {
+    state: &'static MockState,
 }
 
 impl MockMollie {
     fn route(&self, path: &str, status: u16, body: impl Into<String>) {
-        self.responses
+        self.state
+            .responses
             .lock()
             .expect("lock")
             .insert(path.to_string(), (status, body.into()));
@@ -3585,15 +3598,66 @@ impl MockMollie {
         let id = document["id"].as_str().expect("payment document id");
         self.route(&format!("/v2/payments/{id}"), 200, document.to_string());
     }
+
+    /// Subscription ids the mock minted (in creation order).
+    fn created(&self) -> Vec<String> {
+        self.state.created.lock().expect("lock").clone()
+    }
+
+    /// Subscription ids the mock saw DELETEd.
+    fn deleted(&self) -> std::collections::HashSet<String> {
+        self.state.deleted.lock().expect("lock").clone()
+    }
 }
 
 async fn mock_handler(
-    axum::extract::State(responses): axum::extract::State<MockResponses>,
+    axum::extract::State(state): axum::extract::State<&'static MockState>,
     request: axum::http::Request<axum::body::Body>,
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
+    let method = request.method().clone();
     let path = request.uri().path().to_string();
-    let (status, response_body) = responses
+    if method == axum::http::Method::DELETE {
+        if let Some(id) = path.rsplit('/').next() {
+            state.deleted.lock().expect("lock").insert(id.to_string());
+        }
+        return (
+            axum::http::StatusCode::NO_CONTENT,
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            String::new(),
+        )
+            .into_response();
+    }
+    if method == axum::http::Method::POST && path.ends_with("/subscriptions") {
+        let explicit = state.responses.lock().expect("lock").get(&path).cloned();
+        if explicit.is_none() {
+            // Distinct minted ids per create call: the activation saga must
+            // serialize racing checkouts BEFORE the provider mutation, so two
+            // concurrent activations mint two objects and retire exactly one.
+            let n = state
+                .counter
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let id = format!("sub_dyn_{n}");
+            state.created.lock().expect("lock").push(id.clone());
+            let body = serde_json::json!({
+                "id": id,
+                "customerId": path.split('/').nth(3).unwrap_or("cst_dyn"),
+                "status": "active",
+                "amount": { "currency": "EUR", "value": "20.00" },
+                "interval": "1 month",
+                "description": "ApexMail (dynamic mock)"
+            })
+            .to_string();
+            return (
+                axum::http::StatusCode::CREATED,
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                body,
+            )
+                .into_response();
+        }
+    }
+    let (status, response_body) = state
+        .responses
         .lock()
         .expect("lock")
         .get(&path)
@@ -3618,16 +3682,13 @@ async fn mock_handler(
 fn mock_mollie_api() -> &'static MockMollie {
     static MOCK: std::sync::OnceLock<MockMollie> = std::sync::OnceLock::new();
     MOCK.get_or_init(|| {
-        let responses: MockResponses =
-            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        let state: &'static MockState = Box::leak(Box::new(MockState::default()));
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock");
         listener
             .set_nonblocking(true)
             .expect("nonblocking mock listener");
         let address = listener.local_addr().expect("mock address");
-        let app = axum::Router::new()
-            .fallback(mock_handler)
-            .with_state(responses.clone());
+        let app = axum::Router::new().fallback(mock_handler).with_state(state);
         std::thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -3640,7 +3701,7 @@ fn mock_mollie_api() -> &'static MockMollie {
         });
         std::env::set_var("MOLLIE_API_KEY", "test_mock_api_key");
         std::env::set_var("MOLLIE_API_BASE_URL", format!("http://{address}/v2"));
-        MockMollie { responses }
+        MockMollie { state }
     })
 }
 
@@ -6897,5 +6958,293 @@ db_test!(
                 .await
                 .expect("subscription status");
         assert_eq!(status, "canceled");
+    }
+);
+
+// ---------------------------------------------------------------------------
+// Activation saga — the distributed-state invariants the black-box probes
+// could not cover: concurrent distinct-payment activations, orphan provider
+// subscriptions, and amount drift on a LIVE subscription.
+// ---------------------------------------------------------------------------
+
+fn race_activation(
+    pool: sqlx::PgPool,
+    payment_id: &'static str,
+    tenant: &'static str,
+) -> std::pin::Pin<
+    Box<
+        dyn std::future::Future<
+                Output = Result<billing_service::plan_billing::ActivationOutcome, String>,
+            > + Send,
+    >,
+> {
+    async move {
+        billing_service::plan_billing::activate_from_paid_checkout(
+            &pool,
+            payment_id,
+            tenant,
+            "starter",
+            "monthly",
+            "EUR",
+            2_000,
+            Some("cst_cov_race"),
+            Some("mdt_cov_race"),
+        )
+        .await
+    }
+    .boxed()
+}
+
+use futures::FutureExt as _;
+
+db_test!(
+    simultaneous_distinct_payment_activations_leave_one_live_subscription,
+    |h| {
+        let mock = mock_mollie_api();
+        seed_tenant(&h, "cov_race", "free").await;
+        seed_billing_address(&h, "cov_race", "EE").await;
+        // The subscriptions-create path is deliberately NOT registered: the mock
+        // mints a DISTINCT sub_ id per call, exactly what two racing webhooks
+        // with different payment ids produce at the real provider.
+
+        let pool_a = h.pool.clone();
+        let pool_b = h.pool.clone();
+        let (a, b) = tokio::join!(
+            race_activation(pool_a, "tr_race_a", "cov_race"),
+            race_activation(pool_b, "tr_race_b", "cov_race"),
+        );
+        a.expect("first activation");
+        b.expect("second activation");
+
+        // Both payments are real purchases: each carries exactly one invoice.
+        for payment in ["tr_race_a", "tr_race_b"] {
+            let invoices: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM invoices WHERE mollie_payment_id = $1")
+                    .bind(payment)
+                    .fetch_one(&h.pool)
+                    .await
+                    .expect("invoice count");
+            assert_eq!(invoices, 1, "{payment} settled exactly once");
+        }
+
+        // The distributed invariant: ONE live provider subscription for the
+        // tenant. The mock minted two distinct objects; exactly one was retired
+        // (DELETEd at the provider), and it is the one the local row does NOT
+        // reference. Before the per-tenant serialization this test left BOTH
+        // provider objects live and charging.
+        let created = mock.created();
+        assert_eq!(
+            created.len(),
+            2,
+            "the mock must mint distinct provider subscriptions: {created:?}"
+        );
+        let deleted = mock.deleted();
+        let active_local: String = sqlx::query_scalar(
+        "SELECT mollie_subscription_id FROM mollie_subscriptions WHERE tenant_id = $1 AND status = 'active'",
+    )
+    .bind("cov_race")
+    .fetch_one(&h.pool)
+    .await
+    .expect("one active local row");
+        let live: Vec<&String> = created.iter().filter(|id| !deleted.contains(*id)).collect();
+        assert_eq!(
+        live.len(),
+        1,
+        "exactly one provider subscription may remain live: created={created:?} deleted={deleted:?}"
+    );
+        assert_eq!(
+            live[0].as_str(),
+            active_local,
+            "the surviving provider object is the locally adopted one"
+        );
+
+        // The retirement of the loser is journaled as an audit row per adoption.
+        let activations: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_logs WHERE action = 'billing.subscription_activated' AND tenant_id = $1",
+    )
+    .bind("cov_race")
+    .fetch_one(&h.pool)
+    .await
+    .expect("activation audits");
+        assert_eq!(activations, 2);
+
+        cleanup_race(&h).await;
+    }
+);
+
+async fn cleanup_race(h: &Harness) {
+    for statement in [
+        "DELETE FROM invoice_payment_allocations WHERE tenant_id = $1",
+        "DELETE FROM invoices WHERE tenant_id = $1",
+        "DELETE FROM mollie_subscriptions WHERE tenant_id = $1",
+        "DELETE FROM audit_logs WHERE tenant_id = $1",
+        "DELETE FROM billing_addresses WHERE tenant_id = $1",
+        "DELETE FROM tenants WHERE id = $1",
+    ] {
+        sqlx::query(statement)
+            .bind("cov_race")
+            .execute(&h.pool)
+            .await
+            .ok();
+    }
+}
+
+db_test!(
+    sweep_cancels_an_orphan_provider_subscription_and_raises_an_incident,
+    |h| {
+        let mock = mock_mollie_api();
+        seed_tenant(&h, "cov_orph", "starter").await;
+        sqlx::query(
+        "INSERT INTO mollie_subscriptions (tenant_id, mollie_subscription_id, plan, status, billing_interval, billing_cycle_start, billing_cycle_end, mollie_customer_id, mollie_mandate_id, mollie_sequence_type) VALUES ($1, 'sub_orph_local', 'starter', 'active', 'monthly', NOW(),      NOW() + INTERVAL '20 days', 'cst_cov_orph', 'mdt_cov_orph', 'recurring')",
+    )
+    .bind("cov_orph")
+    .execute(&h.pool)
+    .await
+    .expect("seed local subscription");
+        // The customer holds TWO live provider objects; the local table only
+        // knows the first. The list endpoint is the only way to see the orphan.
+        mock.route(
+            "/v2/customers/cst_cov_orph/subscriptions",
+            200,
+            serde_json::json!({
+                "_embedded": { "subscriptions": [
+                    { "id": "sub_orph_local", "customerId": "cst_cov_orph", "status": "active",
+                      "amount": { "currency": "EUR", "value": "20.00" }, "interval": "1 month" },
+                    { "id": "sub_orph_stray", "customerId": "cst_cov_orph", "status": "active",
+                      "amount": { "currency": "EUR", "value": "20.00" }, "interval": "1 month" }
+                ]}
+            })
+            .to_string(),
+        );
+        mock.route(
+            "/v2/customers/cst_cov_orph/subscriptions/sub_orph_local",
+            200,
+            serde_json::json!({
+                "id": "sub_orph_local", "customerId": "cst_cov_orph", "status": "active",
+                "amount": { "currency": "EUR", "value": "20.00" }, "interval": "1 month"
+            })
+            .to_string(),
+        );
+
+        let reconciled = billing_service::plan_billing::sweep_provider_subscription_state(&h.pool)
+            .await
+            .expect("sweep");
+        assert!(reconciled >= 1, "the orphan is canceled: {reconciled}");
+        assert!(
+            mock.deleted().contains("sub_orph_stray"),
+            "the orphan was DELETEd at the provider: {:?}",
+            mock.deleted()
+        );
+        let incidents: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM finance_incidents  WHERE kind = 'mollie_orphan_subscription_canceled' AND detail->>'orphanSubscriptionId' = 'sub_orph_stray'",
+    )
+    .fetch_one(&h.pool)
+    .await
+    .expect("incident count");
+        assert_eq!(incidents, 1, "the orphan is recorded for the operator");
+        // The legitimate subscription is untouched.
+        let status: String = sqlx::query_scalar(
+        "SELECT status FROM mollie_subscriptions WHERE mollie_subscription_id = 'sub_orph_local'",
+    )
+    .fetch_one(&h.pool)
+    .await
+    .expect("local row");
+        assert_eq!(status, "active");
+
+        cleanup_orph(&h).await;
+    }
+);
+
+async fn cleanup_orph(h: &Harness) {
+    for statement in [
+        "DELETE FROM finance_incidents WHERE tenant_id = $1",
+        "DELETE FROM mollie_subscriptions WHERE tenant_id = $1",
+        "DELETE FROM audit_logs WHERE tenant_id = $1",
+        "DELETE FROM tenants WHERE id = $1",
+    ] {
+        sqlx::query(statement)
+            .bind("cov_orph")
+            .execute(&h.pool)
+            .await
+            .ok();
+    }
+}
+
+db_test!(
+    active_subscription_amount_drift_is_reported_and_deduplicated,
+    |h| {
+        let mock = mock_mollie_api();
+        seed_tenant(&h, "cov_drift", "starter").await;
+        sqlx::query(
+        "INSERT INTO mollie_subscriptions (tenant_id, mollie_subscription_id, plan, status, billing_interval, billing_cycle_start, billing_cycle_end, mollie_customer_id, mollie_mandate_id, mollie_sequence_type) VALUES ($1, 'sub_drift_1', 'starter', 'active', 'monthly', NOW(),      NOW() + INTERVAL '20 days', 'cst_cov_drift', 'mdt_cov_drift', 'recurring')",
+    )
+    .bind("cov_drift")
+    .execute(&h.pool)
+    .await
+    .expect("seed subscription");
+        // The provider charges 19.00 while the catalog expects 20.00 — and the
+        // subscription IS active, the exact case the old check skipped.
+        mock.route(
+            "/v2/customers/cst_cov_drift/subscriptions/sub_drift_1",
+            200,
+            serde_json::json!({
+                "id": "sub_drift_1", "customerId": "cst_cov_drift", "status": "active",
+                "amount": { "currency": "EUR", "value": "19.00" }, "interval": "1 month"
+            })
+            .to_string(),
+        );
+
+        billing_service::plan_billing::sweep_provider_subscription_state(&h.pool)
+            .await
+            .expect("first sweep");
+        billing_service::plan_billing::sweep_provider_subscription_state(&h.pool)
+            .await
+            .expect("second sweep");
+
+        let incidents: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM finance_incidents WHERE kind = 'mollie_subscription_amount_drift'",
+    )
+    .fetch_one(&h.pool)
+    .await
+    .expect("incident count");
+        assert_eq!(
+            incidents, 1,
+            "one open incident per drifted subscription, not one per hourly sweep"
+        );
+        // The customer paid; entitlement is untouched — the operator decides.
+        let plan: String = sqlx::query_scalar("SELECT plan FROM tenants WHERE id = $1")
+            .bind("cov_drift")
+            .fetch_one(&h.pool)
+            .await
+            .expect("tenant plan");
+        assert_eq!(plan, "starter");
+        let status: String = sqlx::query_scalar(
+            "SELECT status FROM mollie_subscriptions WHERE mollie_subscription_id = 'sub_drift_1'",
+        )
+        .fetch_one(&h.pool)
+        .await
+        .expect("row status");
+        assert_eq!(status, "active");
+
+        sqlx::query("DELETE FROM finance_incidents WHERE tenant_id = $1")
+            .bind("cov_drift")
+            .execute(&h.pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM mollie_subscriptions WHERE tenant_id = $1")
+            .bind("cov_drift")
+            .execute(&h.pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM audit_logs WHERE tenant_id = $1")
+            .bind("cov_drift")
+            .execute(&h.pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM tenants WHERE id = $1")
+            .bind("cov_drift")
+            .execute(&h.pool)
+            .await
+            .ok();
     }
 );
