@@ -168,7 +168,7 @@ A DPA is executed with every customer in accordance with Article 28. The DPA cov
 
 | Sub-processor | Purpose | Location |
 |---------------|---------|----------|
-| Hetzner Online GmbH | Infrastructure (compute, storage) | EU (Germany/Finland) |
+| Hetzner Online GmbH | Infrastructure (compute, storage) | EU (Finland) |
 
 ---
 

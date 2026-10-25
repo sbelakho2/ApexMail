@@ -26,7 +26,7 @@ verdict_points = ["Managed email infrastructure with API, events, and support in
 # "none" (the winner_badge macro renders them as a spanned em-dash).
 comparison_sections = [
   { title = "EEA DATA PROCESSING", rows = [
-    { feature = "Primary hosting region", apex = 'EU data centres (Germany primary, Finland backup); core data processed in the EEA. Global sends ride AWS SES in its EU (Ireland) region — an EU region of a US company; EU-only routing removes that transport (<a href="/eu-sovereign/">details</a>)', comp = 'Multiple regions including EU (Ireland eu-west-1, Frankfurt eu-central-1, etc.)<sup><a href="#src-ses1">1</a></sup>', winner = "none" },
+    { feature = "Primary hosting region", apex = 'EU data centres in Finland; core data processed in the EEA. Global sends ride AWS SES in its EU (Ireland) region — an EU region of a US company; EU-only routing removes that transport (<a href="/eu-sovereign/">details</a>)', comp = 'Multiple regions including EU (Ireland eu-west-1, Frankfurt eu-central-1, etc.)<sup><a href="#src-ses1">1</a></sup>', winner = "none" },
     { feature = "EU-only routing", apex = 'Yes — one setting: every send leaves through ApexMail’s own EU MTAs; the third-party transport is removed, and an unavailable own-MTA route holds the message (<a href="/eu-sovereign/">how it works</a>)', comp = 'Not offered — region selection changes where SES sends from; delivery still rides AWS SES<sup><a href="#src-ses1">1</a></sup>', winner = "none" },
     { feature = "EEA data processing default", apex = 'EU/EEA-oriented default configuration; active locations are agreement-specific', comp = 'Available — must be explicitly configured; region selection required per sending domain<sup><a href="#src-ses1">1</a></sup>', winner = "none" },
     { feature = "DPA availability", apex = 'Available under the applicable ApexMail agreement', comp = 'Available — AWS DPA (Artifact) with SCCs<sup><a href="#src-ses2">2</a></sup>', winner = "none" }
@@ -58,7 +58,7 @@ comparison_sections = [
     { feature = "Raw cost per email", apex = 'See the current public catalog and checkout for applicable usage terms', comp = '€0.09 (US$0.10)/1,000 emails — lowest per-message cost among major providers<sup><a href="#src-ses10">10</a></sup>', winner = "competitor" },
     { feature = "AWS ecosystem integration", apex = 'Standalone platform with API integration', comp = 'Deep integration with AWS services: Lambda, S3, CloudWatch, SNS, SQS, IAM, KMS, Organizations<sup><a href="#src-ses3">3</a></sup>', winner = "competitor" },
     { feature = "Maximum sending volume", apex = 'Business supports up to 2 million emails/month; Enterprise terms are contract-scoped', comp = 'Virtually unlimited — constrained by account sending limits which auto-scale with reputation<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
-    { feature = "Global regions", apex = 'Germany &amp; Finland (EEA focus)', comp = '22+ AWS regions globally including US, EU, APAC, South America<sup><a href="#src-ses1">1</a></sup>', winner = "competitor" }
+    { feature = "Global regions", apex = 'Finland (EEA focus)', comp = '22+ AWS regions globally including US, EU, APAC, South America<sup><a href="#src-ses1">1</a></sup>', winner = "competitor" }
   ]}
 ]
 

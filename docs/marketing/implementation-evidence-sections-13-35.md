@@ -476,7 +476,7 @@
 - [x] Legal entity data is correct everywhere (`legal_entity.rs`)
 - [x] Obsolete company identifiers return zero results (registry_monitor.rs)
 - [x] Legal pages are internally consistent
-- [x] Data-location statements match architecture (EEA: Germany, Finland)
+- [x] Data-location statements match architecture (EEA: Finland)
 - [x] Subprocessor list is complete (procurement-package.md)
 - [x] Compliance language reflects actual status
 - [x] Security claims describe implemented controls

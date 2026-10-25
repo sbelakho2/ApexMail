@@ -30,8 +30,8 @@ sovereign chain no active subprocessor may process or store customer personal
 data in the United States. The tool REFUSES (exit 2) when the derived active
 set contains a US processing/storage region, or a US-domiciled processor
 engaged without an approved GDPR Chapter V transfer basis. The current
-production configuration (SES ``eu-west-1``, S3 ``eu-central-1``, Hetzner
-``fsn1`` DE / ``hel1`` FI, Mollie B.V. NL, EU OAuth regions) passes;
+production configuration (SES ``eu-west-1``, Hetzner ``hel1`` FI, Mollie
+B.V. NL, EU OAuth regions) passes;
 ``--self-test`` proves the check FAILS when the fixture env sets
 ``us-east-1``.
 
@@ -146,13 +146,11 @@ PROCESSOR_CATALOG: list[Processor] = [
         certifications=[],
         region_env="HETZNER_DEFAULT_LOCATION",
         regions={
-            "fsn1": ("Germany", "Germany"),
-            "nbg1": ("Germany", "Germany"),
             "hel1": ("Finland", "Finland"),
             "ash": ("United States", "United States"),
             "hil": ("United States", "United States"),
         },
-        default_region="fsn1",
+        default_region="hel1",
     ),
     Processor(
         key="aws_s3",
@@ -400,8 +398,8 @@ def derive_active(config: dict[str, str]) -> list[ActiveEntry]:
             entry.notes.append(processor.optional_note)
         if processor.key == "hetzner":
             entry.notes.append(
-                "Hetzner EU locations: Falkenstein/Nuremberg (fsn1/nbg1, DE) and Helsinki "
-                f"(hel1, FI); the active default is {region_label or processor.default_region}"
+                "Hetzner EU location: Helsinki (hel1, FI); the active default is "
+                f"{region_label or processor.default_region}"
             )
         active.append(entry)
     return active

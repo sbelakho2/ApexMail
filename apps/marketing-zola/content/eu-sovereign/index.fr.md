@@ -10,7 +10,7 @@ og_image = "/images/og-image.png"
 
 ## La promesse, et la limite honnête
 
-ApexMail est une société de l'UE (Bel Consulting OÜ, Tallinn, Estonie). Le cloud partagé tourne sur des centres de données européens (Allemagne en primaire, Finlande en secours). Le routage EU-only est un mode réel, activable en un seul réglage : chaque envoi ne part que par les MTA européens d'ApexMail, un envoi sans route MTA propre est retenu plutôt que réacheminé, et chaque message accepté porte un reçu de routage signé Ed25519 que tout tiers peut vérifier avec la clé publique publiée.
+ApexMail est une société de l'UE (Bel Consulting OÜ, Tallinn, Estonie). Le cloud partagé tourne sur des centres de données européens en Finlande. Le routage EU-only est un mode réel, activable en un seul réglage : chaque envoi ne part que par les MTA européens d'ApexMail, un envoi sans route MTA propre est retenu plutôt que réacheminé, et chaque message accepté porte un reçu de routage signé Ed25519 que tout tiers peut vérifier avec la clé publique publiée.
 
 La limite honnête appartient au même écran : le routage **par défaut** d'ApexMail est Global, et les envois Global sont livrés via SES d'Amazon Web Services dans sa région UE configurée — une région UE d'une société américaine, couverte par le contrat de sous-traitance AWS et, le cas échéant, par les clauses contractuelles types de l'UE. La phrase « votre courrier ne touche jamais un prestataire contrôlé par les États-Unis » est vraie **en routage EU-only** ; elle ne l'est pas pour un compte Global, et ce site ne la revendique pas à l'échelle de la plateforme. La [matrice des emplacements de données](/fr/data-locations/) énonce pour le stockage la même portée que cette page pour le transport.
 
@@ -22,7 +22,7 @@ Preuves : les [Conditions](/fr/terms/) nomment la partie contractante et le droi
 
 ## Centres de données européens
 
-Le déploiement partagé par défaut tourne sur l'infrastructure de Hetzner Online GmbH en Allemagne (primaire) et en Finlande (secours). Les données de service essentielles — données de compte, clés d'API hachées, adresses d'expéditeur et de destinataire, contenu des messages, pièces jointes, événements et journaux de livraison, tickets de support, analytique et sauvegardes — sont traitées et répliquées dans l'EEE, sans transfert vers un pays tiers pour ces catégories. Les véritables exceptions sont nommées plutôt que cachées : la connexion OAuth facultative (Google, GitHub) et le traitement des paiements (Mollie B.V.) sont isolés dans la matrice avec leurs propres garanties de transfert.
+Le déploiement partagé par défaut tourne sur l'infrastructure de Hetzner Online GmbH en Finlande. Les données de service essentielles — données de compte, clés d'API hachées, adresses d'expéditeur et de destinataire, contenu des messages, pièces jointes, événements et journaux de livraison, tickets de support, analytique et sauvegardes — sont traitées et répliquées dans l'EEE, sans transfert vers un pays tiers pour ces catégories. Les véritables exceptions sont nommées plutôt que cachées : la connexion OAuth facultative (Google, GitHub) et le traitement des paiements (Mollie B.V.) sont isolés dans la matrice avec leurs propres garanties de transfert.
 
 Preuves : la [matrice des emplacements de données](/fr/data-locations/) liste pour chaque catégorie de données l'emplacement primaire, la sauvegarde et la région de traitement ; le [registre des sous-traitants](/fr/subprocessors/) nomme les entités ainsi que leurs pays de traitement et de stockage.
 
@@ -72,7 +72,7 @@ Preuves : les deux endpoints sont des surfaces publiques vivantes et non authent
 
 ## Ce que EU-only retire de la chaîne de sous-traitants
 
-Le [registre des sous-traitants](/fr/subprocessors/) est généré depuis la configuration du déploiement lui-même ; l'ensemble listé ne peut donc pas dériver de ce qui tourne réellement. En routage EU-only, l'entrée Amazon Web Services SES ne transporte pas le courrier d'un locataire : le message ne sort que par les MTA propres d'ApexMail, exploités sur l'infrastructure Hetzner (Hetzner Online GmbH, Allemagne). Les entrées restantes sont les paiements (Mollie B.V., Amsterdam) et la connexion OAuth facultative (Google, GitHub) — chacune avec son pays de traitement et son mécanisme de transfert indiqués au registre.
+Le [registre des sous-traitants](/fr/subprocessors/) est généré depuis la configuration du déploiement lui-même ; l'ensemble listé ne peut donc pas dériver de ce qui tourne réellement. En routage EU-only, l'entrée Amazon Web Services SES ne transporte pas le courrier d'un locataire : le message ne sort que par les MTA propres d'ApexMail, exploités sur l'infrastructure Hetzner (Hetzner Online GmbH, Finlande). Les entrées restantes sont les paiements (Mollie B.V., Amsterdam) et la connexion OAuth facultative (Google, GitHub) — chacune avec son pays de traitement et son mécanisme de transfert indiqués au registre.
 
 Autrement dit : en EU-only, aucun tiers contrôlé par les États-Unis ne transporte le courrier. En Global, AWS SES le fait — dans une région UE, sous le DPA et les CCT d'AWS, et le registre dit exactement cela.
 

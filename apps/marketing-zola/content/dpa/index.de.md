@@ -45,7 +45,7 @@ Die aktuelle Liste der autorisierten Unterauftragsverarbeiter wird im [ApexMail-
 
 | Unterauftragsverarbeiter | Zweck | Standort | Übertragungsgarantie |
 |---|---|---|---|
-| Hetzner Online GmbH | Kerninfrastruktur (Compute, Storage) | Deutschland und Finnland (EU) | Übermittlung innerhalb der EEA; die Kapitel-V-Regeln der DSGVO finden keine Anwendung |
+| Hetzner Online GmbH | Kerninfrastruktur (Compute, Storage) | Finnland (EU) | Übermittlung innerhalb der EEA; die Kapitel-V-Regeln der DSGVO finden keine Anwendung |
 | Amazon Web Services, Inc. | Telemetrie-Objektspeicher, wenn aktiviert | Konfigurierte S3-Region (Standard: `eu-central-1`) | EU-Standardvertragsklauseln (AWS-DPA) |
 | Amazon Web Services, Inc. | E-Mail-Zustelltransport, wenn aktiviert | Konfigurierte SES-Region | EU-Standardvertragsklauseln (AWS-DPA) |
 | Google LLC | Optionale OAuth-Authentifizierung | Global (US-Unternehmen, Datenverarbeitung gemäß OAuth-Konfiguration) | Standardvertragsklauseln |

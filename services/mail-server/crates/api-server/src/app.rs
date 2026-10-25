@@ -4430,7 +4430,7 @@ mod tests {
         assert!(set_cookie.contains("Max-Age=31536000"));
         assert!(set_cookie.contains("HttpOnly"));
 
-        // Open redirect: off-family return_to falls back to "/" (consent is
+        // Open redirect: off-family return_to falls back to the site home (consent is
         // still recorded — the redirect target is what must be safe).
         let response = app
             .clone()
@@ -4443,7 +4443,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::FOUND);
-        assert_eq!(response.headers().get(header::LOCATION).unwrap(), "/");
+        assert_eq!(
+            response.headers().get(header::LOCATION).unwrap(),
+            "https://apexmail.ee/"
+        );
 
         // POST form twin: necessary-only records the distinct value.
         let response = app
@@ -4461,7 +4464,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::FOUND);
         assert_eq!(
             response.headers().get(header::LOCATION).unwrap(),
-            "/pricing"
+            "https://apexmail.ee/pricing"
         );
         let set_cookie = response
             .headers()

@@ -356,7 +356,6 @@ fn is_utility_shaped(token: &str) -> bool {
         "self-",
         "place-",
         "order-",
-        "basis-",
         "gap-",
         "space-",
         "p",
@@ -369,6 +368,9 @@ fn is_utility_shaped(token: &str) -> bool {
         "max-h-",
         "size-",
         "flex",
+        "basis-full",
+        "basis-auto",
+        "basis-0",
         "grid",
         "col-",
         "row-",
@@ -774,31 +776,35 @@ fn resolve_utility_positive(token: &str) -> Option<String> {
         }
     }
 
-    // Flex / grid item behaviour.
-    for (name, val) in [
-        ("flex-1", "1 1 0%"),
-        ("flex-auto", "1 1 auto"),
-        ("flex-initial", "0 1 auto"),
-        ("flex-none", "none"),
-        ("flex-col", "column"),
-        ("flex-row", "row"),
-        ("flex-wrap", "wrap"),
-        ("flex-nowrap", "nowrap"),
-        ("grow", "1"),
-        ("grow-0", "0"),
-        ("shrink", "1"),
-        ("shrink-0", "0"),
+    // Flex / grid item behaviour. grow/shrink are LONGHANDS: the `flex: 0`
+    // shorthand means `0 1 0%` and collapses the element's flex-basis to
+    // zero — a `shrink-0` wordmark SVG rendered zero pixels wide (ARK
+    // marketing sweep 2026-10-25). flex-1/auto/initial/none are shorthands
+    // by contract.
+    for (name, prop, val) in [
+        ("flex-1", "flex", "1 1 0%"),
+        ("flex-auto", "flex", "1 1 auto"),
+        ("flex-initial", "flex", "0 1 auto"),
+        ("flex-none", "flex", "none"),
+        ("flex-col", "flex-direction", "column"),
+        ("flex-row", "flex-direction", "row"),
+        ("flex-wrap", "flex-wrap", "wrap"),
+        ("flex-nowrap", "flex-wrap", "nowrap"),
+        ("grow", "flex-grow", "1"),
+        ("grow-0", "flex-grow", "0"),
+        ("shrink", "flex-shrink", "1"),
+        ("shrink-0", "flex-shrink", "0"),
+        // Longhand spellings are the same declarations (Tailwind v3 emits
+        // both names); previously they resolved to nothing.
+        ("flex-grow", "flex-grow", "1"),
+        ("flex-grow-0", "flex-grow", "0"),
+        ("flex-shrink", "flex-shrink", "1"),
+        ("flex-shrink-0", "flex-shrink", "0"),
+        ("basis-full", "flex-basis", "100%"),
+        ("basis-auto", "flex-basis", "auto"),
+        ("basis-0", "flex-basis", "0%"),
     ] {
         if base == name {
-            let prop = if matches!(name, "flex-col" | "flex-row" | "flex-wrap" | "flex-nowrap") {
-                if name.contains("wrap") {
-                    "flex-wrap"
-                } else {
-                    "flex-direction"
-                }
-            } else {
-                "flex"
-            };
             return rule(token, &format!("{prop}: {val}"));
         }
     }

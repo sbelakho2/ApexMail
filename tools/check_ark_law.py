@@ -51,7 +51,7 @@ COPY_AUTHORITIES = [
 STRUCTURAL_PREFIXES = [
     # display / flex / grid
     "block", "inline-block", "inline", "flex", "inline-flex", "grid", "hidden",
-    "contents", "table", "flow-root", "flex-", "grow", "shrink", "basis-",
+    "contents", "table", "flow-root", "flex-", "grow", "shrink",
     "items-", "justify-", "self-", "content-", "place-items-", "place-content-",
     "gap-", "gap-x-", "gap-y-", "grid-cols-", "grid-rows-", "col-span-",
     "row-span-", "order-", "auto-cols-", "auto-rows-",
@@ -94,6 +94,7 @@ STRUCTURAL_EXACT = {
     "truncate-none", "mx-auto", "my-auto", "ml-auto", "mr-auto", "mt-auto",
     "mb-auto", "w-full", "h-full", "w-auto", "h-auto", "w-px", "h-px",
     "min-w-0", "w-screen", "h-screen", "list-none", "list-disc",
+    "basis-full", "basis-auto", "basis-0",
     "list-decimal", "cursor-pointer", "cursor-not-allowed", "cursor-default",
     "pointer-events-none", "pointer-events-auto", "text-left", "text-center",
     "text-right", "text-justify", "resize-vertical", "mt-8", "transition-all",

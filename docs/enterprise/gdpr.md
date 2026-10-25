@@ -225,7 +225,7 @@ curl -X POST https://api.apexmail.ee/v1/account/export \
 
 | Sub-processor | Service | Location | Data Access | Safeguards |
 |---------------|---------|----------|-------------|------------|
-| **Hetzner Cloud GmbH** | Cloud infrastructure | Finland (primary), Germany (standby) | Encrypted data at rest | DPA executed, EU-based |
+| **Hetzner Cloud GmbH** | Cloud infrastructure | Finland (single region) | Encrypted data at rest | DPA executed, EU-based |
 | **AWS (Amazon Web Services)** | SES email delivery | eu-west-1 (Ireland) | Email content in transit only | DPA executed, SCCs |
 | **Redis Ltd** | Caching / rate limiting | Same as primary infra | Ephemeral cache data | No persistent storage |
 | **ClickHouse Inc** | Analytics database | Same as primary infra | Aggregated analytics data | EU-hosted |
@@ -248,7 +248,7 @@ SCCs (2021/914/EU) apply to all data transfers from the EEA to third countries w
 
 ### Current Adequacy Decisions
 
-Where data is processed within the EEA (Finland, Germany, Estonia), no SCCs are required as adequacy is presumed.
+Where data is processed within the EEA (Finland; the controller is established in Estonia), no SCCs are required as adequacy is presumed.
 
 ### Data Transfers
 
@@ -256,7 +256,7 @@ Where data is processed within the EEA (Finland, Germany, Estonia), no SCCs are 
 |-------------|-------------|-----------|
 | AWS Ireland (eu-west-1) | Adequacy decision | EEA-based processing |
 | Mollie B.V. (Netherlands) | Adequacy decision | EEA-based processing |
-| Hetzner Finland/Germany | Adequacy decision | EEA-based processing |
+| Hetzner Finland | Adequacy decision | EEA-based processing |
 
 ### SCC Execution
 

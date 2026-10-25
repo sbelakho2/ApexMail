@@ -38,10 +38,10 @@ Die bereitgestellte Konfiguration zielt für Kern-E-Mail-Daten und Telemetriespe
 
 | Datenkategorie | Primärer Standort | Backup / Replikat | Verarbeitung |
 |---|---|---|---|
-| Kern-E-Mail-Infrastruktur (Nachrichten, Zustellmetadaten, Kontodaten) | EU-Rechenzentrum — Deutschland | EU-Rechenzentrum — Finnland | EWR — keine Drittlandübermittlung |
+| Kern-E-Mail-Infrastruktur (Nachrichten, Zustellmetadaten, Kontodaten) | EU-Rechenzentrum — Finnland | EU-Rechenzentrum — Finnland (Sekundärstandort) | EWR — keine Drittlandübermittlung |
 | OAuth-Authentifizierungstoken | Google LLC / GitHub, Inc. (US-Unternehmen, SCCs) | Anbieter-verwaltet | US (SCCs) |
 | Zahlungs- und Abrechnungsdaten | Mollie B.V. (Niederlande, EU) | Anbieter-verwaltet innerhalb der EU | EWR — keine Drittlandübermittlung (Kartennetzwerke gemäß Mollie-DPA) |
-| Support-Tickets | EU-Rechenzentrum — Deutschland | EU-Rechenzentrum — Finnland | EWR — keine Drittlandübermittlung |
+| Support-Tickets | EU-Rechenzentrum — Finnland | EU-Rechenzentrum — Finnland (Sekundärstandort) | EWR — keine Drittlandübermittlung |
 
 Wir übermitteln keine personenbezogenen Daten außerhalb des EWR ohne angemessene Garantien (Standardvertragsklauseln oder einen Angemessenheitsbeschluss gemäß Artikel 45).
 

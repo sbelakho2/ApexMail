@@ -38,10 +38,10 @@ The supplied configuration targets EEA regions for core email-service data and t
 
 | Data Category | Primary Location | Backup / Replica | Processing |
 |---|---|---|---|
-| Core email infrastructure (messages, delivery metadata, account data) | EU data centre — Germany | EU data centre — Finland | EEA — no third-country transfer |
+| Core email infrastructure (messages, delivery metadata, account data) | EU data centre — Finland | EU data centre — Finland (secondary site) | EEA — no third-country transfer |
 | OAuth authentication tokens | Google LLC / GitHub, Inc. (US entities, SCCs) | Provider-managed | US (SCCs) |
 | Payment and billing records | Mollie B.V. (Netherlands, EU) | Provider-managed within the EU | EEA — no third-country transfer (card scheme networks under the Mollie DPA) |
-| Support tickets | EU data centre — Germany | EU data centre — Finland | EEA — no third-country transfer |
+| Support tickets | EU data centre — Finland | EU data centre — Finland (secondary site) | EEA — no third-country transfer |
 
 We do not transfer personal data outside the EEA without adequate safeguards (Standard Contractual Clauses or an adequacy decision under Article 45).
 

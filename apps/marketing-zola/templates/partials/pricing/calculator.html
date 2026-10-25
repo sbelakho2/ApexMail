@@ -8,7 +8,7 @@
 
 {%- set pricing_data = load_data(path="data/pricing.json", format="json") -%}
 
-<section class="scroll-mt-20 apex-mkt-section apex-mkt-section--ink" id="apexmail-calculator" aria-labelledby="calculator-heading" data-pricing='{{ pricing_data | json_encode | escape }}'>
+<section class="scroll-mt-20 apex-mkt-section apex-mkt-section--ink" id="apexmail-calculator" aria-labelledby="calculator-heading" data-pricing='{{ pricing_data | json_encode }}'>
   <div class="apex-mkt-container">
   <div class="max-w-4xl">
 
@@ -119,5 +119,6 @@
         Annual subscriptions are billed at 10&times; the monthly price — {{ pricing_data.annual_savings_percent }}% less than twelve monthly payments. Enterprise requires an annual contract. All totals exclude VAT and contractual services. The next page shows the itemised estimate with the plan, included volume, overage and IP costs.
       </p>
     </div>
+  </div>
   </div>
 </section>

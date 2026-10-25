@@ -451,7 +451,7 @@ services:
       # disabled) but forwarded so the documented .env switch takes effect.
       # The token is a provider API credential: keep the .env file 0600.
       HETZNER_API_TOKEN: ${HETZNER_API_TOKEN:-}
-      HETZNER_DEFAULT_LOCATION: ${HETZNER_DEFAULT_LOCATION:-fsn1}
+      HETZNER_DEFAULT_LOCATION: ${HETZNER_DEFAULT_LOCATION:-hel1}
       HETZNER_MTA_SERVER_ID: ${HETZNER_MTA_SERVER_ID:-}
       # HA data-plane fencing (audit SM10 F4): when TRUE, mutating requests are
       # refused with 503 while this node is fenced via the ha service

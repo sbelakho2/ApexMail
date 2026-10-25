@@ -655,7 +655,7 @@ pub struct MarketingShell<'a> {
 }
 
 fn render_marketing_header() -> String {
-    "<header id=\"site-header\" data-marketing-shell=\"header\" class=\"fixed top-0 left-0 right-0 z-50 border-b\">\
+    "<header id=\"site-header\" data-marketing-shell=\"header\" class=\"apex-mkt-header fixed top-0 left-0 right-0 z-50 border-b\">\
          <nav class=\"max-w-7xl mx-auto px-4 sm:px-6 lg:px-8\">\
          <div class=\"flex items-center justify-between h-16 lg:h-20\">\
          <a href=\"/\" class=\"flex items-center gap-2 apex-link\">\

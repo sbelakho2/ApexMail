@@ -13,24 +13,24 @@ This matrix describes the deployed EU/EEA configuration. Core service data (rows
 
 | # | Data Category | Default Primary Location | Default Backup / Replica | Default Processing Region | Transfer Safeguard |
 |---|---|---|---|---|---|
-| 1 | Account data (name, email, company, address) | EU data centre — Germany | EU data centre — Finland | EEA (no third-country transfer) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
-| 2 | API keys (hashed) | EU data centre — Germany | EU data centre — Finland | EEA (no third-country transfer) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
-| 3 | Sender and recipient addresses | EU data centre — Germany | EU data centre — Finland | EEA (no third-country transfer) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
-| 4 | Message content (subject, body, headers) | EU data centre — Germany | EU data centre — Finland | EEA (no third-country transfer) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
-| 5 | Attachments | EU data centre — Germany | EU data centre — Finland | EEA (no third-country transfer) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
-| 6 | Events and logs (delivery, open, click, bounce) | EU data centre — Germany | EU data centre — Finland | EEA (no third-country transfer) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
-| 7 | Authentication (OAuth tokens, MFA secrets) | EU data centre — Germany; Google LLC / GitHub, Inc. (OAuth) | Provider-managed | EEA (core); US for OAuth providers | SCCs (OAuth providers) |
-| 8 | Billing (invoices, transactions, payment tokens) | EU data centre — Germany; Mollie B.V. (Netherlands, EU) | Provider-managed within the EU | EEA (ApexMail and Mollie); card scheme networks under the Mollie DPA | Intra-EEA processing (Mollie B.V., Amsterdam) |
-| 9 | Support tickets | EU data centre — Germany | EU data centre — Finland | EEA (no third-country transfer) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
-| 10 | Analytics (aggregate delivery metrics, engagement) | EU data centre — Germany | EU data centre — Finland | EEA (no third-country transfer) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
-| 11 | Security logs (audit trails, access logs) | EU data centre — Germany | EU data centre — Finland | EEA (no third-country transfer) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
-| 12 | Backups (database, file storage snapshots) | EU data centre — Finland | EU data centre — Germany (encrypted cold storage) | EEA (no third-country transfer) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
+| 1 | Account data (name, email, company, address) | EU data centre — Finland | EU data centre — Finland (secondary site) | EEA (no third-country transfer) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
+| 2 | API keys (hashed) | EU data centre — Finland | EU data centre — Finland (secondary site) | EEA (no third-country transfer) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
+| 3 | Sender and recipient addresses | EU data centre — Finland | EU data centre — Finland (secondary site) | EEA (no third-country transfer) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
+| 4 | Message content (subject, body, headers) | EU data centre — Finland | EU data centre — Finland (secondary site) | EEA (no third-country transfer) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
+| 5 | Attachments | EU data centre — Finland | EU data centre — Finland (secondary site) | EEA (no third-country transfer) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
+| 6 | Events and logs (delivery, open, click, bounce) | EU data centre — Finland | EU data centre — Finland (secondary site) | EEA (no third-country transfer) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
+| 7 | Authentication (OAuth tokens, MFA secrets) | EU data centre — Finland; Google LLC / GitHub, Inc. (OAuth) | Provider-managed | EEA (core); US for OAuth providers | SCCs (OAuth providers) |
+| 8 | Billing (invoices, transactions, payment tokens) | EU data centre — Finland; Mollie B.V. (Netherlands, EU) | Provider-managed within the EU | EEA (ApexMail and Mollie); card scheme networks under the Mollie DPA | Intra-EEA processing (Mollie B.V., Amsterdam) |
+| 9 | Support tickets | EU data centre — Finland | EU data centre — Finland (secondary site) | EEA (no third-country transfer) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
+| 10 | Analytics (aggregate delivery metrics, engagement) | EU data centre — Finland | EU data centre — Finland (secondary site) | EEA (no third-country transfer) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
+| 11 | Security logs (audit trails, access logs) | EU data centre — Finland | EU data centre — Finland (secondary site) | EEA (no third-country transfer) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
+| 12 | Backups (database, file storage snapshots) | EU data centre — Finland | EU data centre — Finland (encrypted cold storage) | EEA (no third-country transfer) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
 
 ## Sub-processor Locations
 
 | Sub-processor | Purpose | Location | Transfer Safeguard |
 |---|---|---|---|
-| Hetzner Online GmbH | Core infrastructure (compute, storage, networking) | Germany and Finland (EU) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
+| Hetzner Online GmbH | Core infrastructure (compute, storage, networking) | Finland (EU) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
 | Amazon Web Services, Inc. (AWS S3) | Telemetry object storage when enabled | Configured S3 region (default: `eu-central-1`, EU) | EU SCCs when the configured region is outside the EEA |
 | Amazon Web Services, Inc. (AWS SES) | Email-delivery transport when enabled | Configured SES region (EU default) | EU SCCs when the configured region is outside the EEA |
 | Mollie B.V. | Payment processing | Netherlands (EU); card scheme networks process globally under the Mollie DPA | Intra-EEA processing (Mollie B.V., Amsterdam) |
@@ -47,8 +47,8 @@ Dedicated Tenant and BYOC entries below describe a model only where a separate w
 
 | Model | Primary Region | Customer Control |
 |---|---|---|
-| Shared EU Cloud | EU data centres (Germany primary, Finland backup) | ApexMail-managed |
-| Dedicated Tenant | EU region agreed with customer (default: Finland or Germany) | Single-tenant, ApexMail-managed |
+| Shared EU Cloud | EU data centres in Finland | ApexMail-managed |
+| Dedicated Tenant | EU region agreed with customer (default: Finland) | Single-tenant, ApexMail-managed |
 | BYOC (Bring Your Own Cloud) | Customer-chosen provider and region | Customer-managed infrastructure, ApexMail-managed application layer |
 
 ## EU-Only Routing

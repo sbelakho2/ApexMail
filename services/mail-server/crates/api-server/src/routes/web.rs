@@ -144,12 +144,21 @@ pub fn normalize_consent_choice(choice: Option<&str>) -> Option<&'static str> {
     }
 }
 
+/// The marketing site origin — the banner's home and the one fallback the
+/// consent redirect ever uses. Never the API host's root: on the cross-
+/// host deployment that is a 404, and a consent click must never land on
+/// one (owner directive 2026-10-25: "cookie consents always 404").
+pub const CONSENT_RETURN_FALLBACK: &str = "https://apexmail.ee/";
+
 /// Validate a `return_to` target for the consent redirect. Allowed:
-/// same-origin relative paths (`/…`, never `//…`) and absolute HTTPS
-/// URLs on the apexmail.ee host family (the banner lives on
-/// apexmail.ee but the endpoint is api.apexmail.ee, so the return hop
-/// is always cross-host within the family). Everything else — open
-/// redirects, other domains, plain HTTP — falls back to `/`.
+/// same-origin relative paths (`/…`, never `//…`, resolved against the
+/// marketing site origin — the banner lives on apexmail.ee but the
+/// endpoint is api.apexmail.ee, where `/pricing` is a 404), absolute
+/// HTTPS URLs on the apexmail.ee host family, and loopback dev-preview
+/// targets (127.0.0.1 / localhost / [::1]; a local static build has no
+/// api-server and its banner links must still return to the page the
+/// reader was on). Everything else — open redirects, other domains,
+/// plain HTTP — falls back to the site home, which always exists.
 ///
 /// Backslashes and control characters are rejected outright: WHATWG URL
 /// parsing normalises `\` to `/` inside special schemes, so a browser
@@ -159,36 +168,49 @@ pub fn normalize_consent_choice(choice: Option<&str>) -> Option<&'static str> {
 /// parse, so both branches are covered.
 pub fn consent_safe_return_to(return_to: Option<&str>) -> String {
     let Some(value) = return_to.map(str::trim).filter(|v| !v.is_empty()) else {
-        return "/".to_string();
+        return CONSENT_RETURN_FALLBACK.to_string();
     };
 
     if value.contains('\\') || value.chars().any(char::is_control) {
-        return "/".to_string();
+        return CONSENT_RETURN_FALLBACK.to_string();
     }
 
+    // Relative paths belong to the site the banner lives on; resolve them
+    // to the site origin so the hop works in both deployments (api-server
+    // serving the site directly, or the cross-host banner).
     if value.starts_with('/') && !value.starts_with("//") {
-        return value.to_string();
+        return format!("https://apexmail.ee{value}");
     }
 
     let Ok(url) = url::Url::parse(value) else {
-        return "/".to_string();
+        return CONSENT_RETURN_FALLBACK.to_string();
     };
-    if url.scheme() != "https" {
-        return "/".to_string();
-    }
     // Userinfo in the authority (`https://attacker@apexmail.ee/`) is a
     // phishing/confusion shape browsers still display confusingly, and it is
-    // never a legitimate console return target — the host check below would
+    // never a legitimate return target — the host check below would
     // otherwise happily pass it (adversarial suite:
-    // `open_redirect_shapes_fall_back_to_root`).
+    // `open_redirect_shapes_fall_back_to_site_home`).
     if !url.username().is_empty() || url.password().is_some() {
-        return "/".to_string();
+        return CONSENT_RETURN_FALLBACK.to_string();
     }
     let host = url.host_str().map(str::to_ascii_lowercase);
+    // Loopback (dev previews): the user's own machine cannot serve as an
+    // open-redirect target for phishing or token theft, and a local static
+    // build's banner must return to its own pages.
+    let loopback = matches!(
+        host.as_deref(),
+        Some("127.0.0.1") | Some("localhost") | Some("[::1]")
+    );
+    if loopback && matches!(url.scheme(), "http" | "https") {
+        return url.to_string();
+    }
+    if url.scheme() != "https" {
+        return CONSENT_RETURN_FALLBACK.to_string();
+    }
     match host.as_deref() {
         Some("apexmail.ee") | Some("www.apexmail.ee") => url.to_string(),
         Some(host) if host.ends_with(".apexmail.ee") => url.to_string(),
-        _ => "/".to_string(),
+        _ => CONSENT_RETURN_FALLBACK.to_string(),
     }
 }
 
@@ -11873,36 +11895,39 @@ mod tests {
         // "//evil.com" — a protocol-relative hop straight to the
         // attacker. Control characters (CR/LF/TAB) can additionally
         // smuggle headers or corrupt parsers. None may survive.
-        assert_eq!(consent_safe_return_to(Some("/\\evil.com")), "/");
-        assert_eq!(consent_safe_return_to(Some("\\/evil.com")), "/");
-        assert_eq!(consent_safe_return_to(Some("/pricing\\@evil.example")), "/");
-        assert_eq!(consent_safe_return_to(Some("/pricing\\")), "/");
+        assert_eq!(consent_safe_return_to(Some("/\\evil.com")), "https://apexmail.ee/");
+        assert_eq!(consent_safe_return_to(Some("\\/evil.com")), "https://apexmail.ee/");
+        assert_eq!(consent_safe_return_to(Some("/pricing\\@evil.example")), "https://apexmail.ee/");
+        assert_eq!(consent_safe_return_to(Some("/pricing\\")), "https://apexmail.ee/");
         // The absolute-URL branch must be guarded by the same rule.
         assert_eq!(
             consent_safe_return_to(Some("https://apexmail.ee/\\evil.com")),
-            "/"
+            "https://apexmail.ee/"
         );
         assert_eq!(
             consent_safe_return_to(Some(
                 "https://apexmail.ee/pricing\\\r\nSet-Cookie: apexmail_consent=all"
             )),
-            "/"
+            "https://apexmail.ee/"
         );
         assert_eq!(
             consent_safe_return_to(Some("/pricing\r\nSet-Cookie: x=1")),
-            "/"
+            "https://apexmail.ee/"
         );
         // A control char *inside* the path is rejected; one at the very
         // edge is already neutralised by the trim() above it.
-        assert_eq!(consent_safe_return_to(Some("/pri\u{0007}cing")), "/");
-        assert_eq!(consent_safe_return_to(Some("/pricing\u{0007}")), "/");
-        assert_eq!(consent_safe_return_to(Some("/pricing\t")), "/pricing");
+        assert_eq!(consent_safe_return_to(Some("/pri\u{0007}cing")), "https://apexmail.ee/");
+        assert_eq!(consent_safe_return_to(Some("/pricing\u{0007}")), "https://apexmail.ee/");
+        assert_eq!(consent_safe_return_to(Some("/pricing\t")), "https://apexmail.ee/pricing");
         // …while the honest values still pass through untouched.
         assert_eq!(
             consent_safe_return_to(Some("/pricing?back=1")),
-            "/pricing?back=1"
+            "https://apexmail.ee/pricing?back=1"
         );
-        assert_eq!(consent_safe_return_to(Some("/de/cookies/")), "/de/cookies/");
+        assert_eq!(
+            consent_safe_return_to(Some("/de/cookies/")),
+            "https://apexmail.ee/de/cookies/"
+        );
         assert_eq!(
             consent_safe_return_to(Some("https://app.apexmail.ee/dashboard?next=/x")),
             "https://app.apexmail.ee/dashboard?next=/x"
@@ -12015,10 +12040,30 @@ mod tests {
     }
 
     #[test]
-    fn consent_return_to_allows_only_apexmail_family_https() {
-        // Relative same-origin paths pass through.
-        assert_eq!(consent_safe_return_to(Some("/pricing")), "/pricing");
-        assert_eq!(consent_safe_return_to(Some("/de/cookies/")), "/de/cookies/");
+    fn consent_return_to_allows_site_family_and_loopback() {
+        // Relative paths resolve to the marketing site origin (the
+        // endpoint's own host would 404 them).
+        assert_eq!(
+            consent_safe_return_to(Some("/pricing")),
+            "https://apexmail.ee/pricing"
+        );
+        assert_eq!(
+            consent_safe_return_to(Some("/de/cookies/")),
+            "https://apexmail.ee/de/cookies/"
+        );
+        // Loopback dev previews return to themselves.
+        assert_eq!(
+            consent_safe_return_to(Some("http://127.0.0.1:8933/features/")),
+            "http://127.0.0.1:8933/features/"
+        );
+        assert_eq!(
+            consent_safe_return_to(Some("http://localhost:3000/")),
+            "http://localhost:3000/"
+        );
+        assert_eq!(
+            consent_safe_return_to(Some("http://[::1]:8000/pricing")),
+            "http://[::1]:8000/pricing"
+        );
         // Absolute apexmail.ee-family HTTPS URLs pass through (the banner
         // lives on apexmail.ee, this endpoint on api.apexmail.ee).
         assert_eq!(
@@ -12033,30 +12078,30 @@ mod tests {
             consent_safe_return_to(Some("https://app.apexmail.ee/dashboard")),
             "https://app.apexmail.ee/dashboard"
         );
-        // Open redirects are rejected and fall back to "/".
-        assert_eq!(consent_safe_return_to(Some("https://evil.example")), "/");
+        // Open redirects are rejected and fall back to the site home.
+        assert_eq!(consent_safe_return_to(Some("https://evil.example")), "https://apexmail.ee/");
         assert_eq!(
             consent_safe_return_to(Some("https://evil.example/?u=https://apexmail.ee")),
-            "/"
+            "https://apexmail.ee/"
         );
         // Scheme downgrades and lookalike suffix hosts are rejected.
         assert_eq!(
             consent_safe_return_to(Some("http://apexmail.ee/pricing")),
-            "/"
+            "https://apexmail.ee/"
         );
         assert_eq!(
             consent_safe_return_to(Some("https://notapexmail.ee/pricing")),
-            "/"
+            "https://apexmail.ee/"
         );
         assert_eq!(
             consent_safe_return_to(Some("https://apexmail.ee.evil.io/")),
-            "/"
+            "https://apexmail.ee/"
         );
         // Protocol-relative and garbage values never leak through.
-        assert_eq!(consent_safe_return_to(Some("//evil.example")), "/");
-        assert_eq!(consent_safe_return_to(Some("javascript:alert(1)")), "/");
-        assert_eq!(consent_safe_return_to(Some("")), "/");
-        assert_eq!(consent_safe_return_to(None), "/");
+        assert_eq!(consent_safe_return_to(Some("//evil.example")), "https://apexmail.ee/");
+        assert_eq!(consent_safe_return_to(Some("javascript:alert(1)")), "https://apexmail.ee/");
+        assert_eq!(consent_safe_return_to(Some("")), "https://apexmail.ee/");
+        assert_eq!(consent_safe_return_to(None), "https://apexmail.ee/");
     }
 
     #[test]
@@ -12117,7 +12162,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::FOUND);
         assert_eq!(
             response.headers().get(header::LOCATION).unwrap(),
-            "/pricing"
+            "https://apexmail.ee/pricing"
         );
         assert!(response.headers().get(header::SET_COOKIE).is_none());
     }
@@ -27808,13 +27853,13 @@ mod residual_zero_tests {
             consent_post(State(state.clone()), Form(request))
         };
 
-        // (a) A protocol-relative target must collapse to "/" while the
-        //     legitimate choice still records.
+        // (a) A protocol-relative target must collapse to the site home
+        //     while the legitimate choice still records.
         let response = post(Some("all"), "//evil.example/harvest#frag").await;
         assert_eq!(response.status(), StatusCode::FOUND);
         assert_eq!(
             location(&response),
-            "/",
+            "https://apexmail.ee/",
             "a protocol-relative return_to is an off-site redirect"
         );
         assert!(
@@ -27828,23 +27873,23 @@ mod residual_zero_tests {
         // (b) The WHATWG backslash normalization trick (`/\evil.com`)
         //     navigates to `//evil.com` in browsers — refused outright.
         let response = post(Some("all"), "/\\evil.example").await;
-        assert_eq!(location(&response), "/");
+        assert_eq!(location(&response), "https://apexmail.ee/");
 
         // (c) A lookalike host that merely CONTAINS the family name is not
         //     the family; an absolute HTTPS URL on a real subdomain is.
         let response = post(Some("all"), "https://apexmail.ee.evil.example/x").await;
-        assert_eq!(location(&response), "/");
+        assert_eq!(location(&response), "https://apexmail.ee/");
         let family = "https://status.apexmail.ee/pricing?a=1";
         let response = post(Some("necessary"), family).await;
         assert_eq!(location(&response), family);
 
         // (d) Control characters can smuggle header bytes — refused.
         let response = post(Some("all"), "https://apexmail.ee/\u{1}").await;
-        assert_eq!(location(&response), "/");
+        assert_eq!(location(&response), "https://apexmail.ee/");
 
         // (e) An unknown choice records NOTHING (banner stays pending).
         let response = post(Some("junk"), "/dashboard").await;
-        assert_eq!(location(&response), "/dashboard");
+        assert_eq!(location(&response), "https://apexmail.ee/dashboard");
         assert!(
             !set_cookies(&response)
                 .iter()

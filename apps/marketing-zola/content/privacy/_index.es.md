@@ -38,10 +38,10 @@ La configuración proporcionada apunta a regiones del EEE para los datos princip
 
 | Categoría de datos | Ubicación principal | Copia de seguridad / Réplica | Procesamiento |
 |---|---|---|---|
-| Infraestructura de correo principal (mensajes, metadatos de entrega, datos de cuenta) | Centro de datos de la UE — Alemania | Centro de datos de la UE — Finlandia | EEE — sin transferencia a terceros países |
+| Infraestructura de correo principal (mensajes, metadatos de entrega, datos de cuenta) | Centro de datos de la UE — Finlandia | Centro de datos de la UE — Finlandia (sitio secundario) | EEE — sin transferencia a terceros países |
 | Tokens de autenticación OAuth | Google LLC / GitHub, Inc. (entidades estadounidenses, CCT) | Gestionado por el proveedor | EE. UU. (CCT) |
 | Datos de pago y facturación | Mollie B.V. (Países Bajos, UE) | Gestionado por el proveedor dentro de la UE | EEE — sin transferencia a terceros países (redes de tarjetas según el DPA de Mollie) |
-| Tickets de soporte | Centro de datos de la UE — Alemania | Centro de datos de la UE — Finlandia | EEE — sin transferencia a terceros países |
+| Tickets de soporte | Centro de datos de la UE — Finlandia | Centro de datos de la UE — Finlandia (sitio secundario) | EEE — sin transferencia a terceros países |
 
 No transferimos datos personales fuera del EEE sin garantías adecuadas (Cláusulas Contractuales Tipo o una decisión de adecuación en virtud del Artículo 45).
 

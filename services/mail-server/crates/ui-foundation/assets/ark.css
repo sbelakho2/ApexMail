@@ -1078,9 +1078,20 @@ a.apex-sidebar-brand:hover { color: inherit; }
   min-width: 24px;
   padding-block: 0.1875rem;
 }
+/* Tap-target law, global: every link keeps the 24px floor; on touch the
+   floor rises to 44px except for sentence-embedded links inside prose,
+   notices, footnotes and metadata lines (the WCAG 'inline' exception). */
+a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+}
 @media (max-width: 640px), (pointer: coarse) {
   .apex-btn--link,
   .apex-table a { min-height: 44px; }
+  a:not(.apex-prose a):not(.apex-notice a):not(.apex-footnote a):not(.apex-meta a) {
+    min-height: 44px;
+  }
 }
 /* Busy = the verb changed, not a spinner. */
 .apex-btn--busy,
@@ -1901,6 +1912,9 @@ input[type="checkbox"]:not(.sr-only):checked { background: rgb(var(--input)); }
 
 /* Navigation: hierarchy only — 72px desktop, 56px mobile, neutral links,
    2px ink rule on the current page, crimson commercial CTA beside it. */
+.apex-mkt-header {
+  background: rgb(var(--background));
+}
 .apex-mkt-nav {
   display: flex;
   align-items: center;
@@ -2317,6 +2331,11 @@ input[type="checkbox"]:not(.sr-only):checked { background: rgb(var(--input)); }
 .apex-mkt-section--ink .apex-section-label {
   color: rgb(var(--mkt-link-on-ink));
 }
+.apex-mkt-section--ink .apex-index,
+.apex-mkt-section--ink .apex-evidence--mkt .apex-evidence__head,
+.apex-mkt-section--ink .apex-evidence--mkt .apex-evidence__seal {
+  color: rgb(var(--mkt-link-on-ink));
+}
 .apex-mkt-section--ink a { color: rgb(var(--mkt-link-on-ink)); }
 .apex-mkt-section--ink a:hover { color: rgb(var(--mkt-paper)); }
 .apex-mkt-section--ink .apex-btn {
@@ -2441,6 +2460,11 @@ input[type="checkbox"]:not(.sr-only):checked { background: rgb(var(--input)); }
 .apex-mkt-section--brand .apex-section-aside { color: rgb(var(--mkt-paper)); }
 .apex-mkt-section--brand .apex-mkt-kicker,
 .apex-mkt-section--brand .apex-section-label { color: rgb(var(--mkt-paper)); }
+.apex-mkt-section--brand .apex-index,
+.apex-mkt-section--brand .apex-evidence--mkt .apex-evidence__head,
+.apex-mkt-section--brand .apex-evidence--mkt .apex-evidence__seal {
+  color: rgb(var(--mkt-paper));
+}
 .apex-mkt-section--brand a { color: rgb(var(--mkt-paper)); }
 .apex-mkt-section--brand a:hover { color: rgb(var(--mkt-brand-wash)); }
 .apex-mkt-section--brand .apex-btn {
@@ -2655,6 +2679,23 @@ label.inline-flex { flex-wrap: wrap; max-width: 100%; }
   transition-timing-function: var(--motion-ease);
 }
 
+}
+
+/* ── Bar clearance (unlayered: must win over structural positioning
+   utilities). Bars are surfaces, never windows, and they never hide
+   content: the sticky header is opaque (apex-mkt-header, above), every
+   anchor lands below it, the fixed consent bar reserves its own space,
+   and the back-to-top control floats above the bar. */
+[id] { scroll-margin-top: 5.5rem; }
+body:has(.apex-consent) { padding-bottom: 6.5rem; }
+body:has(.apex-consent) #back-to-top { bottom: 8.25rem; }
+/* The mobile navigation sheet is a surface, not a window: opaque paper
+   over the page, and it never runs under the consent bar. */
+#mobile-menu {
+  background: rgb(var(--background));
+}
+body:has(.apex-consent) #mobile-menu {
+  max-height: calc(100vh - 11.5rem);
 }
 
 /* Print: documents print as documents. */

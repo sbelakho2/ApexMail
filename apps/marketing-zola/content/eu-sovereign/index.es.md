@@ -10,7 +10,7 @@ og_image = "/images/og-image.png"
 
 ## La promesa y el límite honesto
 
-ApexMail es una empresa de la UE (Bel Consulting OÜ, Tallin, Estonia). La nube compartida funciona en centros de datos de la UE (Alemania principal, Finlandia de respaldo). El enrutamiento EU-only es un modo real que se activa con un solo ajuste: cada envío sale únicamente por los MTA europeos de ApexMail, un envío sin ruta MTA propia se retiene en lugar de redirigirse, y cada mensaje aceptado lleva un recibo de enrutamiento firmado con Ed25519 que cualquier tercero puede verificar con la clave pública publicada.
+ApexMail es una empresa de la UE (Bel Consulting OÜ, Tallin, Estonia). La nube compartida funciona en centros de datos de la UE en Finlandia. El enrutamiento EU-only es un modo real que se activa con un solo ajuste: cada envío sale únicamente por los MTA europeos de ApexMail, un envío sin ruta MTA propia se retiene en lugar de redirigirse, y cada mensaje aceptado lleva un recibo de enrutamiento firmado con Ed25519 que cualquier tercero puede verificar con la clave pública publicada.
 
 El límite honesto pertenece a la misma pantalla: el enrutamiento **predeterminado** de ApexMail es Global, y los envíos Global se entregan a través de SES de Amazon Web Services en su región de la UE configurada — una región de la UE de una empresa estadounidense, cubierta por el contrato de encargo de tratamiento de AWS y, cuando corresponde, por las cláusulas contractuales tipo de la UE. La frase «tu correo nunca toca un proveedor controlado por EE. UU.» es cierta **con enrutamiento EU-only**; no lo es para una cuenta Global, y este sitio no la afirma para toda la plataforma. La [matriz de ubicaciones de datos](/es/data-locations/) declara para el almacenamiento el mismo alcance que esta página declara para el transporte.
 
@@ -22,7 +22,7 @@ Evidencia: los [Términos](/es/terms/) nombran a la parte contratante y el derec
 
 ## Centros de datos de la UE
 
-El despliegue compartido predeterminado funciona sobre infraestructura de Hetzner Online GmbH en Alemania (principal) y Finlandia (respaldo). Los datos esenciales del servicio — datos de cuenta, claves de API con hash, direcciones de remitente y destinatario, contenido de los mensajes, adjuntos, eventos y registros de entrega, tickets de soporte, analítica y copias de seguridad — se procesan y replican dentro del EEE, sin transferencia a terceros países para esas categorías. Las excepciones reales se nombran en lugar de ocultarse: el inicio de sesión OAuth opcional (Google, GitHub) y el procesamiento de pagos (Mollie B.V.) se detallan por separado en la matriz con sus propias garantías de transferencia.
+El despliegue compartido predeterminado funciona sobre infraestructura de Hetzner Online GmbH en Finlandia. Los datos esenciales del servicio — datos de cuenta, claves de API con hash, direcciones de remitente y destinatario, contenido de los mensajes, adjuntos, eventos y registros de entrega, tickets de soporte, analítica y copias de seguridad — se procesan y replican dentro del EEE, sin transferencia a terceros países para esas categorías. Las excepciones reales se nombran en lugar de ocultarse: el inicio de sesión OAuth opcional (Google, GitHub) y el procesamiento de pagos (Mollie B.V.) se detallan por separado en la matriz con sus propias garantías de transferencia.
 
 Evidencia: la [matriz de ubicaciones de datos](/es/data-locations/) enumera para cada categoría de datos la ubicación principal, la copia de seguridad y la región de procesamiento; el [registro de subencargados](/es/subprocessors/) nombra las entidades y sus países de procesamiento y almacenamiento.
 
@@ -72,7 +72,7 @@ Evidencia: ambos endpoints son superficies públicas, vivas y sin autenticación
 
 ## Lo que EU-only elimina de la cadena de subencargados
 
-El [registro de subencargados](/es/subprocessors/) se genera desde la configuración del propio despliegue, así que el conjunto listado no puede desviarse de lo que realmente se ejecuta. Con enrutamiento EU-only, la entrada de Amazon Web Services SES no transporta el correo de un inquilino: el mensaje sale exclusivamente por los MTA propios de ApexMail, operados sobre infraestructura de Hetzner (Hetzner Online GmbH, Alemania). Las entradas restantes son pagos (Mollie B.V., Ámsterdam) e inicio de sesión OAuth opcional (Google, GitHub), cada una con su país de procesamiento y su mecanismo de transferencia indicados en el registro.
+El [registro de subencargados](/es/subprocessors/) se genera desde la configuración del propio despliegue, así que el conjunto listado no puede desviarse de lo que realmente se ejecuta. Con enrutamiento EU-only, la entrada de Amazon Web Services SES no transporta el correo de un inquilino: el mensaje sale exclusivamente por los MTA propios de ApexMail, operados sobre infraestructura de Hetzner (Hetzner Online GmbH, Finlandia). Las entradas restantes son pagos (Mollie B.V., Ámsterdam) e inicio de sesión OAuth opcional (Google, GitHub), cada una con su país de procesamiento y su mecanismo de transferencia indicados en el registro.
 
 Dicho de otro modo: con EU-only, ningún tercero controlado por EE. UU. transporta el correo. Con Global, AWS SES sí lo hace — en una región de la UE, bajo el DPA y las CCT de AWS, y el registro dice exactamente eso.
 

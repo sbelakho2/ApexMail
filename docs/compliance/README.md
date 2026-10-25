@@ -28,7 +28,7 @@ ApexMail supports GDPR compliance through documented data processing, subject ri
 | **Deletion Process** | Cascade deletion via API or support request; retention schedule published |
 | **Export Process** | JSON/CSV export formats; API-driven or support-assisted |
 | **Breach Notification** | 72-hour notification to Data Protection Authority; customer notification without undue delay |
-| **Data Location** | Primary: European Union (Hetzner, Finland/Germany) |
+| **Data Location** | European Union (Hetzner, Finland) |
 | **Transfer Safeguards** | Standard Contractual Clauses; EU-based processing where feasible |
 | **Customer Responsibilities** | Lawful basis for processing; consent management; data accuracy |
 

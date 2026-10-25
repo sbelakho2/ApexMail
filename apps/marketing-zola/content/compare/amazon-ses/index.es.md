@@ -59,7 +59,7 @@ comparison_sections = [
     { feature = "Coste en bruto por email", apex = 'Consulte el catálogo público actual y el proceso de contratación para las condiciones de uso aplicables', comp = '€0.09 (US$0.10)/1.000 emails — el menor coste por mensaje entre los principales proveedores<sup><a href="#src-ses10">10</a></sup>', winner = "competitor" },
     { feature = "Integración con el ecosistema AWS", apex = 'Plataforma independiente con integración mediante API', comp = 'Integración profunda con los servicios de AWS: Lambda, S3, CloudWatch, SNS, SQS, IAM, KMS, Organizations<sup><a href="#src-ses3">3</a></sup>', winner = "competitor" },
     { feature = "Volumen máximo de envío", apex = 'Business admite hasta 2 millones de emails/mes; las condiciones Enterprise se definen contractualmente', comp = 'Prácticamente ilimitado — limitado por los límites de envío de la cuenta, que escalan automáticamente con la reputación<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
-    { feature = "Regiones globales", apex = 'Alemania y Finlandia (foco en el EEE)', comp = 'Más de 22 regiones de AWS en todo el mundo: EE. UU., UE, APAC, Sudamérica y más<sup><a href="#src-ses1">1</a></sup>', winner = "competitor" }
+    { feature = "Regiones globales", apex = 'Finlandia (foco en el EEE)', comp = 'Más de 22 regiones de AWS en todo el mundo: EE. UU., UE, APAC, Sudamérica y más<sup><a href="#src-ses1">1</a></sup>', winner = "competitor" }
   ]}
 ]
 

@@ -16,7 +16,7 @@ A subprocessor is a third-party data processor engaged by ApexMail to process pe
 
 | Subprocessor | Purpose | Data Processed | Location | Transfer Safeguard |
 |---|---|---|---|---|
-| **Hetzner Online GmbH** | Cloud hosting (compute, storage, networking) | Core service data in the default shared deployment | Germany (storage: Germany) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
+| **Hetzner Online GmbH** | Cloud hosting (compute, storage, networking) | Core service data in the default shared deployment | Finland (storage: Finland) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
 | **Amazon Web Services, Inc.** | Email-delivery transport when enabled (EMAIL_TRANSPORT_TYPE=ses) | Email content and recipient addresses in transit | Ireland (storage: Ireland) | EU Standard Contractual Clauses (AWS DPA) |
 | **Mollie B.V.** | Payment processing, subscription management, invoicing | Payment card details (tokenized — ApexMail never receives full card numbers), billing address, transaction metadata | Netherlands (storage: Netherlands) | Contracting entity is EU-established (Mollie B.V., Amsterdam); card scheme networks process globally under the Mollie Data Processing Agreement; PCI DSS Level 1 certified |
 
