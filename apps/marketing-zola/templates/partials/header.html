@@ -168,7 +168,7 @@
       <div class="pt-6 border-t space-y-3 px-3">
         {# Theme toggle removed with the zero-JS migration: dark mode
            follows the OS prefers-color-scheme setting. #}
-        <a href="{{ config.extra.app_url }}/login" class="block w-full py-3 apex-btn">
+        <a href="{{ config.extra.app_url }}/login" class="block w-full apex-btn">
           {% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["signin"] %}{{ i18n_data[l]["header"]["signin"] }}{% else %}Sign In{% endif %}
         </a>
         <a href="{{ config.extra.app_url }}/signup" class="apex-mkt-cta--primary w-full">

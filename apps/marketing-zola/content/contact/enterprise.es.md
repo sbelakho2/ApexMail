@@ -57,7 +57,7 @@ Tras enviar el formulario, nuestro equipo empresarial revisa sus requisitos y re
     </div>
   </div>
 
-  <fieldset class="border p-4">
+  <fieldset class="apex-block apex-block--tight">
     <legend class="px-2">Modelo de despliegue</legend>
     <div class="space-y-3 mt-3">
       <label class="apex-check">

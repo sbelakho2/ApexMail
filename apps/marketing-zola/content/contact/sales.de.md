@@ -81,7 +81,7 @@ Für Enterprise-Beschaffung, Sicherheitsprüfung oder Private-Cloud-Planung fül
     </div>
   </div>
 
-  <fieldset class="border p-4">
+  <fieldset class="apex-block apex-block--tight">
     <legend class="px-2">Bevorzugte Bereitstellung</legend>
     <div class="space-y-3 mt-3">
       <label class="apex-check">
@@ -103,7 +103,7 @@ Für Enterprise-Beschaffung, Sicherheitsprüfung oder Private-Cloud-Planung fül
     </div>
   </fieldset>
 
-  <fieldset class="border p-4">
+  <fieldset class="apex-block apex-block--tight">
     <legend class="px-2">Compliance-Anforderungen <span class="">(alle zutreffenden auswählen)</span></legend>
     <div class="space-y-3 mt-3">
       <label class="apex-check">

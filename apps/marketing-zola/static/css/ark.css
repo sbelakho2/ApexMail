@@ -1053,6 +1053,10 @@ a.apex-sidebar-brand:hover { color: inherit; }
   padding: 0.375rem 0.875rem;
   font-size: 0.78125rem;
 }
+.apex-btn--lg {
+  min-height: 3.5rem;
+  padding: 0.875rem 1.5rem;
+}
 /* The link-verb: underline, no box. */
 .apex-btn--link {
   display: inline;
@@ -1549,6 +1553,24 @@ input[type="checkbox"]:not(.sr-only):checked { background: rgb(var(--input)); }
   font-size: 0.71875rem;
   color: rgb(var(--surface-500));
   margin-top: 0.125rem;
+}
+
+/* ── Block: the ruled content box ──
+   The view layer used to hand-compose `border p-6` (and p-4/p-5/p-8/p-10)
+   boxes: same look, five different paddings, no component. One primitive,
+   four densities, square and hairline-ruled like everything else. */
+.apex-block {
+  border: 1px solid rgb(var(--foreground));
+  background: rgb(var(--background));
+  padding: 1.5rem;
+}
+.apex-block--tight { padding: 0.75rem; }
+.apex-block--roomy { padding: 2rem; }
+.apex-block--xl { padding: 2.5rem; }
+.apex-block--plain { border: 0; padding: 0; }
+.apex-mkt-section--ink .apex-block {
+  background: transparent;
+  border-color: rgb(var(--mkt-paper));
 }
 
 /* ── Panel: the ruled box for grouped content ── */

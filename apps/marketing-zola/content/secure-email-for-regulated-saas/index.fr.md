@@ -14,15 +14,15 @@ Les équipes SaaS réglementées ont besoin de plus qu'une API d'envoi. Elles on
 ApexMail fournit des workflows de sécurité et de confidentialité autour de la livraison d'emails : contrôles d'accès, forfaits auditables, outils de demandes des personnes concernées et documentation à jour pour la revue d'achat.
 
 <div class="grid grid-cols-1 md:grid-cols-3 gap-6 my-12">
-  <div class="border p-6">
+  <div class="apex-block">
     <h3 class="mb-3 apex-h3">Audit et contrôles d'accès</h3>
     <p>Business et Enterprise incluent des fonctionnalités d'identité et d'audit à l'exécution. La responsabilité de la configuration et des opérations reste celle du client.</p>
   </div>
-  <div class="border p-6">
+  <div class="apex-block">
     <h3 class="mb-3 apex-h3">Position de conformité actuelle</h3>
     <p>La documentation de traitement orientée RGPD et une DPA sont disponibles. La disponibilité HIPAA ne sont pas proposées actuellement.</p>
   </div>
-  <div class="border p-6">
+  <div class="apex-block">
     <h3 class="mb-3 apex-h3">Revue de sécurité</h3>
     <p>Les prospects qualifiés peuvent demander la documentation à jour et discuter du périmètre de tout engagement contractuel de sécurité ou de déploiement.</p>
   </div>

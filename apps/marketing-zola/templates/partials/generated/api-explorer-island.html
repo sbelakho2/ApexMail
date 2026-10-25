@@ -2,7 +2,7 @@
 {# Each lane is a real HTML form POSTing to the Rust sandbox       #}
 {# executor at api.apexmail.ee, which runs the REAL v1 handlers    #}
 {# with a real sandbox-tenant API key and renders the result page.  #}
-<div class="border overflow-hidden">
+<div class="apex-block apex-block--plain overflow-hidden">
   <div class="px-4 py-4">
     <p class="apex-em">Endpoints</p>
     <p class="mt-2">Pick a lane, tune the JSON payload, then send, the request executes against the live sandbox API and the response page shows the real status, latency and body.</p>
@@ -36,13 +36,13 @@
       </div>
       <div class="p-4 sm:p-6">
         <p class="mb-3 apex-em">Response Inspector <span class="ml-2 apex-section-head">No request sent</span></p>
-        <div class="min-h-[14rem] border p-4">
+        <div class="apex-block apex-block--tight min-h-[14rem]">
           <p class="">No request sent yet. Press Send, the request executes against the live sandbox and the result page shows the real status code, latency and JSON body. Failures render verbatim (validation errors, rate limits and 4xx/5xx responses are not rewritten).</p>
         </div>
         <div class="mt-4 grid gap-3 sm:grid-cols-3">
-          <div class="border px-3 py-2">Real handlers, real queue</div>
-          <div class="border px-3 py-2">Real idempotency semantics</div>
-          <div class="border px-3 py-2">example.com recipients only</div>
+          <div class="apex-block apex-block--tight">Real handlers, real queue</div>
+          <div class="apex-block apex-block--tight">Real idempotency semantics</div>
+          <div class="apex-block apex-block--tight">example.com recipients only</div>
         </div>
       </div>
     </form>
@@ -97,7 +97,7 @@
       </div>
       <div class="p-4 sm:p-6">
         <p class="mb-3 apex-em">Response Inspector</p>
-        <div class="min-h-[8rem] border p-4">
+        <div class="apex-block apex-block--tight min-h-[8rem]">
           <p class="">No request sent yet. Press Provision domain, the creation response with DNS records renders on the result page.</p>
         </div>
       </div>

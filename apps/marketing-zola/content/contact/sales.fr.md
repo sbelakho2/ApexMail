@@ -81,7 +81,7 @@ Pour un achat Enterprise, une revue de sécurité ou la planification d'un cloud
     </div>
   </div>
 
-  <fieldset class="border p-4">
+  <fieldset class="apex-block apex-block--tight">
     <legend class="px-2">Préférence de déploiement</legend>
     <div class="space-y-3 mt-3">
       <label class="apex-check">
@@ -103,7 +103,7 @@ Pour un achat Enterprise, une revue de sécurité ou la planification d'un cloud
     </div>
   </fieldset>
 
-  <fieldset class="border p-4">
+  <fieldset class="apex-block apex-block--tight">
     <legend class="px-2">Exigences de conformité <span class="">(cochez tout ce qui s'applique)</span></legend>
     <div class="space-y-3 mt-3">
       <label class="apex-check">

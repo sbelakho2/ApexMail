@@ -8,7 +8,7 @@
 
 <section id="decision-guide" class="apex-mkt-section scroll-mt-20">
   <div class="apex-mkt-container">
-    <div class="border p-10 lg:p-16">
+    <div class="apex-block apex-block--xl">
       <div class="mb-16">
         <p class="mb-6 apex-meta">{% if i18n_data and i18n_data[l] and i18n_data[l]["compare"] and i18n_data[l]["compare"]["decision_label"] %}{{ i18n_data[l]["compare"]["decision_label"] }}{% else %}Decision guide{% endif %}</p>
         <h2 class="mb-6 apex-h2">
@@ -19,7 +19,7 @@
       {# Balanced decision rules (review SS47): when each product is the
          better fit, no winner language. #}
       <div class="grid sm:grid-cols-2 gap-6 mb-12">
-        <div class="p-6 border">
+        <div class="apex-block">
           <h3 class="mb-3 apex-h3">{% if i18n_data and i18n_data[l] and i18n_data[l]["compare"] and i18n_data[l]["compare"]["choose_apexmail"] %}{{ i18n_data[l]["compare"]["choose_apexmail"] }}{% else %}Choose ApexMail when…{% endif %}</h3>
           <ul class="space-y-2">
             {% for point in page.extra.choose_apexmail | default(value=["You need per-message delivery diagnostics and raw SMTP responses", "EEA data storage or private deployment (Dedicated Tenant / BYOC) matters", "You want deliverability tooling (grader, warm-up, reputation) integrated with sending"]) %}
@@ -27,7 +27,7 @@
             {% endfor %}
           </ul>
         </div>
-        <div class="p-6 border">
+        <div class="apex-block">
           <h3 class="mb-3 apex-h3">{% if i18n_data and i18n_data[l] and i18n_data[l]["compare"] and i18n_data[l]["compare"]["choose_competitor"] %}{{ i18n_data[l]["compare"]["choose_competitor"] }}{% else %}Choose {{ competitor_name }} when…{% endif %}</h3>
           <ul class="space-y-2">
             {% for point in page.extra.choose_competitor | default(value=["Your stack depends on that provider's ecosystem or marketplace", "Its specific pricing shape fits your volume profile better", "You need a capability ApexMail does not currently offer"]) %}

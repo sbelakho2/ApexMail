@@ -95,7 +95,7 @@
      reachable instead of an empty grid. #}
   <section class="py-12 lg:py-16">
     <div class="apex-mkt-container">
-      <div class="border p-6">
+      <div class="apex-block">
         <h2 class="apex-h2">{% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['no_guides'] %}{{ i18n_data[l]['a11y']['no_guides'] }}{% else %}Guides are being prepared.{% endif %}</h2>
         <p class="mt-2">{% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['no_guides_body'] %}{{ i18n_data[l]['a11y']['no_guides_body'] }}{% else %}No guides are published in this index yet. The API reference, the quickstart, and support are available now.{% endif %}</p>
         <div class="mt-4 flex flex-wrap gap-4">

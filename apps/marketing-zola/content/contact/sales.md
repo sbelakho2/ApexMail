@@ -84,7 +84,7 @@ For enterprise buying, security review, or private-cloud planning, complete the 
     </div>
   </div>
 
-  <fieldset class="border p-4">
+  <fieldset class="apex-block apex-block--tight">
     <legend class="px-2">Deployment Preference</legend>
     <div class="space-y-3 mt-3">
       <label class="apex-check">
@@ -106,7 +106,7 @@ For enterprise buying, security review, or private-cloud planning, complete the 
     </div>
   </fieldset>
 
-  <fieldset class="border p-4">
+  <fieldset class="apex-block apex-block--tight">
     <legend class="px-2">Compliance Requirements <span class="">(select all that apply)</span></legend>
     <div class="space-y-3 mt-3">
       <label class="apex-check">

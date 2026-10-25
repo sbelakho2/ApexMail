@@ -57,7 +57,7 @@ Après l'envoi du formulaire, notre équipe Enterprise examine vos exigences et 
     </div>
   </div>
 
-  <fieldset class="border p-4">
+  <fieldset class="apex-block apex-block--tight">
     <legend class="px-2">Modèle de déploiement</legend>
     <div class="space-y-3 mt-3">
       <label class="apex-check">

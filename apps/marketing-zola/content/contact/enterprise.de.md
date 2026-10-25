@@ -57,7 +57,7 @@ Nach dem Absenden des Formulars prüft unser Enterprise-Team Ihre Anforderungen 
     </div>
   </div>
 
-  <fieldset class="border p-4">
+  <fieldset class="apex-block apex-block--tight">
     <legend class="px-2">Bereitstellungsmodell</legend>
     <div class="space-y-3 mt-3">
       <label class="apex-check">

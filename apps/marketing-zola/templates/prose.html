@@ -38,7 +38,7 @@
       {# Stable section navigation: Zola's heading anchors ARE the section ids,
          so this nav survives renames of the page and is language-independent. #}
       {% if page.toc %}
-      <nav aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['on_this_page'] %}{{ i18n_data[l]['a11y']['on_this_page'] }}{% else %}On this page{% endif %}" class="mb-10 border p-4">
+      <nav aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['on_this_page'] %}{{ i18n_data[l]['a11y']['on_this_page'] }}{% else %}On this page{% endif %}" class="apex-block apex-block--tight mb-10">
         <ul class="space-y-1.5">
           {% for h in page.toc %}
           {% if h.level <= 2 %}

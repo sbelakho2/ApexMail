@@ -1173,8 +1173,8 @@ impl<'a> EmptyState<'a> {
             .map(|text| format!("<p class=\"mx-auto max-w-[320px]\">{}</p>", text))
             .unwrap_or_default();
         let action = match (self.action_label, self.action_href) {
-            (Some(label), Some(href)) => format!("<a href=\"{}\" class=\"inline-flex items-center justify-center h-10 px-3 min-h-[44px] mt-6 apex-btn\">{}</a>", href, label),
-            (Some(label), None) => format!("<button type=\"button\" class=\"inline-flex items-center justify-center h-10 px-3 min-h-[44px] mt-6 apex-btn\">{}</button>", label),
+            (Some(label), Some(href)) => format!("<a href=\"{}\" class=\"mt-6 apex-btn\">{}</a>", href, label),
+            (Some(label), None) => format!("<button type=\"button\" class=\"mt-6 apex-btn\">{}</button>", label),
             _ => String::new(),
         };
         format!(
@@ -1786,7 +1786,7 @@ pub struct Table<'a> {
 impl<'a> Table<'a> {
     pub fn render_html(&self) -> String {
         let headers = self.columns.iter().map(|column| {
-            format!("<th scope=\"col\" class=\"h-12 px-4 align-middle whitespace-nowrap {}\">{}</th>", table_align_class(column.align), column.label)
+            format!("<th scope=\"col\" class=\"align-middle whitespace-nowrap {}\">{}</th>", table_align_class(column.align), column.label)
         }).collect::<Vec<_>>().join("");
         let rows = if self.rows.is_empty() {
             let colspan = self.columns.len().max(1);
@@ -1819,7 +1819,7 @@ impl<'a> Table<'a> {
                                 align.to_string()
                             };
                             format!(
-                                "<td class=\"p-4 align-middle {}\">{}</td>",
+                                "<td class=\"align-middle {}\">{}</td>",
                                 cell_class, value
                             )
                         })
@@ -1896,7 +1896,7 @@ impl PaginationControls {
             } else {
                 ""
             };
-            format!("<button class=\"inline-flex items-center justify-center h-10 px-3 min-h-[44px] apex-btn\"{}>{}</button>", disabled_attr, label)
+            format!("<button class=\"apex-btn\"{}>{}</button>", disabled_attr, label)
         };
         format!(
             "<div class=\"flex items-center gap-2\" role=\"navigation\" aria-label=\"Pagination controls\">{}{}<span class=\"px-2\">Page {} of {}</span>{}{}</div>",
@@ -2021,10 +2021,11 @@ impl ButtonDensityContract {
 }
 
 pub fn button_density_class(density: &str) -> &'static str {
+    // ARK owns button geometry; density maps to the three sanctioned steps.
     match density {
-        "compact" => "h-8 px-3 py-1 text-xs",
-        "comfortable" => "h-14 px-6 py-4 text-base",
-        _ => "h-12 px-4 py-2",
+        "compact" => "apex-btn--sm",
+        "comfortable" => "apex-btn--lg",
+        _ => "",
     }
 }
 
@@ -2291,7 +2292,7 @@ pub fn render_sortable_header(
         _ => ("⇅", "none"),
     };
     format!(
-        "<th scope=\"col\" class=\"h-12 px-4 align-middle whitespace-nowrap\" aria-sort=\"{}\" data-sort-key=\"{}\"><div class=\"flex items-center gap-1\">{}<span class=\"\">{}</span></div></th>",
+        "<th scope=\"col\" class=\"align-middle whitespace-nowrap\" aria-sort=\"{}\" data-sort-key=\"{}\"><div class=\"flex items-center gap-1\">{}<span class=\"\">{}</span></div></th>",
         aria_sort, sort_key, label, indicator,
     )
 }
@@ -2301,7 +2302,7 @@ pub fn render_row_checkbox(selected: bool) -> String {
     // ARK: a native checkbox with its square ink rule.
     let checked = if selected { " checked" } else { "" };
     format!(
-        "<td class=\"w-12 p-4 align-middle\"><input type=\"checkbox\" aria-label=\"Select row\" class=\"apex-checkbox apex-input\"{checked} /></td>"
+        "<td class=\"w-12 align-middle\"><input type=\"checkbox\" aria-label=\"Select row\" class=\"apex-checkbox apex-input\"{checked} /></td>"
     )
 }
 
@@ -3800,9 +3801,10 @@ mod tests {
 
     #[test]
     fn button_density_class_applies_correct_classes() {
-        assert!(button_density_class("compact").contains("h-8"));
-        assert!(button_density_class("default").contains("h-12"));
-        assert!(button_density_class("comfortable").contains("h-14"));
+        // ARK owns button geometry: density maps to the sanctioned steps.
+        assert_eq!(button_density_class("compact"), "apex-btn--sm");
+        assert_eq!(button_density_class("default"), "");
+        assert_eq!(button_density_class("comfortable"), "apex-btn--lg");
     }
 
     // ────────────────────────────────────────────────────────────

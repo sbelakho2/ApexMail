@@ -81,7 +81,7 @@ Para compras empresariales, revisiones de seguridad o planificación de nube pri
     </div>
   </div>
 
-  <fieldset class="border p-4">
+  <fieldset class="apex-block apex-block--tight">
     <legend class="px-2">Preferencia de despliegue</legend>
     <div class="space-y-3 mt-3">
       <label class="apex-check">
@@ -103,7 +103,7 @@ Para compras empresariales, revisiones de seguridad o planificación de nube pri
     </div>
   </fieldset>
 
-  <fieldset class="border p-4">
+  <fieldset class="apex-block apex-block--tight">
     <legend class="px-2">Requisitos de cumplimiento <span class="">(seleccione todos los que apliquen)</span></legend>
     <div class="space-y-3 mt-3">
       <label class="apex-check">

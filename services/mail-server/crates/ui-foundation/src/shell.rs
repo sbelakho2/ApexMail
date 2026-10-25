@@ -366,7 +366,7 @@ impl<'a> ImpersonationBanner<'a> {
         let safe_operator = html_escape(self.operator_name);
         let safe_time = html_escape(self.time_remaining);
         format!(
-            "<div class=\"fixed top-0 left-0 right-0 z-[100] border-b\" role=\"alert\" aria-live=\"polite\"><div class=\"max-w-7xl mx-auto px-6 py-2\"><div class=\"flex items-center justify-between\"><div class=\"flex items-center gap-6\"><div class=\"flex items-center gap-2 px-2 py-0.5\"><span class=\"apex-em apex-section-head\">Impersonation Active</span></div><div class=\"flex items-center gap-2 apex-em\"><span class=\"\">Tenant:</span><span class=\"px-1.5 py-0.5\">{}</span></div><div class=\"hidden md:flex items-center gap-2 apex-em\"><span class=\"\">Operator:</span><span>{}</span></div></div><div class=\"flex items-center gap-6\">{}<div class=\"flex items-center gap-2 apex-em\"><span class=\"\">Expires:</span><span class=\"px-1.5 py-0.5\">{}</span></div><form method=\"POST\" action=\"/web/auth/impersonate/end\"><button type=\"submit\" class=\"px-3 py-1 apex-btn apex-btn--sm\">{}</button></form></div></div></div></div>",
+            "<div class=\"fixed top-0 left-0 right-0 z-[100] border-b\" role=\"alert\" aria-live=\"polite\"><div class=\"max-w-7xl mx-auto px-6 py-2\"><div class=\"flex items-center justify-between\"><div class=\"flex items-center gap-6\"><div class=\"flex items-center gap-2 px-2 py-0.5\"><span class=\"apex-em apex-section-head\">Impersonation Active</span></div><div class=\"flex items-center gap-2 apex-em\"><span class=\"\">Tenant:</span><span class=\"px-1.5 py-0.5\">{}</span></div><div class=\"hidden md:flex items-center gap-2 apex-em\"><span class=\"\">Operator:</span><span>{}</span></div></div><div class=\"flex items-center gap-6\">{}<div class=\"flex items-center gap-2 apex-em\"><span class=\"\">Expires:</span><span class=\"px-1.5 py-0.5\">{}</span></div><form method=\"POST\" action=\"/web/auth/impersonate/end\"><button type=\"submit\" class=\"apex-btn apex-btn--sm\">{}</button></form></div></div></div></div>",
             safe_tenant,
             safe_operator,
             error,
@@ -666,8 +666,8 @@ fn render_marketing_header() -> String {
          <a href=\"/docs\" class=\"apex-link\">Docs</a>\
          </div>\
          <div class=\"flex items-center gap-3\">\
-         <a href=\"/login\" class=\"px-3 py-2 apex-btn\">Login</a>\
-         <a href=\"/signup\" class=\"apex-btn apex-btn--primary px-4 py-2\">Get Started</a>\
+         <a href=\"/login\" class=\"apex-btn\">Login</a>\
+         <a href=\"/signup\" class=\"apex-btn apex-btn--primary\">Get Started</a>\
          </div></div></nav></header>"
         .to_string()
 }
@@ -825,7 +825,7 @@ fn render_web_sidebar(
     let render_section = |title: &str, items: &[(&str, &str, &str)]| {
         format!(
             "<div class=\"space-y-1 mb-6\">\
-                <p class=\"px-6 mb-2 apex-h3\">{}</p>\
+                <p class=\"apex-nav-group\">{}</p>\
                 {}</div>",
             title,
             render_sidebar_content(items, "", current_path)
@@ -848,7 +848,7 @@ fn render_web_sidebar(
          <div class=\"p-6 mb-4\"><div class=\"flex items-center gap-2\">\
          {wordmark}</div></div>\
          <nav class=\"flex-1 overflow-y-auto\" data-sidebar=\"primary\" aria-label=\"Primary sidebar navigation\">{content}</nav>\
-         <div class=\"p-4 border-t\"><form method=\"POST\" action=\"/web/auth/logout\"><input type=\"hidden\" name=\"_csrf\" value=\"{csrf_token}\" /><button type=\"submit\" class=\"flex w-full items-center gap-3 px-4 py-2 apex-btn\"><span>Sign Out</span></button></form></div></div>",
+         <div class=\"p-4 border-t\"><form method=\"POST\" action=\"/web/auth/logout\"><input type=\"hidden\" name=\"_csrf\" value=\"{csrf_token}\" /><button type=\"submit\" class=\"w-full gap-3 apex-btn\"><span>Sign Out</span></button></form></div></div>",
         content = content,
         csrf_token = html_escape(csrf_token),
         wordmark = wordmark,
@@ -997,7 +997,7 @@ fn render_cp_sidebar(current_path: &str, csrf_token: &str) -> String {
     let render_section = |title: &str, items: &[(&str, &str, &str)]| {
         format!(
             "<div class=\"space-y-1 mb-6\">\
-                <p class=\"px-6 mb-2 apex-h3\">{}</p>\
+                <p class=\"apex-nav-group\">{}</p>\
                 {}</div>",
             title,
             render_sidebar_content(items, "", current_path)
@@ -1017,7 +1017,7 @@ fn render_cp_sidebar(current_path: &str, csrf_token: &str) -> String {
          <span class=\"apex-sidebar-brand apex-wordmark\"><span class=\"apex-wordmark__apex\">Apex</span><span class=\"apex-wordmark__mail\">Mail</span></span>\
          <span class=\"apex-em apex-section-head\">Operations</span></div></div>\
          <nav class=\"flex-1 overflow-y-auto apex-cp-sidebar-nav\" data-sidebar=\"primary\" aria-label=\"Control Plane navigation\">{}</nav>\
-         <div class=\"p-4 border-t\"><form method=\"POST\" action=\"/web/auth/logout\"><input type=\"hidden\" name=\"_csrf\" value=\"{csrf_token}\" /><button type=\"submit\" class=\"flex w-full items-center gap-3 px-4 py-2 apex-btn\"><span>Sign Out</span></button></form></div></div>",
+         <div class=\"p-4 border-t\"><form method=\"POST\" action=\"/web/auth/logout\"><input type=\"hidden\" name=\"_csrf\" value=\"{csrf_token}\" /><button type=\"submit\" class=\"w-full gap-3 apex-btn\"><span>Sign Out</span></button></form></div></div>",
         content,
         csrf_token = html_escape(csrf_token),
     )

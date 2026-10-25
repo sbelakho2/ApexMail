@@ -14,15 +14,15 @@ Regulated SaaS teams need more than a sending API. They need clear ownership, au
 ApexMail provides security and privacy workflows around email delivery, including access controls, audit-capable plans, data-subject request tooling, and current documentation for procurement review.
 
 <div class="grid grid-cols-1 md:grid-cols-3 gap-6 my-12">
-  <div class="border p-6">
+  <div class="apex-block">
     <h3 class="mb-3 apex-h3">Audit and Access Controls</h3>
     <p>Business and Enterprise include runtime identity and audit features. Configuration and operational ownership remain the customer’s responsibility.</p>
   </div>
-  <div class="border p-6">
+  <div class="apex-block">
     <h3 class="mb-3 apex-h3">Current Compliance Position</h3>
     <p>GDPR-oriented processing documentation and a DPA are available. HIPAA availability is not currently offered.</p>
   </div>
-  <div class="border p-6">
+  <div class="apex-block">
     <h3 class="mb-3 apex-h3">Security Review</h3>
     <p>Qualified prospects can request current documentation and discuss the scope of any contractual security or deployment commitment.</p>
   </div>

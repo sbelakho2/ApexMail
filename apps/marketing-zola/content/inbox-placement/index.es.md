@@ -16,7 +16,7 @@ actúa en consecuencia.
 ## Qué medimos
 
 <div class="grid grid-cols-1 md:grid-cols-2 gap-6 my-10">
-  <div class="border p-6">
+  <div class="apex-block">
     <h3 class="mb-3 apex-h3">Google Postmaster Tools</h3>
     <ul class="list-disc pl-5 space-y-1">
       <li>Reputación del dominio: HIGH / MEDIUM / LOW / BAD</li>
@@ -27,7 +27,7 @@ actúa en consecuencia.
       <li>Desglose de errores de entrega</li>
     </ul>
   </div>
-  <div class="border p-6">
+  <div class="apex-block">
     <h3 class="mb-3 apex-h3">Microsoft SNDS</h3>
     <ul class="list-disc pl-5 space-y-1">
       <li>Resultado del filtro: GREEN / YELLOW / RED</li>

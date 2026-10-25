@@ -52,7 +52,7 @@ pub fn tracking_domain_panel_html(panel: &TrackingDomainPanel, csrf_token: &str)
     let csrf = escape(csrf_token);
     let card = |inner: String| {
         format!(
-            "<section data-page=\"tracking-domain\" class=\"space-y-4\"><div class=\"border p-6\">{inner}</div></section>"
+            "<section data-page=\"tracking-domain\" class=\"space-y-4\"><div class=\"apex-block\">{inner}</div></section>"
         )
     };
     const BTN: &str = "apex-btn apex-btn--primary";
@@ -96,7 +96,7 @@ pub fn tracking_domain_panel_html(panel: &TrackingDomainPanel, csrf_token: &str)
             // tracking_domain.rs: "retain the record after verification").
             let verified = row.status == "verified";
             let record = format!(
-                "<div class=\"mt-4 border p-4\"><p class=\"apex-em\">DNS record {heading}</p><p class=\"mt-2 apex-em\">Type, Host, Value</p><p class=\"mt-1 apex-mono-id\">CNAME, {host}, {value}</p>{after}</div>",
+                "<div class=\"apex-block apex-block--tight mt-4\"><p class=\"apex-em\">DNS record {heading}</p><p class=\"mt-2 apex-em\">Type, Host, Value</p><p class=\"mt-1 apex-mono-id\">CNAME, {host}, {value}</p>{after}</div>",
                 heading = if verified { "in place" } else { "to publish" },
                 host = escape(&row.domain),
                 value = escape(&row.cname_target),
@@ -119,7 +119,7 @@ pub fn tracking_domain_panel_html(panel: &TrackingDomainPanel, csrf_token: &str)
                  {reason}{verified_note}{record}\
                  <div class=\"mt-4 flex flex-wrap gap-3\">\
                    <form method=\"post\" action=\"/web/domains/{domain_id}/tracking-domain/verify\"><input type=\"hidden\" name=\"_csrf\" value=\"{csrf}\"><button type=\"submit\" class=\"{BTN}\">Verify DNS now</button></form>\
-                   <form method=\"post\" action=\"/web/domains/{domain_id}/tracking-domain/delete\"><input type=\"hidden\" name=\"_csrf\" value=\"{csrf}\"><button type=\"submit\" class=\"inline-flex items-center justify-center px-4 py-2 apex-btn\">Remove</button></form>\
+                   <form method=\"post\" action=\"/web/domains/{domain_id}/tracking-domain/delete\"><input type=\"hidden\" name=\"_csrf\" value=\"{csrf}\"><button type=\"submit\" class=\"apex-btn\">Remove</button></form>\
                  </div>",
                 domain = escape(&row.domain),
                 domain_id = escape(&panel.domain_id),
@@ -137,10 +137,10 @@ pub fn web_domain_tracking_page(panel: Option<&TrackingDomainPanel>, csrf_token:
 <p class=\"\">Serve open and click tracking links from your own subdomain.</p></div>";
     let body = match panel {
         Some(panel) => tracking_domain_panel_html(panel, csrf_token),
-        None => "<section data-page=\"tracking-domain\" class=\"space-y-4\"><div class=\"border p-6\">\
+        None => "<section data-page=\"tracking-domain\" class=\"space-y-4\"><div class=\"apex-block\">\
 <h2 class=\"apex-section-head\">Custom tracking domain</h2>\
 <p class=\"mt-2\">Open a domain from the Domains page to configure its tracking subdomain. This page is only reachable for a domain in your workspace.</p>\
-<a href=\"/domains\" class=\"mt-4 inline-flex items-center justify-center h-12 px-6 py-3 apex-btn\">Back to domains</a></div></section>"
+<a href=\"/domains\" class=\"mt-4 apex-btn\">Back to domains</a></div></section>"
             .to_string(),
     };
     format!(

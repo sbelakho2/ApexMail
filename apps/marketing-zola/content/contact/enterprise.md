@@ -57,7 +57,7 @@ After you submit the form, our enterprise team reviews your requirements and res
     </div>
   </div>
 
-  <fieldset class="border p-4">
+  <fieldset class="apex-block apex-block--tight">
     <legend class="px-2">Deployment Model</legend>
     <div class="space-y-3 mt-3">
       <label class="apex-check">
