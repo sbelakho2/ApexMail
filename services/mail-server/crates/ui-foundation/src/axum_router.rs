@@ -94,6 +94,10 @@ pub struct RouteData {
     /// carries a verified impersonation cookie. The shells render its banner
     /// (the only in-UI terminate affordance).
     pub impersonation: Option<ImpersonationView>,
+    /// Control-plane billing operations (`/billing`): the whole Mollie
+    /// lifecycle snapshot (money, entitlement, collections, incidents,
+    /// webhook health, settlements). Absent is the honest unavailable state.
+    pub billing_ops: Option<crate::view_data::BillingOpsPageData>,
 }
 
 /// Owned white-label branding threaded from the api-server into the web
@@ -2864,7 +2868,9 @@ fn render_control_plane(
             .unwrap_or_else(leptos_views::control_plane_queues_page),
         "/domains" => data_backed_inner("/domains", data)
             .unwrap_or_else(leptos_views::control_plane_domains_page),
-        "/billing" => leptos_views::control_plane_billing_page(),
+        "/billing" => leptos_views::control_plane_billing_page_with_data(
+            data.and_then(|d| d.billing_ops.as_ref()),
+        ),
         "/billing/plans" => data_backed_inner("/billing/plans", data)
             .unwrap_or_else(leptos_views::control_plane_billing_plans_page),
         "/compliance" => data_backed_inner("/compliance", data)

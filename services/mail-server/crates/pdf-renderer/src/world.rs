@@ -41,6 +41,11 @@ use typst::{Library, LibraryExt, World};
 // Embedded templates (compiled into binary)
 // ---------------------------------------------------------------------------
 
+/// The shared ARK design authority every template imports. Embedded beside
+/// the templates so `#import "ark.typ": *` resolves in a hermetic build; a
+/// `PDF_TEMPLATES_DIR` deployment must ship `ark.typ` next to the templates.
+pub const ARK_LIB: &str = include_str!("templates/ark.typ");
+
 /// All `.typ` templates embedded at compile time.
 pub static TEMPLATES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     let mut m = HashMap::new();
@@ -222,10 +227,12 @@ impl TypstWorld {
 
         let main = project_file("main.typ")?;
         let data_id = project_file("data.json")?;
+        let ark_id = project_file("ark.typ")?;
 
         let mut files = HashMap::new();
         files.insert(main, Source::new(main, source));
         files.insert(data_id, Source::new(data_id, data_json));
+        files.insert(ark_id, Source::new(ark_id, ARK_LIB.to_string()));
 
         Ok(Self {
             files,

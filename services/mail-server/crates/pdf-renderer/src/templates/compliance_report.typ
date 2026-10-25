@@ -26,25 +26,14 @@
 
 #let data = json("data.json")
 
-#set document(
-  title: "Compliance Report — " + data.tenant_id,
-  author: "Bel Consulting OÜ (trading as ApexMail)",
+#import "ark.typ": *
+
+#show: page-setup.with(
+  title: "Compliance Report — " + str(data.tenant_id),
+  footer-left: [ApexMail Compliance Report#meta-sep Generated #data.generated_at],
+  footer-right: [Page #context { counter(page).display() }],
 )
 
-#set page(
-  paper: "a4",
-  margin: (top: 25mm, bottom: 25mm, left: 20mm, right: 20mm),
-  footer: [
-    #set text(size: 7pt, fill: luma(140))
-    #grid(
-      columns: (1fr, 1fr),
-      [ApexMail Compliance Report · Generated #data.generated_at],
-      align(right)[Page #context { counter(page).display() }],
-    )
-  ],
-)
-
-#set text(font: ("Overpass", "Noto Sans", "DejaVu Sans"), size: 10pt, hyphenate: false)
 #set par(justify: true)
 
 // ---------------------------------------------------------------------------
@@ -55,14 +44,11 @@
 // Disabled; a value the report cannot interpret is Unknown — never Fail.
 #let tri-badge(value, positive: "Yes", negative: "No") = {
   if value == true {
-    box(fill: rgb("#16a34a").lighten(85%), stroke: 0.5pt + rgb("#16a34a"), inset: (x: 6pt, y: 2pt), radius: 0pt,
-        text(weight: "bold", size: 8pt, fill: rgb("#16a34a").darken(20%))[#positive])
+    chip(positive, tone: "pos")
   } else if value == false {
-    box(fill: luma(240), stroke: 0.5pt + luma(180), inset: (x: 6pt, y: 2pt), radius: 0pt,
-        text(weight: "bold", size: 8pt, fill: luma(110))[#negative])
+    chip(negative, tone: "neutral")
   } else {
-    box(fill: rgb("#f59e0b").lighten(85%), stroke: 0.5pt + rgb("#f59e0b"), inset: (x: 6pt, y: 2pt), radius: 0pt,
-        text(weight: "bold", size: 8pt, fill: rgb("#b45309"))[UNKNOWN])
+    chip("Unknown", tone: "warn")
   }
 }
 
@@ -91,25 +77,26 @@
 // ---------------------------------------------------------------------------
 
 #grid(
-  columns: (1fr, auto),
+  columns: (2fr, 1fr),
+  column-gutter: 18pt,
   [
-    #text(weight: "bold", size: 20pt, fill: rgb("#dc2626"))[Compliance Report]
+    #text(font: display-font, weight: "semibold", size: 20pt, fill: ink)[Compliance Report]
     #v(4pt)
     #text(size: 12pt)[Tenant: #data.tenant_id]
     #v(2pt)
-    #text(size: 9pt, fill: luma(120))[
+    #text(size: 9pt, fill: muted)[
       Generated: #data.generated_at
     ]
   ],
   align(right + horizon)[
     #block(
-      fill: luma(245),
-      stroke: 1pt + luma(200),
+      fill: limestone,
+      stroke: 1pt + rule,
       inset: 14pt,
       radius: 0pt,
       width: 100%,
     )[
-      #text(size: 8pt, fill: luma(100))[CONFIGURATION STATUS]
+      #eyebrow("Configuration status")
       #v(4pt)
       #text(weight: "bold", size: 13pt)[#status-label(if "status" in data { data.status } else { none })]
     ]
@@ -117,7 +104,7 @@
 )
 
 #v(8pt)
-#line(length: 100%, stroke: 1pt + rgb("#000000"))
+#strong-rule()
 #v(12pt)
 
 // ---------------------------------------------------------------------------
@@ -133,11 +120,11 @@ recognizable value for it.
 
 #table(
   columns: (1fr, auto, 1fr),
-  stroke: 0.5pt + luma(220),
-  fill: (x, y) => if y == 0 { rgb("#dc2626").lighten(90%) } else { none },
+  stroke: hairline,
+  fill: (x, y) => if y == 0 { limestone } else { none },
   inset: 8pt,
   align: (left, center, left),
-  [*Control*], [*Recorded*], [*Notes*],
+  table.header([*Control*], [*Recorded*], [*Notes*]),
 
   [Data Processing Agreement (DPA)],
   [#tri-badge(if "dpa_signed" in data { data.dpa_signed } else { none }, positive: "SIGNED", negative: "NOT SIGNED")],
@@ -178,8 +165,8 @@ recognizable value for it.
 
 #table(
   columns: (1fr, auto),
-  stroke: 0.5pt + luma(220),
-  fill: (x, y) => if y == 0 { rgb("#dc2626").lighten(90%) } else { none },
+  stroke: hairline,
+  fill: (x, y) => if y == 0 { limestone } else { none },
   inset: 8pt,
   align: (left, right),
   [*Measure*], [*Count*],
@@ -208,10 +195,10 @@ recognizable value for it.
   inferred from an absent value.
 
 #v(16pt)
-#line(length: 100%, stroke: 0.5pt + luma(200))
+#line(length: 100%, stroke: hairline)
 #v(8pt)
 #align(center)[
-  #text(size: 8pt, fill: luma(120))[
-    Prepared by Bel Consulting OÜ (trading as ApexMail) · support\@apexmail.ee
+  #text(size: 8pt, fill: muted)[
+    Prepared by Bel Consulting OÜ (trading as ApexMail)#meta-sep support\@apexmail.ee
   ]
 ]

@@ -30,6 +30,8 @@
 //   }
 // }
 
+#import "ark.typ": *
+
 #let data = json("data.json")
 
 // Seller identity is passed in by billing-service; these are only fallbacks so a
@@ -57,54 +59,23 @@
 // US state sales tax (billing-service `us_tax`), when the invoice carries it.
 #let us-sales-tax = data.at("us_sales_tax", default: none)
 #let total = data.at("total", default: 0)
-#let currency-symbol = if currency == "EUR" { "€" } else if currency == "USD" { "$" } else if currency == "GBP" { "£" } else if currency == "CHF" { "CHF " } else if currency == "SEK" { "SEK " } else if currency == "NOK" { "NOK " } else if currency == "DKK" { "DKK " } else if currency == "PLN" { "PLN " } else if currency != "" { currency + " " } else { "" }
+#let currency-symbol = currency-symbol(currency)
 
-#set document(
+#show: page-setup.with(
   title: "Invoice " + invoice-number,
-  author: "Bel Consulting OÜ (trading as ApexMail)",
-)
-
-#set page(
-  paper: "a4",
-  margin: (top: 25mm, bottom: 25mm, left: 20mm, right: 20mm),
-  footer: [
-    #line(length: 100%, stroke: 0.5pt + luma(180))
-    #v(4pt)
-    #set text(size: 7pt, fill: luma(120))
-    #grid(
-      columns: (1fr, 1fr),
-      align(left)[
-        #seller.name · Reg. #seller-reg · VAT #seller-vat \
-        #seller-address
-      ],
-      align(right)[
-        support\@apexmail.ee · apexmail.ee \
-        Page #context { counter(page).display() } of #context { counter(page).final().first() }
-      ],
-    )
+  footer-left: [#seller.name#meta-sep Reg. #seller-reg#meta-sep VAT #seller-vat],
+  footer-right: [
+    support\@apexmail.ee#meta-sep apexmail.ee#meta-sep Page #context { counter(page).display() } of #context { counter(page).final().first() }
   ],
 )
-
-#set text(font: ("Overpass", "Noto Sans", "DejaVu Sans"), size: 10pt)
-// ARK document law: headings belong to Spectral; machine data to mono.
-#show heading: set text(font: ("Spectral", "Noto Serif", "DejaVu Serif"))
 
 // ---------------------------------------------------------------------------
 // Helpers: authoritative money and date handling
 // ---------------------------------------------------------------------------
 
-/// Format minor units (cents) with the invoice's own currency, e.g.
-/// `-€99.00` for -9900 EUR. The sign leads the symbol; unknown currencies
-/// render as `CODE 99.00`.
-#let fmt-money(minor) = {
-  let amount = if type(minor) == int or type(minor) == float { minor } else { 0 }
-  let sign = if amount < 0 { "-" } else { "" }
-  let abs = calc.abs(amount)
-  let major = calc.floor(abs / 100)
-  let ct = calc.rem(abs, 100)
-  let ct-str = if ct < 10 { "0" + str(ct) } else { str(ct) }
-  sign + currency-symbol + str(major) + "." + ct-str
-}
+/// Format minor units with the invoice's own currency symbol (the authority
+/// owns the arithmetic; this binds it to this document's currency).
+#let money(minor) = fmt-money(minor, currency-symbol)
 
 /// Parse an ISO `YYYY-MM-DD` date; `none` for anything else (never throws).
 #let parse-date(s) = {
@@ -131,9 +102,9 @@
   columns: (1fr, 1fr),
   // Company info (left)
   [
-    #text(weight: "bold", size: 18pt, fill: rgb("#dc2626"))[ApexMail]
+    #wordmark(size: 19pt)
     #v(4pt)
-    #text(size: 8pt, fill: luma(100))[
+    #text(size: 8pt, fill: muted)[
       #seller.name \
       #seller-address \
       VAT: #seller-vat \
@@ -142,7 +113,7 @@
   ],
   // Invoice info (right)
   align(right)[
-    #text(weight: "bold", size: 22pt)[INVOICE]
+    #text(font: display-font, weight: "semibold", size: 22pt, fill: ink)[INVOICE]
     #v(6pt)
     #table(
       columns: (auto, auto),
@@ -158,8 +129,26 @@
 )
 
 #v(12pt)
-#line(length: 100%, stroke: 1pt + rgb("#000000"))
-#v(12pt)
+#strong-rule()
+
+#if status-value == "paid" [
+  #v(10pt)
+  #align(right)[
+    #block(
+      fill: tone-fill("pos"),
+      stroke: 1pt + tone-color("pos"),
+      inset: (x: 12pt, y: 6pt),
+      radius: 0pt,
+    )[
+      #text(weight: "semibold", size: 10pt, fill: tone-color("pos"), tracking: 0.06em)[
+        PAID
+        #if "paid_at" in data and data.paid_at != none [ — #data.at("paid_at", default: "—") ]
+      ]
+    ]
+  ]
+]
+
+#v(6pt)
 
 // ---------------------------------------------------------------------------
 // Bill To
@@ -168,7 +157,8 @@
 #text(weight: "bold", size: 11pt)[Bill To:]
 #v(4pt)
 #block(
-  fill: luma(248),
+  fill: limestone,
+  stroke: (left: 2pt + rule),
   inset: 10pt,
   radius: 0pt,
   width: 50%,
@@ -199,8 +189,8 @@
 
 #table(
   columns: (1fr, auto, auto, auto, auto),
-  stroke: (x: none, y: 0.5pt + luma(200)),
-  fill: (x, y) => if y == 0 { rgb("#dc2626").lighten(90%) } else if calc.rem(y, 2) == 0 { luma(250) } else { none },
+  stroke: (x: none, y: hairline),
+  fill: (x, y) => if y == 0 { limestone } else { none },
   inset: 8pt,
   align: (left, center, right, right, right),
   // Header row
@@ -209,9 +199,9 @@
   ..for item in line-items {(
     [#item.description],
     [#item.quantity],
-    [#fmt-money(item.unit_price)],
+    [#money(item.unit_price)],
     [#item.vat_rate%],
-    [#fmt-money(item.amount)],
+    [#money(item.amount)],
   )}
 )
 
@@ -228,9 +218,9 @@
       stroke: none,
       inset: 6pt,
       align: (left, right),
-      [Subtotal], [#fmt-money(subtotal)],
+      [Subtotal], [#money(subtotal)],
       [VAT (#{ let seen = (); for item in line-items { let rate = str(item.vat_rate) + "%"; if not seen.contains(rate) { seen.push(rate) } }; seen.join(", ") })],
-      [#fmt-money(vat-total)],
+      [#money(vat-total)],
       // US state sales tax (billing-service `us_tax`, plan WP C2): rendered
       // only when the invoice carries it, so subtotal + VAT + US tax = total.
       // An exempt sale (customer certificate) says so — a silent $0.00 row
@@ -240,19 +230,19 @@
           let cert = us-sales-tax.at("certificate_id", default: none)
           if cert == none { "" } else { " (certificate " + cert + ")" }
         }],
-        [#fmt-money(0)],
+        [#money(0)],
       ) } else { (
         [US sales tax (#us-sales-tax.state)],
-        [#fmt-money(us-sales-tax.amount_cents)],
+        [#money(us-sales-tax.amount_cents)],
       ) },
     )
-    #line(length: 100%, stroke: 1.5pt + rgb("#000000"))
+    #strong-rule()
     #table(
       columns: (1fr, auto),
       stroke: none,
       inset: 8pt,
       align: (left, right),
-      [*Total (#currency)*], [*#fmt-money(total)*],
+      [*Total (#currency)*], [*#money(total)*],
     )
   ]
 ]
@@ -270,7 +260,8 @@
   #text(weight: "bold", size: 11pt)[Payment Information]
   #v(4pt)
   #block(
-    fill: luma(248),
+    fill: limestone,
+    stroke: (left: 2pt + rule),
     inset: 12pt,
     radius: 0pt,
     width: 100%,
@@ -296,7 +287,8 @@
   #text(weight: "bold", size: 11pt)[Payment Information]
   #v(4pt)
   #block(
-    fill: luma(248),
+    fill: limestone,
+    stroke: (left: 2pt + rule),
     inset: 12pt,
     radius: 0pt,
     width: 100%,
@@ -308,19 +300,3 @@
   ]
 ]
 
-#if status-value == "paid" [
-  #v(16pt)
-  #align(center)[
-    #block(
-      fill: rgb("#16a34a").lighten(80%),
-      stroke: 1pt + rgb("#16a34a"),
-      inset: 12pt,
-      radius: 0pt,
-    )[
-      #text(weight: "bold", size: 14pt, fill: rgb("#16a34a"))[
-        ✓ PAID
-        #if "paid_at" in data and data.paid_at != none [ — #data.at("paid_at", default: "—") ]
-      ]
-    ]
-  ]
-]

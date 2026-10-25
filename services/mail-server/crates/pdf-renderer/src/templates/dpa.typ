@@ -21,6 +21,8 @@
 
 #let data = json("data.json")
 
+#import "ark.typ": *
+
 // ── Agreement identity ──────────────────────────────────────────────────
 // The revision identifies the template revision that produced this document;
 // a producer-supplied `dpa_version` always wins.
@@ -32,37 +34,14 @@
 // and the legacy key are honored, and an absent value renders explicitly.
 #let retention-days = if "retention_days" in data and data.retention_days != none { data.retention_days } else if "data_retention_days" in data and data.data_retention_days != none { data.data_retention_days } else { none }
 
-#set document(
+#show: page-setup.with(
   title: "Data Processing Agreement — " + controller,
-  author: "Bel Consulting OÜ (trading as ApexMail)",
+  running-title: [Data Processing Agreement — v#dpa-version],
+  footer-left: [DPA v#dpa-version],
+  footer-center: [Page #context { counter(page).display() } of #context { counter(page).final().first() }],
+  footer-right: [Confidential],
 )
 
-#set page(
-  paper: "a4",
-  margin: (top: 25mm, bottom: 25mm, left: 25mm, right: 25mm),
-  header: context {
-    if counter(page).get().first() > 1 [
-      #set text(size: 8pt, fill: luma(140))
-  #grid(
-    columns: (1fr, 1fr),
-    [Data Processing Agreement — v#dpa-version],
-    align(right)[Bel Consulting OÜ & #controller],
-  )
-      #line(length: 100%, stroke: 0.3pt + luma(200))
-    ]
-  },
-  footer: [
-    #set text(size: 7pt, fill: luma(140))
-    #grid(
-      columns: (1fr, 1fr, 1fr),
-      [DPA v#dpa-version],
-      align(center)[Page #context { counter(page).display() } of #context { counter(page).final().first() }],
-      align(right)[Confidential],
-    )
-  ],
-)
-
-#set text(font: ("Overpass", "Noto Sans", "DejaVu Sans"), size: 10pt)
 #set par(justify: true)
 #set heading(numbering: "1.1")
 
@@ -73,15 +52,15 @@
 #v(30mm)
 
 #align(center)[
-  #text(weight: "bold", size: 28pt, fill: rgb("#dc2626"))[
+  #text(font: display-font, weight: "semibold", size: 28pt, fill: ink)[
     Data Processing Agreement
   ]
   #v(8pt)
-  #text(size: 12pt, fill: luma(100))[
+  #text(size: 12pt, fill: muted)[
     pursuant to Article 28 of the General Data Protection Regulation (GDPR)
   ]
   #v(24pt)
-  #line(length: 60%, stroke: 1pt + rgb("#000000"))
+  #line(length: 60%, stroke: strong-stroke)
   #v(24pt)
   #text(size: 14pt)[
     Between
@@ -131,7 +110,8 @@ This DPA supplements the Terms of Service and governs the processing of personal
 The following categories of personal data are processed under this Agreement:
 
 #block(
-  fill: luma(248),
+  fill: limestone,
+  stroke: (left: 2pt + rule),
   inset: 12pt,
   radius: 0pt,
   width: 100%,
@@ -231,8 +211,8 @@ The current authorised subprocessors are maintained in the ApexMail Subprocessor
 #if "sub_processors" in data and data.sub_processors.len() > 0 [
   #table(
     columns: (1fr, 1fr, auto),
-    stroke: 0.5pt + luma(200),
-    fill: (x, y) => if y == 0 { rgb("#dc2626").lighten(90%) } else { none },
+    stroke: (x: none, y: hairline),
+    fill: (x, y) => if y == 0 { limestone } else { none },
     inset: 8pt,
     align: (left, left, left),
     [*Sub-processor*], [*Purpose*], [*Location*],

@@ -25,6 +25,7 @@ pub mod audit;
 pub mod audit_search;
 pub mod autopilot;
 pub mod billing_abuse;
+pub mod billing_ops;
 pub mod calendar;
 pub mod campaigns;
 pub mod compliance_overview;

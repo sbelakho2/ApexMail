@@ -345,6 +345,8 @@ validate_repo_gates() {
         ci_check "legacy processor self-test" python3 tools/check_legacy_processor.py --self-test
         ci_check "ARK design law" python3 tools/check_ark_law.py
         ci_check "ARK authority mirror" python3 tools/check_ark_mirror.py
+        ci_check "ARK PDF design authority" python3 tools/check_pdf_ark.py
+        ci_check "ARK PDF design authority (self-test)" python3 tools/check_pdf_ark.py --self-test
         ci_check "ARK console artifact (cssgen --check)" bash -c 'cd services/mail-server && cargo run -q -p ui-foundation --bin cssgen -- --ark crates/ui-foundation/assets/ark.css --include crates/ui-foundation/assets/globals.input.css --content "crates/ui-foundation/src/**/*.rs" --content "crates/api-server/src/**/*.rs" --content "crates/ui-foundation/assets/globals.input.css" --out crates/ui-foundation/assets/globals.css --check'
         ci_check "ARK marketing artifact (cssgen --check)" bash -c 'cd services/mail-server && cargo run -q -p ui-foundation --bin cssgen -- --ark ../../apps/marketing-zola/static/css/ark.css --content "../../apps/marketing-zola/templates" --content "../../apps/marketing-zola/content" --out ../../apps/marketing-zola/static/css/styles.css --check'
         # Asset budget + the all-Rust serving law: the served CSS and font

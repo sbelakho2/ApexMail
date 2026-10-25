@@ -726,6 +726,9 @@ pub fn build_app(state: AppState) -> Router {
         // plus the operator registration surface. Registration is the ONLY
         // thing that makes sales tax compute on new invoices — the sweep
         // tracks thresholds and alerts, and never charges.
+        // The operator's billing control tower: money, entitlement, collections,
+        // incidents, webhook health and settlements in one surface.
+        .nest("/v1/admin/billing", routes::admin::billing_ops::router())
         .nest("/v1/admin/billing/us-tax", routes::admin::us_tax::router())
         // Payout reconciliation: the provider's own settlement objects, the
         // surface the billing lifecycle documents (operator-only).

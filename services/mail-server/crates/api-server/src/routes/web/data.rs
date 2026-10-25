@@ -3413,6 +3413,15 @@ async fn control_plane_route_data(
         _ => None,
     };
 
+    // `/billing` is the operator's billing control tower: the SAME snapshot
+    // the `/v1/admin/billing/*` endpoints serve, so page and API can never
+    // disagree. `None` renders the page's explicit unavailable state.
+    let billing_ops = if path == "/billing" {
+        crate::routes::admin::billing_ops::load_page_data(state).await
+    } else {
+        None
+    };
+
     let sales = match path {
         "/cp/sales" | "/sales" => Some(cp_sales_autopilot(state).await),
         _ => None,
@@ -3475,6 +3484,7 @@ async fn control_plane_route_data(
         tenant_new,
         tenant_detail,
         jobs,
+        billing_ops,
         // The shell identity + impersonation banner are attached by the
         // api-server render pipeline (they need request headers).
         ..RouteData::default()

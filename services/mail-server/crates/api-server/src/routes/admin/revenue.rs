@@ -60,18 +60,14 @@ pub struct RevenueStats {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cac: Option<f64>,
     pub churn_rate: f64,
-    /// Expansion revenue from plan changes. Omitted when no plan-change
-    /// history source exists (the `plan.changed` audit action is never
-    /// emitted and mollie webhook events store no plan payload).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub expansion_revenue: Option<f64>,
+    /// Expansion MRR from plan changes in the last 30 days: the sum of the
+    /// positive before→after MRR deltas recorded by the verified activation
+    /// path (`billing.subscription_activated` carries both facts).
+    pub expansion_revenue: f64,
     pub new_customers: i64,
-    /// Plan-change upgrade count. Omitted for the same reason as
-    /// `expansion_revenue`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub upgrades: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub downgrades: Option<i64>,
+    /// Plan-change upgrades / downgrades in the last 30 days.
+    pub upgrades: i64,
+    pub downgrades: i64,
     pub churned: i64,
 }
 
@@ -306,6 +302,60 @@ fn calculate_cac(marketing_spend_cents: Option<i64>, new_customers: i64) -> Opti
     }
 }
 
+/// One recorded plan change: the monthly-normalized MRR before and after a
+/// verified activation, read from `billing.subscription_activated`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PlanChangeFacts {
+    previous_mrr_cents: i64,
+    new_mrr_cents: i64,
+    /// The audit row predates the before/after facts (an older writer): it can
+    /// be counted but not classified.
+    unclassified: bool,
+}
+
+async fn plan_changes_since(
+    db: &sqlx::PgPool,
+    cutoff: DateTime<Utc>,
+) -> Result<Vec<PlanChangeFacts>, ApiError> {
+    if !table_exists(db, "audit_logs").await? {
+        return Ok(Vec::new());
+    }
+    let time_col = if column_exists(db, "audit_logs", "timestamp").await? {
+        "timestamp"
+    } else {
+        "created_at"
+    };
+    let sql = format!(
+        "SELECT details FROM audit_logs \
+         WHERE action = 'billing.subscription_activated' \
+           AND {time_col} >= $1 \
+           AND details IS NOT NULL"
+    );
+    let rows: Vec<(serde_json::Value,)> = sqlx::query_as(&sql).bind(cutoff).fetch_all(db).await?;
+    Ok(rows
+        .into_iter()
+        .map(|(details,)| {
+            let number = |key: &str| {
+                details
+                    .get(key)
+                    .and_then(|value| value.as_i64().or_else(|| value.as_f64().map(|v| v as i64)))
+            };
+            match (number("previousMrrCents"), number("newMrrCents")) {
+                (Some(previous), Some(current)) => PlanChangeFacts {
+                    previous_mrr_cents: previous,
+                    new_mrr_cents: current,
+                    unclassified: false,
+                },
+                _ => PlanChangeFacts {
+                    previous_mrr_cents: 0,
+                    new_mrr_cents: 0,
+                    unclassified: true,
+                },
+            }
+        })
+        .collect())
+}
+
 async fn get_revenue(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -353,15 +403,38 @@ async fn get_revenue(
         HashMap::new()
     };
 
-    // Plan-change velocity (upgrades/downgrades/expansion MRR) is omitted:
-    // the `plan.changed` audit action it was derived from is never emitted
-    // by any writer, and mollie_webhook_events stores only event ids/types
-    // (no plan payload) — there is no honest data source to derive from.
-    notes.push(
-        "plan-change velocity (upgrades, downgrades, expansion revenue) omitted: no writer \
-         records plan-change history"
-            .into(),
-    );
+    // Plan-change velocity from the activation audit: every verified paid
+    // checkout writes the before/after monthly MRR into
+    // `billing.subscription_activated`, so upgrades, downgrades and expansion
+    // MRR are derived from recorded facts — not inferred or fabricated.
+    let plan_changes = plan_changes_since(db, cutoff_30).await?;
+    let mut upgrades = 0i64;
+    let mut downgrades = 0i64;
+    let mut expansion_cents = 0i64;
+    let mut unclassified = 0i64;
+    for change in &plan_changes {
+        match (change.previous_mrr_cents, change.new_mrr_cents) {
+            // A first activation is a new subscription, not a plan change.
+            (previous, _) if previous <= 0 => {}
+            (previous, new) if new > previous => {
+                upgrades += 1;
+                expansion_cents += new - previous;
+            }
+            (previous, new) if new < previous => {
+                downgrades += 1;
+            }
+            _ => {}
+        }
+        if change.unclassified {
+            unclassified += 1;
+        }
+    }
+    if unclassified > 0 {
+        notes.push(format!(
+            "{unclassified} activation(s) in the window carry no before/after MRR facts \
+             (pre-analytics rows) and are excluded from plan-change velocity"
+        ));
+    }
 
     let current_mrr_cents: i64 = subscriptions
         .iter()
@@ -554,11 +627,9 @@ async fn get_revenue(
             ltv,
             cac,
             churn_rate,
-            // No plan-change history source exists (see note above) — these
-            // are omitted rather than reported as zero.
-            expansion_revenue: None,
-            upgrades: None,
-            downgrades: None,
+            expansion_revenue: cents_to_dollars(expansion_cents),
+            upgrades,
+            downgrades,
             new_customers,
             churned,
         },
@@ -833,10 +904,57 @@ mod adversarial_tests {
         assert!(!revenue.notes.is_empty(), "omission notes are mandatory");
         // The CAC block is omitted when no spend source exists.
         assert_eq!(revenue.stats.cac, None);
-        assert!(revenue
-            .notes
-            .iter()
-            .any(|n| n.contains("plan-change velocity")));
+        // Plan-change velocity now has a real writer: the verified activation
+        // audit carries previous/new MRR. Seed one upgrade and one downgrade
+        // inside the window and assert the derived figures.
+        for (resource, previous, new) in [
+            (format!("sub_up_{tag}"), 2_000_i64, 5_000_i64),
+            (format!("sub_down_{tag}"), 5_000_i64, 2_000_i64),
+        ] {
+            crate::audit_log::insert_audit_log_with_env(
+                &pool,
+                false,
+                Some(&tenant_new),
+                None,
+                "billing.subscription_activated",
+                "subscription",
+                Some(&resource),
+                serde_json::json!({
+                    "previousMrrCents": previous,
+                    "newMrrCents": new,
+                }),
+                None,
+                None,
+            )
+            .await
+            .expect("seed activation audit");
+        }
+        let Json(revenue) = get_revenue(State(state.clone()), admin_auth())
+            .await
+            .expect("revenue with plan changes");
+        assert!(
+            revenue.stats.upgrades >= 1,
+            "the upgrade is classified: {:?}",
+            revenue.stats
+        );
+        assert!(
+            revenue.stats.downgrades >= 1,
+            "the downgrade is classified: {:?}",
+            revenue.stats
+        );
+        assert!(
+            revenue.stats.expansion_revenue >= 30.0,
+            "expansion MRR is the positive delta in dollars: {}",
+            revenue.stats.expansion_revenue
+        );
+        assert!(
+            !revenue
+                .notes
+                .iter()
+                .any(|n| n.contains("plan-change velocity")),
+            "plan-change velocity is no longer omitted: {:?}",
+            revenue.notes
+        );
 
         // Access gates.
         let mut customer = admin_auth();

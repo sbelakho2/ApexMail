@@ -1055,6 +1055,89 @@ mod tests {
     }
 }
 
+/// Control-plane billing operations page (`/billing`).
+///
+/// Display-ready rows built from the api-server's canonical billing snapshot
+/// (`routes::admin::billing_ops`), so the SSR page and the JSON endpoints can
+/// never disagree. Every string is preformatted here; the renderer only lays
+/// it out. `None` on `RouteData` means the loader could not read the store —
+/// the page then says so instead of rendering zeroes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BillingOpsPageData {
+    pub generated_at: String,
+    pub kpis: Vec<KpiCardData>,
+    pub collection_kpis: Vec<KpiCardData>,
+    pub health_kpis: Vec<KpiCardData>,
+    pub plan_mix: Vec<BillingMixRow>,
+    pub interval_mix: Vec<BillingMixRow>,
+    pub movement: Vec<BillingMovementRow>,
+    pub subscriptions: Vec<BillingSubscriptionRow>,
+    pub invoices: Vec<BillingInvoiceRow>,
+    pub incidents: Vec<BillingIncidentRow>,
+    pub settlements: Vec<BillingSettlementRow>,
+    pub settlements_error: Option<String>,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BillingMixRow {
+    pub key: String,
+    pub subscriptions: i64,
+    pub mrr: String,
+    pub share: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BillingMovementRow {
+    pub month: String,
+    pub activations: i64,
+    pub new_mrr: String,
+    pub cancellations: i64,
+    pub churned_mrr: String,
+    pub net_mrr: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BillingSubscriptionRow {
+    pub tenant: String,
+    pub plan: String,
+    pub interval: String,
+    pub status: String,
+    pub provider_id: String,
+    pub cycle_end: String,
+    pub cancel_at_period_end: bool,
+    pub mrr: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BillingInvoiceRow {
+    pub number: String,
+    pub tenant: String,
+    pub status: String,
+    pub total: String,
+    pub tax: String,
+    pub provider_payment_id: String,
+    pub paid_at: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BillingIncidentRow {
+    pub created_at: String,
+    pub kind: String,
+    pub severity: String,
+    pub status: String,
+    pub tenant: String,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BillingSettlementRow {
+    pub id: String,
+    pub status: String,
+    pub amount: String,
+    pub settled_at: String,
+}
+
 #[cfg(test)]
 mod deferred_view_data_tests {
     use super::*;

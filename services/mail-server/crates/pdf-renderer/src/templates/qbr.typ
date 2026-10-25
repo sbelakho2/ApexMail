@@ -34,6 +34,8 @@
 
 #let data = json("data.json")
 
+#import "ark.typ": *
+
 // ── Identity ────────────────────────────────────────────────────────────
 #let tenant = if "tenant_id" in data { str(data.tenant_id) } else { "Not recorded" }
 #let quarter = if "quarter" in data { str(data.quarter) } else { "—" }
@@ -43,37 +45,14 @@
 #let metrics = if "metrics" in data and type(data.metrics) == dictionary { data.metrics } else { (:) }
 #let comparison = if "quarter_over_quarter_change" in data and type(data.quarter_over_quarter_change) == dictionary { data.quarter_over_quarter_change } else { (:) }
 
-#set document(
+#show: page-setup.with(
   title: "QBR Q" + quarter + " " + year + " — " + tenant,
-  author: "Bel Consulting OÜ (trading as ApexMail)",
+  running-title: [QBR#meta-sep Q#quarter #year],
+  footer-left: [Confidential],
+  footer-center: [Page #context { counter(page).display() } of #context { counter(page).final().first() }],
+  footer-right: [Generated #generated],
 )
 
-#set page(
-  paper: "a4",
-  margin: (top: 25mm, bottom: 25mm, left: 20mm, right: 20mm),
-  header: context {
-    if counter(page).get().first() > 1 [
-      #set text(size: 8pt, fill: luma(140))
-      #grid(
-        columns: (1fr, 1fr),
-        [ApexMail QBR · Q#quarter #year],
-        align(right)[Tenant: #tenant],
-      )
-      #line(length: 100%, stroke: 0.3pt + luma(200))
-    ]
-  },
-  footer: [
-    #set text(size: 7pt, fill: luma(140))
-    #grid(
-      columns: (1fr, 1fr, 1fr),
-      [Confidential],
-      align(center)[Page #context { counter(page).display() } of #context { counter(page).final().first() }],
-      align(right)[Generated #generated],
-    )
-  ],
-)
-
-#set text(font: ("Overpass", "Noto Sans", "DejaVu Sans"), size: 10pt, hyphenate: false)
 #set par(justify: true)
 #set heading(numbering: "1.")
 
@@ -81,16 +60,39 @@
 // Helpers
 // ---------------------------------------------------------------------------
 
+// Thousands-grouped decimal that survives a sign and a fractional part:
+// "-100.0" must read "-100.0", never "-,100.0" (the naive end-slicing loop
+// grouped the fraction and stranded the sign).
 #let fmt-num(n) = {
-  let s = str(n)
+  let raw = str(n)
+  let sign = if raw.starts-with("-") or raw.starts-with("−") { "-" } else { "" }
+  // U+2212 (the typographic minus Typst prints) is THREE UTF-8 bytes; slicing
+  // it at 1 splits the character and Typst fails the render.
+  let unsigned = if raw.starts-with("-") {
+    raw.slice(1)
+  } else if raw.starts-with("−") {
+    raw.slice(3)
+  } else {
+    raw
+  }
+  let pieces = unsigned.split(".")
+  let whole = pieces.at(0)
+  let fraction = if pieces.len() > 1 { "." + pieces.at(1) } else { "" }
   let parts = ()
-  let i = s.len()
+  let i = whole.len()
   while i > 3 {
-    parts.push(s.slice(i - 3, i))
+    parts.push(whole.slice(i - 3, i))
     i -= 3
   }
-  parts.push(s.slice(0, i))
-  parts.rev().join(",")
+  parts.push(whole.slice(0, i))
+  sign + parts.rev().join(",") + fraction
+}
+
+// A change value: integral deltas drop the ".0" (a count moved 100, not
+// 100.0); fractional deltas keep one decimal.
+#let fmt-delta(v) = {
+  let rounded = calc.round(v * 10) / 10
+  if calc.fract(rounded) == 0 { fmt-num(int(rounded)) } else { fmt-num(rounded) }
 }
 
 #let value-or-unknown(value) = {
@@ -123,24 +125,24 @@
   let p = if type(previous) == float or type(previous) == int { previous } else { none }
   let c = if type(current) == float or type(current) == int { current } else { none }
   if p == none or c == none {
-    text(fill: luma(120))[—]
+    text(fill: muted)[—]
   } else {
     let delta = c - p
     let direction = direction-for(metric)
     let improved = if direction == "lower-is-better" { delta < 0 }
       else if direction == "higher-is-better" { delta > 0 }
       else { none }
-    let color = if improved == none { luma(120) }
-      else if improved { rgb("#16a34a") }
-      else if delta == 0 { luma(120) }
-      else { rgb("#dc2626") }
+    let color = if improved == none { muted }
+      else if improved { tone-color("pos") }
+      else if delta == 0 { muted }
+      else { tone-color("neg") }
     let arrow = if delta > 0 { "↑" } else if delta < 0 { "↓" } else { "→" }
     let unit = if is-rate(metric) { "pp" } else { "" }
     let direction-word = if improved == none { "" }
       else if delta == 0 { " (unchanged)" }
       else if improved { " (improvement)" }
       else { " (regression)" }
-    text(weight: "bold", fill: color)[#arrow #format-fn(calc.round(delta * 10) / 10)#unit#direction-word]
+    text(weight: "bold", fill: color)[#arrow #fmt-delta(delta)#unit#direction-word]
   }
 }
 
@@ -159,48 +161,30 @@
 
 #let severity-badge(severity) = {
   let s = if severity == none { "unknown" } else { lower(str(severity)) }
-  let (color, label) = if s == "info" or s == "informational" { (rgb("#2563eb"), "INFO") }
-    else if s == "warning" or s == "warn" { (rgb("#f59e0b"), "WARNING") }
-    else if s == "critical" or s == "error" { (rgb("#dc2626"), "CRITICAL") }
-    else { (rgb("#f59e0b"), "UNKNOWN") }
-  box(
-    fill: color.lighten(85%),
-    stroke: 0.5pt + color,
-    inset: (x: 6pt, y: 2pt),
-    radius: 0pt,
-    text(weight: "bold", size: 7pt, fill: color.darken(20%))[#label]
-  )
+  let (tone, label) = if s == "info" or s == "informational" { ("neutral", "INFO") }
+    else if s == "warning" or s == "warn" { ("warn", "WARNING") }
+    else if s == "critical" or s == "error" { ("neg", "CRITICAL") }
+    else { ("warn", "UNKNOWN") }
+  chip(label, tone: tone)
 }
 
 #let goal-badge(status) = {
   let s = if status == none { "unknown" } else { lower(str(status)) }
-  let (color, label) = if s == "completed" { (rgb("#16a34a"), "COMPLETED") }
-    else if s == "in_progress" { (rgb("#2563eb"), "IN PROGRESS") }
-    else if s == "at_risk" { (rgb("#f59e0b"), "AT RISK") }
-    else if s == "not_started" { (luma(120), "NOT STARTED") }
-    else if s == "cancelled" { (luma(120), "CANCELLED") }
-    else { (rgb("#f59e0b"), "UNKNOWN") }
-  box(
-    fill: color.lighten(85%),
-    stroke: 0.5pt + color,
-    inset: (x: 6pt, y: 2pt),
-    radius: 0pt,
-    text(weight: "bold", size: 7pt, fill: color.darken(20%))[#label]
-  )
+  let (tone, label) = if s == "completed" { ("pos", "COMPLETED") }
+    else if s == "in_progress" { ("neutral", "IN PROGRESS") }
+    else if s == "at_risk" { ("warn", "AT RISK") }
+    else if s == "not_started" { ("neutral", "NOT STARTED") }
+    else if s == "cancelled" { ("neutral", "CANCELLED") }
+    else { ("warn", "UNKNOWN") }
+  chip(label, tone: tone)
 }
 
 #let priority-badge(priority) = {
   let p = if priority == none { "unknown" } else { lower(str(priority)) }
-  let color = if p == "high" or p == "critical" { rgb("#dc2626") }
-    else if p == "medium" { rgb("#f59e0b") }
-    else { luma(120) }
-  box(
-    fill: color.lighten(80%),
-    stroke: 0.5pt + color,
-    inset: (x: 6pt, y: 2pt),
-    radius: 0pt,
-    text(weight: "bold", size: 7pt, fill: color.darken(20%))[#upper(p)]
-  )
+  let tone = if p == "high" or p == "critical" { "neg" }
+    else if p == "medium" { "warn" }
+    else { "neutral" }
+  chip(p, tone: tone)
 }
 
 // ---------------------------------------------------------------------------
@@ -210,17 +194,17 @@
 #v(20mm)
 
 #align(center)[
-  #text(weight: "bold", size: 14pt, fill: rgb("#dc2626"))[ApexMail]
+  #wordmark(size: 15pt)
   #v(8pt)
-  #text(weight: "bold", size: 28pt)[Quarterly Business Review]
+  #text(font: display-font, weight: "semibold", size: 28pt, fill: ink)[Quarterly Business Review]
   #v(4pt)
-  #text(size: 16pt, fill: luma(80))[Q#quarter #year]
+  #text(size: 16pt, fill: faint)[Q#quarter #year]
   #v(20pt)
-  #line(length: 50%, stroke: 1.5pt + rgb("#000000"))
+  #line(length: 50%, stroke: strong-stroke)
   #v(20pt)
   #text(size: 14pt)[Prepared for *#tenant*]
   #v(8pt)
-  #text(size: 11pt, fill: luma(120))[
+  #text(size: 11pt, fill: muted)[
     Status: #upper(status) \
     Generated: #generated
   ]
@@ -241,8 +225,8 @@ direction (for example, a rising bounce rate is a regression).
 
 #table(
   columns: (1fr, auto, auto, auto),
-  stroke: 0.5pt + luma(220),
-  fill: (x, y) => if y == 0 { rgb("#dc2626").lighten(90%) } else { none },
+  stroke: (x: none, y: hairline),
+  fill: (x, y) => if y == 0 { limestone } else { none },
   inset: 10pt,
   align: (left, right, right, center),
   [*Metric*], [*This Quarter*], [*Previous*], [*Change*],
@@ -259,7 +243,7 @@ direction (for example, a rising bounce rate is a regression).
 
 #if comparison.len() == 0 [
   #v(6pt)
-  #text(size: 9pt, fill: luma(120))[No quarter-over-quarter comparison was recorded for this report.]
+  #text(size: 9pt, fill: muted)[No quarter-over-quarter comparison was recorded for this report.]
 ]
 
 #v(16pt)
@@ -273,8 +257,8 @@ direction (for example, a rising bounce rate is a regression).
 #if "insights" in data and type(data.insights) == array and data.insights.len() > 0 [
   #table(
     columns: (auto, auto, 1fr),
-    stroke: 0.5pt + luma(220),
-    fill: (x, y) => if y == 0 { rgb("#dc2626").lighten(90%) } else { none },
+    stroke: hairline,
+    fill: (x, y) => if y == 0 { limestone } else { none },
     inset: 8pt,
     align: (left, left, left),
     [*Severity*], [*Category*], [*Finding*],
@@ -282,13 +266,22 @@ direction (for example, a rising bounce rate is a regression).
       [#if type(insight) == dictionary { severity-badge(insight.at("severity", default: none)) } else { severity-badge(none) }],
       [#if type(insight) == dictionary { insight.at("category", default: "—") } else { [—] }],
       [#if type(insight) == dictionary {
-        insight.at("message", default: "—")
-        if "metric_name" in insight and insight.metric_name != none [
-          [ (#insight.metric_name: ]
-          #value-or-unknown(if "metric_value" in insight { insight.metric_value } else { none })
-          #if "threshold" in insight and insight.threshold != none [, threshold #insight.threshold]
-          [)]
-        ]
+        let message = str(insight.at("message", default: "—"))
+        if "metric_name" in insight and insight.metric_name != none {
+          let value = if "metric_value" in insight and insight.metric_value != none {
+            str(insight.metric_value)
+          } else {
+            "not recorded"
+          }
+          let threshold = if "threshold" in insight and insight.threshold != none {
+            ", threshold " + str(insight.threshold)
+          } else {
+            ""
+          }
+          message + " (" + str(insight.metric_name) + ": " + value + threshold + ")"
+        } else {
+          message
+        }
       } else { [#insight] }],
     )}
   )
@@ -334,11 +327,13 @@ direction (for example, a rising bounce rate is a regression).
 #if "recommendations" in data and type(data.recommendations) == array and data.recommendations.len() > 0 [
   #for rec in data.recommendations [
     #block(
-      fill: luma(248),
+      fill: limestone,
+      stroke: (left: 2pt + rule),
       inset: 12pt,
       radius: 0pt,
       width: 100%,
       below: 8pt,
+      breakable: false,
     )[
       #if type(rec) == dictionary [
         #priority-badge(rec.at("priority", default: none))
@@ -366,8 +361,8 @@ direction (for example, a rising bounce rate is a regression).
 #if "goals" in data and type(data.goals) == array and data.goals.len() > 0 [
   #table(
     columns: (1fr, auto, auto, auto),
-    stroke: 0.5pt + luma(220),
-    fill: (x, y) => if y == 0 { rgb("#dc2626").lighten(90%) } else { none },
+    stroke: hairline,
+    fill: (x, y) => if y == 0 { limestone } else { none },
     inset: 8pt,
     align: (left, left, right, right),
     [*Goal*], [*Status*], [*Progress*], [*Target*],
@@ -376,8 +371,8 @@ direction (for example, a rising bounce rate is a regression).
       [#if type(goal) == dictionary { goal-badge(goal.at("status", default: none)) } else { goal-badge(none) }],
       [#if type(goal) == dictionary and "progress_percent" in goal and goal.progress_percent != none { str(goal.progress_percent) + "%" } else { [Not recorded] }],
       [#if type(goal) == dictionary and "target_value" in goal and goal.target_value != none {
-        str(goal.target_value)
-        if "unit" in goal and goal.unit != none { " " + str(goal.unit) }
+        let unit = if "unit" in goal and goal.unit != none { str(goal.unit) } else { "" }
+        str(goal.target_value) + if unit == "%" { "%" } else if unit == "" { "" } else { " " + unit }
       } else { [Not recorded] }],
     )}
   )
@@ -386,10 +381,10 @@ direction (for example, a rising bounce rate is a regression).
 ]
 
 #v(24pt)
-#line(length: 100%, stroke: 0.5pt + luma(200))
+#line(length: 100%, stroke: hairline)
 #v(8pt)
 #align(center)[
-  #text(size: 9pt, fill: luma(120))[
+  #text(size: 9pt, fill: muted)[
     Prepared by Bel Consulting OÜ (trading as ApexMail) for tenant #tenant. \
     For questions, contact support\@apexmail.ee.
   ]

@@ -6898,6 +6898,286 @@ pub fn control_plane_billing_page() -> String {
 </nav></div>".to_string()
 }
 
+/// CP billing operations page (`/billing`): the whole Mollie lifecycle for
+/// the operator — money, entitlement, collections, incidents, webhook health
+/// and settlements — from the same snapshot the JSON endpoints serve.
+/// `None` renders the explicit unavailable state (never a zero-filled board).
+pub fn control_plane_billing_page_with_data(
+    data: Option<&crate::view_data::BillingOpsPageData>,
+) -> String {
+    let Some(data) = data else {
+        return "<div class=\"space-y-6\">\
+<h1 class=\"apex-page-title\">Billing</h1>\
+<section class=\"apex-notice apex-notice--warn\" role=\"status\">\
+<p><strong>Billing figures are unavailable.</strong> The billing store could not be read; \
+nothing is shown rather than a zero-filled board. Retry when the store recovers.</p>\
+</section>\
+<nav class=\"grid gap-4 md:grid-cols-2\">\
+<a href=\"/billing/plans\" class=\"p-6 md:p-8 apex-btn\"><h2 class=\"apex-h3\">Plans</h2><p class=\"mt-1\">Manage subscription plans</p></a>\
+</nav></div>"
+            .to_string();
+    };
+
+    let escape = |text: &str| crate::shell::html_escape(text);
+    let status_word = |status: &str| -> String {
+        let tone = match status {
+            "active" | "resolved" | "paid" => "apex-status--on",
+            "trialing" | "acknowledged" | "pending" | "open" | "medium" => "apex-status--warn",
+            "past_due" | "unpaid" | "failed" | "high" | "critical" => "apex-status--fail",
+            _ => "",
+        };
+        if tone.is_empty() {
+            escape(status)
+        } else {
+            format!(
+                "<span class=\"apex-status {tone}\">{}</span>",
+                escape(status)
+            )
+        }
+    };
+
+    let kpi_grid = |title: &str, kpis: &[crate::view_data::KpiCardData]| -> String {
+        let tiles = kpis
+            .iter()
+            .map(render_stat_tile)
+            .collect::<Vec<_>>()
+            .join("");
+        format!(
+            "<section class=\"border overflow-hidden\">\
+<div class=\"px-8 py-6 border-b\"><h2 class=\"apex-section-head\">{}</h2></div>\
+<div class=\"p-8\"><div class=\"grid gap-6 sm:grid-cols-3 xl:grid-cols-6\">{}</div></div>\
+</section>",
+            escape(title),
+            tiles
+        )
+    };
+
+    let table_section = |title: &str, columns: &[&str], rows: Vec<Vec<String>>| -> String {
+        let header: String = columns
+            .iter()
+            .map(|column| {
+                format!(
+                    "<th scope=\"col\" class=\"px-4 py-3\">{}</th>",
+                    escape(column)
+                )
+            })
+            .collect();
+        let body = if rows.is_empty() {
+            format!(
+                    "<tr class=\"border-b\"><td colspan=\"{}\" class=\"p-6 apex-em\">None recorded.</td></tr>",
+                    columns.len().max(1)
+                )
+        } else {
+            rows.iter()
+                .map(|row| {
+                    let cells = row
+                        .iter()
+                        .map(|cell| format!("<td class=\"px-4 py-3\">{}</td>", cell))
+                        .collect::<String>();
+                    format!("<tr class=\"border-b\">{}</tr>", cells)
+                })
+                .collect::<String>()
+        };
+        format!(
+            "<section class=\"border overflow-hidden\">\
+<div class=\"px-8 py-6 border-b\"><h2 class=\"apex-section-head\">{}</h2></div>\
+<div class=\"w-full overflow-x-auto\"><table class=\"min-w-full apex-table\">\
+<caption class=\"sr-only\">{}</caption><thead><tr>{}</tr></thead><tbody>{}</tbody></table></div>\
+</section>",
+            escape(title),
+            escape(title),
+            header,
+            body
+        )
+    };
+
+    let mix_rows = |rows: &[crate::view_data::BillingMixRow]| {
+        rows.iter()
+            .map(|row| {
+                vec![
+                    escape(&row.key),
+                    format!("<span class=\"apex-num\">{}</span>", row.subscriptions),
+                    format!("<span class=\"apex-num\">{}</span>", escape(&row.mrr)),
+                    escape(&row.share),
+                ]
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let notes = if data.notes.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "<section class=\"apex-notice\" role=\"note\"><ul class=\"list-disc pl-6 space-y-1\">{}</ul></section>",
+            data.notes
+                .iter()
+                .map(|note| format!("<li>{}</li>", escape(note)))
+                .collect::<String>()
+        )
+    };
+
+    let settlements = if let Some(error) = &data.settlements_error {
+        format!(
+            "<section class=\"apex-notice apex-notice--warn\" role=\"status\"><p>Settlements are configured but the provider read failed: {}</p></section>",
+            escape(error)
+        )
+    } else {
+        table_section(
+            "Settlements",
+            &["Settlement", "Status", "Amount", "Settled"],
+            data.settlements
+                .iter()
+                .map(|row| {
+                    vec![
+                        format!("<span class=\"apex-mono-id\">{}</span>", escape(&row.id)),
+                        status_word(&row.status),
+                        format!("<span class=\"apex-num\">{}</span>", escape(&row.amount)),
+                        escape(&row.settled_at),
+                    ]
+                })
+                .collect(),
+        )
+    };
+
+    let subscriptions_rows = data
+        .subscriptions
+        .iter()
+        .map(|row| {
+            vec![
+                format!(
+                    "<span class=\"apex-mono-id\">{}</span>",
+                    escape(&row.tenant)
+                ),
+                escape(&row.plan),
+                escape(&row.interval),
+                status_word(&row.status),
+                format!(
+                    "<span class=\"apex-mono-id\">{}</span>",
+                    escape(&row.provider_id)
+                ),
+                format!("<span class=\"apex-num\">{}</span>", escape(&row.mrr)),
+                escape(&row.cycle_end),
+                if row.cancel_at_period_end {
+                    status_word("pending")
+                } else {
+                    "—".to_string()
+                },
+            ]
+        })
+        .collect();
+
+    let invoices_rows = data
+        .invoices
+        .iter()
+        .map(|row| {
+            vec![
+                escape(&row.number),
+                format!(
+                    "<span class=\"apex-mono-id\">{}</span>",
+                    escape(&row.tenant)
+                ),
+                status_word(&row.status),
+                format!("<span class=\"apex-num\">{}</span>", escape(&row.total)),
+                format!("<span class=\"apex-num\">{}</span>", escape(&row.tax)),
+                format!(
+                    "<span class=\"apex-mono-id\">{}</span>",
+                    escape(&row.provider_payment_id)
+                ),
+                escape(&row.paid_at),
+            ]
+        })
+        .collect();
+
+    let incidents_rows = data
+        .incidents
+        .iter()
+        .map(|row| {
+            vec![
+                escape(&row.created_at),
+                escape(&row.kind),
+                status_word(&row.severity),
+                status_word(&row.status),
+                format!(
+                    "<span class=\"apex-mono-id\">{}</span>",
+                    escape(&row.tenant)
+                ),
+                escape(&row.detail),
+            ]
+        })
+        .collect();
+
+    let movement_rows = data
+        .movement
+        .iter()
+        .map(|row| {
+            vec![
+                escape(&row.month),
+                format!("<span class=\"apex-num\">{}</span>", row.activations),
+                format!("<span class=\"apex-num\">{}</span>", escape(&row.new_mrr)),
+                format!("<span class=\"apex-num\">{}</span>", row.cancellations),
+                format!(
+                    "<span class=\"apex-num\">{}</span>",
+                    escape(&row.churned_mrr)
+                ),
+                format!("<span class=\"apex-num\">{}</span>", escape(&row.net_mrr)),
+            ]
+        })
+        .collect();
+
+    format!(
+        "<div class=\"space-y-8\">\
+<div class=\"flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between\">\
+<div class=\"max-w-3xl\"><h1 class=\"apex-page-title\">Billing</h1>\
+<p class=\"mt-2 apex-em\">Subscription lifecycle, collections and provider state. Snapshot {}.</p></div>\
+<a href=\"/billing/plans\" class=\"inline-flex items-center justify-center px-6 py-2.5 apex-btn apex-btn--primary apex-btn--sm\">Plans</a>\
+</div>\
+{}\
+{}\
+{}\
+{}\
+{}\
+{}\
+{}\
+{}\
+{}\
+{}\
+{}\
+</div>",
+        escape(&data.generated_at),
+        notes,
+        kpi_grid("Money", &data.kpis),
+        kpi_grid("Collections", &data.collection_kpis),
+        kpi_grid("Provider health", &data.health_kpis),
+        table_section("Plan mix", &["Plan", "Subscriptions", "MRR", "Share"], mix_rows(&data.plan_mix)),
+        table_section(
+            "Interval mix",
+            &["Interval", "Subscriptions", "MRR", "Share"],
+            mix_rows(&data.interval_mix),
+        ),
+        table_section(
+            "MRR movement (6 months)",
+            &["Month", "Activations", "New MRR", "Cancellations", "Churned MRR", "Net"],
+            movement_rows,
+        ),
+        table_section(
+            "Subscriptions",
+            &["Tenant", "Plan", "Interval", "Status", "Provider id", "MRR", "Cycle end", "Ends at period end"],
+            subscriptions_rows,
+        ),
+        table_section(
+            "Invoices",
+            &["Invoice", "Tenant", "Status", "Total", "Tax", "Provider payment", "Paid"],
+            invoices_rows,
+        ),
+        table_section(
+            "Finance incidents",
+            &["Created", "Kind", "Severity", "Status", "Tenant", "Detail"],
+            incidents_rows,
+        ),
+        settlements,
+    )
+}
+
 /// CP billing plans page.
 pub fn control_plane_billing_plans_page() -> String {
     let table = Table {
@@ -7828,6 +8108,61 @@ mod tests {
 
     /// Settings actions must be real forms against the live
     /// API endpoints (previously inert buttons).
+    #[test]
+    fn billing_ops_page_renders_the_lifecycle_and_states_gaps_honestly() {
+        use crate::view_data::{
+            BillingIncidentRow, BillingOpsPageData, BillingSubscriptionRow, KpiCardData,
+        };
+
+        // No snapshot → explicit unavailable state, never a zero-filled board.
+        let unavailable = control_plane_billing_page_with_data(None);
+        assert!(unavailable.contains("Billing figures are unavailable"));
+
+        let data = BillingOpsPageData {
+            generated_at: "2026-10-24 12:00 UTC".into(),
+            kpis: vec![KpiCardData::new("MRR", "€20.00").with_hint("ARR €240.00")],
+            health_kpis: vec![KpiCardData::new("Webhook events 24h", "7")],
+            subscriptions: vec![BillingSubscriptionRow {
+                tenant: "tn_1".into(),
+                plan: "starter".into(),
+                interval: "monthly".into(),
+                status: "active".into(),
+                provider_id: "sub_1".into(),
+                cycle_end: "2026-11-24".into(),
+                cancel_at_period_end: true,
+                mrr: "€20.00".into(),
+            }],
+            incidents: vec![BillingIncidentRow {
+                created_at: "2026-10-24 11:00".into(),
+                kind: "mollie_subscription_amount_drift".into(),
+                severity: "high".into(),
+                status: "open".into(),
+                tenant: "<script>alert(1)</script>".into(),
+                detail: "expected 2000 provider 1900".into(),
+            }],
+            notes: vec!["settlements unavailable: Mollie is not configured".into()],
+            ..Default::default()
+        };
+        let html = control_plane_billing_page_with_data(Some(&data));
+        assert!(html.contains("€20.00"));
+        assert!(html.contains("sub_1"));
+        assert!(html.contains("mollie_subscription_amount_drift"));
+        assert!(html.contains("settlements unavailable"));
+        assert!(
+            html.contains("Provider health") && html.contains("Webhook events 24h"),
+            "webhook/incident health must be rendered, not just loaded"
+        );
+        assert!(
+            html.contains("apex-status--fail"),
+            "severity renders a tone"
+        );
+        assert!(
+            !html.contains("<script>alert(1)</script>"),
+            "tenant text is escaped, never interpolated raw"
+        );
+        assert!(!html.contains("<script"), "zero-JS surface");
+    }
+
     #[test]
     fn settings_pages_wire_actions_to_real_endpoints() {
         let keys = web_settings_api_keys_page();

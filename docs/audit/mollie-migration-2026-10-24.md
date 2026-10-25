@@ -106,6 +106,49 @@ changes only when the verified payment webhook lands. Customer onboarding
 takes the billing email from tenant settings, falling back to the billing
 address the invoice actually carries.
 
+## Control-plane visibility
+
+The operator sees the whole lifecycle, not just the webhook outcome.
+
+**API** (`/v1/admin/billing/*`, operator scope + system tenant):
+
+| route | answers |
+|---|---|
+| `GET /overview` | MRR/ARR/ARPA, active/trialing/past_due/unpaid counts, 30-day churn and new subscriptions, upgrades/downgrades/expansion MRR, renewals due in 7/30 days, cancel-at-period-end, plan and interval mix, six-month MRR movement, collections, incidents, webhook health and settlements |
+| `GET /subscriptions` | paginated rows (status/plan/tenant filters) with provider id, mandate presence, catalog MRR, cycle bounds, cancel-at-period-end |
+| `GET /invoices` | paginated invoices (status/tenant filters) with net/VAT/US tax/total, provider payment id and whether an allocation exists |
+| `GET /incidents` | finance incidents (`open` default = open + acknowledged; `all`, an exact status, or one id) |
+| `POST /incidents/{id}/resolve` | transitions to `resolved` with an operator note; guarded (`status IN (open, acknowledged)`) and audited as `billing.finance_incident_resolved` |
+| `GET /health` | webhook events processed/failed/pending in 24 h, last processed time, provider configuration, canceled subscriptions awaiting reconciliation |
+
+**Page** `GET /billing` (control plane) renders the same snapshot through the
+SSR path (`routes::admin::billing_ops::load_page_data` → `RouteData::billing_ops`
+→ `control_plane_billing_page_with_data`), so the page and the API can never
+disagree. When the store cannot be read, the page renders an explicit
+unavailable notice — never a zero-filled board.
+
+**Analytics that were previously omitted now have a writer.** The verified
+activation path records `previousPlan`, `previousInterval`,
+`previousMrrCents` and `newMrrCents` in the `billing.subscription_activated`
+audit; revenue (`/v1/admin/revenue`) and the cross-tenant plan breakdown derive
+upgrades, downgrades and expansion MRR from those facts instead of omitting
+them. Movement is the six-month activation/cancellation ledger, with churned
+MRR read from the retained subscription row each cancellation audit names.
+
+## PDF design authority
+
+All five PDF templates (invoice, DPA, compliance report, QBR, analytics
+export) now draw from one shared Typst module, `templates/ark.typ`: palette,
+type, page geometry, wordmark, chips/notices, money formatting. Templates
+carry data and content only — no colour literals, luma greys, font families,
+page setup, radii or derived tints. `tools/check_pdf_ark.py` is a REQUIRED
+validate lane (with `--self-test`) that fails a design fork, and
+`docs/architecture/pdf-design.md` states the rule. The five documents were
+rendered through the real `/v1/pdf/render` endpoint, rasterised and reviewed
+page by page (13 pages): serif display titles, two-tone wordmark including the
+running header, one-line footer with clearance, repeated table headers,
+non-splitting blocks, consistent money/percent formatting — all pass.
+
 ## The five audits
 
 ### Audit 1 — references (text, schema, env, wire vocabulary)
@@ -130,11 +173,11 @@ Also green: `check_processor_facts` (38 surfaces), `check_prod_billing_wiring`
 
 | suite | result |
 |---|---|
-| api-server | 2,274 / 2,274 |
+| api-server | 2,281 / 2,281 |
 | billing-service | 849 / 849 |
 | compliance | 955 / 955 |
 | sales-autopilot | 1,049 / 1,049 |
-| ui-foundation | 579 / 579 |
+| ui-foundation | 580 / 580 |
 | enterprise | 475 / 475 |
 | tracking-service | 254 / 254 |
 | template-renderer | 150 / 150 |
@@ -145,7 +188,7 @@ Also green: `check_processor_facts` (38 surfaces), `check_prod_billing_wiring`
 | pdf-renderer | 33 / 33 |
 | platform-catalog | 8 / 8 |
 
-**6,897 tests, 0 failed, 0 skipped.** `cargo check --tests` is clean for both
+**6,905 tests, 0 failed, 0 skipped.** `cargo check --tests` is clean for both
 provider-bearing crates; clippy-clean libs.
 
 ### Audit 3 — wire behaviour against a Mollie-shaped server (black box)

@@ -25,30 +25,19 @@
 
 #let data = json("data.json")
 
+#import "ark.typ": *
+
 #let tenant = if "tenant_name" in data and data.tenant_name != none { str(data.tenant_name) } else { "Not recorded" }
 #let generated = if "generated_at" in data { str(data.generated_at) } else { "Not recorded" }
 #let range = if "date_range" in data { data.date_range } else { (from: "—", to: "—") }
 #let s = if "summary" in data { data.summary } else { (:) }
 
-#set document(
+#show: page-setup.with(
   title: "Analytics Export — " + tenant,
-  author: "Bel Consulting OÜ (trading as ApexMail)",
+  footer-left: [ApexMail Analytics Export#meta-sep #range.from — #range.to],
+  footer-right: [Page #context { counter(page).display() } of #context { counter(page).final().first() }],
 )
 
-#set page(
-  paper: "a4",
-  margin: (top: 25mm, bottom: 25mm, left: 20mm, right: 20mm),
-  footer: [
-    #set text(size: 7pt, fill: luma(140))
-    #grid(
-      columns: (1fr, 1fr),
-      [ApexMail Analytics Export · #range.from — #range.to],
-      align(right)[Page #context { counter(page).display() } of #context { counter(page).final().first() }],
-    )
-  ],
-)
-
-#set text(font: ("Overpass", "Noto Sans", "DejaVu Sans"), size: 10pt, hyphenate: false)
 #set par(justify: true)
 
 // ---------------------------------------------------------------------------
@@ -84,26 +73,26 @@
 }
 
 #let rate-color(rate, good-threshold: 90, warn-threshold: 70) = {
-  if rate >= good-threshold { rgb("#16a34a") }
-  else if rate >= warn-threshold { rgb("#f59e0b") }
-  else { rgb("#ef4444") }
+  if rate >= good-threshold { tone-color("pos") }
+  else if rate >= warn-threshold { tone-color("warn") }
+  else { tone-color("neg") }
 }
 
 // ---------------------------------------------------------------------------
 // Header
 // ---------------------------------------------------------------------------
 
-#text(weight: "bold", size: 22pt, fill: rgb("#dc2626"))[Analytics Export]
+#text(font: display-font, weight: "semibold", size: 22pt, fill: ink)[Analytics Export]
 #v(2pt)
 #text(size: 12pt)[Tenant: #tenant]
 #v(2pt)
-#text(size: 9pt, fill: luma(120))[
+#text(size: 9pt, fill: muted)[
   Period: #range.from — #range.to
   #h(16pt) Generated: #generated
 ]
 
 #v(6pt)
-#line(length: 100%, stroke: 1pt + rgb("#000000"))
+#strong-rule()
 #v(12pt)
 
 // ---------------------------------------------------------------------------
@@ -120,44 +109,44 @@ counts recorded by the platform.
   column-gutter: 12pt,
   row-gutter: 12pt,
   // Row 1
-  block(fill: luma(248), inset: 12pt, radius: 0pt, width: 100%)[
-    #text(size: 8pt, fill: luma(120))[TOTAL SENT]
+  block(fill: limestone, stroke: (left: 2pt + rule), inset: 12pt, radius: 0pt, width: 100%)[
+    #eyebrow("TOTAL SENT")
     #v(2pt)
     #text(weight: "bold", size: 20pt)[#fmt-count("total_sent")]
   ],
-  block(fill: luma(248), inset: 12pt, radius: 0pt, width: 100%)[
-    #text(size: 8pt, fill: luma(120))[DELIVERED]
+  block(fill: limestone, stroke: (left: 2pt + rule), inset: 12pt, radius: 0pt, width: 100%)[
+    #eyebrow("DELIVERED")
     #v(2pt)
-    #text(weight: "bold", size: 20pt, fill: if "delivery_rate" in s { rate-color(s.delivery_rate) } else { luma(90) })[#fmt-count("total_delivered")]
-    #text(size: 9pt, fill: luma(120))[ (#fmt-rate("delivery_rate"))]
+    #text(weight: "bold", size: 20pt, fill: if "delivery_rate" in s { rate-color(s.delivery_rate) } else { faint })[#fmt-count("total_delivered")]
+    #text(size: 9pt, fill: muted)[ (#fmt-rate("delivery_rate"))]
   ],
-  block(fill: luma(248), inset: 12pt, radius: 0pt, width: 100%)[
-    #text(size: 8pt, fill: luma(120))[BOUNCED]
+  block(fill: limestone, stroke: (left: 2pt + rule), inset: 12pt, radius: 0pt, width: 100%)[
+    #eyebrow("BOUNCED")
     #v(2pt)
-    #text(weight: "bold", size: 20pt, fill: if "bounce_rate" in s { rate-color(100 - s.bounce_rate) } else { luma(90) })[#fmt-count("total_bounced")]
-    #text(size: 9pt, fill: luma(120))[ (#fmt-rate("bounce_rate"))]
+    #text(weight: "bold", size: 20pt, fill: if "bounce_rate" in s { rate-color(100 - s.bounce_rate) } else { faint })[#fmt-count("total_bounced")]
+    #text(size: 9pt, fill: muted)[ (#fmt-rate("bounce_rate"))]
   ],
   // Row 2
-  block(fill: luma(248), inset: 12pt, radius: 0pt, width: 100%)[
-    #text(size: 8pt, fill: luma(120))[OPENED]
+  block(fill: limestone, stroke: (left: 2pt + rule), inset: 12pt, radius: 0pt, width: 100%)[
+    #eyebrow("OPENED")
     #v(2pt)
     #text(weight: "bold", size: 20pt)[#fmt-count("total_opened")]
-    #text(size: 9pt, fill: luma(120))[ (#fmt-rate("open_rate"))]
+    #text(size: 9pt, fill: muted)[ (#fmt-rate("open_rate"))]
   ],
-  block(fill: luma(248), inset: 12pt, radius: 0pt, width: 100%)[
-    #text(size: 8pt, fill: luma(120))[CLICKED]
+  block(fill: limestone, stroke: (left: 2pt + rule), inset: 12pt, radius: 0pt, width: 100%)[
+    #eyebrow("CLICKED")
     #v(2pt)
     #text(weight: "bold", size: 20pt)[#fmt-count("total_clicked")]
-    #text(size: 9pt, fill: luma(120))[ (#fmt-rate("click_rate"))]
+    #text(size: 9pt, fill: muted)[ (#fmt-rate("click_rate"))]
   ],
-  block(fill: luma(248), inset: 12pt, radius: 0pt, width: 100%)[
-    #text(size: 8pt, fill: luma(120))[COMPLAINTS]
+  block(fill: limestone, stroke: (left: 2pt + rule), inset: 12pt, radius: 0pt, width: 100%)[
+    #eyebrow("COMPLAINTS")
     #v(2pt)
     #if complaint-available [
       #text(weight: "bold", size: 20pt)[#fmt-num(s.total_complaints)]
-      #text(size: 9pt, fill: luma(120))[ (#fmt-rate("complaint_rate"))]
+      #text(size: 9pt, fill: muted)[ (#fmt-rate("complaint_rate"))]
     ] else [
-      #text(weight: "bold", size: 14pt, fill: luma(120))[Not reported]
+      #text(weight: "bold", size: 14pt, fill: muted)[Not reported]
     ]
   ],
 )
@@ -173,8 +162,8 @@ counts recorded by the platform.
 #if "daily_stats" in data and data.daily_stats.len() > 0 [
   #table(
     columns: (auto, auto, auto, auto, auto, auto),
-    stroke: 0.5pt + luma(220),
-    fill: (x, y) => if y == 0 { rgb("#dc2626").lighten(90%) } else if calc.rem(y, 2) == 0 { luma(250) } else { none },
+    stroke: hairline,
+    fill: (x, y) => if y == 0 { limestone } else { none },
     inset: 6pt,
     align: (left, right, right, right, right, right),
     [*Date*], [*Sent*], [*Delivered*], [*Opened*], [*Clicked*], [*Bounced*],
@@ -202,8 +191,8 @@ counts recorded by the platform.
 #if "top_campaigns" in data and data.top_campaigns.len() > 0 [
   #table(
     columns: (1fr, auto, auto, auto),
-    stroke: 0.5pt + luma(220),
-    fill: (x, y) => if y == 0 { rgb("#dc2626").lighten(90%) } else { none },
+    stroke: hairline,
+    fill: (x, y) => if y == 0 { limestone } else { none },
     inset: 8pt,
     align: (left, right, right, right),
     [*Campaign*], [*Sent*], [*Open Rate*], [*Click Rate*],
@@ -229,8 +218,8 @@ counts recorded by the platform.
 #if "domain_breakdown" in data and data.domain_breakdown.len() > 0 [
   #table(
     columns: (1fr, auto, auto, auto),
-    stroke: 0.5pt + luma(220),
-    fill: (x, y) => if y == 0 { rgb("#dc2626").lighten(90%) } else { none },
+    stroke: hairline,
+    fill: (x, y) => if y == 0 { limestone } else { none },
     inset: 8pt,
     align: (left, right, right, right),
     [*Domain*], [*Volume*], [*Delivery Rate*], [*Open Rate*],
@@ -248,10 +237,10 @@ counts recorded by the platform.
 ]
 
 #v(16pt)
-#line(length: 100%, stroke: 0.5pt + luma(200))
+#line(length: 100%, stroke: hairline)
 #v(8pt)
 #align(center)[
-  #text(size: 8pt, fill: luma(120))[
-    Prepared by Bel Consulting OÜ (trading as ApexMail) · support\@apexmail.ee
+  #text(size: 8pt, fill: muted)[
+    Prepared by Bel Consulting OÜ (trading as ApexMail)#meta-sep support\@apexmail.ee
   ]
 ]

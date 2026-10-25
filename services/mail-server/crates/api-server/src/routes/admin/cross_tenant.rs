@@ -227,10 +227,10 @@ pub struct PlanBreakdown {
     pub monthly_revenue: f64,
     pub revenue_share: f64,
     pub avg_lifetime_days: f64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub upgrades_30d: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub downgrades_30d: Option<i64>,
+    /// Verified plan changes in the last 30 days, attributed to the plan the
+    /// tenant moved TO (the activation audit records both facts).
+    pub upgrades_30d: i64,
+    pub downgrades_30d: i64,
 }
 
 fn monthly_revenue_cents(
@@ -335,14 +335,38 @@ async fn get_cross_tenant_plans(
         Vec::new()
     };
 
-    // Plan-change velocity is omitted with an honest note: the `plan.changed`
-    // audit action it was derived from is never emitted by any writer, and
-    // mollie_webhook_events stores only event ids/types (no plan payload).
-    let notes: Vec<String> = vec![
-        "plan-change velocity (upgrades, downgrades, velocity) omitted: no writer \
-         records plan-change history"
-            .into(),
-    ];
+    // Plan-change velocity from the verified activation audit: each row
+    // carries the plan moved TO and the before/after monthly MRR.
+    let mut plan_upgrades: HashMap<String, i64> = HashMap::new();
+    let mut plan_downgrades: HashMap<String, i64> = HashMap::new();
+    if crate::routes::helpers::table_exists(db, "audit_logs").await? {
+        let changes: Vec<(String, i64, i64)> = sqlx::query_as(
+            "SELECT COALESCE(details->>'plan', '') AS plan, \
+                    CASE WHEN jsonb_typeof(details->'previousMrrCents') = 'number' \
+                         THEN (details->>'previousMrrCents')::bigint ELSE 0 END, \
+                    CASE WHEN jsonb_typeof(details->'newMrrCents') = 'number' \
+                         THEN (details->>'newMrrCents')::bigint ELSE 0 END \
+               FROM audit_logs \
+              WHERE action = 'billing.subscription_activated' \
+                AND details IS NOT NULL \
+                AND timestamp >= $1",
+        )
+        .bind(chrono::Utc::now() - chrono::Duration::days(30))
+        .fetch_all(db)
+        .await
+        .unwrap_or_default();
+        for (plan, previous, new) in changes {
+            if previous <= 0 {
+                continue;
+            }
+            if new > previous {
+                *plan_upgrades.entry(plan).or_default() += 1;
+            } else if new < previous {
+                *plan_downgrades.entry(plan).or_default() += 1;
+            }
+        }
+    }
+    let notes: Vec<String> = Vec::new();
 
     let mut plan_revenue: HashMap<String, i64> = HashMap::new();
     let mut plan_active_subs: HashMap<String, i64> = HashMap::new();
@@ -410,6 +434,8 @@ async fn get_cross_tenant_plans(
                 _ => 0.0,
             };
 
+            let upgrades_30d = *plan_upgrades.get(&plan).unwrap_or(&0);
+            let downgrades_30d = *plan_downgrades.get(&plan).unwrap_or(&0);
             PlanBreakdown {
                 plan,
                 tenant_count,
@@ -417,9 +443,8 @@ async fn get_cross_tenant_plans(
                 monthly_revenue,
                 revenue_share,
                 avg_lifetime_days: avg_lifetime,
-                // No plan-change history source exists (see note).
-                upgrades_30d: None,
-                downgrades_30d: None,
+                upgrades_30d,
+                downgrades_30d,
             }
         })
         .collect();
@@ -897,7 +922,14 @@ mod adversarial_tests {
             .await
             .expect("plans");
         assert!(plans.total_tenants >= 1);
-        assert!(!plans.notes.is_empty(), "omission notes are mandatory");
+        // Every metric this endpoint reports now has a writer (plan-change
+        // velocity comes from the verified activation audit), so there is no
+        // omission note left to print.
+        assert!(
+            plans.notes.is_empty(),
+            "no omitted metric remains: {:?}",
+            plans.notes
+        );
         let entry = plans
             .plans
             .iter()
@@ -907,8 +939,8 @@ mod adversarial_tests {
         assert_eq!(entry.monthly_revenue, 50.0);
         assert_eq!(entry.active_subscriptions, 1);
         assert!(entry.avg_lifetime_days > 0.0);
-        assert!(entry.upgrades_30d.is_none());
-        assert!(entry.downgrades_30d.is_none());
+        assert_eq!(entry.upgrades_30d, 0);
+        assert_eq!(entry.downgrades_30d, 0);
         assert!(plans.total_revenue >= 50.0);
         // Velocity is honestly omitted from the wire format.
         let json = serde_json::to_value(&plans).unwrap();

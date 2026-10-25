@@ -71,6 +71,21 @@ pub fn catalog_amount_cents(plan_name: &str, interval: &str, currency: &str) -> 
     (cents > 0).then_some(cents)
 }
 
+/// The monthly-normalized catalog price of a plan/interval, in EUR cents
+/// (round-half-up yearly math, mirroring the revenue analytics). Used ONLY to
+/// classify a plan change in the activation audit: upgrade/downgrade and the
+/// expansion/contraction MRR.
+fn catalog_monthly_mrr_cents(plan_name: &str, interval: &str) -> i64 {
+    let Some(plan) = platform_catalog::plan_by_name(plan_name) else {
+        return 0;
+    };
+    if interval_months(interval) == Some(12) {
+        (plan.price_yearly_cents + 6) / 12
+    } else {
+        plan.price_monthly_cents
+    }
+}
+
 fn period_end(start: DateTime<Utc>, months: u32) -> Result<DateTime<Utc>, String> {
     start
         .checked_add_months(Months::new(months))
@@ -149,22 +164,40 @@ pub async fn activate_from_paid_checkout(
 
     // Any previous provider subscription for this tenant is canceled BEFORE
     // the new one is created: a plan change must never leave two live
-    // subscriptions charging the same customer. The ids are read while the
-    // rows are still live (the upsert below flips them to `canceled`).
-    let previous: Vec<(String, Option<String>)> = sqlx::query_as(
-        "SELECT mollie_subscription_id, mollie_customer_id FROM mollie_subscriptions \
+    // subscriptions charging the same customer. The ids — AND the plan facts
+    // the revenue analytics need to classify the change (upgrade/downgrade,
+    // expansion/contraction MRR) — are read while the rows are still live
+    // (the upsert below flips them to `canceled`).
+    type PreviousSubscription = (String, Option<String>, Option<String>, Option<String>);
+    let previous: Vec<PreviousSubscription> = sqlx::query_as(
+        "SELECT mollie_subscription_id, mollie_customer_id, plan, billing_interval \
+         FROM mollie_subscriptions \
          WHERE tenant_id = $1 AND left(mollie_subscription_id, 4) = 'sub_' \
-           AND status IN ('active', 'trialing', 'past_due', 'unpaid')",
+           AND status IN ('active', 'trialing', 'past_due', 'unpaid') \
+         ORDER BY created_at DESC",
     )
     .bind(tenant_id)
     .fetch_all(pool)
     .await
     .map_err(|error| format!("previous subscription lookup failed: {error}"))?;
-    for (subscription_id, customer_id) in previous {
+    let mut previous_plan: Option<String> = None;
+    let mut previous_interval: Option<String> = None;
+    let mut previous_mrr_cents: i64 = 0;
+    for (subscription_id, customer_id, plan, interval) in previous {
+        if previous_plan.is_none() {
+            previous_mrr_cents = plan
+                .as_deref()
+                .zip(interval.as_deref())
+                .map(|(plan, interval)| catalog_monthly_mrr_cents(plan, interval))
+                .unwrap_or(0);
+            previous_plan = plan;
+            previous_interval = interval;
+        }
         if let Some(customer_id) = customer_id {
             cancel_provider_subscription_object(&customer_id, &subscription_id).await?;
         }
     }
+    let new_mrr_cents = catalog_monthly_mrr_cents(plan_name, interval);
 
     // Provider object first: its id is required by the (NOT NULL, unique)
     // column, and an idempotency key makes a retried webhook replay the same
@@ -317,6 +350,13 @@ pub async fn activate_from_paid_checkout(
                 "currency": currency.trim().to_ascii_uppercase(),
                 "periodStart": start.to_rfc3339(),
                 "periodEnd": end.to_rfc3339(),
+                // Plan-change analytics: the MRR before and after this
+                // verified checkout. A zero/absent previous fact means "new
+                // subscription".
+                "previousPlan": previous_plan,
+                "previousInterval": previous_interval,
+                "previousMrrCents": previous_mrr_cents,
+                "newMrrCents": new_mrr_cents,
             }),
             now,
         )
