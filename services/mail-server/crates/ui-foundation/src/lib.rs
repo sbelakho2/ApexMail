@@ -404,6 +404,54 @@ mod tests {
         }
     }
 
+    /// The reading ladder, pinned at the authority (owner directive
+    /// 2026-10-25: "hierarchy globally is still a mess and does not help
+    /// with reading"). The measured regression was h1 42px, prose h2
+    /// 13px UPPERCASE (smaller than body), h3 15px (equal to body). Every
+    /// level must now be a distinct, monotonically increasing step, and
+    /// the section heading must not be a tiny all-caps label.
+    #[test]
+    fn prose_heading_scale_is_monotonic() {
+        fn rem_of(sheet: &str, selector: &str) -> f64 {
+            let idx = sheet
+                .find(&format!("{selector} {{"))
+                .unwrap_or_else(|| panic!("missing rule {selector}"));
+            let body = &sheet[idx..];
+            let body = &body[..body.find('}').expect("rule closes")];
+            let fs = body
+                .find("font-size: ")
+                .unwrap_or_else(|| panic!("{selector} declares no font-size"));
+            let rest = &body[fs + "font-size: ".len()..];
+            let value = rest.split(';').next().unwrap_or_default().trim();
+            if let Some(rem) = value.strip_suffix("rem") {
+                rem.parse::<f64>().expect("rem literal")
+            } else if let Some(px) = value.strip_suffix("px") {
+                px.parse::<f64>().expect("px literal") / 16.0
+            } else {
+                panic!("{selector} font-size {value:?} is not rem/px")
+            }
+        }
+        let sheet = crate::ARK_CSS;
+        let h1 = rem_of(sheet, ".apex-prose h1");
+        let h2 = rem_of(sheet, ".apex-prose h2");
+        let h3 = rem_of(sheet, ".apex-prose h3");
+        let body = rem_of(sheet, "body");
+        assert!(h2 > h3, "prose h2 ({h2}rem) must outrank h3 ({h3}rem)");
+        assert!(
+            h3 > body,
+            "prose h3 ({h3}rem) must outrank body text ({body}rem)"
+        );
+        assert!(h1 >= h2, "prose h1 ({h1}rem) must be at least h2 ({h2}rem)");
+        // The section heading is a display step, not a caps label.
+        let idx = sheet.find(".apex-prose h2 {").expect("prose h2 rule");
+        let block = &sheet[idx..];
+        let block = &block[..block.find('}').expect("rule closes")];
+        assert!(
+            !block.contains("text-transform: uppercase"),
+            "prose h2 must not be an all-caps label: {block}"
+        );
+    }
+
     /// The palette law, pinned at the authority: ink structure, blue
     /// interaction, amber caution, red destruction and the wordmark, and
     /// NO green and NO purple anywhere, in light or dark.
