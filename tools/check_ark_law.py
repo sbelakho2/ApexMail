@@ -168,6 +168,30 @@ def is_apex(token: str) -> bool:
     return token == "apex-nav-cell" or token.startswith("apex-")
 
 
+JINJA_TAG = re.compile(r"{%.*?%}|{{.*?}}", re.S)
+
+
+def class_tokens(line: str) -> list[str]:
+    """Class tokens of a markup line, ignoring template machinery.
+
+    `{% ... %}` / `{{ ... }}` spans are template syntax, not classes the
+    browser ever receives: a block declared INSIDE an attribute
+    (base.html's `{% block body_class %}`) must not read as two unlawful
+    names. The CONTENTS of a body_class block ARE real classes and are
+    scanned as such.
+    """
+    clean = JINJA_TAG.sub(" ", line)
+    tokens: list[str] = []
+    for match in re.finditer(r'class=\\?"([^"\\]*)\\?"', clean):
+        tokens.extend(match.group(1).split())
+    marker = "{% block body_class %}"
+    if marker in line:
+        rest = line.split(marker, 1)[1]
+        content = rest.split("{%", 1)[0]
+        tokens.extend(JINJA_TAG.sub(" ", content).split())
+    return tokens
+
+
 def scan() -> int:
     vocab = authority_vocabulary()
     failures: list[tuple[str, int, str]] = []
@@ -190,11 +214,7 @@ def scan() -> int:
             # Test code and assert strings are not product markup.
             if in_tests or "assert" in line or line.strip().startswith("//"):
                 continue
-            for m in re.finditer(r'class=\\?"([^"\\]*)\\?"', line):
-                raw = m.group(1)
-                # Leave tiny template fragments ({...}) alone: the sweep
-                # owns them and cssgen ignores merged tokens.
-                for token in raw.split():
+            for token in class_tokens(line):
                     if "{" in token or "}" in token:
                         continue
                     if token in NON_STYLE:
