@@ -104,7 +104,7 @@ pub fn render_bar_chart(data: &[(String, f64)], width: u32, height: u32) -> Stri
         // `var()` never resolves in SVG presentation attributes — route
         // theme colors through a `style` attribute instead.
         svg.push_str(&format!(
-            r##"<rect x="{x:.1}" y="{y:.1}" width="{bar_w:.1}" height="{bar_h:.1}" style="fill: {color}" rx="2" opacity="0.88"><title>{title}</title></rect>"##,
+            r##"<rect x="{x:.1}" y="{y:.1}" width="{bar_w:.1}" height="{bar_h:.1}" style="fill: {color}"><title>{title}</title></rect>"##,
             title = html_escape_svg(&format!("{label}: {}", format_y_axis(*val))),
         ));
 
@@ -220,14 +220,14 @@ pub fn render_line_chart(data: &[(String, f64)], width: u32, height: u32) -> Str
             val
         );
         points_coords.push_str(&format!(
-            r##"<circle cx="{x:.1}" cy="{y:.1}" r="3" style="fill: {dot_color}" stroke="{dot_stroke}" stroke-width="1.5">{point_title}</circle>"##,
+            r##"<circle cx="{x:.1}" cy="{y:.1}" r="3" style="fill: {dot_color}" stroke="{dot_stroke}" stroke-width="1">{point_title}</circle>"##,
         ));
     }
 
     // Line path
     let line_color = "rgb(var(--primary))";
     svg.push_str(&format!(
-        r##"<path d="{path_coords}" fill="none" style="stroke: {line_color}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />"##,
+        r##"<path d="{path_coords}" fill="none" style="stroke: {line_color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />"##,
     ));
 
     // Area fill
@@ -332,15 +332,16 @@ pub fn render_pie_chart(data: &[(String, f64)], width: u32, height: u32) -> Stri
         return render_empty_chart(width, height, "No pie chart data");
     }
 
+    // Same ARK vocabulary as the bar ramp: ink + baltic blue + amber.
     let colors: &[&str] = &[
+        "rgb(var(--foreground))",
         "rgb(var(--primary))",
-        "rgb(var(--success))",
+        "rgb(var(--brand-300))",
         "rgb(var(--warning))",
-        "rgb(var(--destructive))",
-        "rgb(var(--info))",
-        "var(--cp-violet,#8b5cf6)",
-        "var(--cp-pink,#ec4899)",
-        "var(--cp-teal,#14b8a6)",
+        "rgb(var(--surface-500))",
+        "rgb(var(--brand-600))",
+        "rgb(var(--warning-300))",
+        "rgb(var(--surface-400))",
     ];
 
     let mut svg = build_svg_open(width, height, "Pie chart");
@@ -405,7 +406,7 @@ pub fn render_pie_chart(data: &[(String, f64)], width: u32, height: u32) -> Stri
                 "M{x1:.2},{y1:.2} A{outer_r},{outer_r} 0 {large_arc},1 {x2:.2},{y2:.2} L{ix2:.2},{iy2:.2} A{inner_r},{inner_r} 0 {large_arc},0 {ix1:.2},{iy1:.2} Z",
             );
             svg.push_str(&format!(
-                r##"<path d="{d}" style="fill: {color}" opacity="0.86" stroke="{separator_color}" stroke-width="1.5">{slice_title}</path>"##,
+                r##"<path d="{d}" style="fill: {color}" stroke="{separator_color}" stroke-width="1">{slice_title}</path>"##,
             ));
         }
 
@@ -425,7 +426,7 @@ pub fn render_pie_chart(data: &[(String, f64)], width: u32, height: u32) -> Stri
             let pct_str = format!("{pct}%");
             let label_color = "white";
             svg.push_str(&format!(
-                r##"<text x="{lx:.1}" y="{ly:.1}" text-anchor="middle" dominant-baseline="central" font-size="10" font-family="system-ui,sans-serif" font-weight="700" fill="{label_color}">{pct_str}</text>"##,
+                r##"<text x="{lx:.1}" y="{ly:.1}" text-anchor="middle" dominant-baseline="central" font-size="10" font-family="Overpass, system-ui, sans-serif" font-weight="700" fill="{label_color}">{pct_str}</text>"##,
             ));
         }
     }
@@ -505,7 +506,7 @@ pub fn render_gauge(value: f64, max: f64, width: u32, height: u32) -> String {
     let pct_str = format!("{:.1}%", pct * 100.0);
     let text_color = "rgb(var(--foreground))";
     svg.push_str(&format!(
-        r##"<text x="{cx}" y="{cy}" text-anchor="middle" dominant-baseline="central" font-size="22" font-family="system-ui,sans-serif" font-weight="800" style="fill: {text_color}">{pct_str}</text>"##,
+        r##"<text x="{cx}" y="{cy}" text-anchor="middle" dominant-baseline="central" font-size="22" font-family="Overpass, system-ui, sans-serif" font-weight="800" style="fill: {text_color}">{pct_str}</text>"##,
     ));
 
     // Tick marks
@@ -559,14 +560,14 @@ pub fn render_horizontal_bar_chart(data: &[(String, f64)], width: u32, _height: 
         let label_y = y + bar_h * 0.6;
         let label_color = "rgb(var(--foreground))";
         svg.push_str(&format!(
-            r##"<text x="8" y="{label_y:.1}" text-anchor="start" font-size="12" font-family="system-ui,sans-serif" font-weight="500" style="fill: {label_color}">{}</text>"##,
+            r##"<text x="8" y="{label_y:.1}" text-anchor="start" font-size="12" font-family="Overpass, system-ui, sans-serif" font-weight="500" style="fill: {label_color}">{}</text>"##,
             html_escape_svg(&display_label),
         ));
 
         // Bar
         let lx = label_w + 4.0;
         svg.push_str(&format!(
-            r##"<rect x="{lx:.1}" y="{y:.1}" width="{bar_w:.1}" height="{bar_h}" style="fill: {color}" rx="2" opacity="0.85" />"##,
+            r##"<rect x="{lx:.1}" y="{y:.1}" width="{bar_w:.1}" height="{bar_h}" style="fill: {color}" />"##,
         ));
 
         // Value label
@@ -574,7 +575,7 @@ pub fn render_horizontal_bar_chart(data: &[(String, f64)], width: u32, _height: 
         let vy = y + bar_h * 0.6;
         let val_color = "rgb(var(--muted-foreground))";
         svg.push_str(&format!(
-            r##"<text x="{vx:.1}" y="{vy:.1}" text-anchor="start" font-size="11" font-family="system-ui,sans-serif" font-weight="600" style="fill: {val_color}">{}</text>"##,
+            r##"<text x="{vx:.1}" y="{vy:.1}" text-anchor="start" font-size="11" font-family="Overpass, system-ui, sans-serif" font-weight="600" style="fill: {val_color}">{}</text>"##,
             format_y_axis(*val),
         ));
     }
@@ -605,7 +606,7 @@ fn build_svg_line_h(x1: f64, x2: f64, y: f64) -> String {
 fn build_svg_y_label(x: f64, y: f64, text: &str) -> String {
     let color = "rgb(var(--muted-foreground))";
     format!(
-        r##"<text x="{x:.1}" y="{y:.1}" text-anchor="end" font-size="11" font-family="system-ui,sans-serif" style="fill: {color}">{text}</text>"##,
+        r##"<text x="{x:.1}" y="{y:.1}" text-anchor="end" font-size="11" font-family="Overpass, system-ui, sans-serif" style="fill: {color}">{text}</text>"##,
     )
 }
 
@@ -618,24 +619,28 @@ fn build_svg_text_center(
     weight: &str,
 ) -> String {
     format!(
-        r##"<text x="{x:.1}" y="{y:.1}" text-anchor="middle" font-size="{font_size}" font-family="system-ui,sans-serif" font-weight="{weight}" style="fill: {fill}">{text}</text>"##,
+        r##"<text x="{x:.1}" y="{y:.1}" text-anchor="middle" font-size="{font_size}" font-family="Overpass, system-ui, sans-serif" font-weight="{weight}" style="fill: {fill}">{text}</text>"##,
     )
 }
 
 // ── Helpers ──────────────────────────────────────────────────
 
 fn bar_color(i: usize) -> &'static str {
+    // ARK rule: charts draw from the ink and baltic-blue ramps plus
+    // caution amber — the same colour vocabulary as the rest of the UI.
+    // No third-party palettes (the pre-ARK tailwind violet/pink/teal
+    // fallbacks were removed in the ARK completion sweep 2026-10-25).
     const COLORS: &[&str] = &[
+        "rgb(var(--foreground))",
         "rgb(var(--primary))",
-        "rgb(var(--success))",
+        "rgb(var(--brand-300))",
         "rgb(var(--warning))",
-        "rgb(var(--info))",
-        "rgb(var(--destructive))",
-        "var(--cp-violet,#8b5cf6)",
-        "var(--cp-pink,#ec4899)",
-        "var(--cp-teal,#14b8a6)",
-        "var(--cp-amber,#f59e0b)",
-        "var(--cp-blue,#3b82f6)",
+        "rgb(var(--surface-500))",
+        "rgb(var(--brand-600))",
+        "rgb(var(--warning-300))",
+        "rgb(var(--surface-400))",
+        "rgb(var(--brand-400))",
+        "rgb(var(--surface-300))",
     ];
     COLORS[i % COLORS.len()]
 }
@@ -670,7 +675,7 @@ fn html_escape_svg(s: &str) -> String {
 fn render_empty_chart(width: u32, height: u32, reason: &str) -> String {
     let text_color = "rgb(var(--muted-foreground))";
     format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" role="img" aria-label="Empty chart"><rect width="100%" height="100%" fill="transparent" rx="2" /><text x="50%" y="45%" text-anchor="middle" dominant-baseline="central" font-size="13" font-family="system-ui,sans-serif" style="fill: {text_color}" opacity="0.6">{reason}</text></svg>"##,
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" role="img" aria-label="Empty chart"><rect width="100%" height="100%" fill="transparent" /><text x="50%" y="45%" text-anchor="middle" dominant-baseline="central" font-size="13" style="fill: {text_color}; font-family: var(--font-sans)">{reason}</text></svg>"##,
     )
 }
 

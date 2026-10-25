@@ -322,9 +322,8 @@ impl<'a> ShellHeader<'a> {
         };
 
         format!(
-            "<header class=\"apex-console-header sticky top-0 z-20 flex h-16 items-center justify-between border-b px-8\">\
+            "<header class=\"apex-console-header sticky top-0 z-20 flex h-16 items-center justify-between border-b pr-8 pl-14 md:px-8\">\
                 <div class=\"flex items-center gap-4\">\
-                    {mobile_toggle}\
                     <form method=\"get\" action=\"/campaigns\" role=\"search\" class=\"relative hidden md:block\">\
                         <label class=\"sr-only apex-label\" for=\"global-search\">Search campaigns</label>\
                         <div class=\"flex items-center gap-2 min-w-[220px]\">\
@@ -341,7 +340,6 @@ impl<'a> ShellHeader<'a> {
                     </div>\
                 </div>\
             </header>",
-            mobile_toggle = shell_icon("menu", "h-5 w-5"),
             plan_label_block = plan_label_block,
             identity_block = identity_block,
             avatar = safe_avatar,

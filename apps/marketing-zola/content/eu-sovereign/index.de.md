@@ -41,7 +41,7 @@ Was sich gegenüber Global ändert, klar ausgedrückt:
 | | Global (Standard) | EU-only |
 |---|---|---|
 | Versand über dedizierte IPs | Eigene Relay-MTAs von ApexMail | Eigene Relay-MTAs von ApexMail |
-| Alles Übrige | Gemeinsamer Pool — AWS SES in der konfigurierten EU-Region | Eigene EU-MTAs von ApexMail |
+| Alles Übrige | Gemeinsamer Pool — AWS SES in der konfigurierten EU-Region (die Deutschland umfassen kann) | Eigene EU-MTAs von ApexMail |
 | Route nicht verfügbar | Anbieter-Failover | **Anhalten mit benanntem Grund** — kein Drittanbieter-Fallback |
 
 Verfügbarkeit und Preis: enthalten bei [Enterprise](/de/enterprise/) Cloud und in der Compliance-Vertragslinie; in den Self-Service-Tarifen ist es das Add-on **EU-only routing** für **149 €/Monat (165 US$/Monat)** ab Pro — der exakte Katalogwert.
@@ -74,7 +74,7 @@ Belege: Beide Endpunkte sind live und unauthentifizierte Oberflächen der öffen
 
 Das [Unterauftragsverarbeiter-Register](/de/subprocessors/) wird aus der Konfiguration der Bereitstellung selbst erzeugt; die gelistete Menge kann daher nicht von dem abweichen, was tatsächlich läuft. Unter EU-only-Routing trägt der Eintrag Amazon Web Services SES keine Mail eines Mandanten: Die Nachricht verlässt das System ausschließlich über die eigenen MTAs von ApexMail auf Hetzner-Infrastruktur (Hetzner Online GmbH, Finnland). Die übrigen Einträge sind Zahlungen (Mollie B.V., Amsterdam) und optionale OAuth-Anmeldung (Google, GitHub) — jeweils mit Verarbeitungsland und Übermittlungsmechanismus im Register ausgewiesen.
 
-Anders gesagt: Unter EU-only trägt keine US-kontrollierte dritte Partei die Mail. Unter Global tut dies AWS SES — in einer EU-Region, unter dem AWS-AVV und den SCCs, und genau das sagt das Register.
+Anders gesagt: Unter EU-only trägt keine US-kontrollierte dritte Partei die Mail. Unter Global tut dies AWS SES — in EU-Regionen (die Deutschland umfassen können), unter dem AWS-AVV und den SCCs, und genau das sagt das Register.
 
 Belege: Das [Unterauftragsverarbeiter-Register](/de/subprocessors/) (generiert, drift-gated), Abschnitt 5 der [AVV](/de/dpa/) und die [Datenstandort-Matrix](/de/data-locations/).
 

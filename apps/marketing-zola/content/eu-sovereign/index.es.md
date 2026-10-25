@@ -41,7 +41,7 @@ Lo que cambia frente a Global, dicho con claridad:
 | | Global (predeterminado) | EU-only |
 |---|---|---|
 | Envíos por IP dedicada | MTA de retransmisión propios de ApexMail | MTA de retransmisión propios de ApexMail |
-| Todo lo demás | Pool compartido — AWS SES en su región de la UE configurada | MTA europeos propios de ApexMail |
+| Todo lo demás | Pool compartido — AWS SES en su región de la UE configurada (puede incluir Alemania) | MTA europeos propios de ApexMail |
 | Ruta no disponible | Conmutación al proveedor | **Retención con motivo nombrado** — sin respaldo de terceros |
 
 Disponibilidad y precio: incluido en [Enterprise](/es/enterprise/) Cloud y en la línea contractual Compliance; en los planes de autoservicio es el complemento **EU-only routing** a **149 €/mes (165 US$/mes)** desde Pro — la cifra exacta del catálogo.
@@ -74,7 +74,7 @@ Evidencia: ambos endpoints son superficies públicas, vivas y sin autenticación
 
 El [registro de subencargados](/es/subprocessors/) se genera desde la configuración del propio despliegue, así que el conjunto listado no puede desviarse de lo que realmente se ejecuta. Con enrutamiento EU-only, la entrada de Amazon Web Services SES no transporta el correo de un inquilino: el mensaje sale exclusivamente por los MTA propios de ApexMail, operados sobre infraestructura de Hetzner (Hetzner Online GmbH, Finlandia). Las entradas restantes son pagos (Mollie B.V., Ámsterdam) e inicio de sesión OAuth opcional (Google, GitHub), cada una con su país de procesamiento y su mecanismo de transferencia indicados en el registro.
 
-Dicho de otro modo: con EU-only, ningún tercero controlado por EE. UU. transporta el correo. Con Global, AWS SES sí lo hace — en una región de la UE, bajo el DPA y las CCT de AWS, y el registro dice exactamente eso.
+Dicho de otro modo: con EU-only, ningún tercero controlado por EE. UU. transporta el correo. Con Global, AWS SES sí lo hace — en regiones de la UE (que pueden incluir Alemania), bajo el DPA y las CCT de AWS, y el registro dice exactamente eso.
 
 Evidencia: el [registro de subencargados](/es/subprocessors/) (generado y protegido contra desviaciones), la sección 5 del [DPA](/es/dpa/) y la [matriz de ubicaciones de datos](/es/data-locations/).
 

@@ -43,10 +43,91 @@ structural_failure = False
 
 APP_SURFACES = {"web", "control-plane"}
 
+# ── Marketing copy surfaces (owner directive 2026-10-25: the copy lint
+#    applies everywhere). Template text nodes are scanned with Tera tags and
+#    HTML markup stripped; i18n.json values are scanned per locale. ──
+MARKETING_TEMPLATES = ROOT / "apps/marketing-zola/templates"
+I18N_CATALOG = ROOT / "apps/marketing-zola/data/i18n.json"
+_TERA_TAG = re.compile(r"\{%.*?%\}|\{\{.*?\}\}|\{#.*?#\}", re.S)
+_HTML_TAG = re.compile(r"<[^>]+>", re.S)
+
+
+def template_text_nodes(text: str) -> str:
+    """The visible fallback copy of a Tera template: Tera directives and
+    HTML tags removed."""
+    return _HTML_TAG.sub(" ", _TERA_TAG.sub(" ", text))
+
+
+def marketing_copy_sites():
+    """(path, line, phrase) for banned phrases on marketing surfaces."""
+    sites = []
+    if MARKETING_TEMPLATES.is_dir():
+        for path in sorted(MARKETING_TEMPLATES.rglob("*.html")):
+            text = template_text_nodes(path.read_text(errors="ignore"))
+            for phrase in BANNED_PHRASES:
+                if phrase in text.lower():
+                    sites.append((str(path), 0, phrase))
+    if I18N_CATALOG.is_file():
+        import json as _json
+
+        catalog = _json.loads(I18N_CATALOG.read_text())
+        def walk(node, where):
+            if isinstance(node, dict):
+                for k, v in node.items():
+                    walk(v, f"{where}.{k}")
+            elif isinstance(node, list):
+                for i, v in enumerate(node):
+                    walk(v, f"{where}[{i}]")
+            elif isinstance(node, str):
+                low = node.lower()
+                for phrase in BANNED_PHRASES:
+                    if re.search(
+                        r"(?<![A-Za-z0-9_-])" + re.escape(phrase) + r"(?![A-Za-z0-9_-])",
+                        low,
+                    ):
+                        sites.append((str(I18N_CATALOG), where, phrase))
+        walk(catalog, "i18n")
+    return sites
+
 BANNED_PHRASES = {
+    # The content-standards table (docs/marketing/content-standards.md) plus
+    # the docs-lint filler vocabulary, enforced on every copy surface:
+    # marketing templates and i18n values join the flash strings.
     "enterprise-grade": "say what is actually true about the deployment instead",
     "lightning-fast": "drop the speed superlative — state the mechanism or number",
     "seamless": "describe the actual flow; nothing is seamless",
+    "seamlessly": "describe the actual flow; nothing is seamless",
+    "world-class": "name the measurable achievement",
+    "best-in-class": "state the objective comparison",
+    "effortless": "state the number of steps",
+    "powerful": "name the capability",
+    "robust": "state the reliability data",
+    "cutting-edge": "name the technology",
+    "state-of-the-art": "name the technology",
+    "revolutionary": "remove the claim",
+    "unmatched": "substantiate with an independent comparison or remove",
+    "built for scale": "state the scale numbers",
+    "secure by design": "name the security controls",
+    "developer-first": "name the developer features (API, SDKs, docs)",
+    "premium": "remove the tier adjective",
+    "comprehensive": "state what is actually covered",
+    "battle-tested": "state the production evidence",
+    "production-ready": "state the conformance evidence",
+    "game-changing": "remove the claim",
+    "next-generation": "name the generation's actual mechanism",
+    "future-proof": "state what is guaranteed",
+    "turnkey": "state the setup steps",
+    "single pane of glass": "name the surfaces it unifies",
+    "supercharge": "state the measured change",
+    "unlock": "state what the reader can do",
+    "empower": "state what the reader can do",
+    "elevate": "state the change",
+    "foster": "state the effect",
+    "delve": "use 'read' or 'review'",
+    "leverage": "use 'use'",
+    "in today's": "start with the fact",
+    "not merely": "drop the contrast construction",
+    "the property you can rely on": "state the property",
 }
 
 # "tenant" is operator vocabulary — customer-facing (web-surface) flash
@@ -196,7 +277,17 @@ def main(argv: list[str]) -> int:
     if exempted:
         print(f"operator-region 'tenant' flashes exempt (admin surface): {exempted}")
 
-    # ── 3. app-surface fixture text (when the export is available) ────────
+    # ── 3. marketing copy (templates' visible text + i18n values) ─────────
+    marketing_sites = marketing_copy_sites()
+    checked = 0
+    for path, where, phrase in marketing_sites:
+        print(f"FAIL banned-phrase {path}:{where} — {phrase!r} "
+              f"({BANNED_PHRASES[phrase]})")
+        failures.append(f"banned-phrase {path}:{where}")
+        checked += 1
+    print(f"marketing copy surfaces: {checked} finding(s)")
+
+    # ── 4. app-surface fixture text (when the export is available) ────────
     if fixtures.is_dir():
         from ui_html_rules import iter_documents
         docs = 0

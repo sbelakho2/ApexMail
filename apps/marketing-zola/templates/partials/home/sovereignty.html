@@ -57,7 +57,7 @@
   <div class="apex-notice mt-8">
     <b class="apex-notice__legend">Scope</b>
     <p>
-      {% if i18n_data and i18n_data[l] and i18n_data[l]["home_sovereignty"] and i18n_data[l]["home_sovereignty"]["note"] %}{{ i18n_data[l]["home_sovereignty"]["note"] | safe }}{% else %}The Global default delivers through AWS SES in its EU (Ireland) region, an EU region of a US company. EU-only routing removes that transport; the full comparison is on <a href="/eu-sovereign/">the sovereignty page</a>.{% endif %}
+      {% if i18n_data and i18n_data[l] and i18n_data[l]["home_sovereignty"] and i18n_data[l]["home_sovereignty"]["note"] %}{{ i18n_data[l]["home_sovereignty"]["note"] | safe }}{% else %}The Global default delivers through AWS SES in its EU regions, which may include Germany — EU regions of a US company; ApexMail's own hosting is in Finland. EU-only routing removes that transport; the full comparison is on <a href="/eu-sovereign/">the sovereignty page</a>.{% endif %}
     </p>
   </div>
   <p class="mt-6">

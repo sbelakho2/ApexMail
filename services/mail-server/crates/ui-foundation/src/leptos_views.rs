@@ -6133,15 +6133,9 @@ fn render_cp_collection_page(
                 {}\
             </div>\
             <div class=\"grid gap-6 sm:grid-cols-3\">{}</div>\
-            <section class=\"border overflow-hidden\">\
-                <div class=\"px-8 py-6 border-b flex items-center justify-between\">\
-                    <h2 class=\"apex-section-head\">{}</h2>\
-                    <div class=\"flex items-center gap-2\">\
-                        <span class=\"w-1.5 h-1.5\"></span>\
-                        <span class=\"apex-em apex-section-head\">Real-time</span>\
-                    </div>\
-                </div>\
-                {}\
+            <section class=\"apex-panel\">\
+                <h2 class=\"apex-panel__head\">{}</h2>\
+                <div class=\"apex-panel__body\">{}</div>\
             </section>\
         </div>",
         title,
@@ -6943,9 +6937,9 @@ nothing is shown rather than a zero-filled board. Retry when the store recovers.
             .collect::<Vec<_>>()
             .join("");
         format!(
-            "<section class=\"border overflow-hidden\">\
-<div class=\"px-8 py-6 border-b\"><h2 class=\"apex-section-head\">{}</h2></div>\
-<div class=\"p-8\"><div class=\"grid gap-6 sm:grid-cols-3 xl:grid-cols-6\">{}</div></div>\
+            "<section class=\"apex-panel\">\
+<h2 class=\"apex-panel__head\">{}</h2>\
+<div class=\"apex-panel__body\"><div class=\"grid gap-6 sm:grid-cols-3 xl:grid-cols-6\">{}</div></div>\
 </section>",
             escape(title),
             tiles
@@ -6979,10 +6973,10 @@ nothing is shown rather than a zero-filled board. Retry when the store recovers.
                 .collect::<String>()
         };
         format!(
-            "<section class=\"border overflow-hidden\">\
-<div class=\"px-8 py-6 border-b\"><h2 class=\"apex-section-head\">{}</h2></div>\
-<div class=\"w-full overflow-x-auto\"><table class=\"min-w-full apex-table\">\
-<caption class=\"sr-only\">{}</caption><thead><tr>{}</tr></thead><tbody>{}</tbody></table></div>\
+            "<section class=\"apex-panel\">\
+<h2 class=\"apex-panel__head\">{}</h2>\
+<div class=\"apex-panel__body\"><div class=\"w-full overflow-x-auto\"><table class=\"min-w-full apex-table\">\
+<caption class=\"sr-only\">{}</caption><thead><tr>{}</tr></thead><tbody>{}</tbody></table></div></div>\
 </section>",
             escape(title),
             escape(title),

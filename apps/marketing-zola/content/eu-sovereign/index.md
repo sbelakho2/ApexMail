@@ -13,7 +13,7 @@ mkt_page_mode = "trust"
 
 ApexMail is an EU company (Bel Consulting OÜ, Tallinn, Estonia). The shared cloud runs on EU data centres in Finland. EU-only routing is a real, one-setting mode: every send leaves through ApexMail's own EU MTAs, a send with no own-MTA route is held rather than rerouted, and every accepted message carries an Ed25519-signed routing receipt that any third party can verify against the published public key.
 
-The honest boundary belongs on the same screen: ApexMail's **default** routing is Global, and Global sends are delivered through Amazon Web Services' SES in its configured EU region — an EU region of a US company, covered by the AWS Data Processing Agreement and, where applicable, EU Standard Contractual Clauses. The sentence "your mail never touches a US-controlled provider" is true **under EU-only routing**; it is not true of a Global account, and this site does not claim it platform-wide. The [data location matrix](/data-locations/) states the same scope for storage as this page states for transport.
+The honest boundary belongs on the same screen: ApexMail's **default** routing is Global, and Global sends are delivered through Amazon Web Services' SES in its configured EU regions — EU regions of a US company, which may include Germany — covered by the AWS Data Processing Agreement and, where applicable, EU Standard Contractual Clauses. The sentence "your mail never touches a US-controlled provider" is true **under EU-only routing**; it is not true of a Global account, and this site does not claim it platform-wide. The [data location matrix](/data-locations/) states the same scope for storage as this page states for transport.
 
 ## An EU company under EU law
 
@@ -42,7 +42,7 @@ What changes versus Global, plainly:
 | | Global (default) | EU-only |
 |---|---|---|
 | Dedicated-IP sends | ApexMail's own relay MTAs | ApexMail's own relay MTAs |
-| Everything else | Shared pool — AWS SES in its configured EU region | ApexMail's own EU MTAs |
+| Everything else | Shared pool — AWS SES in its configured EU region (which may include Germany) | ApexMail's own EU MTAs |
 | Route unavailable | Provider failover | **Hold with a named reason** — no third-party fallback |
 
 Availability and price: included on [Enterprise](/enterprise/) Cloud and on the Compliance contract line; on self-serve plans it is the **EU-only routing** add-on at **€149/month (US$165/month)** on Pro and above — the exact catalog figure.

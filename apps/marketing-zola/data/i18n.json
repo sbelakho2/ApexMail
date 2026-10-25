@@ -243,8 +243,8 @@
       "details_heading": "Detailansicht der Kernfunktionen",
       "details_subtitle": "Sehen Sie, wie ApexMail komplexe E-Mail-Infrastruktur einfach macht.",
       "detail_api_label": "Entwicklung in Minuten",
-      "detail_api_title": "Entwicklerorientierte API",
-      "detail_api_desc": "Unsere RESTful-API ist für Entwickler konzipiert, die Einfachheit und Leistung schätzen. Die SDKs sind in Entwicklung (Quellcode im Monorepo), dazu umfassende Dokumentation und klares Anfrage-Feedback.",
+      "detail_api_title": "Die HTTP-API",
+      "detail_api_desc": "Die REST-API ist für die direkte HTTP-Integration gebaut. Die SDKs sind in Entwicklung (Quellcode im Monorepo); integrieren Sie heute gegen die HTTP-API, mit Request-/Response-Dokumentation und klaren Fehlerantworten.",
       "detail_api_benefit_1": "Schnellstart-Pfad für den ersten Versand",
       "detail_api_benefit_2": "Idempotenzschlüssel für sichere Wiederholungen",
       "detail_api_benefit_3": "Webhook-Signaturen für Sicherheit",
@@ -764,7 +764,7 @@
       "point_4_title": "Signierte Routing-Belege",
       "point_4_desc": "Jede angenommene Nachricht trägt eine Ed25519-Signatur über ihre Routing-Daten, prüfbar von jeder dritten Partei mit dem veröffentlichten öffentlichen Schlüssel.",
       "point_4_link": "So funktioniert die Prüfung",
-      "note": "Offener Umfang: Die globale Standardzustellung läuft über AWS SES in dessen EU-Region (Irland) — eine EU-Region eines US-Unternehmens. EU-only-Routing entfernt sie; der vollständige Vergleich steht auf <a href=\"/de/eu-sovereign/\">der Souveränitätsseite</a>.",
+      "note": "Offener Umfang: Die globale Standardzustellung läuft über AWS SES in dessen EU-Regionen (die Deutschland umfassen können) — EU-Regionen eines US-Unternehmens; das eigene Hosting von ApexMail steht in Finnland. EU-only-Routing entfernt diesen Transport; der vollständige Vergleich steht auf <a href=\"/de/eu-sovereign/\">der Souveränitätsseite</a>.",
       "see_all": "Souveränitäts-Dossier lesen"
     }
   },
@@ -992,7 +992,7 @@
       "f_support_title": "Support prioritaire",
       "f_support_desc": "Gestionnaire de succès dédié avec support asynchrone prioritaire et chemins d'escalade",
       "badge_developer_plus": "Business+",
-      "detail_api_title": "API axée développeur",
+      "detail_api_title": "L’API HTTP",
       "detail_compliance_title": "Conformité intégrée",
       "detail_compliance_benefit_3": "Documentation de conformité actuelle",
       "detail_compliance_cta": "En savoir plus sur la conformité",
@@ -1532,7 +1532,7 @@
       "point_4_title": "Reçus de routage signés",
       "point_4_desc": "Chaque message accepté porte une signature Ed25519 sur ses données de routage, vérifiable par tout tiers avec la clé publique publiée.",
       "point_4_link": "Comment vérifier",
-      "note": "Périmètre honnête : la livraison globale par défaut passe par AWS SES dans sa région UE (Irlande) — une région UE d’une société américaine. Le routage EU-only la retire ; la comparaison complète figure sur <a href=\"/fr/eu-sovereign/\">la page souveraineté</a>.",
+      "note": "Périmètre honnête : la livraison globale par défaut passe par AWS SES dans ses régions UE (qui peuvent inclure l’Allemagne) — des régions UE d’une société américaine ; l’hébergement propre d’ApexMail est en Finlande. Le routage EU-only retire ce transport ; la comparaison complète figure sur <a href=\"/fr/eu-sovereign/\">la page souveraineté</a>.",
       "see_all": "Lire le dossier souveraineté"
     }
   },
@@ -1760,7 +1760,7 @@
       "f_support_title": "Soporte prioritario",
       "f_support_desc": "Gerente de éxito dedicado con soporte asíncrono prioritario y rutas de escalado",
       "badge_developer_plus": "Business+",
-      "detail_api_title": "API para desarrolladores",
+      "detail_api_title": "La API HTTP",
       "detail_compliance_title": "Cumplimiento integrado",
       "detail_compliance_benefit_3": "Documentación de cumplimiento actual",
       "detail_compliance_cta": "Más sobre cumplimiento",
@@ -2300,7 +2300,7 @@
       "point_4_title": "Recibos de enrutamiento firmados",
       "point_4_desc": "Cada mensaje aceptado lleva una firma Ed25519 sobre sus datos de enrutamiento, verificable por cualquier tercero con la clave pública publicada.",
       "point_4_link": "Cómo funciona la verificación",
-      "note": "Alcance honesto: la entrega global predeterminada pasa por AWS SES en su región de la UE (Irlanda), una región de la UE de una empresa estadounidense. El enrutamiento EU-only la elimina; la comparación completa está en <a href=\"/es/eu-sovereign/\">la página de soberanía</a>.",
+      "note": "Alcance honesto: la entrega global predeterminada pasa por AWS SES en sus regiones de la UE (que pueden incluir Alemania) — regiones de la UE de una empresa estadounidense; el alojamiento propio de ApexMail está en Finlandia. El enrutamiento EU-only elimina ese transporte; la comparación completa está en <a href=\"/es/eu-sovereign/\">la página de soberanía</a>.",
       "see_all": "Leer el caso de soberanía"
     }
   }

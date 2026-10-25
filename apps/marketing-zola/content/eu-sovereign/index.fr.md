@@ -41,7 +41,7 @@ Ce qui change par rapport à Global, dit clairement :
 | | Global (défaut) | EU-only |
 |---|---|---|
 | Envois via IP dédiée | MTA relais propres d'ApexMail | MTA relais propres d'ApexMail |
-| Tout le reste | Pool partagé — AWS SES dans sa région UE configurée | MTA européens propres d'ApexMail |
+| Tout le reste | Pool partagé — AWS SES dans sa région UE configurée (qui peut inclure l’Allemagne) | MTA européens propres d'ApexMail |
 | Route indisponible | Bascule vers le fournisseur | **Retenue avec un motif nommé** — aucun repli tiers |
 
 Disponibilité et prix : inclus sur [Enterprise](/fr/enterprise/) Cloud et sur la ligne contractuelle Compliance ; sur les offres en libre-service, c'est l'add-on **EU-only routing** à **149 €/mois (165 US$/mois)** à partir de Pro — le chiffre exact du catalogue.
@@ -74,7 +74,7 @@ Preuves : les deux endpoints sont des surfaces publiques vivantes et non authent
 
 Le [registre des sous-traitants](/fr/subprocessors/) est généré depuis la configuration du déploiement lui-même ; l'ensemble listé ne peut donc pas dériver de ce qui tourne réellement. En routage EU-only, l'entrée Amazon Web Services SES ne transporte pas le courrier d'un locataire : le message ne sort que par les MTA propres d'ApexMail, exploités sur l'infrastructure Hetzner (Hetzner Online GmbH, Finlande). Les entrées restantes sont les paiements (Mollie B.V., Amsterdam) et la connexion OAuth facultative (Google, GitHub) — chacune avec son pays de traitement et son mécanisme de transfert indiqués au registre.
 
-Autrement dit : en EU-only, aucun tiers contrôlé par les États-Unis ne transporte le courrier. En Global, AWS SES le fait — dans une région UE, sous le DPA et les CCT d'AWS, et le registre dit exactement cela.
+Autrement dit : en EU-only, aucun tiers contrôlé par les États-Unis ne transporte le courrier. En Global, AWS SES le fait — dans des régions UE (qui peuvent inclure l’Allemagne), sous le DPA et les CCT d'AWS, et le registre dit exactement cela.
 
 Preuves : le [registre des sous-traitants](/fr/subprocessors/) (généré, protégé contre la dérive), la section 5 du [DPA](/fr/dpa/) et la [matrice des emplacements de données](/fr/data-locations/).
 

@@ -192,7 +192,8 @@ PROCESSOR_CATALOG: list[Processor] = [
         },
         default_region="eu-west-1",
         optional_note="Active only while EMAIL_TRANSPORT_TYPE=ses; dedicated IP transfers ride "
-        "ApexMail's own Hetzner MTAs.",
+        "ApexMail's own Hetzner MTAs. AWS EU regions may include Germany; ApexMail's own "
+        "hosting is in Finland.",
     ),
     Processor(
         key="google_oauth",
